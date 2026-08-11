@@ -63,6 +63,7 @@ def render(
     unicode: bool = True,
     color: bool = False,
     width: int | None = None,
+    legend: bool = True,
 ) -> str:
     glyph = UNICODE if unicode else ASCII
     width = width or min(max(shutil.get_terminal_size((100, 24)).columns, 72), 110)
@@ -89,8 +90,9 @@ def render(
     out.extend(_diagnostics(diagram, paint, glyph))
     out.extend(_candidates(diagram, paint))
     out.extend(_warnings(diagram, paint, glyph))
-    out.append("")
-    out.append(_legend(glyph, paint))
+    if legend:
+        out.append("")
+        out.append(_legend(glyph, paint))
     return "\n".join(out)
 
 

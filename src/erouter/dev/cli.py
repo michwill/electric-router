@@ -399,10 +399,12 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst) -> i
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
         return 2
+    prep_warnings = set(prepared.warnings)
     print(
         f"  ready in {(time.monotonic() - started) * 1000:.0f} ms "
-        f"({len(prepared.arcs)} arcs calibrated).  "
-        f"Type an amount in {symbol_src}; blank line or 'q' to quit.\n"
+        f"({len(prepared.arcs)} arcs calibrated"
+        + (f", {len(prep_warnings)} dropped" if prep_warnings else "")
+        + f").  Type an amount in {symbol_src}; blank line or 'q' to quit.\n"
     )
 
     while True:
@@ -442,12 +444,21 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst) -> i
             print(f"  {BAD} no route: {exc}")
             continue
         _present(result, args, chain, rpc, nodes, wrappers, load,
-                 src, dst, amount_in, started)
+                 src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
 
 def _present(result, args, chain, rpc, nodes, wrappers, load,
-             src, dst, amount_in, started) -> int:
-    """Draw one route and, if asked, write its JSON."""
+             src, dst, amount_in, started, *, lean: bool = False,
+             suppress: set[str] | None = None) -> int:
+    """Draw one route and, if asked, write its JSON.
+
+    `lean` is the interactive view: the amount and the route, nothing else.
+    Repeating the loss ledger, the diagnostics table and the candidate list
+    after every keystroke buries the one thing being compared between sizes.
+    Warnings stay -- those are the ones worth interrupting for -- but the ones
+    raised while *preparing* are size-independent and identical on every quote,
+    so `suppress` carries them and they are reported once at startup instead.
+    """
     import json
 
     from ..core.render_text import render
@@ -479,8 +490,8 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
         certificate=result.certificate,
         certificate_reason=result.certificate_reason,
         pool_names=result.pool_names,
-        ledger=_ledger(result, nodes, dst, in_human, out_human),
-        diagnostics={
+        ledger=None if lean else _ledger(result, nodes, dst, in_human, out_human),
+        diagnostics={} if lean else {
             "pools": result.counters.get("pools", 0),
             "arcs calibrated": result.counters.get("arcs_calibrated", 0),
             "probes": result.counters.get("probes", 0),
@@ -488,14 +499,15 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
             "probe ms": f"{result.timings.get('probe', 0):.0f}",
             "solve ms": f"{result.timings.get('solve', 0):.1f}",
         },
-        warnings=result.warnings[:8],
+        warnings=[w for w in result.warnings if not suppress or w not in suppress][:8],
         verified_out=result.verified_out,
     )
-    if result.candidates:
+    if result.candidates and not lean:
         diagram.candidates = candidate_summary(
             result.candidates, nodes.decimals(dst), limit=args.candidates
         )
-    print(render(diagram, unicode=not args.ascii, color=not args.no_color))
+    print(render(diagram, unicode=not args.ascii, color=not args.no_color,
+                 legend=not lean))
 
     if args.json:
         payload = to_json(
