@@ -192,6 +192,7 @@ def prepare(
     *,
     src_token: str,
     dst_token: str,
+    extra_arcs: list[PoolArc] | None = None,
     timings: dict[str, float] | None = None,
 ) -> Prepared:
     """The size-independent half: probe, calibrate, restrict, price.
@@ -230,6 +231,11 @@ def prepare(
     scratch.counters["arcs_planned"] = len(refs)
     scratch.counters["probes"] = len(plan)
     scratch.counters["arcs_calibrated"] = len(arcs)
+    # Mint/stake arcs are exactly linear by construction, so they are supplied
+    # already calibrated rather than probed -- there is no curve to measure.
+    if extra_arcs:
+        arcs = arcs + [copy.copy(a) for a in extra_arcs]
+        scratch.counters["stake_arcs"] = len(extra_arcs)
     if not arcs:
         raise RoutingError("no arc survived calibration")
 
@@ -313,6 +319,7 @@ def route(
     gas_price_wei: int = 0,
     refit_rounds: int = 2,
     prepared: Prepared | None = None,
+    extra_arcs: list[PoolArc] | None = None,
 ) -> RouteResult:
     result = RouteResult(
         src_token=src_token.lower(),
@@ -335,7 +342,7 @@ def route(
         with clock("prepare"):
             prepared = prepare(
                 pools, nodes, client, src_token=src_token, dst_token=dst_token,
-                timings=result.timings,
+                extra_arcs=extra_arcs, timings=result.timings,
             )
     else:
         result.counters["reused_preparation"] = 1

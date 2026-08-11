@@ -35,12 +35,22 @@ class Chain:
     # ERC4626 list because wstETH predates that standard and exposes its own
     # getters, not convertToAssets.
     wsteth_pairs: tuple[tuple[str, str], ...] = ()
+    # One-way instant conversions: `(token_in, token_out, kind, target,
+    # cap_selector)`.  Never merges -- minting is instant but redemption is a
+    # queue or a cooldown, and a merge would let the router unstake for free.
+    stake_arcs: tuple[tuple[str, str, str, str, str], ...] = ()
+    # Vaults whose *deposit* is instant while redemption is gated.  Modelled as
+    # a one-way ERC4626_DEPOSIT arc rather than dropped: sUSDe's 7-day cooldown
+    # and pufETH's withdrawal queue make them unmergeable, not unroutable.
+    oneway_vaults: tuple[str, ...] = ()
     extra: dict[str, str] = field(default_factory=dict)
 
 
 SCRVUSD = "0x0655977FEb2f289A4aB78af67BAB0d17aAb84367"
 WSTETH = "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
 STETH = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
+SUSDE = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
+PUFETH = "0xD9A442856C234a39a81a089C06451EBAa4306a72"
 CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 
 CHAINS: dict[str, Chain] = {
@@ -53,6 +63,11 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         erc4626_allowlist=(SCRVUSD,),
         wsteth_pairs=((WSTETH, STETH),),
+        stake_arcs=(
+            # Lido: 1 ETH -> 1 stETH, capped by the daily staking limit.
+            (NATIVE_SENTINEL, STETH, "STAKE_NATIVE", STETH, "getCurrentStakeLimit()"),
+        ),
+        oneway_vaults=(SUSDE, PUFETH),
     ),
     "arbitrum": Chain(
         name="arbitrum",

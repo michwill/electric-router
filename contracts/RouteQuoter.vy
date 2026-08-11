@@ -55,6 +55,7 @@ WRAP_NATIVE: public(constant(uint8)) = 9  # 1:1, no call
 UNWRAP_NATIVE: public(constant(uint8)) = 10  # 1:1, no call
 WSTETH_UNWRAP: public(constant(uint8)) = 11  # getStETHByWstETH(uint256)
 WSTETH_WRAP: public(constant(uint8)) = 12  # getWstETHByStETH(uint256)
+STAKE_NATIVE: public(constant(uint8)) = 13  # native -> LST, 1:1, no call
 
 
 struct Res:
@@ -119,8 +120,10 @@ def _static(target: address, data: Bytes[512]) -> Res:
 @internal
 @view
 def _quote(target: address, kind: uint8, i: uint8, j: uint8, n: uint8, dx: uint256) -> Res:
-    if kind == WRAP_NATIVE or kind == UNWRAP_NATIVE:
-        # Wrapped natives are 1:1 by construction; no call to make.
+    if kind == WRAP_NATIVE or kind == UNWRAP_NATIVE or kind == STAKE_NATIVE:
+        # Wrapped natives are 1:1 by construction, and so is Lido's submit()
+        # (1 ETH in, 1 stETH of shares out).  No call to make.  Staking is one
+        # way only -- there is no UNSTAKE kind, because withdrawal is a queue.
         return Res(status=STATUS_VALUE, value=dx)
 
     if kind == SWAP_STABLE:

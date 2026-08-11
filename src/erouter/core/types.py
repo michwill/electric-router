@@ -26,6 +26,7 @@ class ArcKind(IntEnum):
     UNWRAP_NATIVE = 10  # 1:1, no call
     WSTETH_UNWRAP = 11  # getStETHByWstETH(uint256)
     WSTETH_WRAP = 12  # getWstETHByStETH(uint256)
+    STAKE_NATIVE = 13  # native -> LST at 1:1 (Lido submit, frxETHMinter)
 
     @property
     def is_swap(self) -> bool:

@@ -320,7 +320,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     from .probe_cache import CachedQuoterClient
     from .rpc import JsonRpcTransport
     from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import build_node_map
+    from .wrappers import build_node_map, build_stake_arcs
 
     chain = chain_table.get(args.chain)
     started = time.monotonic()
@@ -348,12 +348,14 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 2
 
     nodes, wrappers = build_node_map(load.pools, chain, client)
+    stake_arcs = build_stake_arcs(nodes, chain, client)
     if not nodes.has(src) or not nodes.has(dst):
         print(f"{BAD} token not routable in this universe")
         return 2
 
     if args.amount is None and not args.amount_wei:
-        return _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst)
+        return _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
+                            stake_arcs)
 
     amount_in = int(Decimal((args.amount or "1").replace("_", "")) * 10 ** nodes.decimals(src))
     if args.amount_wei:
@@ -367,6 +369,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             max_candidates=args.candidates,
             gas_price_wei=int(float(args.gas_price) * 1e9),
             refit_rounds=args.refit,
+            extra_arcs=stake_arcs,
         )
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
@@ -376,7 +379,8 @@ def cmd_route(args: argparse.Namespace) -> int:
                     src, dst, amount_in, started)
 
 
-def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst) -> int:
+def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
+                 stake_arcs=None) -> int:
     """Quote sizes as they are typed, reusing everything that does not depend on one.
 
     The expensive half of a route -- probing every arc and fitting reference
@@ -395,7 +399,8 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst) -> i
     print("  preparing (probing arcs, fitting reference prices)...", flush=True)
     started = time.monotonic()
     try:
-        prepared = prepare(load.pools, nodes, client, src_token=src, dst_token=dst)
+        prepared = prepare(load.pools, nodes, client, src_token=src, dst_token=dst,
+                           extra_arcs=stake_arcs)
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
         return 2

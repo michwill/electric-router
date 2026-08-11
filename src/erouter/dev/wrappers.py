@@ -15,6 +15,7 @@ from ..core.nodes import Conversion, ConversionKind, NodeMap
 from ..core.pools import PoolSpec
 from ..core.quoter import QuoterClient
 from ..core.transport import Call, Status
+from ..core.types import ArcKind, PoolArc
 from .chains import NATIVE_SENTINEL, Chain
 
 # A vault must accept at least this multiple of the trade before it can be
@@ -277,3 +278,109 @@ def discover_vaults(
             )
         )
     return found
+
+
+def build_stake_arcs(
+    nodes: NodeMap, chain: Chain, client: QuoterClient
+) -> list[PoolArc]:
+    """One-way instant conversions, as capped linear arcs.
+
+    A merge is bidirectional by definition -- one node, zero resistance both
+    ways -- so minting cannot be one.  Lido pays 1 stETH per ETH instantly but
+    withdrawal is a queue; sUSDe mints on demand but redemption has a seven-day
+    cooldown; pufETH the same with a queue.  Merging any of them would let the
+    router unstake for free and emit routes that cannot execute.
+
+    They are exactly the §2.3 clamped-arc shape instead: `a` = the mint rate,
+    `B = 0` (genuinely linear, not a chord approximation), and a finite cap.
+    The cap is not decoration -- an uncapped linear arc with `eps < 0` gives
+    unbounded flow (§2.3 rule 2), and `eps < 0` is precisely what happens when
+    the token trades above NAV, which is when minting is attractive.
+
+    Measured on the ETH/stETH pool at block 25,734,769: the pool beats minting
+    by 0.7 bp at 1 ETH and 0.2 bp at 1,000, then loses by 2.1 bp at 5,000,
+    48.5 bp at 20,000 and 7,803 bp at 100,000.  Minting is a hard floor at
+    exactly 1:1, and it binds at the sizes where the quadratic model is least
+    trustworthy.
+
+    `convex_flag` stays False: these arcs are exactly linear, so §5.5's
+    certificate is still valid over them.  `clamped` is True because the cap
+    invariant must apply.
+    """
+    arcs: list[PoolArc] = []
+    calls: list[Call] = []
+    native: list[tuple] = []
+    for token_in, token_out, kind, target, cap_sig in chain.stake_arcs:
+        if not (nodes.has(token_in.lower()) and nodes.has(token_out.lower())):
+            continue
+        native.append((token_in.lower(), token_out.lower(), kind, target.lower(), cap_sig))
+        calls.append(Call(target, encode_call(cap_sig)))
+
+    vaults = [v.lower() for v in chain.oneway_vaults if nodes.has(v.lower())]
+    for vault in vaults:
+        unit = 10 ** nodes.decimals(vault)
+        calls.extend([
+            Call(vault, encode_call("asset()")),
+            Call(vault, encode_call("convertToAssets(uint256)", unit)),
+            Call(vault, encode_call("totalAssets()")),
+        ])
+
+    if not calls:
+        return arcs
+    answers = client.raw(calls)
+
+    for k, (token_in, token_out, kind, target, _sig) in enumerate(native):
+        limit = answers[k]
+        if limit.status is not Status.VALUE or limit.uint() == 0:
+            continue
+        tau, sigma = nodes.node(token_in), nodes.node(token_out)
+        if tau == sigma:
+            continue
+        arcs.append(PoolArc(
+            id=f"stake:{target}:{token_in[:10]}>{token_out[:10]}",
+            pool=target, kind=ArcKind[kind], i=0, j=0, n_coins=0,
+            token_in=token_in, token_out=token_out, tau=tau, sigma=sigma,
+            a=1.0, B=0.0, cap=limit.uint() / 10 ** nodes.decimals(token_in),
+            clamped=True, convex_flag=False,
+            decimals_in=nodes.decimals(token_in),
+            decimals_out=nodes.decimals(token_out),
+            tvl_usd=0.0,  # deliberately no weight in the §4 price fit: the
+                          # reference price should come from markets, not the
+                          # mint rate, which is an upper bound on the token
+            note=f"mint {nodes.symbol(token_out)}",
+        ))
+
+    base = len(native)
+    for k, vault in enumerate(vaults):
+        asset_ans, rate_ans, total_ans = answers[base + 3 * k : base + 3 * k + 3]
+        if asset_ans.status is not Status.VALUE or rate_ans.status is not Status.VALUE:
+            continue
+        asset = "0x" + asset_ans.data[-20:].hex()
+        if not nodes.has(asset):
+            continue
+        unit = 10 ** nodes.decimals(vault)
+        rate = rate_ans.uint() / unit  # assets per share
+        if rate <= 0:
+            continue
+        tau, sigma = nodes.node(asset), nodes.node(vault)
+        if tau == sigma:
+            continue
+        # `maxDeposit` is routinely 2**256-1 on these, which is not a capacity
+        # the model may use.  `totalAssets` is a real, finite, on-chain measure
+        # that scales with the protocol, and it is conservative.
+        total = total_ans.uint() if total_ans.status is Status.VALUE else 0
+        if total == 0:
+            continue
+        arcs.append(PoolArc(
+            id=f"mint:{vault}:{asset[:10]}>{vault[:10]}",
+            pool=vault, kind=ArcKind.ERC4626_DEPOSIT, i=0, j=0, n_coins=0,
+            token_in=asset, token_out=vault, tau=tau, sigma=sigma,
+            a=1.0 / rate, B=0.0,
+            cap=total / 10 ** nodes.decimals(asset),
+            clamped=True, convex_flag=False,
+            decimals_in=nodes.decimals(asset),
+            decimals_out=nodes.decimals(vault),
+            tvl_usd=0.0,
+            note=f"mint {nodes.symbol(vault)}",
+        ))
+    return arcs
