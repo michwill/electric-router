@@ -314,3 +314,36 @@ def test_output_is_monotone_and_concave_in_size(X):
     # more value routed, more absolute loss, but never a lower marginal rate
     assert hi.objective(g) >= lo.objective(g) - 1e-15
     assert kcl_residual(g, lo, 0, 2, X) < 1e-10
+
+
+# ------------------------------------------------------- the KCL gate itself
+
+
+def test_kcl_tolerance_does_not_tighten_without_limit_as_the_trade_shrinks():
+    """§12.4's gate must not reject small trades for being small.
+
+    The solve runs in units scaled by `g_scale`, so its roundoff is absolute
+    there and is multiplied by `g_scale` on the way out.  Expressed purely as a
+    fraction of `Psi`, the gate therefore tightens without limit as `Psi`
+    falls: measured on mainnet USDC->USDT, `g_scale = 1.5e6` turned a clean
+    1e-11 solve into a 4.7e-5 relative residual at $1 and 3.8e-11 at $100k --
+    identical routing, and every trade under a few hundred dollars was rejected
+    outright with "flow conservation is violated".
+    """
+    from erouter.core.pipeline import _kcl_tolerance
+
+    g_scale = 1.5e6
+    # The measured residuals, which are all floating-point noise.
+    assert _kcl_tolerance(1.0, g_scale) > 4.7e-5
+    assert _kcl_tolerance(10.0, g_scale) > 1.8e-6
+    assert _kcl_tolerance(100.0, g_scale) > 2.9e-9
+
+    # ...and it must still catch the failure it exists for.  Flow conjured on
+    # arcs outside the active component is O(Psi), i.e. a relative residual of
+    # order 1, which no scale may excuse.
+    for Psi in (1.0, 1e3, 1e6):
+        assert _kcl_tolerance(Psi, g_scale) < 1.0
+
+    # Large trades keep a tight absolute bound rather than inheriting a loose
+    # one: g_scale is a property of the graph, not of the trade.
+    assert _kcl_tolerance(1e5, g_scale) < 1e-7

@@ -43,12 +43,20 @@ def rpc(chain):
 
 @pytest.fixture(scope="session")
 def quoter_client(rpc):
-    """The production path: quoter injected by state override, nothing deployed."""
+    """The production path: quoter injected by state override, nothing deployed.
+
+    Wrapped in the per-block cache.  The probe grid is sized in fractions of
+    each pool's *reserves*, so it does not depend on the amount being routed at
+    all -- one warm snapshot serves every pair and every size, which is what
+    makes a many-pool sweep and property-based fuzzing affordable.  Pin
+    `EROUTER_BLOCK` to reuse it across runs.
+    """
     if not rpc.supports_state_override():
         pytest.skip("node does not support eth_call state overrides")
     from erouter.dev.boa_host import override_client
+    from erouter.dev.probe_cache import CachedQuoterClient
 
-    return override_client(rpc)
+    return CachedQuoterClient(override_client(rpc), rpc.chain_id, rpc.block)
 
 
 @pytest.fixture(scope="session")

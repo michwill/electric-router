@@ -33,11 +33,23 @@ def digest(probes: list[Probe]) -> str:
     return hasher.hexdigest()[:32]
 
 
+def route_digest(routes, amounts_in, dst_slots) -> str:
+    """Stable fingerprint of a candidate verification batch."""
+    hasher = hashlib.sha256()
+    for legs, amount, slot in zip(routes, amounts_in, dst_slots, strict=True):
+        hasher.update(f"|{amount}:{slot}".encode())
+        for leg in legs:
+            hasher.update(repr(leg.as_tuple()).encode())
+    return hasher.hexdigest()[:32]
+
+
 @dataclass(slots=True)
 class ProbeCacheStats:
     hits: int = 0
     misses: int = 0
     probes_served: int = 0
+    route_hits: int = 0
+    route_misses: int = 0
 
     @property
     def hit(self) -> bool:
@@ -68,9 +80,6 @@ class CachedQuoterClient:
     def __getattr__(self, name):
         return getattr(self.client, name)
 
-    def quote_routes(self, *args, **kwargs):
-        return self.client.quote_routes(*args, **kwargs)
-
     def quote_route(self, *args, **kwargs):
         return self.client.quote_route(*args, **kwargs)
 
@@ -97,3 +106,31 @@ class CachedQuoterClient:
         answers = self.client.probe(probes)
         self.cache.write([[q.status.name, str(q.value)] for q in answers], *parts)
         return answers
+
+    def quote_routes(self, routes, amounts_in, dst_slots) -> list[int]:
+        """Cached too, which is what makes property-based fuzzing affordable.
+
+        Unlike the probe grid -- whose sizes are fractions of pool *reserves*
+        and so are identical no matter what amount is being routed -- candidate
+        verification depends on the amount, so a new draw is a genuine miss.
+        Caching it still pays for two reasons: hypothesis replays an example
+        many times while shrinking, and a failing case is then re-run offline as
+        often as the fix needs without touching the node.
+        """
+        if not self.enabled or not routes:
+            return self.client.quote_routes(routes, amounts_in, dst_slots)
+
+        parts = (
+            str(self.chain_id),
+            str(self.block),
+            f"routes-{route_digest(routes, amounts_in, dst_slots)}.json",
+        )
+        stored = self.cache.read(*parts)
+        if stored and len(stored) == len(routes):
+            self.stats.route_hits += 1
+            return [int(row[0]) for row in stored]
+
+        self.stats.route_misses += 1
+        outs = self.client.quote_routes(routes, amounts_in, dst_slots)
+        self.cache.write([[str(v)] for v in outs], *parts)
+        return outs

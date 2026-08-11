@@ -43,6 +43,10 @@ from .solve import SolveReport, active_set_solve, solve
 from .types import ArcKind, PoolArc, Probe
 from .verify import realize_candidates, verify
 
+# §12.4's flow-conservation gate, in two terms -- see `_kcl_tolerance`.
+KCL_RELATIVE = 1e-8
+KCL_ABSOLUTE = 1e-9
+
 
 @dataclass(slots=True)
 class RouteResult:
@@ -344,7 +348,8 @@ def route(
     # invariant that catches conjured or stranded flow before it reaches a leg.
     residual = _kcl_residual(g, psi, src_node, dst_node, Psi)
     result.counters["kcl_residual"] = residual
-    if residual > 1e-8:
+    tolerance = _kcl_tolerance(Psi, g.g_scale)
+    if residual > tolerance:
         raise RoutingError(
             f"flow conservation is violated by {residual:.3e} of the routed value"
         )
@@ -814,6 +819,24 @@ def _recalibrate(arcs: list[PoolArc], ladders, nodes: NodeMap) -> int:
         arc.calib_delta = fit.calib_delta
         changed += 1
     return changed
+
+
+def _kcl_tolerance(Psi: float, g_scale: float) -> float:
+    """How much KCL slop is floating-point noise rather than a bug.
+
+    The solve runs in units scaled by `g_scale`, so its roundoff is absolute
+    *there* and gets multiplied by `g_scale` on the way out.  A tolerance
+    expressed purely as a fraction of `Psi` therefore tightens without limit as
+    the trade shrinks: measured on USDC->USDT at this block, `g_scale = 1.5e6`
+    turns a clean 1e-11 solve into a 4.7e-5 absolute residual, which is 4.7e-5
+    of a $1 trade and 3.8e-11 of a $100k one.  The router was identical in both
+    cases; only the yardstick moved, and small trades were rejected outright.
+
+    So allow both terms.  This stays far tighter than the failure the check
+    exists to catch -- flow conjured on arcs outside the active component is
+    `O(Psi)`, several orders above either bound at any size.
+    """
+    return KCL_RELATIVE + KCL_ABSOLUTE * g_scale / max(Psi, 1e-30)
 
 
 def _kcl_residual(
