@@ -1,0 +1,706 @@
+"""The ROUTE() driver (spec §5.1).
+
+    nu      <- reference_prices(pools, dst)          one Laplacian solve
+    a, B    <- calibrate(pools, nu, X)               M2, vectorised
+    G, eps  <- M3, M4
+    S       <- seed_subgraph(src, dst, eps, G)
+    repeat: solve on S -> price out all m -> extend S    until nothing violates
+    realize -> legs
+
+Takes an already-loaded universe and a `QuoterClient`, so it stays in `core`
+and can run in the browser against a deployed quoter.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from dataclasses import dataclass, field
+
+import numpy as np
+
+from .calibrate import Calibration, CalibrationError, calibrate
+from .candidates import Candidate, CandidateSet, generate
+from .graph import ArcArrays, build, scale
+from .nodes import NodeMap, rescale
+from .pools import PoolSpec
+from .prices import check_pair_drops, reference_prices
+from .probe import ArcRef, Ladder, collect, plan_grid
+from .quoter import QuoterClient
+from .realize import RealizedRoute, cancel_cycles, check_one_arc_per_pool, realize
+from .refit import RefitReport, refit
+from .seed import k_shortest_paths, seed_subgraph
+from .solve import SolveReport, active_set_solve, solve
+from .types import ArcKind, PoolArc
+from .verify import realize_candidates, verify
+
+
+@dataclass(slots=True)
+class RouteResult:
+    route: RealizedRoute | None = None
+    report: SolveReport | None = None
+    arcs: list[PoolArc] = field(default_factory=list)
+    graph: ArcArrays | None = None
+    nu: np.ndarray | None = None
+    nodes: NodeMap | None = None
+    src_token: str = ""
+    dst_token: str = ""
+    amount_in: int = 0
+    price_out_per_in: float = 0.0
+    fee_bp: float = 0.0
+    impact_bp: float = 0.0
+    candidates: CandidateSet | None = None
+    refit_report: RefitReport | None = None
+    winner: Candidate | None = None
+    verified_out: int | None = None
+    timings: dict[str, float] = field(default_factory=dict)
+    counters: dict[str, int] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    pool_names: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.route is not None
+
+    @property
+    def certificate(self) -> bool:
+        return bool(self.report and self.report.certificate)
+
+    @property
+    def certificate_reason(self) -> str | None:
+        if self.certificate:
+            return None
+        return (self.report.reason if self.report else None) or "NO_SOLUTION"
+
+
+class RoutingError(RuntimeError):
+    pass
+
+
+def build_arcs(
+    pools: list[PoolSpec], nodes: NodeMap
+) -> tuple[list[ArcRef], list[tuple[PoolSpec, int, int]]]:
+    """Every quotable swap direction, with its probe target and metadata."""
+    refs: list[ArcRef] = []
+    meta: list[tuple[PoolSpec, int, int]] = []
+    for pool in pools:
+        kind = pool.swap_kind
+        if kind is None or not pool.balances:
+            continue
+        for i, j in pool.swap_pairs():
+            if i >= len(pool.balances) or pool.balances[i] <= 0:
+                continue
+            token_in, token_out = pool.coins[i].address, pool.coins[j].address
+            if not (nodes.has(token_in) and nodes.has(token_out)):
+                continue
+            if nodes.node(token_in) == nodes.node(token_out):
+                continue  # self-loop after merging; see the note in route()
+            refs.append(
+                ArcRef(
+                    pool=pool.address,
+                    kind=kind,
+                    i=i,
+                    j=j,
+                    n_coins=pool.n_coins,
+                    reserve_in=pool.balances[i],
+                    decimals_in=pool.coins[i].decimals,
+                    decimals_out=pool.coins[j].decimals,
+                )
+            )
+            meta.append((pool, i, j))
+    return refs, meta
+
+
+def _to_arc(
+    pool: PoolSpec, i: int, j: int, ref: ArcRef, fit: Calibration, nodes: NodeMap
+) -> PoolArc:
+    token_in, token_out = pool.coins[i].address, pool.coins[j].address
+    a, B = rescale(fit.a, fit.B, nodes.rate(token_in), nodes.rate(token_out))
+    cap = fit.cap
+    if math.isfinite(cap):
+        cap = cap * nodes.rate(token_in)
+    return PoolArc(
+        id=ref.id,
+        pool=pool.address,
+        kind=ArcKind(pool.swap_kind),
+        i=i,
+        j=j,
+        n_coins=pool.n_coins,
+        token_in=token_in,
+        token_out=token_out,
+        tau=nodes.node(token_in),
+        sigma=nodes.node(token_out),
+        a=a,
+        B=B,
+        cap=cap,
+        calib_delta=fit.calib_delta,
+        convex_flag=fit.convex_flag,
+        clamped=fit.clamped,
+        flag_reason=fit.flag_reason,
+        drift=fit.drift,
+        eta=fit.eta,
+        reserve_in=ref.reserve_in,
+        decimals_in=ref.decimals_in,
+        decimals_out=ref.decimals_out,
+        tvl_usd=pool.tvl_usd,
+        note=pool.name,
+    )
+
+
+def calibrate_arcs(
+    refs: list[ArcRef],
+    meta: list[tuple[PoolSpec, int, int]],
+    ladders: list[Ladder],
+    nodes: NodeMap,
+) -> tuple[list[PoolArc], list[str]]:
+    arcs: list[PoolArc] = []
+    dropped: list[str] = []
+    lookup = {id(lad.arc): lad for lad in ladders}
+    for ref, (pool, i, j) in zip(refs, meta, strict=True):
+        ladder = next((lad for lad in ladders if lad.arc is ref), None) or lookup.get(id(ref))
+        if ladder is None or not ladder.ok:
+            dropped.append(f"{ref.id}: only {0 if ladder is None else len(ladder.deltas)} probes")
+            continue
+        deltas, quotes = ladder.as_float()
+        try:
+            fit = calibrate(deltas, quotes)
+        except CalibrationError as exc:
+            dropped.append(f"{ref.id}: {exc}")
+            continue
+        arcs.append(_to_arc(pool, i, j, ref, fit, nodes))
+    return arcs, dropped
+
+
+def route(
+    pools: list[PoolSpec],
+    nodes: NodeMap,
+    client: QuoterClient,
+    *,
+    src_token: str,
+    dst_token: str,
+    amount_in: int,
+    max_rounds: int = 8,
+    seed_k: int = 10,
+    verify_on_chain: bool = True,
+    max_candidates: int = 20,
+    gas_price_wei: int = 0,
+    refit_rounds: int = 2,
+) -> RouteResult:
+    result = RouteResult(
+        src_token=src_token.lower(),
+        dst_token=dst_token.lower(),
+        amount_in=amount_in,
+        nodes=nodes,
+    )
+    clock = _Clock(result.timings)
+
+    if not nodes.has(src_token) or not nodes.has(dst_token):
+        raise RoutingError("source or destination token is not in the universe")
+    src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
+    if src_node == dst_node:
+        raise RoutingError(
+            f"{nodes.symbol(src_token)} and {nodes.symbol(dst_token)} are the same "
+            "node after merging; convert directly rather than routing"
+        )
+
+    # --- probe -----------------------------------------------------------
+    with clock("arcs"):
+        refs, meta = build_arcs(pools, nodes)
+        plan = plan_grid(refs)
+    with clock("probe"):
+        ladders = collect(plan, client.probe(plan.probes))
+    with clock("calibrate"):
+        arcs, dropped = calibrate_arcs(plan.arcs, _align(plan.arcs, refs, meta), ladders, nodes)
+    result.arcs = arcs
+    result.warnings.extend(dropped[:20])
+    result.counters["pools"] = len(pools)
+    result.counters["arcs_planned"] = len(refs)
+    result.counters["probes"] = len(plan)
+    result.counters["arcs_calibrated"] = len(arcs)
+    if not arcs:
+        raise RoutingError("no arc survived calibration")
+
+    # Restrict to the part of the graph that can actually reach the
+    # destination.  A disconnected island has no price relative to the
+    # numeraire -- `reference_prices` returns 1.0 there as a placeholder, not
+    # as a valuation -- and feeding those arcs in gives conductances twelve
+    # orders of magnitude off, which wrecks the Laplacian's conditioning for
+    # everything else.  Measured: meme-coin pools with no path to WETH produced
+    # G ~ 3e12 against a physical maximum near 1e4.
+    with clock("component"):
+        arcs = _restrict_to_component(arcs, dst_node, nodes.n_nodes, result)
+    if not arcs:
+        raise RoutingError(f"{nodes.symbol(dst_token)} is not reachable from any pool")
+    if not any(a.tau == src_node or a.sigma == src_node for a in arcs):
+        raise RoutingError(
+            f"no path from {nodes.symbol(src_token)} to {nodes.symbol(dst_token)}"
+        )
+    result.arcs = arcs
+    result.pool_names = {a.pool.lower(): a.note for a in arcs}
+
+    # --- reference prices (§4) -------------------------------------------
+    with clock("prices"):
+        tau = np.array([a.tau for a in arcs], dtype=np.int64)
+        sig = np.array([a.sigma for a in arcs], dtype=np.int64)
+        a_vec = np.array([a.a for a in arcs])
+        # Both directions are already present as separate arcs, so half weight
+        # keeps a pool's influence from being counted twice.
+        weights = np.array([max(a.tvl_usd, 1.0) / 2 for a in arcs])
+        nu = reference_prices(tau, sig, a_vec, weights, nodes.n_nodes, dst_node)
+    result.nu = nu
+
+    # --- graph (§3.1, §9.5-9.7) -----------------------------------------
+    with clock("graph"):
+        amount_human = amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
+        Psi = float(nu[src_node] * amount_human)
+        if Psi <= 0:
+            raise RoutingError("input amount prices to zero value")
+
+        bottomless = _clamp_unphysical_depth(arcs, nu, nodes)
+        if bottomless:
+            result.counters["arcs_clamped_as_bottomless"] = bottomless
+            result.warnings.append(
+                f"{bottomless} arc(s) showed no measurable curvature at the probed "
+                "size and were clamped to B = 0 with a cap (§2.3)"
+            )
+        # `cap` is a bound on *value* flow, so convert from canonical token units.
+        caps = np.array(
+            [
+                a.cap if not math.isfinite(a.cap) else float(nu[a.tau] * a.cap)
+                for a in arcs
+            ]
+        )
+        g = build(
+            tau, sig, a_vec, np.array([a.B for a in arcs]), nu, Psi,
+            cap=caps,
+            flagged=np.array([a.convex_flag for a in arcs]),
+            clamped=np.array([a.clamped for a in arcs]),
+            n_nodes=nodes.n_nodes,
+            merge_duplicates=False,
+            require=(src_node, dst_node),
+        )
+        # `build` drops dust and can merge duplicates, so re-align the arc
+        # metadata to the arrays the solver will actually see.
+        arcs = [arcs[group[0]] for group in g.sources]
+        result.counters["arcs_dropped_dust"] = sum(
+            1 for reason in g.dropped.values() if reason == "DUST"
+        )
+        result.arcs = arcs
+        for k, arc in enumerate(arcs):
+            arc.G, arc.eps = float(g.G[k]), float(g.eps[k])
+        _warn_pair_drops(arcs, result)
+        g, Psi_scaled = scale(g, Psi)
+    result.graph = g
+
+    # --- solve (§5.4, §5.5) ----------------------------------------------
+    with clock("seed"):
+        seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
+        # §5.4's warm start, and it is worth a lot here.  Starting with all m
+        # arcs active means pivoting ~700 of them back *out* one at a time, and
+        # every one of those pivots factorises a matrix the size of the whole
+        # connected component.  Starting from one path only ever adds arcs, so
+        # the matrix stays the size of the active set.
+        best_path = k_shortest_paths(g, src_node, dst_node, k=1)
+        warm_start = np.array(best_path[0]) if best_path else None
+    with clock("solve"):
+        report = solve(
+            g, src_node, dst_node, Psi_scaled, seed=seed,
+            max_rounds=max_rounds, A0=warm_start,
+        )
+    result.report = report
+    if not report.solution.feasible:
+        raise RoutingError(report.reason or "no feasible route")
+
+    psi = report.solution.psi * g.g_scale
+    psi, cycles = cancel_cycles(g.tau, g.sig, psi)
+    if cycles:
+        result.counters["cycles_cancelled"] = cycles
+        result.warnings.append(
+            f"{cycles} circulation(s) removed from the optimal flow: the model "
+            "found a negative-eps loop it cannot execute as a one-way trade (§2.6)"
+        )
+    active = np.flatnonzero(psi > 0)
+    if active.size == 0:
+        raise RoutingError("the optimal flow is empty")
+
+    # §12.4: KCL must hold on the flow we are about to execute.  This is the
+    # invariant that catches conjured or stranded flow before it reaches a leg.
+    residual = _kcl_residual(g, psi, src_node, dst_node, Psi)
+    result.counters["kcl_residual"] = residual
+    if residual > 1e-8:
+        raise RoutingError(
+            f"flow conservation is violated by {residual:.3e} of the routed value"
+        )
+    result.counters["active_arcs"] = int(active.size)
+    result.counters["pivots"] = report.solution.pivots
+    result.counters["cg_rounds"] = report.cg_rounds
+    result.counters["arcs_priced_out"] = g.m
+
+    # --- realize (§5.6) ---------------------------------------------------
+    with clock("realize"):
+        live = [arcs[k] for k in active]
+        result.route = realize(
+            live, psi[active], nu, nodes,
+            src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+            potentials=report.solution.u,
+        )
+    conflicts = check_one_arc_per_pool(result.route)
+    if conflicts:
+        result.warnings.append(
+            f"{len(conflicts)} pool(s) used more than once; a view-only quote "
+            "cannot see its own earlier leg (§7 rule 1)"
+        )
+
+    # --- candidates and on-chain verification (§6, §7) --------------------
+    if verify_on_chain:
+        scaled = report.solution.psi.copy()
+        with clock("candidates"):
+            pool_set = generate(
+                g, arcs, src_node, dst_node, Psi_scaled, report.solution,
+                base_certificate=report.certificate, seed=seed,
+                max_candidates=max_candidates,
+            )
+            for candidate in pool_set.candidates:
+                candidate.psi = candidate.psi * g.g_scale
+            del scaled
+            realize_candidates(
+                pool_set, arcs, nu, nodes,
+                src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+                potentials=report.solution.u,
+            )
+        with clock("verify"):
+            dst_wei_per_eth = _dst_per_eth(nodes, nu, dst_token)
+            verify(
+                pool_set, client, amount_in=amount_in,
+                gas_price_wei=gas_price_wei, dst_wei_per_eth=dst_wei_per_eth,
+            )
+        result.candidates = pool_set
+        result.counters["candidates"] = len(pool_set)
+        result.counters["candidates_quoted"] = sum(
+            1 for c in pool_set.candidates if c.verified_out is not None
+        )
+        result.counters["candidates_reverted"] = sum(
+            1 for c in pool_set.candidates if c.status == "reverted"
+        )
+
+        # The safety floor: quote every obvious one-hop swap too, so the
+        # winner can never be worse than something found by inspection.
+        with clock("direct"):
+            direct, direct_arcs = direct_candidates(
+                pools, nodes, nu, src_token, dst_token, amount_in
+            )
+            for candidate, arc in zip(direct, direct_arcs, strict=True):
+                trial = CandidateSet([candidate])
+                realize_candidates(
+                    trial, [arc], nu, nodes,
+                    src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+                )
+                if candidate.status == "ready":
+                    pool_set.candidates.append(candidate)
+            result.counters["direct_candidates"] = len(direct)
+            if direct:
+                verify(
+                    pool_set, client, amount_in=amount_in,
+                    gas_price_wei=gas_price_wei, dst_wei_per_eth=dst_wei_per_eth,
+                )
+
+        winner = pool_set.best
+        if winner is None:
+            result.warnings.append(
+                "no candidate could be quoted on-chain; falling back to the "
+                "modelled route (treat the output as unverified)"
+            )
+        else:
+            result.route = winner.route
+            result.verified_out = winner.verified_out
+            result.winner = winner
+            if not winner.certificate:
+                report.certificate = False
+                report.reason = report.reason or winner.reason or "RESTRICTED"
+
+            # --- §8 refit: re-anchor the winner at its realised sizes --------
+            if refit_rounds > 0:
+                with clock("refit"):
+                    _refit_winner(
+                        result, pool_set, winner, g, arcs, nu, nodes, client,
+                        src_node=src_node, dst_node=dst_node, Psi=Psi_scaled,
+                        src_token=src_token, dst_token=dst_token,
+                        amount_in=amount_in, rounds=refit_rounds,
+                        gas_price_wei=gas_price_wei,
+                    )
+
+    fee, impact = report.solution.loss_split(g)
+    result.fee_bp = fee * g.g_scale / Psi * 10_000
+    result.impact_bp = impact * g.g_scale / Psi * 10_000
+    result.price_out_per_in = float(nu[src_node] / nu[dst_node]) if nu[dst_node] else 0.0
+    return result
+
+
+def direct_candidates(
+    pools: list[PoolSpec],
+    nodes: NodeMap,
+    nu: np.ndarray,
+    src_token: str,
+    dst_token: str,
+    amount_in: int,
+) -> tuple[list[Candidate], list[PoolArc]]:
+    """One-leg candidates through every pool holding both tokens.
+
+    These are the safety floor, and they exist precisely because they do *not*
+    depend on the probe grid, the calibration, the reference-price fit or the
+    solver.  If a probe fails and an arc is dropped, the model can lose sight
+    of an obvious direct swap; measured once on a degraded run, the router
+    returned 13,700 USDC for 100,000 DAI and honestly verified it, because
+    every candidate it generated really was that bad.
+
+    A router must never be beaten by a swap anyone could find by inspection.
+    """
+    src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
+    out: list[Candidate] = []
+    made: list[PoolArc] = []
+    for pool in pools:
+        kind = pool.swap_kind
+        if kind is None:
+            continue
+        index = {c.address.lower(): k for k, c in enumerate(pool.coins)}
+        for token_in, i in index.items():
+            if nodes.node(token_in) != src_node:
+                continue
+            for token_out, j in index.items():
+                if i == j or nodes.node(token_out) != dst_node:
+                    continue
+                arc = PoolArc(
+                    id=f"direct:{pool.address.lower()}:{i}>{j}",
+                    pool=pool.address, kind=kind, i=i, j=j, n_coins=pool.n_coins,
+                    token_in=token_in, token_out=token_out,
+                    tau=src_node, sigma=dst_node,
+                    a=float(nu[src_node] / nu[dst_node]) if nu[dst_node] else 1.0,
+                    B=0.0, reserve_in=pool.balances[i] if i < len(pool.balances) else 0,
+                    decimals_in=pool.coins[i].decimals,
+                    decimals_out=pool.coins[j].decimals,
+                    tvl_usd=pool.tvl_usd, note=pool.name,
+                )
+                made.append(arc)
+                out.append(
+                    Candidate(
+                        label=f"direct {pool.name[:22]}",
+                        psi=np.array([1.0]), certificate=False,
+                        kind="direct", reason="DIRECT", n_arcs=1,
+                    )
+                )
+    return out, made
+
+
+def _refit_winner(
+    result: RouteResult,
+    pool_set: CandidateSet,
+    winner: Candidate,
+    g: ArcArrays,
+    arcs: list[PoolArc],
+    nu: np.ndarray,
+    nodes: NodeMap,
+    client: QuoterClient,
+    *,
+    src_node: int,
+    dst_node: int,
+    Psi: float,
+    src_token: str,
+    dst_token: str,
+    amount_in: int,
+    rounds: int,
+    gas_price_wei: int,
+) -> None:
+    """§8 -- refit the winner, re-solve, and let the chain adjudicate again.
+
+    The refitted route is *offered*, never imposed: it goes back through the
+    same quoter as an extra candidate, so it only wins if it actually quotes
+    higher.  A refit can only improve the model, but the model is not what is
+    being reported.
+    """
+    from .verify import realize_candidates
+    from .verify import verify as verify_candidates
+
+    forbidden = np.ones(g.m, bool)
+    forbidden[np.flatnonzero(winner.psi > 0)] = False
+
+    def solve_fn(graph_arrays, A0):
+        return active_set_solve(
+            graph_arrays, src_node, dst_node, Psi, A0=A0, forbidden=forbidden
+        )
+
+    report = refit(
+        g, arcs, winner.psi / g.g_scale, nu, client, solve_fn, Psi,
+        rate_in=lambda arc: nodes.rate(arc.token_in),
+        rate_out=lambda arc: nodes.rate(arc.token_out),
+        rounds=rounds,
+    )
+    result.refit_report = report
+    result.counters["refit_rounds"] = len(report.rounds)
+    if report.rounds:
+        result.counters["refit_quoted"] = report.rounds[-1].quoted
+        if report.rounds[-1].reflagged:
+            result.warnings.append(
+                f"{report.rounds[-1].reflagged} arc(s) showed increasing returns at "
+                "their realised size and were clamped (§11.2)"
+            )
+    if report.psi is None or not report.changed:
+        return
+    if not report.converged:
+        result.warnings.append(
+            f"refit did not converge in {len(report.rounds)} rounds "
+            f"(max |d psi| / Psi = {report.rounds[-1].max_delta_psi:.2e})"
+        )
+
+    refitted = Candidate(
+        label="refit at realised size",
+        psi=report.psi * g.g_scale,
+        certificate=False,
+        kind="refit",
+        reason="REFIT",
+        n_arcs=int(np.count_nonzero(report.psi > 0)),
+    )
+    trial = CandidateSet([refitted])
+    realize_candidates(
+        trial, arcs, nu, nodes,
+        src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+    )
+    verify_candidates(trial, client, amount_in=amount_in)
+    if not refitted.ok:
+        return
+
+    pool_set.candidates.append(refitted)
+    verify_candidates(pool_set, client, amount_in=amount_in, gas_price_wei=gas_price_wei)
+    best = pool_set.best
+    if best is not None:
+        result.route = best.route
+        result.verified_out = best.verified_out
+        result.winner = best
+
+
+def _dst_per_eth(nodes: NodeMap, nu: np.ndarray, dst_token: str) -> float:
+    """Output-token wei per 1 ETH, for costing gas.  0 when ETH is unpriced."""
+    for candidate in ("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",):
+        if not nodes.has(candidate):
+            continue
+        weth_value = float(nu[nodes.node(candidate)])
+        dst_value = float(nu[nodes.node(dst_token)])
+        if weth_value <= 0 or dst_value <= 0:
+            return 0.0
+        return weth_value / dst_value * 10 ** nodes.decimals(dst_token)
+    return 0.0
+
+
+def _kcl_residual(
+    g: ArcArrays, psi: np.ndarray, src: int, dst: int, Psi: float
+) -> float:
+    """`||B^T psi - s_hat||_inf / Psi` -- Kirchhoff's current law (§12.4)."""
+    net = np.zeros(g.n_nodes)
+    np.add.at(net, g.tau, psi)
+    np.subtract.at(net, g.sig, psi)
+    want = np.zeros(g.n_nodes)
+    want[src] += Psi
+    want[dst] -= Psi
+    return float(np.max(np.abs(net - want)) / Psi) if Psi > 0 else 0.0
+
+
+def _restrict_to_component(
+    arcs: list[PoolArc], dst_node: int, n_nodes: int, result: RouteResult
+) -> list[PoolArc]:
+    from .graph import component_of
+
+    tau = np.array([a.tau for a in arcs], dtype=np.int64)
+    sig = np.array([a.sigma for a in arcs], dtype=np.int64)
+    reachable = component_of(dst_node, tau, sig, n_nodes)
+    keep = [a for a in arcs if reachable[a.tau] and reachable[a.sigma]]
+    result.counters["arcs_unreachable"] = len(arcs) - len(keep)
+    result.counters["nodes_reachable"] = int(reachable.sum())
+    return keep
+
+
+# A pool cannot be meaningfully deeper than this multiple of its own input
+# reserve.  For constant product `G = nu*y0/2` exactly; a stableswap at the peg
+# is far deeper, but not by twelve orders of magnitude.
+DEPTH_LIMIT = 1e4
+
+
+def _clamp_unphysical_depth(arcs: list[PoolArc], nu: np.ndarray, nodes: NodeMap) -> int:
+    """Treat immeasurably small curvature as the zero-curvature limit.
+
+    A `B` that implies a conductance far beyond the pool's own reserves is not
+    a very deep pool, it is a curvature below the integer noise floor of the
+    quotes -- deep pools probed at small sizes look linear.  Leaving it as a
+    huge finite `G` wrecks the Laplacian's condition number for every other
+    arc; clamping to `B = 0` with a cap is the admissible limit (§2.3) and
+    keeps the arc honest: bottomless only up to the size actually probed.
+    """
+    clamped = 0
+    for arc in arcs:
+        if arc.B <= 0 or arc.reserve_in <= 0:
+            continue
+        reserve_canonical = (
+            arc.reserve_in / 10**arc.decimals_in * nodes.rate(arc.token_in)
+        )
+        limit = float(nu[arc.tau]) * reserve_canonical * DEPTH_LIMIT
+        conductance = float(nu[arc.tau]) * arc.a / arc.B
+        if limit > 0 and conductance > limit:
+            arc.B = 0.0
+            arc.clamped = True
+            arc.convex_flag = True
+            probed = arc.calib_delta if arc.calib_delta > 0 else reserve_canonical
+            arc.cap = min(arc.cap, probed)
+            clamped += 1
+    return clamped
+
+
+def _align(planned, refs, meta):
+    """`plan_grid` may skip arcs, so re-align the metadata to what it kept."""
+    by_id = {ref.id: m for ref, m in zip(refs, meta, strict=True)}
+    return [by_id[ref.id] for ref in planned]
+
+
+def _warn_pair_drops(arcs: list[PoolArc], result: RouteResult) -> None:
+    """§2.6: `eps_f + eps_r <= 0` means `nu` is inconsistent with that pool.
+
+    It manufactures a two-arc negative cycle that does not exist, and the
+    solver will happily allocate flow around it.
+    """
+    forward: dict[tuple[str, int, int], PoolArc] = {}
+    for arc in arcs:
+        forward[(arc.pool.lower(), arc.i, arc.j)] = arc
+    pairs = []
+    for (pool, i, j), arc in forward.items():
+        reverse = forward.get((pool, j, i))
+        if reverse is not None and i < j:
+            pairs.append((arc, reverse))
+    if not pairs:
+        return
+    violations = check_pair_drops(
+        np.array([f.eps for f, _ in pairs]), np.array([r.eps for _, r in pairs])
+    )
+    result.counters["eps_pair_violations"] = int(violations.size)
+    if violations.size:
+        result.warnings.append(
+            f"{violations.size} pool(s) have eps_f + eps_r <= 0: the reference price "
+            "is inconsistent with them (spurious negative 2-cycle, §2.6)"
+        )
+
+
+class _Clock:
+    def __init__(self, sink: dict[str, float]) -> None:
+        self.sink = sink
+
+    def __call__(self, name: str):
+        return _Span(self.sink, name)
+
+
+class _Span:
+    def __init__(self, sink: dict[str, float], name: str) -> None:
+        self.sink, self.name = sink, name
+
+    def __enter__(self):
+        self.started = time.monotonic()
+        return self
+
+    def __exit__(self, *exc):
+        self.sink[self.name] = (time.monotonic() - self.started) * 1000
+        return False

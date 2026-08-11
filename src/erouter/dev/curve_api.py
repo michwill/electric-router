@@ -1,0 +1,127 @@
+"""Curve Prices v2 client (stdlib urllib).
+
+The API supplies only the *universe and the TVL bootstrap*.  Every number that
+enters the solve -- balances, decimals, `a`, `B`, the ABI dialect -- is read
+on-chain at the pinned block, because the API is demonstrably wrong about some
+of them (`pool_type` mis-types 6 mainnet arcs today) and unreliable about
+others (`tvl_usd` on dust pools).  A total API outage should degrade to a stale
+universe, never to a wrong route.
+
+Two quirks worth knowing: the default urllib User-Agent gets a **403**, and
+`pagination` is hard-capped at 50.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+PRICES_V2 = "https://prices.curve.finance/v2"
+MAX_PAGE_SIZE = 50  # anything larger is a 422
+DEFAULT_MIN_TVL = 10_000.0
+CACHE_TTL = 300.0  # matches the edge cache
+
+USER_AGENT = "electric-router/0.1 (+https://curve.finance)"
+
+
+class CurveApiError(RuntimeError):
+    pass
+
+
+RETRIES = 3
+BACKOFF = 0.75
+
+
+def _get(url: str, timeout: float = 30.0, retries: int = RETRIES) -> Any:
+    """GET with a short retry on transient failures.
+
+    The API returns 502 often enough to matter (seen live during development),
+    and a single blip must not take down a route that is otherwise fully
+    determined by on-chain state.
+    """
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    last = ""
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            last = f"{exc.code} {exc.reason}"
+            if exc.code < 500 and exc.code != 429:
+                break  # 4xx will not fix itself; 403 means the UA is missing
+        except (urllib.error.URLError, TimeoutError) as exc:
+            last = str(getattr(exc, "reason", exc))
+        if attempt + 1 < retries:
+            time.sleep(BACKOFF * (2**attempt))
+    raise CurveApiError(f"{last} for {url}")
+
+
+class CurveApi:
+    def __init__(self, ttl: float = CACHE_TTL) -> None:
+        self.ttl = ttl
+        self._cache: dict[str, tuple[float, Any]] = {}
+
+    def _cached(self, key: str, produce) -> Any:
+        hit = self._cache.get(key)
+        now = time.monotonic()
+        if hit and now - hit[0] < self.ttl:
+            return hit[1]
+        value = produce()
+        self._cache[key] = (now, value)
+        return value
+
+    def chains(self) -> dict[str, int]:
+        """API chain name -> chain id.  Note Gnosis is served as 'xdai'."""
+
+        def produce():
+            payload = _get(f"{PRICES_V2}/pools/chains/")
+            return {row["name"]: int(row["chain_id"]) for row in payload["data"]}
+
+        return self._cached("chains", produce)
+
+    def list_pools(
+        self,
+        chain_id: int,
+        *,
+        min_tvl: float = DEFAULT_MIN_TVL,
+        limit: int | None = None,
+    ) -> list[dict]:
+        """Every pool on the chain above `min_tvl`, newest page order preserved."""
+
+        def produce():
+            pools: list[dict] = []
+            page = 1
+            total = None
+            while True:
+                query = urllib.parse.urlencode(
+                    {
+                        "chain_id": chain_id,
+                        "page": page,
+                        "pagination": MAX_PAGE_SIZE,
+                        "sort_by": "tvl",
+                        "sort_direction": "desc",
+                        "min_tvl": min_tvl,
+                    }
+                )
+                payload = _get(f"{PRICES_V2}/pools/?{query}")
+                batch = payload.get("pools") or []
+                total = payload.get("count") if total is None else total
+                pools.extend(batch)
+                if not batch or (total is not None and len(pools) >= total):
+                    break
+                if limit is not None and len(pools) >= limit:
+                    break
+                page += 1
+            return pools[:limit] if limit else pools
+
+        return self._cached(f"pools:{chain_id}:{min_tvl}:{limit}", produce)
+
+    def pool_detail(self, chain_id: int, address: str) -> dict:
+        return self._cached(
+            f"detail:{chain_id}:{address.lower()}",
+            lambda: _get(f"{PRICES_V2}/pools/{chain_id}/{address}"),
+        )

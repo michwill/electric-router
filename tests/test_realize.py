@@ -1,0 +1,314 @@
+"""Node merging and leg realisation -- no chain."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from erouter.core.nodes import Conversion, ConversionKind, NodeMap, rescale
+from erouter.core.realize import (
+    RealizationError,
+    check_one_arc_per_pool,
+    realize,
+    topological_nodes,
+)
+from erouter.core.types import ArcKind, PoolArc
+
+ETH = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+WETH = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+CRVUSD = "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e"
+SCRVUSD = "0x0655977feb2f289a4ab78af67bab0d17aab84367"
+
+POOL_A = "0x" + "a1" * 20
+POOL_B = "0x" + "b2" * 20
+POOL_C = "0x" + "c3" * 20
+
+
+def base_nodes() -> NodeMap:
+    nodes = NodeMap()
+    nodes.add_token(WETH, "WETH", 18)
+    nodes.add_token(USDC, "USDC", 6)
+    nodes.add_token(CRVUSD, "crvUSD", 18)
+    return nodes
+
+
+def merged_nodes() -> NodeMap:
+    nodes = base_nodes()
+    nodes.add_token(ETH, "ETH", 18)
+    nodes.merge(
+        Conversion(ConversionKind.NATIVE_WRAP, ETH, WETH, 1, 1, target=WETH)
+    )
+    nodes.add_token(SCRVUSD, "scrvUSD", 18)
+    nodes.merge(
+        Conversion(ConversionKind.ERC4626, SCRVUSD, CRVUSD, 11 * 10**17, 10**18, target=SCRVUSD)
+    )
+    return nodes
+
+
+def arc(pool, token_in, token_out, nodes, *, a=1.0, B=1e-9, i=0, j=1, reserve=10**24):
+    return PoolArc(
+        id=f"{pool}:{i}>{j}",
+        pool=pool,
+        kind=ArcKind.SWAP_STABLE,
+        i=i,
+        j=j,
+        n_coins=2,
+        token_in=token_in,
+        token_out=token_out,
+        tau=nodes.node(token_in),
+        sigma=nodes.node(token_out),
+        a=a,
+        B=B,
+        G=1.0 / max(B, 1e-30),
+        eps=1.0 - a,
+        reserve_in=reserve,
+        decimals_in=nodes.decimals(token_in),
+        decimals_out=nodes.decimals(token_out),
+    )
+
+
+# ------------------------------------------------------------- node merging
+
+
+def test_eth_and_weth_become_one_node():
+    """The eight sentinel pools are otherwise nearly disconnected."""
+    nodes = merged_nodes()
+    assert nodes.node(ETH) == nodes.node(WETH)
+    assert nodes.canonical(ETH) == WETH  # most pools hold the wrapped token
+    assert nodes.rate(ETH) == 1.0
+    assert nodes.to_canonical_wei(ETH, 10**18) == 10**18
+    assert "ETH" in nodes.node_symbol(nodes.node(WETH))
+
+
+def test_erc4626_merge_carries_an_exact_integer_rate():
+    nodes = merged_nodes()
+    assert nodes.node(SCRVUSD) == nodes.node(CRVUSD)
+    assert nodes.canonical(SCRVUSD) == CRVUSD
+    assert nodes.rate(SCRVUSD) == pytest.approx(1.1)
+    # exact integer arithmetic, not a float round trip
+    assert nodes.to_canonical_wei(SCRVUSD, 10**18) == 11 * 10**17
+    assert nodes.from_canonical_wei(SCRVUSD, 11 * 10**17) == 10**18
+
+
+def test_unmerged_tokens_keep_their_own_node():
+    nodes = merged_nodes()
+    assert nodes.node(USDC) != nodes.node(WETH)
+    assert nodes.rate(USDC) == 1.0
+    assert nodes.merged_nodes() == sorted(
+        {nodes.node(WETH), nodes.node(CRVUSD)}
+    )
+
+
+def test_rescale_squares_the_input_rate():
+    """B has units of output per input squared, so R_in enters twice.
+
+    Getting this wrong is silent: the arc still solves, just with a
+    conductance off by the price ratio.
+    """
+    a, B = rescale(2.0, 3.0, rate_in=4.0, rate_out=5.0)
+    assert a == pytest.approx(2.0 * 5.0 / 4.0)
+    assert B == pytest.approx(3.0 * 5.0 / 16.0)
+    with pytest.raises(ValueError):
+        rescale(1.0, 1.0, rate_in=0.0, rate_out=1.0)
+
+
+# ----------------------------------------------------------------- ordering
+
+
+def test_cycle_in_the_active_arcs_is_rejected():
+    tau = np.array([0, 1, 2])
+    sig = np.array([1, 2, 0])
+    with pytest.raises(RealizationError, match="cycle"):
+        topological_nodes(tau, sig, 3)
+
+
+def test_topological_order_puts_sources_first():
+    order = topological_nodes(np.array([0, 1]), np.array([1, 2]), 3)
+    assert order == [0, 1, 2]
+
+
+# --------------------------------------------------------------- realising
+
+
+def test_single_hop():
+    nodes = base_nodes()
+    arcs = [arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0)]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        arcs, np.array([1000.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert len(route.legs) == 1
+    leg = route.legs[0]
+    assert leg.leg.src_slot == 0
+    assert leg.leg.bps == 0  # the only leg out of the node sweeps everything
+    assert leg.amount_in == 1000 * 10**6
+    assert route.modelled_out > 0
+    assert route.dst_slot == route.slots[WETH]
+
+
+def test_series_two_hops_chain_amounts():
+    nodes = base_nodes()
+    arcs = [
+        arc(POOL_A, USDC, CRVUSD, nodes, a=1.0),
+        arc(POOL_B, CRVUSD, WETH, nodes, a=1 / 4000.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(CRVUSD)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        arcs, np.array([1000.0, 1000.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert [rl.target for rl in route.legs] == [POOL_A, POOL_B]
+    assert route.legs[1].leg.src_slot == route.legs[0].leg.dst_slot
+    assert route.legs[1].amount_in == route.legs[0].amount_out
+
+
+def test_parallel_split_shares_sum_and_the_last_leg_sweeps():
+    nodes = base_nodes()
+    arcs = [
+        arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        arcs, np.array([700.0, 300.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert len(route.legs) == 2
+    assert route.legs[0].leg.bps == 7000
+    assert route.legs[1].leg.bps == 0  # remainder, so no dust is stranded
+    assert route.legs[0].amount_in + route.legs[1].amount_in == 1000 * 10**6
+
+
+def test_mid_path_branch_produces_two_groups():
+    """USDC splits, one branch goes through crvUSD, both land on WETH."""
+    nodes = base_nodes()
+    arcs = [
+        arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, USDC, CRVUSD, nodes, a=1.0),
+        arc(POOL_C, CRVUSD, WETH, nodes, a=1 / 4000.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(CRVUSD)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        arcs, np.array([600.0, 400.0, 400.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert len(route.legs) == 3
+    # the two legs leaving USDC are contiguous, so the bps snapshot is stable
+    assert route.legs[0].leg.src_slot == route.legs[1].leg.src_slot == 0
+    assert route.legs[2].leg.src_slot == route.slots[CRVUSD]
+    assert route.legs[0].leg.bps == 6000
+    assert route.legs[1].leg.bps == 0
+
+
+def test_a_pool_holding_native_eth_gets_a_conversion_leg():
+    """The route arrives holding WETH but the pool wants the sentinel."""
+    nodes = merged_nodes()
+    arcs = [
+        arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, ETH, CRVUSD, nodes, a=4000.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    nu[nodes.node(CRVUSD)] = 1.0
+
+    route = realize(
+        arcs, np.array([1000.0, 1000.0]), nu, nodes,
+        src_token=USDC, dst_token=CRVUSD, amount_in=1000 * 10**6,
+    )
+    conversions = [rl for rl in route.legs if rl.is_conversion]
+    assert len(conversions) == 1
+    assert conversions[0].kind is ArcKind.UNWRAP_NATIVE
+    assert conversions[0].token_in.lower() == WETH
+    assert conversions[0].token_out.lower() == ETH
+    # 1:1, so nothing is lost crossing the merged node
+    assert conversions[0].amount_out == conversions[0].amount_in
+
+
+def test_no_conversion_when_every_arc_uses_the_canonical_token():
+    nodes = merged_nodes()
+    arcs = [
+        arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, WETH, CRVUSD, nodes, a=4000.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    nu[nodes.node(CRVUSD)] = 1.0
+    route = realize(
+        arcs, np.array([1000.0, 1000.0]), nu, nodes,
+        src_token=USDC, dst_token=CRVUSD, amount_in=1000 * 10**6,
+    )
+    assert not any(rl.is_conversion for rl in route.legs)
+
+
+def test_destination_conversion_is_emitted():
+    """Asking for ETH when the graph ends on the WETH hub."""
+    nodes = merged_nodes()
+    arcs = [arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0)]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        arcs, np.array([1000.0]), nu, nodes,
+        src_token=USDC, dst_token=ETH, amount_in=1000 * 10**6,
+    )
+    assert route.legs[-1].kind is ArcKind.UNWRAP_NATIVE
+    assert route.dst_slot == route.slots[ETH]
+    assert route.modelled_out > 0
+
+
+def test_erc4626_destination_applies_the_vault_rate():
+    nodes = merged_nodes()
+    arcs = [arc(POOL_A, USDC, CRVUSD, nodes, a=1.0)]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(CRVUSD)] = 1.0
+
+    route = realize(
+        arcs, np.array([1100.0]), nu, nodes,
+        src_token=USDC, dst_token=SCRVUSD, amount_in=1100 * 10**6,
+    )
+    deposit = route.legs[-1]
+    assert deposit.kind is ArcKind.ERC4626_DEPOSIT
+    # 1.1 assets per share, so shares out are assets / 1.1
+    assert deposit.amount_out == pytest.approx(deposit.amount_in / 1.1, rel=1e-9)
+
+
+def test_one_arc_per_pool_violation_is_detected():
+    """Decision 3: a view-only quoter cannot see its own earlier leg."""
+    nodes = base_nodes()
+    arcs = [
+        arc(POOL_A, USDC, CRVUSD, nodes, a=1.0, i=0, j=1),
+        arc(POOL_A, CRVUSD, WETH, nodes, a=1 / 4000.0, i=1, j=2),
+    ]
+    nu = np.ones(nodes.n_nodes)
+    nu[nodes.node(WETH)] = 4000.0
+    route = realize(
+        arcs, np.array([1000.0, 1000.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert check_one_arc_per_pool(route) == [POOL_A.lower()]
+
+
+def test_realize_rejects_an_empty_flow():
+    with pytest.raises(RealizationError):
+        realize([], np.array([]), np.ones(2), base_nodes(),
+                src_token=USDC, dst_token=WETH, amount_in=1)

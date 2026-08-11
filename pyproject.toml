@@ -1,0 +1,54 @@
+[project]
+name = "electric-router"
+version = "0.1.0"
+description = "Optimal multi-pool Curve routing as a linear resistor network with diodes"
+authors = [{ name = "Michael Egorov", email = "michwill@yieldbasis.com" }]
+requires-python = ">=3.11"
+
+# The core solver is stdlib + numpy and nothing else, so it can be lifted into a
+# Pyodide/Flet frontend unchanged.  See docs/quadratic-flow-router.md and
+# tests/test_purity.py, which fails the build if anything else creeps in.
+dependencies = ["numpy>=2,<3"]
+
+[dependency-groups]
+dev = [
+    "titanoboa==0.2.8",
+    "vyper==0.4.3",
+    "pytest>=8",
+    "pytest-xdist>=3.6,<4",
+    "hypothesis>=6,<7",
+    # test-only oracles: eth_abi checks core/codec.py, scipy checks core/linalg.py
+    "eth-abi>=5,<6",
+    "scipy>=1.14",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+erouter = "erouter.dev.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/erouter"]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["forked: needs networks.py and a reachable RPC"]
+addopts = "-m 'not forked'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF", "C4", "RET"]
+# RUF00x: the spec uses mathematical unicode (nu, psi, sigma) and so do we.
+# SIM300: misfires on numpy comparisons -- it wants `floor <= G` where `G < floor`
+#         is the readable form.
+ignore = ["E501", "RUF001", "RUF002", "RUF003", "SIM300"]
