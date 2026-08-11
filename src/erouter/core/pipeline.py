@@ -40,7 +40,7 @@ from .realize import RealizedRoute, cancel_cycles, check_one_arc_per_pool, reali
 from .refit import RefitReport, refit
 from .seed import k_shortest_paths, seed_subgraph
 from .solve import SolveReport, active_set_solve, solve
-from .types import ArcKind, PoolArc
+from .types import ArcKind, PoolArc, Probe
 from .verify import realize_candidates, verify
 
 
@@ -414,8 +414,20 @@ def route(
                 )
                 if candidate.status == "ready":
                     pool_set.candidates.append(candidate)
+            chains, chain_arcs = two_step_candidates(
+                pools, nodes, nu, client, src_token, dst_token, amount_in
+            )
+            for candidate, pair in zip(chains, chain_arcs, strict=True):
+                trial = CandidateSet([candidate])
+                realize_candidates(
+                    trial, pair, nu, nodes,
+                    src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+                )
+                if candidate.status == "ready":
+                    pool_set.candidates.append(candidate)
             result.counters["direct_candidates"] = len(direct)
-            if direct:
+            result.counters["two_step_candidates"] = len(chains)
+            if direct or chains:
                 verify(
                     pool_set, client, amount_in=amount_in,
                     gas_price_wei=gas_price_wei, dst_wei_per_eth=dst_wei_per_eth,
@@ -503,6 +515,136 @@ def direct_candidates(
                     )
                 )
     return out, made
+
+
+def two_step_candidates(
+    pools: list[PoolSpec],
+    nodes: NodeMap,
+    nu: np.ndarray,
+    client: QuoterClient,
+    src_token: str,
+    dst_token: str,
+    amount_in: int,
+    *,
+    limit: int = 6,
+) -> tuple[list[Candidate], list[list[PoolArc]]]:
+    """Model-free `src -> M -> dst` chains, one pool per hop.
+
+    The two-hop half of the safety floor.  `direct_candidates` covers what a
+    person would find in one glance; this covers what they would find in two,
+    and it depends on no part of the model either.  It exists because the
+    quadratic element law degrades badly once a trade is large relative to the
+    pools -- measured on wstETH->WETH at 50 units, where the whole Curve
+    universe holds ~900 wstETH, the model's best candidate paid 50.30 against
+    54.70 from an obvious two-pool chain.
+
+    Two batched rounds pick *which* chains to offer; the quoter then decides
+    the actual amounts, so the ranking here only has to be roughly right.
+    """
+    src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
+
+    def slots(pool: PoolSpec, node: int) -> list[int]:
+        return [
+            k for k, c in enumerate(pool.coins)
+            if nodes.has(c.address) and nodes.node(c.address) == node
+        ]
+
+    # --- round A: src -> M ------------------------------------------------
+    probes: list[Probe] = []
+    first: list[tuple[PoolSpec, int, int, int]] = []
+    for pool in pools:
+        if pool.swap_kind is None:
+            continue
+        for i in slots(pool, src_node):
+            for j, coin in enumerate(pool.coins):
+                if j == i or not nodes.has(coin.address):
+                    continue
+                middle = nodes.node(coin.address)
+                if middle in (src_node, dst_node):
+                    continue
+                probes.append(
+                    Probe(pool.address, pool.swap_kind, i, j, pool.n_coins, amount_in)
+                )
+                first.append((pool, i, j, middle))
+    if not probes:
+        return [], []
+
+    best_first: dict[int, tuple[int, PoolSpec, int, int]] = {}
+    for quote, (pool, i, j, middle) in zip(client.probe(probes), first, strict=True):
+        if not quote.ok or quote.value <= 0:
+            continue
+        canonical = nodes.to_canonical_wei(pool.coins[j].address, quote.value)
+        if canonical > best_first.get(middle, (0,))[0]:
+            best_first[middle] = (canonical, pool, i, j)
+    if not best_first:
+        return [], []
+
+    ranked = sorted(best_first.items(), key=lambda kv: -kv[1][0])[: 3 * limit]
+
+    # --- round B: M -> dst ------------------------------------------------
+    probes = []
+    second: list[tuple[int, PoolSpec, int, int]] = []
+    for middle, (canonical, _p1, _i1, _j1) in ranked:
+        for pool in pools:
+            if pool.swap_kind is None:
+                continue
+            for i in slots(pool, middle):
+                start = nodes.from_canonical_wei(pool.coins[i].address, canonical)
+                if start <= 0:
+                    continue
+                for j in slots(pool, dst_node):
+                    if i == j:
+                        continue
+                    probes.append(
+                        Probe(pool.address, pool.swap_kind, i, j, pool.n_coins, start)
+                    )
+                    second.append((middle, pool, i, j))
+    if not probes:
+        return [], []
+
+    best_chain: dict[int, tuple[int, PoolSpec, int, int]] = {}
+    for quote, (middle, pool, i, j) in zip(client.probe(probes), second, strict=True):
+        if not quote.ok or quote.value <= 0:
+            continue
+        value = nodes.to_canonical_wei(pool.coins[j].address, quote.value)
+        if value > best_chain.get(middle, (0,))[0]:
+            best_chain[middle] = (value, pool, i, j)
+
+    out: list[Candidate] = []
+    made: list[list[PoolArc]] = []
+    for middle, (_value, pool2, i2, j2) in sorted(
+        best_chain.items(), key=lambda kv: -kv[1][0]
+    )[:limit]:
+        _canonical, pool1, i1, j1 = best_first[middle]
+        arcs = [
+            _synthetic_arc(pool1, i1, j1, nodes, nu, src_node, middle),
+            _synthetic_arc(pool2, i2, j2, nodes, nu, middle, dst_node),
+        ]
+        out.append(
+            Candidate(
+                label=f"2-hop via {nodes.symbol(pool1.coins[j1].address)}",
+                psi=np.array([1.0, 1.0]), certificate=False,
+                kind="direct", reason="TWO_STEP", n_arcs=2,
+            )
+        )
+        made.append(arcs)
+    return out, made
+
+
+def _synthetic_arc(
+    pool: PoolSpec, i: int, j: int, nodes: NodeMap, nu: np.ndarray, tau: int, sigma: int
+) -> PoolArc:
+    """An arc built for realisation only -- never calibrated, never solved."""
+    return PoolArc(
+        id=f"naive:{pool.address.lower()}:{i}>{j}",
+        pool=pool.address, kind=pool.swap_kind, i=i, j=j, n_coins=pool.n_coins,
+        token_in=pool.coins[i].address, token_out=pool.coins[j].address,
+        tau=tau, sigma=sigma,
+        a=float(nu[tau] / nu[sigma]) if nu[sigma] else 1.0, B=0.0,
+        reserve_in=pool.balances[i] if i < len(pool.balances) else 0,
+        decimals_in=pool.coins[i].decimals, decimals_out=pool.coins[j].decimals,
+        tvl_usd=pool.tvl_usd, note=pool.name,
+    )
 
 
 def _refit_winner(
