@@ -567,6 +567,7 @@ def _refit_winner(
     verify_candidates(trial, client, amount_in=amount_in)
     if not refitted.ok:
         return
+    refitted.rank = None  # ranked for real against the whole set below
 
     pool_set.candidates.append(refitted)
     verify_candidates(pool_set, client, amount_in=amount_in, gas_price_wei=gas_price_wei)

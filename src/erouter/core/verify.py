@@ -105,22 +105,26 @@ def verify(
     fixed cost per leg is not an element law and must not enter the convex
     core (§11.1).
     """
+    # Quote whatever is new.  Ranking happens unconditionally below: this is
+    # called more than once per route (candidates, then the direct floor, then
+    # the refit), and returning early when nothing needs quoting used to leave
+    # ranks stale from an earlier call -- including a rank of 1 that a solo
+    # verification had handed to the refit candidate.  The winner is chosen by
+    # rank, so a stale rank silently picks the wrong route.
     ready = [c for c in candidates.candidates if c.status == "ready" and c.route]
-    if not ready:
-        return candidates
-
-    outs = client.quote_routes(
-        [c.route.wire_legs for c in ready],
-        [amount_in] * len(ready),
-        [c.route.dst_slot for c in ready],
-    )
-    for candidate, value in zip(ready, outs, strict=True):
-        if value <= 0:
-            candidate.status = "reverted"
-            candidate.note = candidate.note or "quoter returned 0"
-            continue
-        candidate.verified_out = int(value)
-        candidate.status = "ok"
+    if ready:
+        outs = client.quote_routes(
+            [c.route.wire_legs for c in ready],
+            [amount_in] * len(ready),
+            [c.route.dst_slot for c in ready],
+        )
+        for candidate, value in zip(ready, outs, strict=True):
+            if value <= 0:
+                candidate.status = "reverted"
+                candidate.note = candidate.note or "quoter returned 0"
+                continue
+            candidate.verified_out = int(value)
+            candidate.status = "ok"
 
     def score(candidate: Candidate) -> float:
         value = float(candidate.verified_out or 0)
@@ -138,8 +142,14 @@ def verify(
     # and §11.1 is explicit that a fixed per-arc cost belongs in candidate
     # selection rather than in the convex core.  Quantising the score is how a
     # tie becomes visible to the sort at all.
+    for candidate in candidates.candidates:
+        if not candidate.ok:
+            candidate.rank = None  # a stale rank must never survive a re-verify
+
     usable = [c for c in candidates.candidates if c.ok]
-    best_score = max((score(c) for c in usable), default=0.0)
+    if not usable:
+        return candidates
+    best_score = max(score(c) for c in usable)
     tolerance = abs(best_score) * TIE_TOLERANCE
 
     def rank_key(candidate: Candidate) -> tuple:
@@ -148,6 +158,23 @@ def verify(
         return (bucket, legs(candidate) if bucket == 0 else 0, -value)
 
     ranked = sorted(usable, key=rank_key)
+
+    # Hard floor: never rank below a plain one-hop swap.  The tie-break should
+    # already give this -- a direct candidate has one leg, so it wins any tie --
+    # but "the router is never worse than a pool you could find by inspection"
+    # is a promise, not an emergent property, so it is enforced rather than
+    # assumed.
+    floor = max(
+        (c for c in usable if c.kind == "direct"),
+        key=lambda c: c.verified_out or 0,
+        default=None,
+    )
+    if floor is not None and ranked and (ranked[0].verified_out or 0) < (
+        floor.verified_out or 0
+    ):
+        ranked.remove(floor)
+        ranked.insert(0, floor)
+
     for position, candidate in enumerate(ranked, start=1):
         candidate.rank = position
     return candidates

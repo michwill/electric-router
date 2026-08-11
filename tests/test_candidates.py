@@ -216,3 +216,57 @@ def test_verify_is_a_no_op_without_ready_candidates():
     verify(candidates, client, amount_in=1)
     assert client.calls == 0
     assert candidates.best is None
+
+
+# ------------------------------------------------ ranking must not go stale
+
+
+def test_reverifying_reassigns_every_rank():
+    """The bug: `verify` used to return early when nothing needed quoting.
+
+    It is called three times per route -- candidates, then the direct floor,
+    then the refit -- and the winner is chosen *by rank*.  Returning early left
+    ranks from an earlier call, including a rank of 1 that a solo verification
+    had handed the refit candidate, so the router silently reported a route
+    that was not the best one quoted.
+    """
+    a, b = _candidate("a", 1), _candidate("b", 1)
+    candidates = CandidateSet([a, b])
+    verify(candidates, FakeClient([1_000_000, 900_000]), amount_in=10**6)
+    assert (a.rank, b.rank) == (1, 2)
+
+    # a solo verification elsewhere hands `b` a rank of 1 ...
+    b.rank = 1
+    # ... and a re-verify with nothing new to quote must fix it
+    verify(candidates, FakeClient([]), amount_in=10**6)
+    assert (a.rank, b.rank) == (1, 2)
+    assert candidates.best is a
+
+
+def test_ranks_are_unique_and_contiguous():
+    candidates = CandidateSet([_candidate(str(k), 1) for k in range(6)])
+    verify(candidates, FakeClient([100, 700, 300, 0, 500, 200]), amount_in=10**6)
+    ranks = sorted(c.rank for c in candidates.candidates if c.ok)
+    assert ranks == list(range(1, len(ranks) + 1))
+    assert all(c.rank is None for c in candidates.candidates if not c.ok)
+
+
+def test_a_stale_rank_on_a_reverted_candidate_is_cleared():
+    good, bad = _candidate("good", 1), _candidate("bad", 1)
+    bad.rank = 1
+    candidates = CandidateSet([good, bad])
+    verify(candidates, FakeClient([1000, 0]), amount_in=10**6)
+    assert bad.status == "reverted" and bad.rank is None
+    assert candidates.best is good
+
+
+def test_the_winner_is_never_worse_than_a_direct_swap():
+    """The floor is enforced, not merely expected to fall out of the tie-break."""
+    direct = _candidate("direct pool", 1)
+    direct.kind = "direct"
+    fancy = _candidate("clever 8-leg route", 8)
+    candidates = CandidateSet([fancy, direct])
+    # the multi-leg route quotes *worse* than the plain swap
+    verify(candidates, FakeClient([900_000, 1_000_000]), amount_in=10**6)
+    assert candidates.best is direct
+    assert candidates.best.verified_out == 1_000_000
