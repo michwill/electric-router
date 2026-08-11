@@ -13,6 +13,7 @@ and can run in the browser against a deployed quoter.
 
 from __future__ import annotations
 
+import copy
 import math
 import time
 from dataclasses import dataclass, field
@@ -21,7 +22,7 @@ import numpy as np
 
 from .calibrate import Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
-from .graph import ArcArrays, build, scale
+from .graph import MAX_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
 from .prices import check_pair_drops, reference_prices
@@ -184,6 +185,119 @@ def calibrate_arcs(
     return arcs, dropped
 
 
+def prepare(
+    pools: list[PoolSpec],
+    nodes: NodeMap,
+    client: QuoterClient,
+    *,
+    src_token: str,
+    dst_token: str,
+    timings: dict[str, float] | None = None,
+) -> Prepared:
+    """The size-independent half: probe, calibrate, restrict, price.
+
+    Everything here is a function of the block and the pair, not the amount,
+    so an interactive session pays for it once.
+    """
+    scratch = RouteResult(src_token=src_token.lower(), dst_token=dst_token.lower(),
+                          nodes=nodes)
+    clock = _Clock(timings if timings is not None else scratch.timings)
+    src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
+
+    # --- probe, pass 1: the whole universe, coarsely (§2.6) ---------------
+    #
+    # Pricing out every arc is what the §5.5 certificate rests on, and that
+    # needs only `eps`, hence only `a`.  `B` matters only where flow goes.  So
+    # the universe gets two points each and the full ladder is spent later on
+    # the arcs that could carry something -- ~5,300 probes down to ~1,900.
+    with clock("arcs"):
+        refs, meta = build_arcs(pools, nodes)
+        plan = plan_grid(refs, grid=COARSE_GRID)
+    with clock("probe"):
+        ladders = collect(plan, client.probe(plan.probes))
+        retry = plan_refine(
+            ladders, {lad.arc.id for lad in ladders if not lad.ok}, grid=RETRY_GRID
+        )
+        if retry.probes:
+            merge(ladders, collect(retry, client.probe(retry.probes)))
+            scratch.counters["probes_retried"] = len(retry)
+    with clock("calibrate"):
+        arcs, dropped = calibrate_arcs(
+            plan.arcs, _align(plan.arcs, refs, meta), ladders, nodes
+        )
+    scratch.warnings.extend(dropped[:20])
+    scratch.counters["pools"] = len(pools)
+    scratch.counters["arcs_planned"] = len(refs)
+    scratch.counters["probes"] = len(plan)
+    scratch.counters["arcs_calibrated"] = len(arcs)
+    if not arcs:
+        raise RoutingError("no arc survived calibration")
+
+    # Restrict to the part of the graph that can actually reach the
+    # destination.  A disconnected island has no price relative to the
+    # numeraire -- `reference_prices` returns 1.0 there as a placeholder, not
+    # as a valuation -- and feeding those arcs in gives conductances twelve
+    # orders of magnitude off, which wrecks the Laplacian's conditioning for
+    # everything else.  Measured: meme-coin pools with no path to WETH produced
+    # G ~ 3e12 against a physical maximum near 1e4.
+    with clock("component"):
+        arcs = _restrict_to_component(arcs, dst_node, nodes.n_nodes, scratch)
+    if not arcs:
+        raise RoutingError(f"{nodes.symbol(dst_token)} is not reachable from any pool")
+    if not any(a.tau == src_node or a.sigma == src_node for a in arcs):
+        raise RoutingError(
+            f"no path from {nodes.symbol(src_token)} to {nodes.symbol(dst_token)}"
+        )
+
+    # --- reference prices (§4) -------------------------------------------
+    with clock("prices"):
+        a_vec = np.array([a.a for a in arcs])
+        # Both directions are already present as separate arcs, so half weight
+        # keeps a pool's influence from being counted twice.
+        weights = np.array([max(a.tvl_usd, 1.0) / 2 for a in arcs])
+        nu = reference_prices(
+            np.array([a.tau for a in arcs], dtype=np.int64),
+            np.array([a.sigma for a in arcs], dtype=np.int64),
+            a_vec, weights, nodes.n_nodes, dst_node,
+        )
+
+    return Prepared(
+        arcs=arcs, ladders=ladders, nu=nu, src_node=src_node, dst_node=dst_node,
+        pool_names={a.pool.lower(): a.note for a in arcs},
+        counters=dict(scratch.counters), warnings=list(scratch.warnings),
+    )
+
+
+@dataclass(slots=True)
+class Prepared:
+    """Everything about a (universe, src, dst) that does not depend on size.
+
+    The split is not a convenience -- it is a property of the model.  Probe
+    sizes are fractions of each pool's *reserves*, so the whole derivative
+    measurement is amount-independent; and `G_p = nu_tau a_p / B_p`,
+    `eps_p = 1 - a_p nu_sig / nu_tau` contain no `Psi` at all.  `Psi` enters
+    only at the dust floor, the caps and the right-hand side of the solve.
+
+    So quoting a second size reuses the probes (the RPC), the calibration and
+    the reference-price fit, and re-runs only the solve.  `warm` carries the
+    previous active set forward, which matters more than it sounds: within one
+    active set the KKT system is *affine* in `Psi` -- `L u = Psi(e_src - e_dst)
+    + B_A(G_A eps_A)` -- so a nearby size usually needs the same arcs
+    conducting, and the solve converges in a handful of pivots instead of ~80.
+    """
+
+    arcs: list[PoolArc]
+    ladders: list[Ladder]
+    nu: np.ndarray
+    src_node: int
+    dst_node: int
+    pool_names: dict[str, str] = field(default_factory=dict)
+    warm: np.ndarray | None = None
+    counters: dict[str, int] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    quotes: int = 0
+
+
 def route(
     pools: list[PoolSpec],
     nodes: NodeMap,
@@ -198,6 +312,7 @@ def route(
     max_candidates: int = 20,
     gas_price_wei: int = 0,
     refit_rounds: int = 2,
+    prepared: Prepared | None = None,
 ) -> RouteResult:
     result = RouteResult(
         src_token=src_token.lower(),
@@ -216,65 +331,60 @@ def route(
             "node after merging; convert directly rather than routing"
         )
 
-    # --- probe, pass 1: the whole universe, coarsely (§2.6) ---------------
-    #
-    # Pricing out every arc is what the §5.5 certificate rests on, and that
-    # needs only `eps`, hence only `a`.  `B` matters only where flow goes.  So
-    # the universe gets two points each and the full ladder is spent later on
-    # the arcs that could carry something -- ~5,300 probes down to ~1,900.
-    with clock("arcs"):
-        refs, meta = build_arcs(pools, nodes)
-        plan = plan_grid(refs, grid=COARSE_GRID)
-    with clock("probe"):
-        ladders = collect(plan, client.probe(plan.probes))
-        retry = plan_refine(
-            ladders, {lad.arc.id for lad in ladders if not lad.ok}, grid=RETRY_GRID
-        )
-        if retry.probes:
-            merge(ladders, collect(retry, client.probe(retry.probes)))
-            result.counters["probes_retried"] = len(retry)
-    with clock("calibrate"):
-        arcs, dropped = calibrate_arcs(plan.arcs, _align(plan.arcs, refs, meta), ladders, nodes)
-    result.arcs = arcs
-    result.warnings.extend(dropped[:20])
-    result.counters["pools"] = len(pools)
-    result.counters["arcs_planned"] = len(refs)
-    result.counters["probes"] = len(plan)
-    result.counters["arcs_calibrated"] = len(arcs)
-    if not arcs:
-        raise RoutingError("no arc survived calibration")
+    if prepared is None:
+        with clock("prepare"):
+            prepared = prepare(
+                pools, nodes, client, src_token=src_token, dst_token=dst_token,
+                timings=result.timings,
+            )
+    else:
+        result.counters["reused_preparation"] = 1
 
-    # Restrict to the part of the graph that can actually reach the
-    # destination.  A disconnected island has no price relative to the
-    # numeraire -- `reference_prices` returns 1.0 there as a placeholder, not
-    # as a valuation -- and feeding those arcs in gives conductances twelve
-    # orders of magnitude off, which wrecks the Laplacian's conditioning for
-    # everything else.  Measured: meme-coin pools with no path to WETH produced
-    # G ~ 3e12 against a physical maximum near 1e4.
-    with clock("component"):
-        arcs = _restrict_to_component(arcs, dst_node, nodes.n_nodes, result)
-    if not arcs:
-        raise RoutingError(f"{nodes.symbol(dst_token)} is not reachable from any pool")
-    if not any(a.tau == src_node or a.sigma == src_node for a in arcs):
-        raise RoutingError(
-            f"no path from {nodes.symbol(src_token)} to {nodes.symbol(dst_token)}"
-        )
+    # A fresh copy per quote: `_assemble` writes `G`/`eps` back onto the arcs
+    # and the §8 refit re-anchors `B` at one size's realised flows, so handing
+    # the same objects to the next quote would leak this size into it.
+    arcs = [copy.copy(a) for a in prepared.arcs]
+    nu, ladders = prepared.nu, prepared.ladders
     result.arcs = arcs
-    result.pool_names = {a.pool.lower(): a.note for a in arcs}
-
-    # --- reference prices (§4) -------------------------------------------
-    with clock("prices"):
-        a_vec = np.array([a.a for a in arcs])
-        # Both directions are already present as separate arcs, so half weight
-        # keeps a pool's influence from being counted twice.
-        weights = np.array([max(a.tvl_usd, 1.0) / 2 for a in arcs])
-        nu = reference_prices(
-            np.array([a.tau for a in arcs], dtype=np.int64),
-            np.array([a.sigma for a in arcs], dtype=np.int64),
-            a_vec, weights, nodes.n_nodes, dst_node,
-        )
     result.nu = nu
+    result.pool_names = dict(prepared.pool_names)
+    result.counters.update(prepared.counters)
+    result.warnings.extend(prepared.warnings)
 
+    return _quote(
+        result, clock, pools, nodes, client, arcs, ladders, nu,
+        src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+        src_node=src_node, dst_node=dst_node, max_rounds=max_rounds,
+        seed_k=seed_k, verify_on_chain=verify_on_chain,
+        max_candidates=max_candidates, gas_price_wei=gas_price_wei,
+        refit_rounds=refit_rounds, prepared=prepared,
+    )
+
+
+def _quote(
+    result: RouteResult,
+    clock,
+    pools: list[PoolSpec],
+    nodes: NodeMap,
+    client: QuoterClient,
+    arcs: list[PoolArc],
+    ladders: list[Ladder],
+    nu: np.ndarray,
+    *,
+    src_token: str,
+    dst_token: str,
+    amount_in: int,
+    src_node: int,
+    dst_node: int,
+    max_rounds: int,
+    seed_k: int,
+    verify_on_chain: bool,
+    max_candidates: int,
+    gas_price_wei: int,
+    refit_rounds: int,
+    prepared: Prepared | None,
+) -> RouteResult:
+    """The size-dependent half: graph, solve, candidates, verify, refit."""
     amount_human = amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
     Psi = float(nu[src_node] * amount_human)
     if Psi <= 0:
@@ -312,8 +422,24 @@ def route(
         # every one of those pivots factorises a matrix the size of the whole
         # connected component.  Starting from one path only ever adds arcs, so
         # the matrix stays the size of the active set.
-        best_path = k_shortest_paths(g, src_node, dst_node, k=1)
-        warm_start = np.array(best_path[0]) if best_path else None
+        warm_start = None
+        if prepared is not None and prepared.warm is not None:
+            # A previous size's support, carried by arc *id*: the dust floor is
+            # a function of Psi, so a different size can drop different arcs and
+            # index-based reuse would silently point at the wrong pools.
+            #
+            # Worth carrying because within one active set the KKT system is
+            # affine in Psi -- L u = Psi (e_src - e_dst) + B_A (G_A eps_A) -- so
+            # the set of conducting arcs is piecewise constant in size, and a
+            # nearby amount usually lands in the same piece with nothing to do.
+            wanted = set(prepared.warm.tolist()) if hasattr(prepared.warm, "tolist") else set(prepared.warm)
+            reuse = [k for k, arc in enumerate(arcs) if arc.id in wanted]
+            if reuse:
+                warm_start = np.array(reuse, dtype=np.int64)
+                result.counters["warm_start_arcs"] = len(reuse)
+        if warm_start is None:
+            best_path = k_shortest_paths(g, src_node, dst_node, k=1)
+            warm_start = np.array(best_path[0]) if best_path else None
     with clock("solve"):
         report = solve(
             g, src_node, dst_node, Psi_scaled, seed=seed,
@@ -343,6 +469,16 @@ def route(
     active = np.flatnonzero(psi > 0)
     if active.size == 0:
         raise RoutingError("the optimal flow is empty")
+
+    # Carry the *support* to the next size, not the whole final basis.  `A`
+    # ends column generation holding every arc that ever priced in -- 199 of
+    # them here against 34 carrying flow -- and handing that back as a start
+    # set makes the next solve evict the difference one pivot at a time
+    # (measured: 18 pivots per quote against 2).  `candidates.py` warm-starts
+    # from the circulation-free support for exactly this reason.
+    if prepared is not None:
+        prepared.warm = np.array([arcs[k].id for k in active], dtype=object)
+        prepared.quotes += 1
 
     # §12.4: KCL must hold on the flow we are about to execute.  This is the
     # invariant that catches conjured or stranded flow before it reaches a leg.
@@ -794,6 +930,14 @@ def _assemble(
     )
     for k, arc in enumerate(arcs):
         arc.G, arc.eps = float(g.G[k]), float(g.eps[k])
+    if g.ill_conditioned:
+        result.counters["condition"] = int(g.ill_conditioned)
+        result.warnings.append(
+            f"conductance spread is {g.ill_conditioned:.2e}, past §12.4's "
+            f"{MAX_CONDITION:.0e} bound: the dust floor was backed off to keep "
+            "the pair connected at all. The route is still checked on-chain, "
+            "but treat the modelled split as approximate"
+        )
     _warn_pair_drops(arcs, result)
     return arcs, g
 

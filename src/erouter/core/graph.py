@@ -97,6 +97,9 @@ class ArcArrays:
     clamped: np.ndarray
     n_nodes: int
     g_scale: float = 1.0
+    # Set when the dust floor had to be backed off for connectivity and the
+    # resulting spread exceeds MAX_CONDITION.  Non-fatal, but worth surfacing.
+    ill_conditioned: float = 0.0
     # index -> original arc indices (a merged duplicate group has several)
     sources: list[list[int]] = field(default_factory=list)
     dropped: dict[int, str] = field(default_factory=dict)
@@ -198,6 +201,7 @@ def build(
     # nodes we have to route between are still joined.  A badly conditioned
     # solve is recoverable; a graph with no path is not.
     dust = G < floor
+    backed_off = False
     if require is not None:
         while floor > base_floor:
             alive = ~dust
@@ -205,6 +209,7 @@ def build(
             if reachable[require[0]]:
                 break
             floor /= 10.0
+            backed_off = True
             dust = G < max(floor, base_floor)
     keep = ~dust
     for k in np.flatnonzero(dust):
@@ -257,10 +262,20 @@ def build(
         raise ValueError(f"arc {bad} has G={arrays.G[bad]:.3e}; Laplacian would not be PSD")
     condition = arrays.condition()
     if condition >= MAX_CONDITION:
-        raise ValueError(
-            f"max(G)/min(G) = {condition:.3e} >= {MAX_CONDITION:.0e}; "
-            "something is being clamped in the wrong space (§9.7)"
-        )
+        if not backed_off:
+            raise ValueError(
+                f"max(G)/min(G) = {condition:.3e} >= {MAX_CONDITION:.0e}; "
+                "something is being clamped in the wrong space (§9.7)"
+            )
+        # The dust floor was lowered above precisely to keep `src` joined to
+        # `dst`, and that is the whole reason the spread is this wide.  Failing
+        # here would contradict the rule that produced the state: a badly
+        # conditioned solve is recoverable and the §12.4 KCL residual check
+        # adjudicates it, whereas a graph with no path is simply no route.
+        # Measured in a 200-pair survey: one long-tail pair reached 1.96e13
+        # and died on this assertion with a `ValueError`, which callers
+        # handling `RoutingError` do not catch.
+        arrays.ill_conditioned = condition
     return arrays
 
 

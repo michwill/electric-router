@@ -313,13 +313,9 @@ def _resolve_token(nodes, symbol_or_address: str, pools) -> str:
 
 
 def cmd_route(args: argparse.Namespace) -> int:
-    import json
     from decimal import Decimal
 
     from ..core.pipeline import RoutingError, route
-    from ..core.render_text import render
-    from ..core.rendermodel import build_diagram
-    from ..core.schema import to_json
     from .boa_host import override_client
     from .probe_cache import CachedQuoterClient
     from .rpc import JsonRpcTransport
@@ -356,7 +352,10 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} token not routable in this universe")
         return 2
 
-    amount_in = int(Decimal(args.amount.replace("_", "")) * 10 ** nodes.decimals(src))
+    if args.amount is None and not args.amount_wei:
+        return _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst)
+
+    amount_in = int(Decimal((args.amount or "1").replace("_", "")) * 10 ** nodes.decimals(src))
     if args.amount_wei:
         amount_in = int(args.amount_wei)
 
@@ -373,12 +372,93 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} no route: {exc}")
         return 2
 
+    return _present(result, args, chain, rpc, nodes, wrappers, load,
+                    src, dst, amount_in, started)
+
+
+def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst) -> int:
+    """Quote sizes as they are typed, reusing everything that does not depend on one.
+
+    The expensive half of a route -- probing every arc and fitting reference
+    prices -- is a function of the block and the pair, never of the amount, so
+    it is paid once here.  What is left per keystroke is the solve, which also
+    starts from the previous size's active set: the KKT system is affine in
+    `Psi` within one active set, so a nearby amount usually keeps the same arcs
+    conducting and converges almost immediately.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from ..core.pipeline import RoutingError, prepare, route
+
+    symbol_src, symbol_dst = nodes.symbol(src), nodes.symbol(dst)
+    print(f"  {chain.name} · block {rpc.block:,} · {symbol_src} -> {symbol_dst}")
+    print("  preparing (probing arcs, fitting reference prices)...", flush=True)
+    started = time.monotonic()
+    try:
+        prepared = prepare(load.pools, nodes, client, src_token=src, dst_token=dst)
+    except RoutingError as exc:
+        print(f"{BAD} no route: {exc}")
+        return 2
+    print(
+        f"  ready in {(time.monotonic() - started) * 1000:.0f} ms "
+        f"({len(prepared.arcs)} arcs calibrated).  "
+        f"Type an amount in {symbol_src}; blank line or 'q' to quit.\n"
+    )
+
+    while True:
+        try:
+            raw = input(f"  {symbol_src} amount> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not raw or raw.lower() in {"q", "quit", "exit"}:
+            return 0
+        text = raw.replace("_", "").replace(",", "")
+        multiplier = 1
+        if text and text[-1].lower() in "kmb":
+            multiplier = {"k": 10**3, "m": 10**6, "b": 10**9}[text[-1].lower()]
+            text = text[:-1]
+        try:
+            amount_in = int(Decimal(text) * multiplier * 10 ** nodes.decimals(src))
+        except (InvalidOperation, ValueError):
+            print(f"  {BAD} not a number: {raw!r}")
+            continue
+        if amount_in <= 0:
+            print(f"  {BAD} amount must be positive")
+            continue
+
+        started = time.monotonic()
+        try:
+            result = route(
+                load.pools, nodes, client,
+                src_token=src, dst_token=dst, amount_in=amount_in,
+                verify_on_chain=not args.no_verify,
+                max_candidates=args.candidates,
+                gas_price_wei=int(float(args.gas_price) * 1e9),
+                refit_rounds=args.refit,
+                prepared=prepared,
+            )
+        except RoutingError as exc:
+            print(f"  {BAD} no route: {exc}")
+            continue
+        _present(result, args, chain, rpc, nodes, wrappers, load,
+                 src, dst, amount_in, started)
+
+
+def _present(result, args, chain, rpc, nodes, wrappers, load,
+             src, dst, amount_in, started) -> int:
+    """Draw one route and, if asked, write its JSON."""
+    import json
+
+    from ..core.render_text import render
+    from ..core.rendermodel import build_diagram
+    from ..core.schema import to_json
+    from ..core.verify import summary as candidate_summary
+
     elapsed = (time.monotonic() - started) * 1000
     result.warnings.extend(load.warnings)
     for entry in wrappers.rejected_vaults:
         result.warnings.append(f"vault {entry.symbol} not merged: {entry.reason}")
-
-    from ..core.verify import summary as candidate_summary
 
     delivered = result.verified_out or result.route.modelled_out
     out_human = delivered / 10 ** nodes.decimals(dst)
@@ -465,7 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd = sub.add_parser("route", help="compute and draw an optimal route")
     route_cmd.add_argument("--from", dest="src", required=True, help="symbol or address")
     route_cmd.add_argument("--to", dest="dst", required=True, help="symbol or address")
-    route_cmd.add_argument("--amount", default="1", help="in human units, e.g. 1_000_000")
+    route_cmd.add_argument("--amount", default=None,
+                       help="in human units, e.g. 1_000_000; omit for an interactive session")
     route_cmd.add_argument("--amount-wei", help="exact integer input, overrides --amount")
     route_cmd.add_argument("--chain", default="ethereum")
     route_cmd.add_argument("--block", default="latest")
