@@ -34,6 +34,11 @@ from .types import ArcKind
 class ConversionKind(StrEnum):
     NATIVE_WRAP = "NATIVE_WRAP"  # 1:1, ERC20 <-> native
     ERC4626 = "ERC4626"  # shares <-> assets at the vault's rate
+    # Lido's wstETH: same shape as a native wrapper but rate-bearing, and it
+    # predates ERC4626 so it exposes its own getters rather than
+    # convertToAssets.  curve_solver's generic equivalent is AmountCall*; if a
+    # second token of this shape appears, that is the generalisation to make.
+    WSTETH = "WSTETH"  # wstETH <-> stETH at getStETHByWstETH
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +71,8 @@ class Conversion:
             # The canonical side of a native pair is the wrapped ERC20, so
             # going from native to canonical is a wrap.
             return ArcKind.WRAP_NATIVE
+        if self.kind is ConversionKind.WSTETH:
+            return ArcKind.WSTETH_UNWRAP  # wstETH -> stETH
         return ArcKind.ERC4626_REDEEM  # shares -> assets
 
     @property
@@ -73,6 +80,8 @@ class Conversion:
         """canonical -> token."""
         if self.kind is ConversionKind.NATIVE_WRAP:
             return ArcKind.UNWRAP_NATIVE
+        if self.kind is ConversionKind.WSTETH:
+            return ArcKind.WSTETH_WRAP  # stETH -> wstETH
         return ArcKind.ERC4626_DEPOSIT  # assets -> shares
 
 

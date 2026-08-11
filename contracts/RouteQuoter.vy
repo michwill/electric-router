@@ -53,6 +53,8 @@ ERC4626_DEPOSIT: public(constant(uint8)) = 7  # previewDeposit(uint256)
 ERC4626_REDEEM: public(constant(uint8)) = 8  # previewRedeem(uint256)
 WRAP_NATIVE: public(constant(uint8)) = 9  # 1:1, no call
 UNWRAP_NATIVE: public(constant(uint8)) = 10  # 1:1, no call
+WSTETH_UNWRAP: public(constant(uint8)) = 11  # getStETHByWstETH(uint256)
+WSTETH_WRAP: public(constant(uint8)) = 12  # getWstETHByStETH(uint256)
 
 
 struct Res:
@@ -155,6 +157,18 @@ def _quote(target: address, kind: uint8, i: uint8, j: uint8, n: uint8, dx: uint2
                 method_id("calc_withdraw_one_coin(uint256,uint256)"),
                 abi_encode(dx, convert(j, uint256)),
             ),
+        )
+
+    if kind == WSTETH_UNWRAP:
+        # Lido's wstETH is lossless and unbounded, so it is a node merge in the
+        # model; this is only how the merge is priced on the way out.
+        return self._static(
+            target, concat(method_id("getStETHByWstETH(uint256)"), abi_encode(dx))
+        )
+
+    if kind == WSTETH_WRAP:
+        return self._static(
+            target, concat(method_id("getWstETHByStETH(uint256)"), abi_encode(dx))
         )
 
     if kind == ERC4626_DEPOSIT:

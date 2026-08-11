@@ -38,13 +38,34 @@ def _slots(pool: PoolSpec, nodes: NodeMap, node: int) -> list[int]:
     ]
 
 
+def _as(nodes: NodeMap, amount: int, held: str, wanted: str) -> int:
+    """`amount` of `held`, expressed in `wanted`, through the node's rate.
+
+    Siblings on a merged node are *not* interchangeable one-for-one once the
+    node carries a rate: 50 stETH is 40.28 wstETH.  Feeding a pool's wstETH
+    slot the stETH amount overstates the input by 24%, and the baseline then
+    "beats" NAV -- which is how this was caught.
+    """
+    if held.lower() == wanted.lower():
+        return amount
+    return nodes.from_canonical_wei(wanted, nodes.to_canonical_wei(held, amount))
+
+
 def naive_direct(
     pools: list[PoolSpec], nodes: NodeMap, client, src: str, dst: str, amount: int
 ) -> Baseline:
-    """Best single-pool swap, over every pool holding both tokens."""
+    """Best single-pool swap, over every pool holding both tokens.
+
+    The pool pays its *own* coin, which may be a sibling of the destination on
+    a merged node rather than the destination itself -- stETH when wstETH was
+    asked for.  Those are not interchangeable one-for-one: wstETH is worth
+    1.2414 stETH, so quoting the raw output overstates by 24%.  Convert through
+    the node's exact rate, exactly as `naive_two_step` does.
+    """
     src_node, dst_node = nodes.node(src), nodes.node(dst)
     probes: list[Probe] = []
     labels: list[str] = []
+    outputs: list[str] = []
     for pool in pools:
         if pool.swap_kind is None:
             continue
@@ -52,16 +73,23 @@ def naive_direct(
             for j in _slots(pool, nodes, dst_node):
                 if i == j:
                     continue
+                start = _as(nodes, amount, src, pool.coins[i].address)
+                if start <= 0:
+                    continue
                 probes.append(
-                    Probe(pool.address, pool.swap_kind, i, j, pool.n_coins, amount)
+                    Probe(pool.address, pool.swap_kind, i, j, pool.n_coins, start)
                 )
                 labels.append(f"{pool.name} [{i}>{j}]")
+                outputs.append(pool.coins[j].address)
     if not probes:
         return Baseline()
     best = Baseline()
-    for quote, label in zip(client.probe(probes), labels, strict=True):
-        if quote.ok and quote.value > best.amount_out:
-            best = Baseline(quote.value, label)
+    for quote, label, token in zip(client.probe(probes), labels, outputs, strict=True):
+        if not quote.ok:
+            continue
+        value = nodes.from_canonical_wei(dst, nodes.to_canonical_wei(token, quote.value))
+        if value > best.amount_out:
+            best = Baseline(value, label)
     return best
 
 
@@ -91,6 +119,9 @@ def naive_two_step(
         if pool.swap_kind is None:
             continue
         for i in _slots(pool, nodes, src_node):
+            start = _as(nodes, amount, src, pool.coins[i].address)
+            if start <= 0:
+                continue
             for j, coin in enumerate(pool.coins):
                 if j == i or not nodes.has(coin.address):
                     continue
@@ -98,7 +129,7 @@ def naive_two_step(
                 if middle in (src_node, dst_node):
                     continue
                 probes.append(
-                    Probe(pool.address, pool.swap_kind, i, j, pool.n_coins, amount)
+                    Probe(pool.address, pool.swap_kind, i, j, pool.n_coins, start)
                 )
                 meta.append((middle, coin.address.lower(), f"{pool.name} [{i}>{j}]"))
     if not probes:

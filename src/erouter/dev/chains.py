@@ -31,10 +31,16 @@ class Chain:
     # maxDeposit == 0.  Merging any of those mints value from nothing.
     # Every entry must pass an executed deposit/redeem on a fork (see tests).
     erc4626_allowlist: tuple[str, ...] = ()
+    # (token, canonical) pairs handled by ConversionKind.WSTETH.  Kept off the
+    # ERC4626 list because wstETH predates that standard and exposes its own
+    # getters, not convertToAssets.
+    wsteth_pairs: tuple[tuple[str, str], ...] = ()
     extra: dict[str, str] = field(default_factory=dict)
 
 
 SCRVUSD = "0x0655977FEb2f289A4aB78af67BAB0d17aAb84367"
+WSTETH = "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
+STETH = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
 CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 
 CHAINS: dict[str, Chain] = {
@@ -46,6 +52,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="ETH",
         wrapped="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         erc4626_allowlist=(SCRVUSD,),
+        wsteth_pairs=((WSTETH, STETH),),
     ),
     "arbitrum": Chain(
         name="arbitrum",

@@ -91,12 +91,85 @@ def build_node_map(
         nodes.symbol_of.setdefault(sentinel, chain.native_symbol)
         report.native_merged.append((chain.native_symbol, f"W{chain.native_symbol}"))
 
+    # --- wstETH: rate-bearing, but otherwise a native wrapper ------------
+    pairs = [
+        (t.lower(), c.lower())
+        for t, c in chain.wsteth_pairs
+        if nodes.has(t.lower()) and nodes.has(c.lower())
+    ]
+    if pairs:
+        _merge_wsteth(nodes, report, pairs, client)
+
     # --- ERC4626: allowlist, then verify ---------------------------------
     candidates = [v.lower() for v in chain.erc4626_allowlist if nodes.has(v.lower())]
     if candidates:
         _merge_vaults(nodes, report, candidates, client, value_wei)
 
     return nodes, report
+
+
+def _merge_wsteth(
+    nodes: NodeMap,
+    report: WrapperReport,
+    pairs: list[tuple[str, str]],
+    client: QuoterClient,
+) -> None:
+    """Merge wstETH into stETH -- lossless, unbounded, and exactly linear.
+
+    Measured on mainnet at block 25,734,769: the rate is 1.241440951 stETH per
+    wstETH, `getStETHByWstETH` is linear to 1.3e-19 across eight decades, and a
+    1 stETH round trip loses 1 wei to integer rounding.  There is no deposit
+    cap, no withdrawal queue and no cooldown -- the three things that disqualify
+    pufETH and sUSDe under R5 -- so it is a short circuit in value coordinates.
+
+    Not merging it is expensive rather than merely incomplete: without the
+    merge, wstETH cannot reach the deep ETH/stETH pool, and 50 wstETH -> WETH
+    quoted 10.7% below NAV against curve_solver, which does model the wrap.
+    """
+    calls: list[Call] = []
+    for token, _canonical in pairs:
+        unit = 10 ** nodes.decimals(token)
+        calls.extend(
+            [
+                Call(token, encode_call("getStETHByWstETH(uint256)", unit)),
+                Call(token, encode_call("getStETHByWstETH(uint256)", unit * 1_000_000)),
+            ]
+        )
+
+    answers = client.raw(calls)
+    for k, (token, canonical) in enumerate(pairs):
+        one_ans, million_ans = answers[2 * k], answers[2 * k + 1]
+        entry = VaultReport(token=token, symbol=nodes.symbol(token), asset=canonical)
+        report.vaults.append(entry)
+
+        if one_ans.status is not Status.VALUE or one_ans.uint() == 0:
+            entry.reason = "getStETHByWstETH returned nothing"
+            continue
+        unit = 10 ** nodes.decimals(token)
+        one = one_ans.uint()
+        entry.rate_num, entry.rate_den = one, unit
+        entry.decimals = nodes.decimals(token)
+
+        million = million_ans.uint() if million_ans.status is Status.VALUE else 0
+        if million == 0:
+            entry.reason = "rate is not linear (no answer at scale)"
+            continue
+        entry.linearity_error = abs(million - one * 1_000_000) / max(million, 1)
+        if entry.linearity_error > LINEARITY_TOL:
+            entry.reason = f"non-linear ({entry.linearity_error:.2e})"
+            continue
+
+        nodes.merge(
+            Conversion(
+                kind=ConversionKind.WSTETH,
+                token=token,
+                canonical=canonical,
+                rate_num=one,
+                rate_den=unit,
+                target=token,
+            )
+        )
+        entry.merged = True
 
 
 def _merge_vaults(

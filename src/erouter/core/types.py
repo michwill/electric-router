@@ -24,6 +24,8 @@ class ArcKind(IntEnum):
     ERC4626_REDEEM = 8  # previewRedeem(uint256)
     WRAP_NATIVE = 9  # 1:1, no call
     UNWRAP_NATIVE = 10  # 1:1, no call
+    WSTETH_UNWRAP = 11  # getStETHByWstETH(uint256)
+    WSTETH_WRAP = 12  # getWstETHByStETH(uint256)
 
     @property
     def is_swap(self) -> bool:

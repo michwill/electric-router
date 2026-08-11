@@ -106,7 +106,21 @@ def test_the_route_beats_the_best_single_pool(universe, quoter_client, usdc_weth
         pytest.skip("no pool holds both USDC and WETH")
     best = max((q.value for q in quoter_client.probe(probes) if q.ok), default=0)
     assert best > 0
-    assert usdc_weth.route.modelled_out >= best * 0.999
+
+    # Assert on the figure we ship.  `modelled_out` is a *lower bound* by
+    # construction (§3.6 -- the quadratic majorant over-states loss), so
+    # comparing it to a real quote tests the model's tightness, not the route:
+    # merging wstETH into stETH moved the reference-price fit enough to drop
+    # the modelled figure 10% while the verified output rose slightly.
+    verified = usdc_weth.verified_out or 0
+    assert verified >= best * 0.999, (
+        f"split route {verified} < best single pool {best} "
+        f"({(verified / best - 1) * 1e4:+.2f} bp)"
+    )
+    # ...and the model must stay on the conservative side of reality.
+    assert usdc_weth.route.modelled_out <= verified * 1.001, (
+        "modelled output exceeds the verified quote; the majorant is inverted"
+    )
 
 
 def test_native_eth_destination_emits_an_unwrap(universe, quoter_client):
