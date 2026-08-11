@@ -312,3 +312,52 @@ def test_realize_rejects_an_empty_flow():
     with pytest.raises(RealizationError):
         realize([], np.array([]), np.ones(2), base_nodes(),
                 src_token=USDC, dst_token=WETH, amount_in=1)
+
+
+def test_a_route_ending_in_native_eth_wraps_at_the_destination():
+    """The destination node had no outgoing arcs, so the hub fold was skipped.
+
+    A pool that pays out the ETH sentinel then deposited into the ETH slot
+    while the caller asked for WETH; the quoter read the WETH slot, found
+    nothing, and the whole candidate came back "reverted".  On mainnet that
+    silently removed both large ETH/stETH pools from stETH->WETH and left a
+    shallow factory pool paying half.
+    """
+    nodes = merged_nodes()
+    arcs = [arc(POOL_A, USDC, ETH, nodes, a=1 / 1890.0)]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 1890.0
+
+    route = realize(
+        arcs, np.array([1000.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert [rl.kind for rl in route.legs] == [ArcKind.SWAP_STABLE, ArcKind.WRAP_NATIVE]
+    wrap = route.legs[-1]
+    assert wrap.token_in.lower() == ETH and wrap.token_out.lower() == WETH
+    assert wrap.amount_out == wrap.amount_in  # 1:1
+    assert route.dst_slot == route.slots[WETH]
+    assert route.modelled_out > 0  # the quoter would have read 0 before
+
+
+def test_an_intermediate_dead_end_still_emits_no_conversion():
+    """Only the destination gets the fold; a node with no way out is not one."""
+    nodes = merged_nodes()
+    arcs = [
+        arc(POOL_A, USDC, ETH, nodes, a=1 / 1890.0),
+        arc(POOL_B, WETH, CRVUSD, nodes, a=1890.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 1890.0
+    nu[nodes.node(CRVUSD)] = 1.0
+    route = realize(
+        arcs, np.array([1000.0, 1000.0]), nu, nodes,
+        src_token=USDC, dst_token=CRVUSD, amount_in=1000 * 10**6,
+    )
+    # ETH -> WETH is needed because the second arc consumes WETH, not because
+    # the node is the destination
+    kinds = [rl.kind for rl in route.legs]
+    assert ArcKind.WRAP_NATIVE in kinds
+    assert kinds[-1] is ArcKind.SWAP_STABLE  # the route ends on a real swap

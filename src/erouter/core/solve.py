@@ -36,6 +36,9 @@ from .linalg import DEFAULT_SOLVER, SingularSystem
 # §9.2 absolute, never relative: rho legitimately passes through zero, and this
 # is far below any real fee (1e-9 is 1e-5 bp).
 TOL = 1e-9
+# Flow below this fraction of the trade cannot matter, but chasing it can keep
+# the active set oscillating forever.  Only used as a fallback (see `solve`).
+DEGENERACY_SCREEN = 1e-4
 
 
 def _steepest_pick(mask: np.ndarray, score: np.ndarray) -> int:
@@ -316,6 +319,7 @@ def solve(
     """
     m = g.m
     banned = np.zeros(m, bool) if forbidden is None else np.asarray(forbidden, bool)
+    degenerate = False
     in_S = np.ones(m, bool) if seed is None else np.asarray(seed, bool).copy()
     in_S &= ~banned
 
@@ -323,7 +327,8 @@ def solve(
     rounds = 0
     widened = False
     warm = A0
-    for rounds in range(1, max_rounds + 2):
+    screen = min_flow
+    for rounds in range(1, max_rounds + 4):
         report_solution = active_set_solve(
             g, src, dst, Psi,
             A0=warm,
@@ -331,8 +336,25 @@ def solve(
             forced_upper=forced_upper,
             tol=tol,
             solver=solver,
-            min_flow=min_flow,
+            min_flow=screen,
+            partial_ok=degenerate,
         )
+        if (
+            not report_solution.feasible
+            and report_solution.reason.startswith("no convergence")
+            and screen <= 0
+        ):
+            # Dozens of arcs sitting within a hair of the diode threshold can
+            # oscillate in and out forever, each carrying dust.  Retry with a
+            # flow screen and, this time, accept the incumbent: every iterate
+            # satisfies conservation exactly -- only optimality is incomplete --
+            # so a partial solve is a valid flow for candidates and the quoter
+            # to work from.  Failing the whole route instead would be strictly
+            # worse.  Measured on WETH->rETH and stETH->rETH, which otherwise
+            # never converge.  The certificate goes with it.
+            screen = DEGENERACY_SCREEN * Psi
+            degenerate = True
+            continue
         # Carry the support into the next round.  Column generation only *adds*
         # arcs, so re-deriving the active set from scratch each round repeats
         # work that is already done -- and each repeat starts from a large
@@ -358,12 +380,19 @@ def solve(
     else:
         return SolveReport(report_solution, False, rounds, in_S, reason="CG_TRUNCATED")
 
+    if report_solution is not None and not report_solution.feasible:
+        return SolveReport(report_solution, False, rounds, in_S,
+                           reason=report_solution.reason)
+
     assert report_solution is not None
     # The certificate needs both: no arc outside S wants flow, and no
     # non-concave arc carries any -- §5.5 proves nothing about a flagged arc.
     flagged_active = bool(np.any(g.flagged & (report_solution.psi > 0)))
     certificate = not flagged_active and not banned.any()
     reason = ""
+    if degenerate:
+        certificate = False
+        reason = "DEGENERATE"
     if flagged_active:
         reason = "CHORD_ACTIVE"
     elif banned.any():

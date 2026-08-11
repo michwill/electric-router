@@ -239,6 +239,7 @@ def realize(
         by_source.setdefault(arc.tau, []).append(k)
 
     # --- emit -----------------------------------------------------------
+    destination = nodes.node(dst_token)
     for node in node_order:
         canonical = nodes.canonical_of[node]
         outgoing = by_source.get(node, [])
@@ -250,7 +251,15 @@ def realize(
         if node == nodes.node(src_token):
             incoming_tokens.add(src_token.lower())
         for token in sorted(incoming_tokens):
-            if token == canonical or not outgoing:
+            if token == canonical:
+                continue
+            # The destination has no outgoing arcs, so skipping it here left a
+            # route that ends in native ETH depositing into the ETH slot while
+            # the caller asked for WETH -- the quoter then reads the WETH slot,
+            # finds nothing, and the whole candidate reads as "reverted".  That
+            # silently removed both big ETH/stETH pools from stETH->WETH and
+            # left a shallow factory pool paying half.
+            if not outgoing and node != destination:
                 continue
             conversion = nodes.conversion.get(token)
             if conversion is None:
