@@ -319,6 +319,15 @@ def route(
             f"{cycles} circulation(s) removed from the optimal flow: the model "
             "found a negative-eps loop it cannot execute as a one-way trade (§2.6)"
         )
+    # Decompose the loss *here*, against the graph that produced this flow.
+    # Candidate generation and the refit both mutate `g` -- the refit re-anchors
+    # B at realised sizes, which at theta ~ 20% can move G by orders of
+    # magnitude -- so pairing this psi with a later G reports nonsense
+    # (measured: a "resistor" term of 683,668 bp on a 2.7 bp route).
+    fee, impact = report.solution.loss_split(g)
+    result.fee_bp = fee * g.g_scale / Psi * 10_000
+    result.impact_bp = impact * g.g_scale / Psi * 10_000
+
     active = np.flatnonzero(psi > 0)
     if active.size == 0:
         raise RoutingError("the optimal flow is empty")
@@ -429,9 +438,6 @@ def route(
                         gas_price_wei=gas_price_wei,
                     )
 
-    fee, impact = report.solution.loss_split(g)
-    result.fee_bp = fee * g.g_scale / Psi * 10_000
-    result.impact_bp = impact * g.g_scale / Psi * 10_000
     result.price_out_per_in = float(nu[src_node] / nu[dst_node]) if nu[dst_node] else 0.0
     return result
 

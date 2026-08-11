@@ -36,6 +36,7 @@ class BusView:
     potential_bp: float | None = None
     is_source: bool = False
     is_dest: bool = False
+    is_verified: bool = False  # this figure came from the chain, not the model
     merged_with: list[str] = field(default_factory=list)
 
 
@@ -108,6 +109,7 @@ def build_diagram(
     ledger: dict[str, float] | None = None,
     diagnostics: dict[str, object] | None = None,
     warnings: list[str] | None = None,
+    verified_out: int | None = None,
 ) -> Diagram:
     pool_names = pool_names or {}
     diagram = Diagram(
@@ -130,14 +132,22 @@ def build_diagram(
         node = route.node_of_slot.get(slot, 0)
         members = [nodes.symbol(t) for t in nodes.tokens_of[node] if t != token]
         potential = route.potentials.get(node)
+        # The destination shows what the chain actually quoted, not what the
+        # model accumulated -- otherwise the diagram's own total disagrees with
+        # the headline figure, which is the number that matters.
+        amount_wei = balances.get(slot, 0)
+        verified_here = slot == route.dst_slot and verified_out is not None
+        if verified_here:
+            amount_wei = verified_out
         diagram.buses.append(
             BusView(
                 slot=slot,
                 node=node,
                 token=token,
                 symbol=nodes.symbol(token),
-                amount=format_units(balances.get(slot, 0), nodes.decimals(token)),
-                amount_wei=balances.get(slot, 0),
+                amount=format_units(amount_wei, nodes.decimals(token)),
+                amount_wei=amount_wei,
+                is_verified=bool(verified_here),
                 potential_bp=None if potential is None else potential * 10_000,
                 is_source=slot == 0,
                 is_dest=slot == route.dst_slot,

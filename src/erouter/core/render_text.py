@@ -139,6 +139,8 @@ def _bus_line(bus, glyph, width, paint) -> str:
     if bus.merged_with:
         label = f"[ {bus.symbol} = {'/'.join(bus.merged_with)} ]"
     tail = f" {bus.amount}"
+    if bus.is_verified:
+        tail += " quoted"
     if bus.potential_bp is not None:
         tail += (
             "   u = ground"
@@ -253,6 +255,8 @@ def _legend(glyph, paint) -> str:
     return paint(
         f"  legend  {glyph['diode']} diode (fee eps)   "
         f"{glyph['resistor']} resistor (impact psi/G)   "
-        f"== zero-resistance node merge",
+        f"== node merge\n"
+        f"          per-leg amounts are modelled; totals marked 'quoted' come "
+        f"from the chain",
         DIM,
     )

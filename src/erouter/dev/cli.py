@@ -409,6 +409,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             "solve ms": f"{result.timings.get('solve', 0):.1f}",
         },
         warnings=result.warnings[:8],
+        verified_out=result.verified_out,
     )
     if result.candidates:
         diagram.candidates = candidate_summary(

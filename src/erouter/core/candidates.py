@@ -194,51 +194,23 @@ def generate(
     if warm.size == 0:
         warm = base_active
 
-    # 2. pin sweep on every active flagged arc (§6.3) -- highest priority after
-    #    C0, because no drop-an-arc candidate can find a chord interior.
-    flagged_active = [int(k) for k in base_active if g.flagged[k]]
-    flagged_active.sort(key=lambda k: -base.psi[k])
-    for arc_index in flagged_active[:3]:
-        star = float(base.psi[arc_index])
-        for step in PIN_LADDER:
-            pin = min(star * step, float(g.cap[arc_index]))
-            if step > 0 and pin <= 0:
-                continue
-            resolve(
-                np.zeros(g.m, bool),
-                f"pin {arcs[arc_index].note[:18]} x{step:g}",
-                "pin",
-                pinned={arc_index: pin},
-            )
-            if len(out) >= max_candidates:
-                break
+    # Per-family budgets.  Ordering alone is not enough: with many flagged
+    # arcs the pin sweep alone is 3 x 7 = 21 candidates, which used to consume
+    # the whole budget before sparsification ran.  That mattered because every
+    # un-sparsified candidate inherits the relaxation's sprawl and blows the
+    # quoter's leg limit -- measured on a 5M USDC->USDT swap, *all twenty*
+    # candidates came back too_long and the router fell back to a single pool,
+    # missing a 0.08 bp two-pool split.
+    sparse_budget = max(6, int(max_candidates * 0.45))
+    pin_budget = max(4, int(max_candidates * 0.30))
 
-    # 3. one arc per pool (decision 3) -- keep the largest, forbid the rest
-    conflicts = conflicting_pools(arcs, base.psi)
-    if conflicts:
-        forbidden = np.zeros(g.m, bool)
-        for indices in conflicts.values():
-            keep = max(indices, key=lambda k: base.psi[k])
-            for k in indices:
-                if k != keep:
-                    forbidden[k] = True
-        resolve(forbidden, f"repair {len(conflicts)} pool conflict(s)", "repair")
-        # and the alternative choice for the single worst conflict
-        worst = max(conflicts.items(), key=lambda kv: len(kv[1]))
-        for keep in sorted(worst[1], key=lambda k: -base.psi[k])[1:2]:
-            alt = np.zeros(g.m, bool)
-            for k in worst[1]:
-                if k != keep:
-                    alt[k] = True
-            resolve(alt, f"repair alt {arcs[keep].note[:18]}", "repair")
-
-    # 4. sparsification, over the k cheapest *paths* rather than the k largest
+    # 2. sparsification, over the k cheapest *paths* rather than the k largest
     #    arcs.  Restricting to arbitrary arcs usually leaves src and dst
     #    disconnected and the re-solve is infeasible; a union of shortest paths
     #    is connected by construction.  `k = 1` is §6.2's `C_*`, the
-    #    no-splitting fallback, and the whole ladder doubles as §11.1's
-    #    gas-sparsification move -- which is what prunes a relaxation that
-    #    spread across dozens of arcs chasing fitted dislocations.
+    #    no-splitting fallback, and the ladder doubles as §11.1's gas move --
+    #    it is also the only family that reliably fits the quoter.
+    made = 0
     paths = k_shortest_paths(g, src, dst, k=max(top_k) if top_k else 6)
     union: set[int] = set()
     for k, path in enumerate(paths, start=1):
@@ -249,11 +221,11 @@ def generate(
         for index in union:
             forbidden[index] = False
         label = "C* best single path" if k == 1 else f"top {k} paths"
-        resolve(forbidden, label, "sparse")
-        if len(out) >= max_candidates:
+        made += bool(resolve(forbidden, label, "sparse"))
+        if made >= sparse_budget:
             break
 
-    # 4b. keep only the pools the relaxation liked best, but let the solver use
+    # 2b. keep only the pools the relaxation liked best, but let the solver use
     #     any arc of those pools so it can still find a connected route.
     order = sorted(base_active, key=lambda k: -base.psi[k])
     ranked_pools: list[str] = []
@@ -261,11 +233,53 @@ def generate(
         if pools[k] not in ranked_pools:
             ranked_pools.append(pools[k])
     for k in top_k:
-        if k >= len(ranked_pools) or len(out) >= max_candidates:
+        if k >= len(ranked_pools) or made >= sparse_budget:
             continue
         keep = set(ranked_pools[:k])
         forbidden = np.array([pool not in keep for pool in pools], dtype=bool)
-        resolve(forbidden, f"top {k} pool{'s' if k > 1 else ''}", "sparse")
+        made += bool(resolve(forbidden, f"top {k} pool{'s' if k > 1 else ''}", "sparse"))
+
+    # 3. pin sweep on every active flagged arc (§6.3).  Still ahead of the drop
+    #    candidates, because no drop candidate can find a chord interior.
+    made = 0
+    flagged_active = [int(k) for k in base_active if g.flagged[k]]
+    flagged_active.sort(key=lambda k: -base.psi[k])
+    for arc_index in flagged_active[:3]:
+        star = float(base.psi[arc_index])
+        for step in PIN_LADDER:
+            pin = min(star * step, float(g.cap[arc_index]))
+            if step > 0 and pin <= 0:
+                continue
+            made += bool(
+                resolve(
+                    np.zeros(g.m, bool),
+                    f"pin {arcs[arc_index].note[:18]} x{step:g}",
+                    "pin",
+                    pinned={arc_index: pin},
+                )
+            )
+            if made >= pin_budget or len(out) >= max_candidates:
+                break
+        if made >= pin_budget or len(out) >= max_candidates:
+            break
+
+    # 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
+    conflicts = conflicting_pools(arcs, base.psi)
+    if conflicts:
+        forbidden = np.zeros(g.m, bool)
+        for indices in conflicts.values():
+            keep_index = max(indices, key=lambda k: base.psi[k])
+            for k in indices:
+                if k != keep_index:
+                    forbidden[k] = True
+        resolve(forbidden, f"repair {len(conflicts)} pool conflict(s)", "repair")
+        worst = max(conflicts.items(), key=lambda kv: len(kv[1]))
+        for keep_index in sorted(worst[1], key=lambda k: -base.psi[k])[1:2]:
+            alt = np.zeros(g.m, bool)
+            for k in worst[1]:
+                if k != keep_index:
+                    alt[k] = True
+            resolve(alt, f"repair alt {arcs[keep_index].note[:18]}", "repair")
 
     # 5. drop each active arc in turn (§6.2)
     for k in order[: max(0, max_candidates - len(out))]:
