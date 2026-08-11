@@ -301,7 +301,7 @@ def test_drift_flags_a_curve_whose_second_derivative_moves():
 @pytest.mark.parametrize(
     ("deltas", "quotes", "match"),
     [
-        ([1.0, 2.0], [1.0, 2.0], "at least 3"),
+        ([1.0], [1.0], "at least 2"),
         ([1.0, 1.0, 2.0], [1.0, 2.0, 3.0], "strictly increasing"),
         ([1.0, 2.0, 3.0], [1.0, 0.0, 3.0], "positive"),
         ([1.0, 2.0, 3.0], [1.0, 2.0], "same length"),

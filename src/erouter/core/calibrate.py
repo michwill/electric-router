@@ -117,8 +117,8 @@ def calibrate(
     y = np.asarray(quotes, dtype=float)
     if x.ndim != 1 or x.shape != y.shape:
         raise CalibrationError("deltas and quotes must be 1-D and the same length")
-    if x.size < 3:
-        raise CalibrationError(f"need at least 3 probes, got {x.size}")
+    if x.size < 2:
+        raise CalibrationError(f"need at least 2 probes, got {x.size}")
     if not np.all(np.diff(x) > 0):
         raise CalibrationError("deltas must be strictly increasing")
     if not np.all(y > 0):
@@ -145,6 +145,9 @@ def calibrate(
     # probe deliberately excluded.  Divided differences estimate a derivative
     # *at a point*, so spreading the nodes over decades measures the spread
     # rather than the curve.
+    # DRIFT and eta need four nodes (origin plus three), so a two-point coarse
+    # pass reports neither -- by design: they are diagnostics for arcs that
+    # carry flow, and those get the full ladder.
     drift = 0.0
     eta = math.nan
     if x.size >= 3:

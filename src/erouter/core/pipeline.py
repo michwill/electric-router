@@ -25,7 +25,16 @@ from .graph import ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
 from .prices import check_pair_drops, reference_prices
-from .probe import ArcRef, Ladder, collect, plan_grid
+from .probe import (
+    COARSE_GRID,
+    RETRY_GRID,
+    ArcRef,
+    Ladder,
+    collect,
+    merge,
+    plan_grid,
+    plan_refine,
+)
 from .quoter import QuoterClient
 from .realize import RealizedRoute, cancel_cycles, check_one_arc_per_pool, realize
 from .refit import RefitReport, refit
@@ -203,12 +212,23 @@ def route(
             "node after merging; convert directly rather than routing"
         )
 
-    # --- probe -----------------------------------------------------------
+    # --- probe, pass 1: the whole universe, coarsely (§2.6) ---------------
+    #
+    # Pricing out every arc is what the §5.5 certificate rests on, and that
+    # needs only `eps`, hence only `a`.  `B` matters only where flow goes.  So
+    # the universe gets two points each and the full ladder is spent later on
+    # the arcs that could carry something -- ~5,300 probes down to ~1,900.
     with clock("arcs"):
         refs, meta = build_arcs(pools, nodes)
-        plan = plan_grid(refs)
+        plan = plan_grid(refs, grid=COARSE_GRID)
     with clock("probe"):
         ladders = collect(plan, client.probe(plan.probes))
+        retry = plan_refine(
+            ladders, {lad.arc.id for lad in ladders if not lad.ok}, grid=RETRY_GRID
+        )
+        if retry.probes:
+            merge(ladders, collect(retry, client.probe(retry.probes)))
+            result.counters["probes_retried"] = len(retry)
     with clock("calibrate"):
         arcs, dropped = calibrate_arcs(plan.arcs, _align(plan.arcs, refs, meta), ladders, nodes)
     result.arcs = arcs
@@ -240,56 +260,44 @@ def route(
 
     # --- reference prices (§4) -------------------------------------------
     with clock("prices"):
-        tau = np.array([a.tau for a in arcs], dtype=np.int64)
-        sig = np.array([a.sigma for a in arcs], dtype=np.int64)
         a_vec = np.array([a.a for a in arcs])
         # Both directions are already present as separate arcs, so half weight
         # keeps a pool's influence from being counted twice.
         weights = np.array([max(a.tvl_usd, 1.0) / 2 for a in arcs])
-        nu = reference_prices(tau, sig, a_vec, weights, nodes.n_nodes, dst_node)
+        nu = reference_prices(
+            np.array([a.tau for a in arcs], dtype=np.int64),
+            np.array([a.sigma for a in arcs], dtype=np.int64),
+            a_vec, weights, nodes.n_nodes, dst_node,
+        )
     result.nu = nu
+
+    amount_human = amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
+    Psi = float(nu[src_node] * amount_human)
+    if Psi <= 0:
+        raise RoutingError("input amount prices to zero value")
 
     # --- graph (§3.1, §9.5-9.7) -----------------------------------------
     with clock("graph"):
-        amount_human = amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
-        Psi = float(nu[src_node] * amount_human)
-        if Psi <= 0:
-            raise RoutingError("input amount prices to zero value")
-
-        bottomless = _clamp_unphysical_depth(arcs, nu, nodes)
-        if bottomless:
-            result.counters["arcs_clamped_as_bottomless"] = bottomless
-            result.warnings.append(
-                f"{bottomless} arc(s) showed no measurable curvature at the probed "
-                "size and were clamped to B = 0 with a cap (§2.3)"
-            )
-        # `cap` is a bound on *value* flow, so convert from canonical token units.
-        caps = np.array(
-            [
-                a.cap if not math.isfinite(a.cap) else float(nu[a.tau] * a.cap)
-                for a in arcs
-            ]
-        )
-        g = build(
-            tau, sig, a_vec, np.array([a.B for a in arcs]), nu, Psi,
-            cap=caps,
-            flagged=np.array([a.convex_flag for a in arcs]),
-            clamped=np.array([a.clamped for a in arcs]),
-            n_nodes=nodes.n_nodes,
-            merge_duplicates=False,
-            require=(src_node, dst_node),
-        )
-        # `build` drops dust and can merge duplicates, so re-align the arc
-        # metadata to the arrays the solver will actually see.
-        arcs = [arcs[group[0]] for group in g.sources]
-        result.counters["arcs_dropped_dust"] = sum(
-            1 for reason in g.dropped.values() if reason == "DUST"
-        )
-        result.arcs = arcs
-        for k, arc in enumerate(arcs):
-            arc.G, arc.eps = float(g.G[k]), float(g.eps[k])
-        _warn_pair_drops(arcs, result)
+        arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result)
+    with clock("seed"):
         g, Psi_scaled = scale(g, Psi)
+        seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
+
+    # --- probe, pass 2: the full ladder, only where it can matter ---------
+    with clock("refine"):
+        wanted = {arcs[k].id for k in np.flatnonzero(seed)}
+        wanted |= {a.id for a in arcs if a.tau in (src_node, dst_node) or a.sigma in (src_node, dst_node)}
+        extra = plan_refine(ladders, wanted)
+        result.counters["probes_refined"] = len(extra)
+        if extra.probes:
+            merge(ladders, collect(extra, client.probe(extra.probes)))
+            refined = _recalibrate(arcs, ladders, nodes)
+            result.counters["arcs_refined"] = refined
+            if refined:
+                arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result)
+                g, Psi_scaled = scale(g, Psi)
+                seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
+    result.arcs = arcs
     result.graph = g
 
     # --- solve (§5.4, §5.5) ----------------------------------------------
@@ -595,6 +603,75 @@ def _dst_per_eth(nodes: NodeMap, nu: np.ndarray, dst_token: str) -> float:
             return 0.0
         return weth_value / dst_value * 10 ** nodes.decimals(dst_token)
     return 0.0
+
+
+def _assemble(
+    arcs: list[PoolArc],
+    nu: np.ndarray,
+    Psi: float,
+    nodes: NodeMap,
+    src_node: int,
+    dst_node: int,
+    result: RouteResult,
+):
+    """Build the solver arrays from the current calibration.
+
+    Called twice -- once on the coarse pass, once after refinement -- because
+    `build` drops dust and can merge duplicates, so the arc list has to be
+    re-aligned to whatever survived.
+    """
+    bottomless = _clamp_unphysical_depth(arcs, nu, nodes)
+    if bottomless:
+        result.counters["arcs_clamped_as_bottomless"] = bottomless
+
+    # `cap` is a bound on *value* flow, so convert from canonical token units.
+    caps = np.array(
+        [a.cap if not math.isfinite(a.cap) else float(nu[a.tau] * a.cap) for a in arcs]
+    )
+    g = build(
+        np.array([a.tau for a in arcs], dtype=np.int64),
+        np.array([a.sigma for a in arcs], dtype=np.int64),
+        np.array([a.a for a in arcs]),
+        np.array([a.B for a in arcs]),
+        nu, Psi,
+        cap=caps,
+        flagged=np.array([a.convex_flag for a in arcs]),
+        clamped=np.array([a.clamped for a in arcs]),
+        n_nodes=nodes.n_nodes,
+        merge_duplicates=False,
+        require=(src_node, dst_node),
+    )
+    arcs = [arcs[group[0]] for group in g.sources]
+    result.counters["arcs_dropped_dust"] = sum(
+        1 for reason in g.dropped.values() if reason == "DUST"
+    )
+    for k, arc in enumerate(arcs):
+        arc.G, arc.eps = float(g.G[k]), float(g.eps[k])
+    _warn_pair_drops(arcs, result)
+    return arcs, g
+
+
+def _recalibrate(arcs: list[PoolArc], ladders, nodes: NodeMap) -> int:
+    """Re-fit the arcs whose ladders just gained points."""
+    by_id = {lad.arc.id: lad for lad in ladders}
+    changed = 0
+    for arc in arcs:
+        ladder = by_id.get(arc.id)
+        if ladder is None or len(ladder.deltas) < 3:
+            continue
+        deltas, quotes = ladder.as_float()
+        try:
+            fit = calibrate(deltas, quotes)
+        except CalibrationError:
+            continue
+        a, B = rescale(fit.a, fit.B, nodes.rate(arc.token_in), nodes.rate(arc.token_out))
+        arc.a, arc.B = a, B
+        arc.cap = fit.cap * nodes.rate(arc.token_in) if math.isfinite(fit.cap) else math.inf
+        arc.clamped, arc.convex_flag = fit.clamped, fit.convex_flag
+        arc.flag_reason, arc.drift, arc.eta = fit.flag_reason, fit.drift, fit.eta
+        arc.calib_delta = fit.calib_delta
+        changed += 1
+    return changed
 
 
 def _kcl_residual(

@@ -26,6 +26,19 @@ from .types import ArcKind, Probe, ProbeLadder
 
 GRID: tuple[float, ...] = (1e-6, 1e-4, 1e-3, 1e-2, 3e-2, 1e-1)
 
+# §2.6's probe economy.  Pricing out every arc -- which is what the §5.5
+# certificate rests on -- needs only `eps`, hence only `a`.  `B` is needed only
+# where flow actually goes.  So the whole universe gets a two-point pass, and
+# the full ladder is spent on the arcs that could carry something.
+#
+# Two points plus the free origin still give a real curvature estimate (one
+# second divided difference), so nothing is bootstrapped from TVL; it is just
+# coarser than the arcs that get refined.
+COARSE_GRID: tuple[float, ...] = (1e-4, 1e-2)
+# Sizes to fall back to when a coarse probe fails -- 6% of arcs do, and a few
+# return zero, which is worse because it looks like a valid quote.
+RETRY_GRID: tuple[float, ...] = (1e-3, 3e-2, 1e-1)
+
 
 @dataclass(frozen=True, slots=True)
 class ArcRef:
@@ -79,7 +92,7 @@ def plan_grid(arcs: list[ArcRef], grid: tuple[float, ...] = GRID) -> ProbePlan:
     plan = ProbePlan()
     for arc in arcs:
         deltas = plan_deltas(arc.reserve_in, arc.decimals_in, grid)
-        if len(deltas) < 3:  # too little room to fit a curvature
+        if len(deltas) < 2:  # too little room to fit even a curvature estimate
             continue
         start = len(plan.probes)
         for delta in deltas:
@@ -102,7 +115,9 @@ class Ladder:
 
     @property
     def ok(self) -> bool:
-        return len(self.deltas) >= 3
+        # Two successful probes plus the free origin are enough for `a` and a
+        # curvature estimate; the coarse pass deliberately stops there.
+        return len(self.deltas) >= 2
 
     @property
     def coarse_tangent(self) -> bool:
@@ -134,6 +149,51 @@ class Ladder:
             decimals_out=self.arc.decimals_out,
             block=block,
         )
+
+
+def plan_refine(
+    ladders: list[Ladder], keep: set[str], grid: tuple[float, ...] = GRID
+) -> ProbePlan:
+    """Plan the ladder points still missing on the arcs worth refining.
+
+    Only the sizes not already probed are requested, so the coarse pass is
+    reused rather than repeated.
+    """
+    plan = ProbePlan()
+    for ladder in ladders:
+        arc = ladder.arc
+        if arc.id not in keep:
+            continue
+        have = set(ladder.deltas)
+        wanted = [d for d in plan_deltas(arc.reserve_in, arc.decimals_in, grid) if d not in have]
+        if not wanted:
+            continue
+        start = len(plan.probes)
+        for delta in wanted:
+            plan.probes.append(Probe(arc.pool, arc.kind, arc.i, arc.j, arc.n_coins, delta))
+        plan.arcs.append(arc)
+        plan.deltas.append(wanted)
+        plan.spans.append((start, len(plan.probes)))
+    return plan
+
+
+def merge(ladders: list[Ladder], extra: list[Ladder]) -> list[Ladder]:
+    """Fold refinement results into the coarse ladders, keeping sizes sorted."""
+    by_id = {lad.arc.id: lad for lad in ladders}
+    for more in extra:
+        base = by_id.get(more.arc.id)
+        if base is None or not more.deltas:
+            continue
+        pairs = sorted(
+            {**dict(zip(base.deltas, base.quotes, strict=True)),
+             **dict(zip(more.deltas, more.quotes, strict=True))}.items()
+        )
+        base.deltas = [d for d, _ in pairs]
+        base.quotes = [q for _, q in pairs]
+        base.attempted += more.attempted
+        for key, count in more.failures.items():
+            base.failures[key] = base.failures.get(key, 0) + count
+    return ladders
 
 
 def collect(plan: ProbePlan, results) -> list[Ladder]:
