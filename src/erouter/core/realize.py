@@ -240,6 +240,7 @@ def realize(
 
     # --- emit -----------------------------------------------------------
     destination = nodes.node(dst_token)
+    dst_lower = dst_token.lower()
     for node in node_order:
         canonical = nodes.canonical_of[node]
         outgoing = by_source.get(node, [])
@@ -260,6 +261,14 @@ def realize(
             # silently removed both big ETH/stETH pools from stETH->WETH and
             # left a shallow factory pool paying half.
             if not outgoing and node != destination:
+                continue
+            # Flow that already arrives *as the token the caller asked for* is
+            # finished.  Folding it into the hub only for the destination tail
+            # below to convert it straight back is a wasted round trip: two
+            # legs and two lots of integer rounding to end where it started.
+            # Measured on USDC->sUSDS, where pools pay sUSDS directly and the
+            # route ended `... REDEEM sUSDS->USDS, DEPOSIT USDS->sUSDS`.
+            if node == destination and not outgoing and token == dst_lower:
                 continue
             conversion = nodes.conversion.get(token)
             if conversion is None:
@@ -316,8 +325,20 @@ def realize(
     # --- destination ----------------------------------------------------
     dst_node = nodes.node(dst_token)
     dst_canonical = nodes.canonical_of[dst_node]
-    if dst_token.lower() != dst_canonical:
-        conversion = nodes.conversion.get(dst_token.lower())
+    # Only convert out of the hub if anything actually landed in it.  Arrivals
+    # already in `dst_token` now bypass the fold above, so when *every* leg
+    # pays the requested token the hub is empty and this leg would move zero --
+    # harmless in the quoter, which skips a zero-dx leg, but it still spends
+    # one of the caller's legs and shows up in the diagram.
+    arriving = {
+        arcs[k].token_out.lower() for k in range(len(arcs)) if arcs[k].sigma == dst_node
+    }
+    hub_has_balance = any(
+        token == dst_canonical or (token != dst_lower and token in nodes.conversion)
+        for token in arriving
+    )
+    if dst_lower != dst_canonical and hub_has_balance:
+        conversion = nodes.conversion.get(dst_lower)
         if conversion is not None:
             route.legs.append(
                 _conversion_leg(

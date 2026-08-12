@@ -361,3 +361,50 @@ def test_an_intermediate_dead_end_still_emits_no_conversion():
     kinds = [rl.kind for rl in route.legs]
     assert ArcKind.WRAP_NATIVE in kinds
     assert kinds[-1] is ArcKind.SWAP_STABLE  # the route ends on a real swap
+
+
+def test_arrival_in_the_destination_token_skips_the_hub_round_trip():
+    """A leg that already pays `dst_token` must not fold to the hub and back.
+
+    `realize` converts everything arriving at a merged node into the node's
+    canonical token, then converts out to whatever the caller asked for.  That
+    is right when they differ and pure waste when they do not: measured on
+    USDC->sUSDS, pools paying sUSDS directly produced a route ending
+    `... REDEEM sUSDS->USDS, DEPOSIT USDS->sUSDS`, two legs and two lots of
+    integer rounding to arrive where it already was.
+
+    The mirror of the ETH-sentinel bug in
+    `test_native_destination_folds_through_the_hub`: there the fold was missing
+    and had to be added, here it fires when it should not.
+    """
+    import math
+
+    nodes = NodeMap()
+    nodes.add_token(USDC, "USDC", 6)
+    nodes.add_token(CRVUSD, "crvUSD", 18)
+    nodes.add_token(SCRVUSD, "scrvUSD", 18)
+    nodes.merge(
+        Conversion(
+            kind=ConversionKind.ERC4626, token=SCRVUSD, canonical=CRVUSD,
+            rate_num=2 * 10**18, rate_den=10**18, target=SCRVUSD,
+        )
+    )
+    # One pool that pays the *share* token directly -- exactly the sUSDS shape.
+    arc = PoolArc(
+        id="p:0>1", pool=POOL_A, kind=ArcKind.SWAP_STABLE, i=0, j=1, n_coins=2,
+        token_in=USDC, token_out=SCRVUSD,
+        tau=nodes.node(USDC), sigma=nodes.node(SCRVUSD),
+        a=1.0, B=0.0, cap=math.inf, decimals_in=6, decimals_out=18,
+    )
+    route = realize(
+        [arc], np.array([1.0]), np.ones(nodes.n_nodes), nodes,
+        src_token=USDC, dst_token=SCRVUSD, amount_in=10**6,
+    )
+    kinds = [leg.leg.kind for leg in route.legs]
+    assert ArcKind.ERC4626_REDEEM not in kinds, (
+        f"folded the destination token into the hub: {[k.name for k in kinds]}"
+    )
+    assert ArcKind.ERC4626_DEPOSIT not in kinds, (
+        f"converted back out of an empty hub: {[k.name for k in kinds]}"
+    )
+    assert len(route.legs) == 1, [k.name for k in kinds]
