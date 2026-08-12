@@ -31,6 +31,14 @@ import numpy as np
 from .types import FlagReason
 
 DRIFT_TOL = 0.25
+# Two probes an order of magnitude apart returning the *same* output is not a
+# curve, it is a wall: the venue has handed over everything it has.  Measured
+# on a LLAMMA WETH market, `get_dy` returned 11.472806 crvUSD for every input
+# from 0.039 WETH to 38.7 -- a thousandfold range -- because only that much
+# crvUSD stood in reachable bands.  Fitting a rate through saturated points
+# reads the marginal price as 296 crvUSD/WETH when it is nearer 1,900, and in
+# §4's log-price fit that one arc drags the whole frame.
+SATURATION_TOL = 1e-9
 # A local `B` that jumps by more than this between grid nodes is a liquidity
 # cliff -- for stableswap, the edge of the peg (§2.5).
 PEG_JUMP = 4.0
@@ -127,6 +135,29 @@ def calibrate(
     tangent_delta = float(x[0])
     a = float(y[0] / x[0])
 
+    # --- capacity wall (§2.3 rule 2) -------------------------------------
+    #
+    # Truncate to the strictly-increasing prefix, and treat the last size that
+    # still bought something more as a hard cap.  This is the clamped-arc
+    # shape the spec already provides for: no self-limiting term beyond the
+    # cap, so the cap must be finite -- which it is, by construction here.
+    saturated_at: float | None = None
+    for k in range(1, x.size):
+        if y[k] <= y[k - 1] * (1.0 + SATURATION_TOL):
+            saturated_at = float(x[k - 1])
+            x, y = x[:k], y[:k]
+            break
+    if saturated_at is not None and x.size == 1:
+        # Everything above the smallest probe is flat: the arc is a fixed
+        # payout, which the quadratic model cannot express at all beyond `a`.
+        return Calibration(
+            a=a, B=0.0, cap=saturated_at, clamped=True, convex_flag=True,
+            flag_reason=FlagReason.CLAMPED, calib_delta=saturated_at,
+            tangent_delta=tangent_delta, note="SATURATED",
+        )
+
+    if saturated_at is not None:
+        cap = saturated_at if cap is None else min(cap, saturated_at)
     d_bar = float(delta_bar if delta_bar is not None else x[-1])
     f_bar = float(np.interp(d_bar, x, y))
     B = 2.0 * (a * d_bar - f_bar) / d_bar**2
@@ -160,8 +191,10 @@ def calibrate(
             D3 = float((D_local[1] - D_local[0]) / (xs_local[3] - xs_local[0]))
             eta = 3.0 * a * D3 / (2.0 * D_local[1] ** 2)
 
-    note = ""
-    clamped = B <= 0.0
+    note = "SATURATED" if saturated_at is not None else ""
+    # A wall is a cap even when the fitted curvature is healthy: without it the
+    # solver sizes the arc from `B` alone and posts flow the venue cannot fill.
+    clamped = B <= 0.0 or saturated_at is not None
     flag_reason = FlagReason.NONE
     if numeric_flag and structural_flag:
         flag_reason = FlagReason.BOTH

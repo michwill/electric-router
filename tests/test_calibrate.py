@@ -310,3 +310,43 @@ def test_drift_flags_a_curve_whose_second_derivative_moves():
 def test_bad_ladders_are_rejected(deltas, quotes, match):
     with pytest.raises(CalibrationError, match=match):
         calibrate(deltas, quotes)
+
+
+def test_a_saturating_quote_becomes_a_capped_arc():
+    """`get_dy` that stops rising is a wall, not a curve.
+
+    Measured on a LLAMMA WETH market: `get_dy` returned 11.472806 crvUSD for
+    every input from 0.039 WETH to 38.7, a thousandfold range, because only
+    that much crvUSD stood in reachable bands.  Fitting through those points
+    reads the marginal rate as 296 crvUSD/WETH when it is nearer 1,900, and
+    §4's log-price fit then drags the whole reference frame with it.
+
+    The arc is still perfectly routable up to the wall -- that is what `cap`
+    is for (§2.3 rule 2), and a clamped arc must have a finite one.
+    """
+    deltas = [0.000387, 0.038737, 0.387368, 3.873677, 38.736766]
+    quotes = [0.508730, 11.472806, 11.472806, 11.472806, 11.472806]
+
+    fit = calibrate(deltas, quotes)
+
+    assert math.isfinite(fit.cap), "a saturating arc must be capped"
+    assert fit.cap == pytest.approx(0.038737), fit.cap
+    assert fit.clamped
+    # `a` is the CHORD to the wall, not the tangent at the origin.  §2.3 picks
+    # the chord so the model is exact at `cap` and conservative below it: the
+    # tangent here is 1,314, which would have the model promise 50.9 crvUSD
+    # where the chain pays 11.47.  Under-promising is the safe direction, and
+    # the on-chain quote adjudicates the rest.
+    assert fit.a == pytest.approx(11.472806 / 0.038737, rel=1e-9)
+    assert fit.a * fit.cap == pytest.approx(11.472806, rel=1e-9), "exact at the cap"
+
+
+def test_a_healthy_curve_is_not_mistaken_for_a_wall():
+    """Diminishing returns must not read as saturation."""
+    deltas = [1.0, 10.0, 100.0, 1000.0]
+    quotes = [1.0, 9.99, 99.5, 985.0]
+
+    fit = calibrate(deltas, quotes)
+
+    assert not math.isfinite(fit.cap) or fit.cap >= deltas[-1]
+    assert fit.note != "SATURATED"
