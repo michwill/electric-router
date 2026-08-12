@@ -335,14 +335,43 @@ def realize(
         canonical = nodes.canonical_of[node]
         outgoing = by_source.get(node, [])
 
-        # (1) fold every non-canonical token held at this node into the hub
         incoming_tokens = {
             arcs[k].token_out.lower() for k in range(len(arcs)) if arcs[k].sigma == node
         }
         if node == nodes.node(src_token):
             incoming_tokens.add(src_token.lower())
+
+        # (0) which member of this node should actually hold the balance?
+        #
+        # The canonical token is an arbitrary label -- what matters is which
+        # member the legs want.  Defaulting to it round-trips a node whose flow
+        # both arrives *and* leaves as the same non-canonical token: USDC->ETH
+        # then ETH->crvUSD realised as `ETH->WETH, WETH->ETH` between them, two
+        # legs and two lots of integer rounding to end where it started.  It is
+        # the same waste the destination tail below already avoids, and it is
+        # what makes one slot drained by two non-adjacent groups.
+        #
+        # Only when the whole node agrees, and only when everything arriving
+        # can reach the new hub in one hop -- every conversion is defined
+        # against the canonical, so a second non-canonical arrival would need
+        # two.  Left alone for the destination, whose tail is keyed to the
+        # canonical, and for mixed nodes, where funnelling through one slot is
+        # what makes the `bps` split well defined.
+        hub = canonical
+        if outgoing and node != destination:
+            wanted = {arcs[k].token_in.lower() for k in outgoing}
+            if len(wanted) == 1:
+                only = next(iter(wanted))
+                if (
+                    only != canonical
+                    and only in nodes.conversion
+                    and incoming_tokens <= {only, canonical}
+                ):
+                    hub = only
+
+        # (1) fold everything held at this node into the hub
         for token in sorted(incoming_tokens):
-            if token == canonical:
+            if token == hub:
                 continue
             # The destination has no outgoing arcs, so skipping it here left a
             # route that ends in native ETH depositing into the ETH slot while
@@ -360,13 +389,18 @@ def realize(
             # route ended `... REDEEM sUSDS->USDS, DEPOSIT USDS->sUSDS`.
             if node == destination and not outgoing and token == dst_lower:
                 continue
-            conversion = nodes.conversion.get(token)
+            # Every conversion is defined against the canonical, so folding
+            # *into* a non-canonical hub runs the same one backwards.
+            if token == canonical:
+                conversion, forward = nodes.conversion.get(hub), False
+            else:
+                conversion, forward = nodes.conversion.get(token), True
             if conversion is None:
                 continue
             route.legs.append(
                 _conversion_leg(
-                    nodes, conversion, forward=True,
-                    src=slot(token), dst=slot(canonical), bps=0,
+                    nodes, conversion, forward=forward,
+                    src=slot(token), dst=slot(hub), bps=0,
                 )
             )
 
@@ -381,7 +415,7 @@ def realize(
         group: list[tuple[int, int]] = []  # (arc index, destination slot)
         for k in outgoing:
             token_in = arcs[k].token_in.lower()
-            if token_in == canonical:
+            if token_in == hub:
                 group.append((k, -1))
             else:
                 spoke = slot(token_in)
@@ -396,12 +430,12 @@ def realize(
                 route.legs.append(
                     _conversion_leg(
                         nodes, conversion, forward=False,
-                        src=slot(canonical), dst=spoke, bps=bps,
+                        src=slot(hub), dst=spoke, bps=bps,
                     )
                 )
             else:
                 route.legs.append(
-                    _arc_leg(arcs[k], nodes, slot(canonical), slot(arcs[k].token_out),
+                    _arc_leg(arcs[k], nodes, slot(hub), slot(arcs[k].token_out),
                              bps, deltas[k], outs[k], float(psi[k]), deltas[k] / total)
                 )
 

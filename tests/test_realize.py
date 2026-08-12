@@ -408,3 +408,86 @@ def test_arrival_in_the_destination_token_skips_the_hub_round_trip():
         f"converted back out of an empty hub: {[k.name for k in kinds]}"
     )
     assert len(route.legs) == 1, [k.name for k in kinds]
+
+
+def test_a_node_that_receives_and_sends_one_token_does_not_round_trip():
+    """USDC->ETH then ETH->crvUSD must not wrap and immediately unwrap.
+
+    The canonical token is an arbitrary label; what matters is which member
+    the legs want.  Hubbing on WETH regardless emitted `ETH->WETH, WETH->ETH`
+    between the two swaps -- two legs and two lots of integer rounding to end
+    where it started, and the reason one slot ended up drained by two
+    non-adjacent groups.
+    """
+    nodes = merged_nodes()
+    arcs = [
+        arc(POOL_A, USDC, ETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, ETH, CRVUSD, nodes, a=4000.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    nu[nodes.node(CRVUSD)] = 1.0
+    route = realize(
+        arcs, np.array([1000.0, 1000.0]), nu, nodes,
+        src_token=USDC, dst_token=CRVUSD, amount_in=1000 * 10**6,
+    )
+    assert not any(rl.is_conversion for rl in route.legs), (
+        "wrapped and unwrapped for nothing: " + ", ".join(r.kind.name for r in route.legs)
+    )
+    assert len(route.legs) == 2
+
+
+def test_the_hub_still_converts_when_the_node_sends_the_canonical_token():
+    """Arriving as ETH and leaving as WETH is a real conversion, not waste."""
+    nodes = merged_nodes()
+    arcs = [
+        arc(POOL_A, USDC, ETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, WETH, CRVUSD, nodes, a=4000.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    nu[nodes.node(CRVUSD)] = 1.0
+    route = realize(
+        arcs, np.array([1000.0, 1000.0]), nu, nodes,
+        src_token=USDC, dst_token=CRVUSD, amount_in=1000 * 10**6,
+    )
+    conversions = [rl for rl in route.legs if rl.is_conversion]
+    assert len(conversions) == 1
+    assert conversions[0].kind is ArcKind.WRAP_NATIVE
+
+
+def test_a_mixed_node_still_funnels_through_one_slot():
+    """When the node sends *both* members, the hub is what makes bps well defined.
+
+    Only sweeps may re-drain a slot, which is what keeps the funnel honest --
+    the contract re-snapshots per group, so the second draw measures what is
+    actually there.
+    """
+    nodes = merged_nodes()
+    arcs = [
+        arc(POOL_A, USDC, ETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, ETH, CRVUSD, nodes, a=4000.0),
+        arc(POOL_C, WETH, CRVUSD, nodes, a=4000.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    nu[nodes.node(CRVUSD)] = 1.0
+    route = realize(
+        arcs, np.array([1000.0, 600.0, 400.0]), nu, nodes,
+        src_token=USDC, dst_token=CRVUSD, amount_in=1000 * 10**6,
+    )
+    groups: list[list] = []
+    for rl in route.legs:
+        if groups and groups[-1][0].leg.src_slot == rl.leg.src_slot:
+            groups[-1].append(rl)
+        else:
+            groups.append([rl])
+    seen = set()
+    for group in groups:
+        slot = group[0].leg.src_slot
+        if slot in seen:
+            assert all(rl.leg.bps == 0 for rl in group), "re-drained with a stale base"
+        seen.add(slot)

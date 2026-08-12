@@ -67,8 +67,20 @@ def test_legs_are_topologically_ordered(usdc_weth):
 
 
 def test_bps_groups_are_contiguous_and_end_with_a_sweep(usdc_weth):
-    """The quoter snapshots a slot's balance when its group opens, so all legs
-    leaving a slot must be adjacent and the last must take the remainder."""
+    """`bps` is a share of the balance snapshotted when a group opens.
+
+    The contract re-snapshots on *every* change of `src_slot`
+    (`if src != cur: cur = src; base = bal[src]`), so a slot being drained
+    again later is not by itself wrong -- the second group simply measures
+    against whatever is there by then.  What would be wrong is a group whose
+    `bps` were computed against the node's whole arrival but which opens on a
+    partly drained slot, and that can only happen to a group carrying `bps`.
+
+    A pure sweep is immune: `bps == 0` takes `bal[src]`, not `base`.  A node
+    that both receives and sends a non-canonical token legitimately produces
+    exactly that shape -- fold ETH into the hub, hand part of it back, draw the
+    rest -- so requiring outright adjacency failed on correct routes.
+    """
     legs = usdc_weth.route.legs
     groups: list[list] = []
     for realized in legs:
@@ -79,7 +91,11 @@ def test_bps_groups_are_contiguous_and_end_with_a_sweep(usdc_weth):
     seen = set()
     for group in groups:
         slot = group[0].leg.src_slot
-        assert slot not in seen, f"slot {slot} drained by non-adjacent groups"
+        if slot in seen:
+            assert all(leg.leg.bps == 0 for leg in group), (
+                f"slot {slot} is drained again by a group carrying bps; those "
+                "shares were measured against a balance that is already gone"
+            )
         seen.add(slot)
         assert group[-1].leg.bps == 0, "last leg out of a node must sweep"
         assert all(leg.leg.bps > 0 for leg in group[:-1])
