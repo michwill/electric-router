@@ -22,6 +22,7 @@ import numpy as np
 
 from .calibrate import Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
+from .gas import min_useful_flow
 from .graph import MAX_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
@@ -519,11 +520,24 @@ def _quote(
     # --- candidates and on-chain verification (§6, §7) --------------------
     if verify_on_chain:
         scaled = report.solution.psi.copy()
+        # The §11.1 bound, in the solver's scaled value units.  Zero when gas
+        # is disabled, which restores the previous behaviour exactly.
+        # Gas screens *candidate* generation only.  The base solve stays
+        # gas-blind on purpose: it is then always present as a candidate, so
+        # the gas-aware ones can only be chosen when they are net better.
+        # Screening the base solve too made USDC->USDT $10k pick a 19-leg
+        # route over a 6-leg one and lose $0.21 -- the cheaper answer had
+        # stopped being generated at all, so verification could not find it.
+        dst_wei_per_eth = _dst_per_eth(nodes, nu, dst_token)
+        gas_floor = _gas_cost(nodes, nu, dst_token, gas_price_wei, g.g_scale)
+        result.counters["gas_floor_bp"] = int(
+            gas_floor * g.g_scale / Psi * 10_000 if Psi > 0 else 0
+        )
         with clock("candidates"):
             pool_set = generate(
                 g, arcs, src_node, dst_node, Psi_scaled, report.solution,
                 base_certificate=report.certificate, seed=seed,
-                max_candidates=max_candidates,
+                max_candidates=max_candidates, gas_floor=gas_floor,
             )
             for candidate in pool_set.candidates:
                 candidate.psi = candidate.psi * g.g_scale
@@ -534,7 +548,6 @@ def _quote(
                 potentials=report.solution.u,
             )
         with clock("verify"):
-            dst_wei_per_eth = _dst_per_eth(nodes, nu, dst_token)
             verify(
                 pool_set, client, amount_in=amount_in,
                 gas_price_wei=gas_price_wei, dst_wei_per_eth=dst_wei_per_eth,
@@ -874,12 +887,30 @@ def _refit_winner(
     refitted.rank = None  # ranked for real against the whole set below
 
     pool_set.candidates.append(refitted)
-    verify_candidates(pool_set, client, amount_in=amount_in, gas_price_wei=gas_price_wei)
+    # `dst_wei_per_eth` is what turns gas into output-token units; without it
+    # the gas term is silently skipped and this re-ranking undoes the
+    # gas-aware selection made moments earlier.  Measured on USDC->USDT $1k:
+    # a 31-leg route burning $0.56 of gas to gain $0.08 was reinstated over
+    # the 1-leg answer.
+    verify_candidates(
+        pool_set, client, amount_in=amount_in, gas_price_wei=gas_price_wei,
+        dst_wei_per_eth=_dst_per_eth(nodes, nu, dst_token),
+    )
     best = pool_set.best
     if best is not None:
         result.route = best.route
         result.verified_out = best.verified_out
         result.winner = best
+
+
+def _gas_cost(
+    nodes: NodeMap, nu: np.ndarray, dst_token: str, gas_price_wei: int, g_scale: float
+) -> float:
+    """One leg's gas, in the solver's scaled value units.  0 disables it."""
+    if gas_price_wei <= 0 or g_scale <= 0:
+        return 0.0
+    per_eth = _dst_per_eth(nodes, nu, dst_token) / 10 ** nodes.decimals(dst_token)
+    return min_useful_flow(gas_price_wei, per_eth) / g_scale
 
 
 def _dst_per_eth(nodes: NodeMap, nu: np.ndarray, dst_token: str) -> float:

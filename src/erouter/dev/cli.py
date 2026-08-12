@@ -349,6 +349,14 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     nodes, wrappers = build_node_map(load.pools, chain, client)
     stake_arcs = build_stake_arcs(nodes, chain, client)
+    # Gas is priced by default.  Leaving it at zero made every route look free
+    # to branch, which is exactly backwards for the small trades where an extra
+    # leg costs more than it saves.
+    gas_price_wei = (
+        int(float(args.gas_price) * 1e9) if args.gas_price is not None
+        else rpc.gas_price()
+    )
+    args.gas_price_wei = gas_price_wei
     if not nodes.has(src) or not nodes.has(dst):
         print(f"{BAD} token not routable in this universe")
         return 2
@@ -367,7 +375,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             src_token=src, dst_token=dst, amount_in=amount_in,
             verify_on_chain=not args.no_verify,
             max_candidates=args.candidates,
-            gas_price_wei=int(float(args.gas_price) * 1e9),
+            gas_price_wei=gas_price_wei,
             refit_rounds=args.refit,
             extra_arcs=stake_arcs,
         )
@@ -441,7 +449,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 src_token=src, dst_token=dst, amount_in=amount_in,
                 verify_on_chain=not args.no_verify,
                 max_candidates=args.candidates,
-                gas_price_wei=int(float(args.gas_price) * 1e9),
+                gas_price_wei=getattr(args, "gas_price_wei", 0),
                 refit_rounds=args.refit,
                 prepared=prepared,
             )
@@ -576,7 +584,10 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd.add_argument("--no-verify", action="store_true",
                            help="skip on-chain verification (modelled numbers only)")
     route_cmd.add_argument("--candidates", type=int, default=20)
-    route_cmd.add_argument("--gas-price", default="0", help="gwei, for tie-breaking only")
+    route_cmd.add_argument(
+        "--gas-price", default=None,
+        help="gwei; defaults to the node's live price. 0 disables gas costing",
+    )
     route_cmd.add_argument("--no-cache", action="store_true", help="re-probe every arc")
     route_cmd.add_argument("--refit", type=int, default=2, help="§8 refit rounds (0 = off)")
     route_cmd.set_defaults(func=cmd_route)

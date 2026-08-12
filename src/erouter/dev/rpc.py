@@ -112,6 +112,13 @@ class JsonRpcTransport:
     def block(self) -> int:
         return self.pin.block
 
+    def gas_price(self) -> int:
+        """Live gas price in wei, or 0 if the node will not say."""
+        try:
+            return int(self.fetch("eth_gasPrice", []), 16)
+        except Exception:
+            return 0
+
     @property
     def chain_id(self) -> int:
         return self.pin.chain_id

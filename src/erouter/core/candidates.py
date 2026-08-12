@@ -61,6 +61,7 @@ class Candidate:
     status: str = "pending"
     note: str = ""
     rank: int | None = None
+    gas: int = 0
 
     @property
     def ok(self) -> bool:
@@ -124,6 +125,7 @@ def generate(
     seed: np.ndarray | None = None,
     max_candidates: int = 20,
     top_k: tuple[int, ...] = TOP_K,
+    gas_floor: float = 0.0,
 ) -> CandidateSet:
     out = CandidateSet()
     seen: set[tuple] = set()
@@ -163,7 +165,14 @@ def generate(
             # restricted candidate cannot be certified anyway.
             solution = active_set_solve(
                 g, src, dst, Psi, A0=warm, forbidden=banned, forced_upper=pinned,
+                # §11.1: gas cannot enter the objective without making the
+                # program mixed-integer, but it bounds it from outside.  An arc
+                # carrying less value than its leg costs to execute cannot pay
+                # for itself even if it were pure profit, so screening it out
+                # is sound rather than heuristic -- and it is what stops a
+                # small trade sprouting branches that gas would eat.
                 min_flow=MIN_FLOW_FRACTION * Psi,
+                gas_cost=gas_floor,
                 maxit=CANDIDATE_PIVOTS, partial_ok=True,
             )
             if not solution.feasible:

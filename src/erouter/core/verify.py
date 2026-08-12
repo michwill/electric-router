@@ -26,15 +26,14 @@ from __future__ import annotations
 import numpy as np
 
 from .candidates import Candidate, CandidateSet
+from .gas import route_gas
 from .nodes import NodeMap
 from .quoter import MAX_LEGS, MAX_SLOTS, QuoterClient
 from .realize import RealizationError, check_one_arc_per_pool, realize
 from .types import PoolArc
 
-# A swap leg through a router costs roughly this much gas; used only to break
-# near-ties, since §11.1 keeps gas out of the convex core.
-GAS_PER_LEG = 120_000
-GAS_BASE = 45_000
+# Per-kind execution gas lives in `gas.py`; a flat per-leg figure over-charged
+# wraps by 3x and under-charged single-coin withdrawals.
 # Outputs within this relative distance are the same answer; take the cheaper
 # route to execute.  0.05 bp is far below any gas cost worth the extra hop.
 TIE_TOLERANCE = 5e-6
@@ -129,7 +128,8 @@ def verify(
     def score(candidate: Candidate) -> float:
         value = float(candidate.verified_out or 0)
         if gas_price_wei > 0 and dst_wei_per_eth > 0 and candidate.route:
-            gas = GAS_BASE + GAS_PER_LEG * len(candidate.route.legs)
+            gas = route_gas(leg.leg.kind for leg in candidate.route.legs)
+            candidate.gas = gas
             value -= gas * gas_price_wei / 1e18 * dst_wei_per_eth
         return value
 

@@ -107,6 +107,7 @@ def active_set_solve(
     maxit: int = 600,
     solver=None,
     min_flow: float = 0.0,
+    gas_cost: float = 0.0,
     partial_ok: bool = False,
 ) -> Solution:
     """Solve (P) restricted to the non-forbidden arcs.
@@ -236,6 +237,15 @@ def active_set_solve(
         entering = Z & (rho > tol)
         if min_flow > 0 and entering.any():
             entering &= (g.G * rho) > min_flow
+        if gas_cost > 0 and entering.any():
+            # What admitting this arc is actually worth.  At reduced cost `rho`
+            # it settles at `psi = G rho`, and the objective falls by
+            # `G rho^2 / 2` -- so that, not the flow through it, is what has to
+            # beat the gas of one more leg.  Screening on flow alone is far too
+            # loose: measured on a $1,000 USDC->USDT trade, 31 legs each cleared
+            # a flow floor while together burning 3.25M gas (~$185 at 30 gwei)
+            # to gain a fraction of a basis point.
+            entering &= (0.5 * g.G * rho * rho) > gas_cost
         if entering.any():
             A[pick(entering, rho)] = True
             pivots += 1
@@ -310,6 +320,7 @@ def solve(
     forbidden: np.ndarray | None = None,
     A0: np.ndarray | None = None,
     min_flow: float = 0.0,
+    gas_cost: float = 0.0,
 ) -> SolveReport:
     """Column generation around `active_set_solve` (spec §5.1 lines 5-10).
 
@@ -337,6 +348,7 @@ def solve(
             tol=tol,
             solver=solver,
             min_flow=screen,
+            gas_cost=gas_cost,
             partial_ok=degenerate,
         )
         if (
