@@ -580,6 +580,41 @@ def _stage_table(title: str, wall_ms: float, timings: dict[str, float], width: i
     return rpc, cpu
 
 
+def _hot_functions(fn, limit: int = 12, reference_ms: float | None = None) -> None:
+    """Function-level self time inside one route.
+
+    Stage timings say *which phase*; this says *which line*.  cProfile inflates
+    the total, and by how much depends on the call count and the machine -- it
+    has been 3x and 15x on the same code -- so the inflation is measured
+    against the un-profiled wall and printed, rather than asserted.  Only the
+    shares are meaningful.
+    """
+    import cProfile
+    import pstats
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    fn()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    total = stats.total_tt or 1e-9
+    rows = sorted(
+        ((entry[2], key) for key, entry in stats.stats.items()),
+        key=lambda pair: -pair[0],
+    )[:limit]
+    inflation = (
+        f", {total * 1000 / reference_ms:.0f}x the un-profiled {reference_ms:,.0f} ms"
+        if reference_ms else ""
+    )
+    print(f"\n  HOT FUNCTIONS   self time in one route "
+          f"(profiled {total * 1000:,.0f} ms{inflation} — read the shares, not the times)")
+    print(f"  {'share':>7}{'calls':>9}  where")
+    for self_time, (path, line, name) in rows:
+        where = f"{path.rsplit('/', 1)[-1]}:{line}({name})"
+        calls = stats.stats[(path, line, name)][0]
+        print(f"  {self_time / total * 100:>6.1f}%{calls:>9,}  {where[:62]}")
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     """Where a route's time goes, cold and warm.
 
@@ -670,9 +705,15 @@ def cmd_bench(args: argparse.Namespace) -> int:
         return wall * 1000, rpc_ms, cpu_ms, best
 
     cold = phase("COLD   first quote: probes the universe", uncached, None)
+    if args.profile and cold:
+        _hot_functions(lambda: route(load.pools, nodes, uncached, **kw),
+                       reference_ms=cold[0])
     warm_state = prepare(load.pools, nodes, cached, src_token=src, dst_token=dst,
                          extra_arcs=stake)
     warm = phase("WARM   in-session: prepare() reused, probes cached", cached, warm_state)
+    if args.profile and warm:
+        _hot_functions(lambda: route(load.pools, nodes, cached, **kw, prepared=warm_state),
+                       reference_ms=warm[0])
     if cold and warm:
         print(f"\n  cold {cold[0]:,.0f} ms ({cold[1] / cold[0] * 100:.0f}% network)"
               f"   ->   warm {warm[0]:,.0f} ms ({warm[2] / warm[0] * 100:.0f}% compute)"
@@ -724,6 +765,10 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--gas-price", default=None, help="gwei; defaults to the live price")
     bench.add_argument("--max-legs", type=int, default=32)
     bench.add_argument("--llamma", action="store_true")
+    bench.add_argument(
+        "--profile", action="store_true",
+        help="also print function-level self time inside a warm route",
+    )
     bench.set_defaults(func=cmd_bench)
 
     route_cmd = sub.add_parser("route", help="compute and draw an optimal route")
