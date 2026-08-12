@@ -444,12 +444,24 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
     return balances.get(route.dst_slot, 0)
 
 
+# Paths are display-only, and there can be exponentially many of them: the
+# walk below is a DAG enumeration, so a route 16 legs deep that branches three
+# ways at each node has tens of millions.  Measured on crvUSD->sDOLA at 5M once
+# the savings vaults were merged, this never returned -- §11.6 warns that path
+# enumeration is exponential, and it is just as true in the presentation layer
+# as in the solver.
+MAX_DISPLAY_PATHS = 64
+
+
 def _decompose(route: RealizedRoute) -> list[list[str]]:
     """Flow decomposition, for display only.
 
     Deliberately derived *after* the legs: the legs are the truth, and paths
     are a reading of them.  Doing it the other way round is what double-counts
     shared pools.
+
+    Bounded at `MAX_DISPLAY_PATHS`: nobody reads the 65th path, and the legs --
+    which are the executable artefact -- are unaffected by the cut.
     """
     outgoing: dict[int, list[RealizedLeg]] = {}
     for realized in route.legs:
@@ -458,7 +470,7 @@ def _decompose(route: RealizedRoute) -> list[list[str]]:
     paths: list[list[str]] = []
 
     def walk(slot: int, trail: list[str], depth: int = 0) -> None:
-        if depth > 16:
+        if depth > 16 or len(paths) >= MAX_DISPLAY_PATHS:
             return
         legs = outgoing.get(slot)
         if not legs or slot == route.dst_slot:
@@ -466,10 +478,17 @@ def _decompose(route: RealizedRoute) -> list[list[str]]:
                 paths.append(trail)
             return
         for realized in legs:
+            if len(paths) >= MAX_DISPLAY_PATHS:
+                return
             label = realized.arc_id or f"{realized.kind.name}:{realized.target[:10]}"
             walk(realized.leg.dst_slot, [*trail, label], depth + 1)
 
     walk(0, [])
+    if len(paths) >= MAX_DISPLAY_PATHS:
+        route.warnings.append(
+            f"path list truncated at {MAX_DISPLAY_PATHS}; the legs are complete "
+            "and are what executes"
+        )
     return paths
 
 

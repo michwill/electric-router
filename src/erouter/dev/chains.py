@@ -50,6 +50,20 @@ SCRVUSD = "0x0655977FEb2f289A4aB78af67BAB0d17aAb84367"
 WSTETH = "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
 STETH = "0xae7ab96520DE3A18E5e111B5EaAb095312D7fE84"
 SUSDE = "0x9D39A5DE30e57443BfF2A8307A4256c8797A3497"
+# Merged only after an executed deposit->redeem round trip on a fork returned
+# to the wei (tests/forked/test_vault_roundtrip.py).  Static checks are not
+# enough: sUSDe and pufETH pass linearity and maxDeposit and are traps.
+SDOLA = "0xb45ad160634c528Cc3D2926d9807104FA3157305"
+SDAI = "0x83F20F44975D03b1b09e64809B757c47f942BEeA"
+SUSDS = "0xa3931d71877C0E7a3148CB7Eb4463524FEc27fbD"
+SFRXETH = "0xac3E018457B222d93114458476f3E3416Abbe38F"
+SGHO = "0xE1753F2E00940cC31213dD92013CF019dfe4ca1D"
+STUSDS = "0x99cD4EC3F88a45940936f469E4Bb72a2a701EeB9"
+# Round-trip clean but only $3.0M and $1.1M deep.  A merge asserts unbounded
+# depth in both directions, which those cannot honour at routing sizes, so
+# they stay out until there is a capped bidirectional element to hold them.
+# cvcrvUSD = 0xcea18a8752bb7e7817f9ae7565328fe415c0f2ca
+# sUSG     = 0xf17d6f98a5c6eaa99d149079984119e0a4ef6900
 PUFETH = "0xD9A442856C234a39a81a089C06451EBAa4306a72"
 CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 
@@ -61,7 +75,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="NETWORK",
         native_symbol="ETH",
         wrapped="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-        erc4626_allowlist=(SCRVUSD,),
+        erc4626_allowlist=(SCRVUSD, SDOLA, SDAI, SUSDS, SFRXETH, SGHO, STUSDS),
         wsteth_pairs=((WSTETH, STETH),),
         stake_arcs=(
             # Lido: 1 ETH -> 1 stETH, capped by the daily staking limit.
