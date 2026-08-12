@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .graph import ArcArrays
-from .quoter import MAX_SLOTS
+from .quoter import MAX_LEGS, MAX_SLOTS
 from .realize import RealizedRoute, cancel_cycles
 from .seed import k_shortest_paths
 from .solve import Solution, active_set_solve
@@ -144,6 +144,7 @@ def generate(
     max_candidates: int = 20,
     top_k: tuple[int, ...] = TOP_K,
     gas_floor: float = 0.0,
+    max_legs: int = MAX_LEGS,
 ) -> CandidateSet:
     out = CandidateSet()
     seen: set[tuple] = set()
@@ -218,7 +219,11 @@ def generate(
                         banned[k] = True
         else:
             return False
-        if width(solution.psi) > MAX_SLOTS:
+        # Two ways to be unrealisable, and both are known before realising:
+        # more distinct tokens than the quoter has slots, or more arcs than the
+        # caller will accept legs (each arc is at least one leg).
+        support = int(np.count_nonzero(solution.psi > 0))
+        if width(solution.psi) > MAX_SLOTS or support > max_legs:
             # Solved, and unrealisable.  Adding it would spend a realise and a
             # slot in the verification batch to learn what the node count
             # already said.

@@ -25,10 +25,10 @@
 # --- limits ---------------------------------------------------------------
 
 MAX_PROBES: public(constant(uint256)) = 600
-MAX_LEGS: public(constant(uint256)) = 32
-MAX_ALL_LEGS: public(constant(uint256)) = 320
+MAX_LEGS: public(constant(uint256)) = 128
+MAX_ALL_LEGS: public(constant(uint256)) = 768
 MAX_ROUTES: public(constant(uint256)) = 32
-MAX_SLOTS: public(constant(uint256)) = 24
+MAX_SLOTS: public(constant(uint256)) = 128
 MAX_COINS: public(constant(uint256)) = 8
 
 BPS: constant(uint256) = 10_000

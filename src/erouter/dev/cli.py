@@ -596,8 +596,9 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd.add_argument("--refit", type=int, default=2, help="§8 refit rounds (0 = off)")
     route_cmd.add_argument(
         "--max-legs", type=int, default=32,
-        help="reject routes with more legs than this; 32 is the quoter's own "
-             "capacity, a deployed router will want far fewer",
+        help="reject routes with more legs than this. The quoter can price 128; "
+             "the default is what an executor might plausibly run. Going wide is "
+             "worth ~5 bp below ~4 gwei and a loss above it",
     )
     route_cmd.add_argument(
         "--pool-filters", action="store_true",

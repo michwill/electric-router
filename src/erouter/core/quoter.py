@@ -27,10 +27,10 @@ SIG_RAW_BATCH = "raw_batch(address[],bytes[])"
 
 # Mirrors the contract's constants; the cross-check test reads them back.
 MAX_PROBES = 600
-MAX_LEGS = 32
-MAX_ALL_LEGS = 320
+MAX_LEGS = 128
+MAX_ALL_LEGS = 768
 MAX_ROUTES = 32
-MAX_SLOTS = 24
+MAX_SLOTS = 128
 
 
 @dataclass(frozen=True, slots=True)

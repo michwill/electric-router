@@ -45,6 +45,14 @@ from .solve import SolveReport, active_set_solve, solve
 from .types import ArcKind, PoolArc, Probe
 from .verify import realize_candidates, verify
 
+# What the router will *propose* by default, as opposed to what the quoter can
+# *price* (MAX_LEGS, 128).  Raising the quoter's capacity is free -- it is a
+# memory array in a view call -- but a 67-leg route is not executable by any
+# deployed router, so the default stays where an executor might plausibly
+# follow.  `--max-legs` opens it up; measured on USDC->WETH 100k, going wide
+# is worth +5.35 bp below ~4 gwei and a loss above it.
+DEFAULT_MAX_LEGS = 32
+
 # §12.4's flow-conservation gate, in two terms -- see `_kcl_tolerance`.
 KCL_RELATIVE = 1e-8
 KCL_ABSOLUTE = 1e-9
@@ -321,7 +329,7 @@ def route(
     refit_rounds: int = 2,
     prepared: Prepared | None = None,
     extra_arcs: list[PoolArc] | None = None,
-    max_legs: int = MAX_LEGS,
+    max_legs: int = DEFAULT_MAX_LEGS,
 ) -> RouteResult:
     result = RouteResult(
         src_token=src_token.lower(),
@@ -392,7 +400,7 @@ def _quote(
     gas_price_wei: int,
     refit_rounds: int,
     prepared: Prepared | None,
-    max_legs: int = MAX_LEGS,
+    max_legs: int = DEFAULT_MAX_LEGS,
 ) -> RouteResult:
     """The size-dependent half: graph, solve, candidates, verify, refit."""
     amount_human = amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
@@ -540,6 +548,7 @@ def _quote(
                 g, arcs, src_node, dst_node, Psi_scaled, report.solution,
                 base_certificate=report.certificate, seed=seed,
                 max_candidates=max_candidates, gas_floor=gas_floor,
+                max_legs=max_legs,
             )
             for candidate in pool_set.candidates:
                 candidate.psi = candidate.psi * g.g_scale
