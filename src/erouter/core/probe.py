@@ -53,6 +53,59 @@ RETRY_GRID: tuple[float, ...] = (1e-3, 3e-2, 1e-1)
 # diagnostic.
 TRADE_GRID: tuple[float, ...] = (0.05, 0.10, 0.20)
 
+# The coarse pass, in dollars rather than in fractions of a pool's own reserve.
+# `1e-4 * reserve` means "a bit of this pool", so it is $16k in 3pool and $2 in
+# a $20k venue -- the same nominal grid samples two entirely different regimes,
+# which is how a shallow pool ends up fitted three orders below where any real
+# trade lands.  A value grid means the same thing everywhere.
+#
+# Deliberately *not* sized by the trade: `prepare()` is amount-independent so a
+# session reuses it across every amount typed, and the coarse pass only has to
+# produce `a` for §5.5 to price out with.  The trade-sized ladder belongs in
+# refine, which runs per amount and already has `nu`.
+VALUE_GRID_USD: tuple[float, ...] = (1_000.0, 50_000.0)
+
+# ...but a dollar grid alone is only half of it, and the missing half is not
+# cosmetic.  $50,000 into a $20k venue is not a probe, it is the whole pool: the
+# chord it measures is nowhere near the mid, so `sqrt(a_f * a_r)` collapses and
+# §4's round-trip floor mutes the arc.  Measured, unbounded: 34 arcs muted (from
+# zero) and 12 saturated (from 8), and the price frame that fell out of it broke
+# flow conservation by 1.3e-4 on crvUSD->sDOLA.
+#
+# So the size is `min(notional, RESERVE_CEILING * reserve)`, which is the shape
+# asked for: a fixed slice of the trade, capped by a fixed slice of the pool.
+# The cap scales the *whole* ladder rather than clipping each point, because
+# clipping collapses both points onto the cap on exactly the shallow pools that
+# need the span most, and two equal deltas are a zero denominator in the divided
+# differences.  1e-2 is where the reserve grid's own coarse pass topped out, and
+# it is the regime the round-trip floor was measured healthy in.
+RESERVE_CEILING = 1e-2
+
+
+def plan_value_deltas(
+    price_usd: float,
+    decimals: int,
+    grid: tuple[float, ...] = VALUE_GRID_USD,
+    reserve_in: int = 0,
+    ceiling: float = RESERVE_CEILING,
+) -> list[int]:
+    """Probe sizes worth a fixed number of dollars, capped by the pool's depth."""
+    if price_usd <= 0:
+        return []
+    unit = 10.0**decimals
+    sizes = [usd / price_usd * unit for usd in grid]
+    cap = ceiling * reserve_in
+    if cap > 0 and sizes and sizes[-1] > cap:
+        sizes = [size * (cap / sizes[-1]) for size in sizes]
+    floor = max(1, 10 ** max(0, decimals - 6))
+    out: list[int] = []
+    for size in sizes:
+        delta = max(int(size), floor)
+        if out and delta <= out[-1]:
+            continue
+        out.append(delta)
+    return out
+
 
 @dataclass(frozen=True, slots=True)
 class ArcRef:
@@ -66,6 +119,7 @@ class ArcRef:
     reserve_in: int
     decimals_in: int = 18
     decimals_out: int = 18
+    token_in: str = ""  # only for pricing the probe grid
 
     @property
     def id(self) -> str:
@@ -101,11 +155,28 @@ class ProbePlan:
         return len(self.probes)
 
 
-def plan_grid(arcs: list[ArcRef], grid: tuple[float, ...] = GRID) -> ProbePlan:
-    """One batch covering every arc's whole ladder."""
+def plan_grid(
+    arcs: list[ArcRef],
+    grid: tuple[float, ...] = GRID,
+    prices: dict[str, float] | None = None,
+) -> ProbePlan:
+    """One batch covering every arc's whole ladder.
+
+    With `prices`, sizes come from `VALUE_GRID_USD`; an arc whose input token
+    is unpriced falls back to the reserve grid, so coverage never depends on a
+    third party knowing about a token.
+    """
     plan = ProbePlan()
     for arc in arcs:
-        deltas = plan_deltas(arc.reserve_in, arc.decimals_in, grid)
+        deltas = []
+        if prices:
+            deltas = plan_value_deltas(
+                prices.get(arc.token_in.lower(), 0.0),
+                arc.decimals_in,
+                reserve_in=arc.reserve_in,
+            )
+        if not deltas:
+            deltas = plan_deltas(arc.reserve_in, arc.decimals_in, grid)
         if len(deltas) < 2:  # too little room to fit even a curvature estimate
             continue
         start = len(plan.probes)

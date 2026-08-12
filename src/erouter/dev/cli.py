@@ -314,6 +314,19 @@ def _resolve_token(nodes, symbol_or_address: str, pools) -> str:
     return ranked[0][0]
 
 
+def _probe_prices(chain) -> dict[str, float]:
+    """Rough USD prices, used only to size the coarse probe grid.
+
+    Degrading to `{}` is a real fallback, not a failure path: the planner then
+    sizes off each pool's own reserve exactly as it did before, so an API
+    outage costs probe placement rather than the route.
+    """
+    try:
+        return CurveApi().usd_prices(chain.api_name)
+    except (CurveApiError, OSError):
+        return {}
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
@@ -382,6 +395,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             gas_price_wei=gas_price_wei,
             refit_rounds=args.refit,
             extra_arcs=stake_arcs,
+            prices=_probe_prices(chain),
             max_legs=args.max_legs,
         )
     except RoutingError as exc:
@@ -413,7 +427,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
     started = time.monotonic()
     try:
         prepared = prepare(load.pools, nodes, client, src_token=src, dst_token=dst,
-                           extra_arcs=stake_arcs)
+                           extra_arcs=stake_arcs, prices=_probe_prices(chain))
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
         return 2
@@ -684,6 +698,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     kw = {
         "src_token": src, "dst_token": dst, "amount_in": amount,
         "extra_arcs": stake, "gas_price_wei": gas_price, "max_legs": args.max_legs,
+        "prices": _probe_prices(chain),
     }
 
     def phase(title, client, prepared):
@@ -709,7 +724,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
         _hot_functions(lambda: route(load.pools, nodes, uncached, **kw),
                        reference_ms=cold[0])
     warm_state = prepare(load.pools, nodes, cached, src_token=src, dst_token=dst,
-                         extra_arcs=stake)
+                         extra_arcs=stake, prices=kw["prices"])
     warm = phase("WARM   in-session: prepare() reused, probes cached", cached, warm_state)
     if args.profile and warm:
         _hot_functions(lambda: route(load.pools, nodes, cached, **kw, prepared=warm_state),

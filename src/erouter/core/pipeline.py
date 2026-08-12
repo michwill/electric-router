@@ -135,6 +135,7 @@ def build_arcs(
                     reserve_in=pool.balances[i],
                     decimals_in=pool.coins[i].decimals,
                     decimals_out=pool.coins[j].decimals,
+                    token_in=token_in,
                 )
             )
             meta.append((pool, i, j))
@@ -209,6 +210,7 @@ def prepare(
     src_token: str,
     dst_token: str,
     extra_arcs: list[PoolArc] | None = None,
+    prices: dict[str, float] | None = None,
     timings: dict[str, float] | None = None,
 ) -> Prepared:
     """The size-independent half: probe, calibrate, restrict, price.
@@ -229,7 +231,7 @@ def prepare(
     # the arcs that could carry something -- ~5,300 probes down to ~1,900.
     with clock("arcs"):
         refs, meta = build_arcs(pools, nodes)
-        plan = plan_grid(refs, grid=COARSE_GRID)
+        plan = plan_grid(refs, grid=COARSE_GRID, prices=prices)
     with clock("probe"):
         ladders = collect(plan, client.probe(plan.probes))
         retry = plan_refine(
@@ -344,6 +346,7 @@ def route(
     refit_rounds: int = 2,
     prepared: Prepared | None = None,
     extra_arcs: list[PoolArc] | None = None,
+    prices: dict[str, float] | None = None,
     max_legs: int = DEFAULT_MAX_LEGS,
 ) -> RouteResult:
     result = RouteResult(
@@ -367,7 +370,7 @@ def route(
         with clock("prepare"):
             prepared = prepare(
                 pools, nodes, client, src_token=src_token, dst_token=dst_token,
-                extra_arcs=extra_arcs, timings=result.timings,
+                extra_arcs=extra_arcs, prices=prices, timings=result.timings,
             )
     else:
         result.counters["reused_preparation"] = 1
