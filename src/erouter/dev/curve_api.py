@@ -21,6 +21,7 @@ import urllib.request
 from typing import Any
 
 PRICES_V2 = "https://prices.curve.finance/v2"
+PRICES_V1 = "https://prices.curve.finance/v1"
 MAX_PAGE_SIZE = 50  # anything larger is a 422
 DEFAULT_MIN_TVL = 10_000.0
 CACHE_TTL = 300.0  # matches the edge cache
@@ -119,6 +120,38 @@ class CurveApi:
             return pools[:limit] if limit else pools
 
         return self._cached(f"pools:{chain_id}:{min_tvl}:{limit}", produce)
+
+    def pool_filters(self, chain_id: int) -> set[str]:
+        """Curve's own list of pools that do not do what they advertise.
+
+        Same list curve_solver loads at startup.  These are not merely
+        illiquid -- illiquidity the router prices correctly by itself -- they
+        are pools whose quote and execution disagree: rebasing or
+        fee-on-transfer coins, broken oracles, deprecated implementations.  A
+        quoter cannot tell the difference, so `get_dy` looks perfectly healthy
+        right up until the swap delivers something else.
+
+        Returns lowercase addresses.  An unreachable endpoint yields an empty
+        set: routing on the full universe is worse than routing on a filtered
+        one, but it is much better than not routing at all, and every quote is
+        still verified on-chain.
+        """
+
+        def produce():
+            payload = _get(f"{PRICES_V1}/chains/pool_filters")
+            for entry in payload.get("data", []):
+                if entry.get("chain_id") == chain_id:
+                    return {
+                        pool["address"].lower()
+                        for pool in entry.get("pools", [])
+                        if pool.get("address")
+                    }
+            return set()
+
+        try:
+            return self._cached(f"filters:{chain_id}", produce)
+        except CurveApiError:
+            return set()
 
     def pool_detail(self, chain_id: int, address: str) -> dict:
         return self._cached(

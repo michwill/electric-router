@@ -25,6 +25,7 @@ class UniverseLoad:
     source: str  # "api" | "cache" | "stale"
     age: float = 0.0
     warnings: list[str] = field(default_factory=list)
+    filtered: int = 0
 
 
 def load_pools(
@@ -42,7 +43,10 @@ def load_pools(
     if not refresh:
         fresh = cache.get(chain.chain_id, min_tvl)
         if fresh is not None:
-            return UniverseLoad(parse_universe(fresh), "cache", cache.age(chain.chain_id, min_tvl))
+            pools, dropped = _apply_filters(parse_universe(fresh), chain, api, warnings)
+            load = UniverseLoad(pools, "cache", cache.age(chain.chain_id, min_tvl), warnings)
+            load.filtered = dropped
+            return load
 
     try:
         raw = api.list_pools(chain.chain_id, min_tvl=min_tvl)
@@ -52,10 +56,40 @@ def load_pools(
             raise
         age = cache.age(chain.chain_id, min_tvl)
         warnings.append(f"Curve API unavailable ({exc}); using a universe {age / 60:.0f} min old")
-        return UniverseLoad(parse_universe(stale), "stale", age, warnings)
+        pools, dropped = _apply_filters(parse_universe(stale), chain, api, warnings)
+        load = UniverseLoad(pools, "stale", age, warnings)
+        load.filtered = dropped
+        return load
 
     cache.put(chain.chain_id, min_tvl, raw)
-    return UniverseLoad(parse_universe(raw), "api", 0.0, warnings)
+    pools = parse_universe(raw)
+    pools, dropped = _apply_filters(pools, chain, api, warnings)
+    load = UniverseLoad(pools, "api", 0.0, warnings)
+    load.filtered = dropped
+    return load
+
+
+def _apply_filters(
+    pools: list[PoolSpec], chain: Chain, api: CurveApi, warnings: list[str]
+) -> tuple[list[PoolSpec], int]:
+    """Drop pools Curve itself flags as not honouring their quotes.
+
+    Applied after the TVL floor and outside the universe cache, because the
+    list changes on Curve's schedule rather than ours -- a pool can be flagged
+    long after it was cached, and continuing to route through it because of a
+    stale snapshot is the whole failure this prevents.
+    """
+    blocked = api.pool_filters(chain.chain_id)
+    if not blocked:
+        return pools, 0
+    kept = [p for p in pools if p.address.lower() not in blocked]
+    dropped = len(pools) - len(kept)
+    if dropped:
+        warnings.append(
+            f"{dropped} pool(s) excluded by Curve's pool_filters list "
+            f"({len(blocked)} flagged on this chain)"
+        )
+    return kept, dropped
 
 
 @dataclass(slots=True)
