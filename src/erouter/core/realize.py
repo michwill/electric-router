@@ -135,6 +135,96 @@ def cancel_cycles(
     return flow, removed
 
 
+# A branch carrying less than this share of what leaves its node cannot change
+# the answer, but it can still destroy it.  Measured on rETH->WETH: the best
+# candidate by 87 bp put 7e-6 of one node into frxETH->crvUSD, which then fed
+# six more legs -- crvUSD->scrvUSD->ynUSDx->ynRWAx->USDC->WETH -- each carrying
+# an amount that rounded to zero.  One of them quoted zero on a zero input, the
+# quoter aborted the whole route, and the candidate was dropped as "reverted"
+# in favour of one paying 57.42 instead of 57.97.
+#
+# `MIN_FLOW_FRACTION` in candidates.py does not catch this: it screens an arc's
+# flow against the *whole trade*, while a branch can be a meaningful share of
+# Psi and still be a rounding error at the node it leaves from.
+DUST_SHARE = 1e-4
+
+
+def prune_dust(
+    tau: np.ndarray,
+    sig: np.ndarray,
+    psi: np.ndarray,
+    src: int,
+    dst: int,
+    *,
+    share: float = DUST_SHARE,
+    tol: float = 1e-12,
+) -> tuple[np.ndarray, int]:
+    """Drop branches too small to matter, and whatever they were feeding.
+
+    Two rules, applied together until the flow stops changing:
+
+    * a branch carrying less than `share` of its node's outflow is dust;
+    * an arc no longer on any src->dst path goes with it, which is what
+      removes the orphaned tail rather than leaving legs quoting on nothing.
+
+    The dropped value is not lost.  The quoter splits a node by share of the
+    balance actually sitting in its slot and the last leg of a group sweeps the
+    remainder, so removing a branch hands its flow to its siblings -- and at
+    the optimum those siblings are priced within a hair of it (§6.1), so the
+    cost is second order in an amount already below 1 bp of the node.
+
+    This *does* leave KCL violated by up to `share` at the pruned node, which
+    is deliberate and belongs strictly after §12.4's check on the solved flow:
+    the invariant is about what the solver produced, and this is about what the
+    quoter can survive.  Returns the pruned flow and the number of arcs cut.
+    """
+    flow = np.array(psi, dtype=float)
+    if flow.size == 0:
+        return flow, 0
+    n = int(max(int(tau.max()), int(sig.max()), src, dst)) + 1
+    removed = 0
+    for _ in range(len(flow) + 1):
+        live = flow > tol
+        if not live.any():
+            break
+        out_total = np.zeros(n)
+        np.add.at(out_total, tau[live], flow[live])
+        doomed = live & (flow < share * out_total[tau])
+        doomed |= live & ~_on_a_path(tau, sig, live, n, src, dst)
+        if not doomed.any():
+            break
+        flow[doomed] = 0.0
+        removed += int(np.count_nonzero(doomed))
+    # Pruning may not decide there is no route.  If the trade no longer reaches
+    # the destination, the criterion was wrong for this flow and the original
+    # stands -- a reverting candidate is adjudicated by the quoter, an empty
+    # one never gets that far.
+    if not (flow[sig == dst] > tol).any():
+        return np.array(psi, dtype=float), 0
+    return flow, removed
+
+
+def _on_a_path(
+    tau: np.ndarray, sig: np.ndarray, live: np.ndarray, n: int, src: int, dst: int
+) -> np.ndarray:
+    """Live arcs reachable from `src` and co-reachable to `dst`."""
+    idx = np.flatnonzero(live)
+
+    def sweep(seed: int, frm: np.ndarray, to: np.ndarray) -> np.ndarray:
+        seen = np.zeros(n, dtype=bool)
+        seen[seed] = True
+        for _ in range(n):
+            nxt = to[idx[seen[frm[idx]]]]
+            if nxt.size == 0 or seen[nxt].all():
+                break
+            seen[nxt] = True
+        return seen
+
+    forward = sweep(src, tau, sig)
+    backward = sweep(dst, sig, tau)
+    return live & forward[tau] & backward[sig]
+
+
 def _find_cycle(tau: np.ndarray, sig: np.ndarray) -> list[int] | None:
     """One directed cycle as local arc indices, or None.
 

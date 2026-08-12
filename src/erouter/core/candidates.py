@@ -28,7 +28,7 @@ import numpy as np
 
 from .graph import ArcArrays
 from .quoter import MAX_LEGS, MAX_SLOTS
-from .realize import RealizedRoute, cancel_cycles
+from .realize import RealizedRoute, cancel_cycles, prune_dust
 from .seed import k_shortest_paths
 from .solve import Solution, active_set_solve
 from .types import PoolArc
@@ -164,6 +164,9 @@ def generate(
 
     def add(psi: np.ndarray, label: str, kind: str, certificate: bool, reason: str = "") -> bool:
         psi, _ = cancel_cycles(g.tau, g.sig, psi)
+        # Before the dedup signature, so two candidates differing only by a
+        # dust branch collapse into one instead of spending two verify slots.
+        psi, _ = prune_dust(g.tau, g.sig, psi, src, dst)
         active = int(np.count_nonzero(psi > 0))
         if active == 0:
             return False

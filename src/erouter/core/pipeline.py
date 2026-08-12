@@ -45,7 +45,13 @@ from .probe import (
     plan_sized,
 )
 from .quoter import MAX_LEGS, QuoterClient
-from .realize import RealizedRoute, cancel_cycles, check_one_arc_per_pool, realize
+from .realize import (
+    RealizedRoute,
+    cancel_cycles,
+    check_one_arc_per_pool,
+    prune_dust,
+    realize,
+)
 from .refit import RefitReport, refit
 from .seed import k_shortest_paths, seed_subgraph
 from .solve import SolveReport, active_set_solve, solve
@@ -547,6 +553,14 @@ def _quote(
 
     # --- realize (§5.6) ---------------------------------------------------
     with clock("realize"):
+        # Strictly after the KCL check above: that invariant is about the flow
+        # the solver produced, this is about the flow the quoter can survive.
+        psi, dust = prune_dust(g.tau, g.sig, psi, src_node, dst_node)
+        if dust:
+            result.counters["dust_arcs_pruned"] = dust
+            active = np.flatnonzero(psi > 0)
+            if active.size == 0:
+                raise RoutingError("the optimal flow is empty")
         live = [arcs[k] for k in active]
         result.route = realize(
             live, psi[active], nu, nodes,
