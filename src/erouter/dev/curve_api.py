@@ -121,41 +121,6 @@ class CurveApi:
 
         return self._cached(f"pools:{chain_id}:{min_tvl}:{limit}", produce)
 
-    def usd_prices(self, chain: str) -> dict[str, float]:
-        """Approximate USD price per token, for sizing probes.
-
-        Only ever used to choose *how big* a probe should be, never to value a
-        route -- that is what the §4 reference-price fit is for, and it is
-        measured on chain rather than read from an API.  So being within a
-        factor of two is plenty, and this is within 1%.
-
-        It buys the one thing the probe planner cannot get for itself: a scale
-        that means the same thing in every pool.  Sizing by a fraction of each
-        pool's own reserve makes a probe mean "a bit of this pool", which is
-        why a shallow venue gets sampled three orders below where any real
-        trade lands.
-        """
-
-        def produce() -> dict[str, float]:
-            payload = _get(f"{PRICES_V1}/usd_price/{chain}")
-            out: dict[str, float] = {}
-            for entry in payload.get("data", []):
-                address = (entry.get("address") or "").lower()
-                price = entry.get("usd_price")
-                if address and price:
-                    try:
-                        value = float(price)
-                    except (TypeError, ValueError):
-                        continue
-                    if value > 0:
-                        out[address] = value
-            return out
-
-        try:
-            return self._cached(f"usd:{chain}", produce)
-        except CurveApiError:
-            return {}
-
     def llamma_markets(self, chain: str) -> list[dict]:
         """crvUSD mint markets and Curve Lending markets, as raw entries.
 
