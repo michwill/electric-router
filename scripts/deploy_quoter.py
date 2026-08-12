@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Deploy RouteQuoter.vy, so quoting stops shipping the contract with it.
+
+Until it is deployed, every quote goes out as an `eth_call` with the runtime
+bytecode attached as a state override.  That works and needs no transaction --
+which is why development runs that way -- but it puts 7,486 bytes on the wire
+14,974 hex characters at a time, on *every* call.  Measured on a cold
+USDC->WETH route over a 129 ms link: 14 round trips, 1.54 MB sent, of which
+0.21 MB (14%) was the contract.
+
+Deploying also takes boa out of the request path entirely.  `core/quoter.py`
+already builds calldata for "a RouteQuoter at this address", so once one
+exists the browser build needs nothing but `eth_call` -- no compiler, no
+state-override support, no boa.  That is the §Portability seam, and this is
+the script that opens it.
+
+Dry-runs on a fork by default; `--broadcast` sends it for real.
+
+    python scripts/deploy_quoter.py --chain ethereum
+    python scripts/deploy_quoter.py --chain ethereum --broadcast --verify
+
+The deployer key is a brownie keystore under `~/.brownie/accounts/`, decoded
+with a passphrase at the prompt -- the same arrangement yb-core's scripts use.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from getpass import getpass
+from pathlib import Path
+from time import sleep
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO / "src"))
+
+CONTRACT = REPO / "contracts" / "RouteQuoter.vy"
+# A pool and a swap that every mainnet fork can answer, used to prove the
+# deployed contract behaves identically to the one we have been overriding.
+SANITY_POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"  # 3pool
+SANITY_DX = 1_000 * 10**6  # 1,000 USDC
+
+
+def account_load(name: str):
+    """A brownie keystore, decoded at the prompt.  Never a plaintext key."""
+    from eth_account import account
+
+    path = os.path.expanduser(os.path.join("~", ".brownie", "accounts", name + ".json"))
+    if not os.path.exists(path):
+        raise SystemExit(f"no keystore at {path}")
+    with open(path) as handle:
+        key = account.decode_keyfile_json(json.load(handle), getpass(f"passphrase for {name}: "))
+    return account.Account.from_key(key)
+
+
+def verify_with_retries(contract, etherscan, attempts: int = 6, pause: int = 10) -> None:
+    """Etherscan needs the code indexed before it will look at it."""
+    from boa.verifiers import verify as boa_verify
+
+    for attempt in range(attempts):
+        try:
+            sleep(pause)
+            boa_verify(contract, etherscan, wait=True)
+            print("  verified")
+            return
+        except ValueError as exc:
+            if "Already Verified" in str(exc):
+                print("  already verified")
+                return
+            print(f"  verify attempt {attempt + 1}/{attempts}: {exc}")
+    print("  ! not verified -- the deployment is still good, verify by hand")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--chain", default="ethereum")
+    parser.add_argument("--account", default="babe", help="brownie keystore name")
+    parser.add_argument(
+        "--broadcast", action="store_true",
+        help="send the transaction. Without it, this deploys on a fork and "
+             "throws the result away, which is the safe way to rehearse",
+    )
+    parser.add_argument("--verify", action="store_true", help="submit to Etherscan")
+    args = parser.parse_args()
+
+    import boa
+
+    from erouter.dev import chains as chain_table
+    from erouter.dev import config
+    from erouter.dev.boa_host import runtime_bytecode
+
+    chain = chain_table.get(args.chain)
+    url = config.rpc_url(chain.rpc_attr)
+    expected = runtime_bytecode()
+    print(f"{chain.name} (chain {chain.chain_id})")
+    print(f"  contract  {CONTRACT.relative_to(REPO)}  ({len(expected):,} bytes runtime)")
+    print(f"  mode      {'BROADCAST' if args.broadcast else 'fork rehearsal'}")
+
+    if args.broadcast:
+        boa.set_network_env(url)
+        deployer = account_load(args.account)
+        boa.env.add_account(deployer)
+        print(f"  deployer  {deployer.address}")
+    else:
+        boa.fork(url)
+        boa.env.eoa = boa.env.generate_address()
+        print(f"  deployer  {boa.env.eoa} (fork)")
+
+    quoter = boa.load(str(CONTRACT))
+    address = str(quoter.address)
+    print(f"\n  deployed at {address}")
+
+    # Same bytes we have been overriding with?  A mismatch means the deployed
+    # contract is not the one every measurement in this repo was taken against.
+    on_chain = boa.env.get_code(quoter.address)
+    if bytes(on_chain) != bytes(expected):
+        print(f"  ! runtime differs: {len(on_chain):,} on chain vs {len(expected):,} compiled")
+        return 1
+    print(f"  runtime matches the compiled bytecode ({len(expected):,} bytes)")
+
+    # And does it answer?  Compare it against the override path on the same
+    # block, because "deployed" and "usable" are different claims.
+    from erouter.core.quoter import QuoterClient
+    from erouter.core.types import ArcKind, Probe
+    from erouter.dev.boa_host import override_client
+    from erouter.dev.rpc import JsonRpcTransport
+
+    probe = [Probe(SANITY_POOL, ArcKind.SWAP_STABLE, 1, 2, 3, SANITY_DX)]
+    if args.broadcast:
+        rpc = JsonRpcTransport(url)
+        deployed = QuoterClient(rpc, address).probe(probe)[0]
+        overridden = override_client(rpc).probe(probe)[0]
+        print("\n  sanity 1,000 USDC -> USDT on 3pool")
+        print(f"    deployed   {deployed.value:,} ({deployed.status.name})")
+        print(f"    override   {overridden.value:,} ({overridden.status.name})")
+        if deployed.value != overridden.value or not deployed.ok:
+            print("  ! the deployed quoter disagrees with the override; not usable")
+            return 1
+        print("    agree")
+
+        if args.verify:
+            from boa.explorer import Etherscan
+
+            key = getattr(config.networks(), "ETHERSCAN_API_KEY", None)
+            if key:
+                verify_with_retries(quoter, Etherscan(api_key=key))
+            else:
+                print("  ! no ETHERSCAN_API_KEY in networks.py; skipping verification")
+
+        print("\n  add to src/erouter/dev/chains.py:")
+        print(f'      quoter="{address}",   # in the {chain.name} entry')
+        print("  after which routing stops sending the bytecode with every call.")
+    else:
+        print("\n  fork rehearsal only -- nothing was broadcast.")
+        print("  re-run with --broadcast (and --verify) when you want it on chain.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

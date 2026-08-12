@@ -46,6 +46,20 @@ def override_client(rpc: JsonRpcTransport, address: str = SCRATCH) -> QuoterClie
     return QuoterClient(rpc, address, overrides=overrides)
 
 
+def quoter_client(rpc: JsonRpcTransport, chain) -> QuoterClient:
+    """The deployed quoter when the chain has one, else the override.
+
+    Prefer deployed: it sends 7,486 fewer bytes per call and needs neither a
+    compiler nor state-override support, so the same code path works from a
+    browser.  The override stays as the fallback because it needs no
+    deployment at all, which is what makes a new chain routable on day one.
+    """
+    address = (getattr(chain, "quoter", "") or "").strip()
+    if address:
+        return QuoterClient(rpc, address)
+    return override_client(rpc)
+
+
 class BoaHost:
     """`Transport` backed by boa's EVM (plain local env, or a fork)."""
 

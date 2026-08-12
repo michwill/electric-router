@@ -30,6 +30,12 @@ class Chain:
     # through a withdrawal queue; sUSDe has a 7-day cooldown; sfrxUSD has
     # maxDeposit == 0.  Merging any of those mints value from nothing.
     # Every entry must pass an executed deposit/redeem on a fork (see tests).
+    # A deployed RouteQuoter, if there is one.  With it, quoting is a plain
+    # `eth_call` to a known address; without it the runtime bytecode rides
+    # along as a state override on every call (7,486 bytes, ~14% of a cold
+    # route's upload).  A deployed quoter also takes boa out of the request
+    # path, which is what the browser build needs.
+    quoter: str = ""
     erc4626_allowlist: tuple[str, ...] = ()
     # (token, canonical) pairs handled by ConversionKind.WSTETH.  Kept off the
     # ERC4626 list because wstETH predates that standard and exposes its own

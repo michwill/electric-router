@@ -112,7 +112,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_pools(args: argparse.Namespace) -> int:
     """Load the universe and resolve every pool's ABI dialect."""
-    from .boa_host import override_client
+    from .boa_host import quoter_client
     from .rpc import JsonRpcTransport
     from .universe import count_swap_arcs, load_pools, resolve_dialects
 
@@ -128,7 +128,7 @@ def cmd_pools(args: argparse.Namespace) -> int:
         print(f"{WARN} {warning}")
 
     rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
-    client = override_client(rpc)
+    client = quoter_client(rpc, chain)
     audit = resolve_dialects(load.pools, client, chain, use_cache=not args.refresh)
 
     source = load.source + (f" ({load.age / 60:.0f} min old)" if load.source != "api" else "")
@@ -183,7 +183,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
     from ..core.calibrate import CalibrationError, asym, calibrate, peg_boundary
     from ..core.prices import gamma_live
     from ..core.probe import collect, plan_grid
-    from .boa_host import override_client
+    from .boa_host import quoter_client
     from .rpc import JsonRpcTransport
     from .universe import arc_refs, load_pools, read_balances, resolve_dialects
 
@@ -196,7 +196,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
         return 2
 
     rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
-    client = override_client(rpc)
+    client = quoter_client(rpc, chain)
     resolve_dialects(pools, client, chain)
     read_balances(pools, client)
 
@@ -318,7 +318,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
     from ..core.pipeline import RoutingError, route
-    from .boa_host import override_client
+    from .boa_host import quoter_client
     from .probe_cache import CachedQuoterClient
     from .rpc import JsonRpcTransport
     from .universe import load_pools, read_balances, resolve_dialects
@@ -335,7 +335,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 4
 
     rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
-    client = override_client(rpc)
+    client = quoter_client(rpc, chain)
     resolve_dialects(load.pools, client, chain, use_cache=not args.refresh)
     read_balances(load.pools, client)
     if not args.no_cache:
@@ -630,7 +630,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
     from ..core.pipeline import RoutingError, prepare, route
-    from .boa_host import override_client
+    from .boa_host import quoter_client
     from .probe_cache import CachedQuoterClient
     from .rpc import JsonRpcTransport
     from .universe import load_pools, read_balances, resolve_dialects
@@ -655,7 +655,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
-    raw = override_client(rpc)
+    raw = quoter_client(rpc, chain)
     cached = CachedQuoterClient(raw, chain.chain_id, rpc.block)
     uncached = CachedQuoterClient(raw, chain.chain_id, rpc.block, enabled=False)
     resolve_dialects(load.pools, cached, chain)
