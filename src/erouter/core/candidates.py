@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .graph import ArcArrays
+from .quoter import MAX_SLOTS
 from .realize import RealizedRoute, cancel_cycles
 from .seed import k_shortest_paths
 from .solve import Solution, active_set_solve
@@ -42,6 +43,20 @@ PIN_LADDER = (0.0, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0)
 # by the quoter, so they are solved to this screen rather than to machine
 # tolerance; the certified base solve is not.
 MIN_FLOW_FRACTION = 1e-4
+# A candidate is realised into the quoter's slot accumulator, one slot per
+# distinct token it touches.  A support wider than that cannot be priced no
+# matter how good it is, so counting nodes is a cheap, sound rejection: the
+# realised slot count is never *fewer* than the distinct nodes carrying flow
+# (conversions only add spokes).
+#
+# Predicting it from the relaxation's own width does not work.  The obvious
+# argument -- pin/drop/repair perturb C0 by one arc, so they inherit its width
+# -- is false: forbidding an arc makes the re-solve find a different and
+# sometimes far narrower support.  Skipping those families on that reasoning
+# cost 5.65 bp on a $100 USDC->USDT swap and 0.49 bp at $1,000.  So the family
+# is stopped only once it has actually produced this many unrealisable
+# candidates in a row, which costs a few pivots to learn and never guesses.
+WIDE_STREAK = 2
 # Candidates are heuristics; stopping early yields a feasible flow, not a
 # broken one, and the quoter is what decides between them anyway.
 CANDIDATE_PIVOTS = 60
@@ -72,6 +87,9 @@ class Candidate:
 class CandidateSet:
     candidates: list[Candidate] = field(default_factory=list)
     skipped: int = 0
+    # Node count of the relaxation when it was too wide for any perturbation of
+    # it to be realisable; 0 when the pin/drop/repair families ran normally.
+    skipped_wide: int = 0
 
     def __len__(self) -> int:
         return len(self.candidates)
@@ -130,6 +148,19 @@ def generate(
     out = CandidateSet()
     seen: set[tuple] = set()
 
+    streak: dict[str, int] = {}
+
+    def exhausted(kind: str) -> bool:
+        """Has this family produced only unrealisable candidates lately?"""
+        return streak.get(kind, 0) >= WIDE_STREAK
+
+    def width(psi: np.ndarray) -> int:
+        """Distinct nodes carrying flow -- a lower bound on realised slots."""
+        live = psi > 0
+        if not live.any():
+            return 0
+        return int(np.unique(np.concatenate([g.tau[live], g.sig[live]])).size)
+
     def add(psi: np.ndarray, label: str, kind: str, certificate: bool, reason: str = "") -> bool:
         psi, _ = cancel_cycles(g.tau, g.sig, psi)
         active = int(np.count_nonzero(psi > 0))
@@ -187,6 +218,14 @@ def generate(
                         banned[k] = True
         else:
             return False
+        if width(solution.psi) > MAX_SLOTS:
+            # Solved, and unrealisable.  Adding it would spend a realise and a
+            # slot in the verification batch to learn what the node count
+            # already said.
+            out.skipped += 1
+            streak[kind] = streak.get(kind, 0) + 1
+            return False
+        streak[kind] = 0
         return add(solution.psi, label, kind, False, "RESTRICTED")
 
     # 1. the relaxation itself
@@ -248,6 +287,8 @@ def generate(
         forbidden = np.array([pool not in keep for pool in pools], dtype=bool)
         made += bool(resolve(forbidden, f"top {k} pool{'s' if k > 1 else ''}", "sparse"))
 
+    out.skipped_wide = width(base.psi)
+
     # 3. pin sweep on every active flagged arc (§6.3).  Still ahead of the drop
     #    candidates, because no drop candidate can find a chord interior.
     made = 0
@@ -267,9 +308,9 @@ def generate(
                     pinned={arc_index: pin},
                 )
             )
-            if made >= pin_budget or len(out) >= max_candidates:
+            if made >= pin_budget or len(out) >= max_candidates or exhausted("pin"):
                 break
-        if made >= pin_budget or len(out) >= max_candidates:
+        if made >= pin_budget or len(out) >= max_candidates or exhausted("pin"):
             break
 
     # 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
@@ -295,7 +336,7 @@ def generate(
         forbidden = np.zeros(g.m, bool)
         forbidden[k] = True
         resolve(forbidden, f"drop {arcs[int(k)].note[:20]}", "drop")
-        if len(out) >= max_candidates:
+        if len(out) >= max_candidates or exhausted("drop"):
             break
 
     out.candidates = out.candidates[:max_candidates]
