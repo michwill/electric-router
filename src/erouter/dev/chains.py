@@ -82,6 +82,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="ETH",
         wrapped="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         erc4626_allowlist=(SCRVUSD, SDOLA, SDAI, SUSDS, SFRXETH, SGHO, STUSDS),
+        quoter="0x88E24d1942A1a126E9330B4bc6303D40Ebf6FFD0",
         wsteth_pairs=((WSTETH, STETH),),
         stake_arcs=(
             # Lido: 1 ETH -> 1 stETH, capped by the daily staking limit.

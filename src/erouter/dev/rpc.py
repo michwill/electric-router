@@ -22,6 +22,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -33,6 +34,10 @@ USER_AGENT = "electric-router/0.1"
 # JSON-RPC batches are chunked by both count and total calldata size; a chunk
 # that fails outright is halved and retried before falling back per call.
 DEFAULT_BATCH = 500
+# Concurrent HTTP streams for independent calls.  One stream does not fill a
+# slow uplink: three 600-probe chunks measured 3,979 ms serial, 2,334 ms at
+# once.  Kept modest so a public endpoint does not read it as abuse.
+DEFAULT_STREAMS = 4
 MAX_BATCH_BYTES = 16 << 20
 
 
@@ -114,10 +119,12 @@ class JsonRpcTransport:
         *,
         timeout: float = 300.0,
         batch_size: int = DEFAULT_BATCH,
+        max_streams: int = DEFAULT_STREAMS,
     ) -> None:
         self.url = url
         self.timeout = timeout
         self.batch_size = batch_size
+        self.max_streams = max_streams
         self._id = 0
         # Before the first fetch below: `_post` accounts into it.
         self.stats = RpcStats()
@@ -158,6 +165,28 @@ class JsonRpcTransport:
                 params.append(overrides)
             payloads.append(("eth_call", params))
         return [_answer(r) for r in self.fetch_multi(payloads)]
+
+    def call_batch(
+        self, requests: list[bytes], *, to: str, overrides: dict | None = None
+    ) -> list[bytes | None]:
+        """Independent eth_calls, one connection each, issued concurrently.
+
+        Threads rather than async because `urllib` is blocking and this is the
+        only place in the codebase that waits on more than one socket.
+        """
+        if len(requests) <= 1:
+            return [self._try_call(d, to=to, overrides=overrides) for d in requests]
+        workers = min(len(requests), self.max_streams)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(
+                pool.map(lambda d: self._try_call(d, to=to, overrides=overrides), requests)
+            )
+
+    def _try_call(self, data: bytes, *, to: str, overrides: dict | None) -> bytes | None:
+        try:
+            return self.call(to, data, overrides=overrides)
+        except Exception:
+            return None
 
     # -------------------------------------------------------------------- wire
 
