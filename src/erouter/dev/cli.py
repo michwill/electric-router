@@ -546,6 +546,146 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
     return 0
 
 
+# `prepare` is a parent span wrapping these, so counting both double-counts.
+_PREPARE_CHILDREN = ("arcs", "probe", "calibrate", "component", "prices")
+# Stages whose cost is a network round trip rather than arithmetic.
+_RPC_STAGES = {"probe", "refine", "verify", "direct", "refit"}
+_STAGE_ORDER = (
+    "arcs", "probe", "calibrate", "component", "prices",
+    "graph", "seed", "refine", "solve", "candidates", "direct", "verify",
+    "refit", "realize",
+)
+
+
+def _stage_table(title: str, wall_ms: float, timings: dict[str, float], width: int = 34):
+    """One phase's stage breakdown, split into network and compute."""
+    print(f"\n  {title}   {wall_ms:,.0f} ms wall")
+    print(f"  {'stage':<12}{'ms':>9}{'share':>8}  where")
+    rpc = cpu = 0.0
+    for name in _STAGE_ORDER:
+        ms = timings.get(name)
+        if not ms:
+            continue
+        where = "rpc" if name in _RPC_STAGES else "cpu"
+        if where == "rpc":
+            rpc += ms
+        else:
+            cpu += ms
+        bar = "#" * max(1, int(ms / max(wall_ms, 1e-9) * width))
+        print(f"  {name:<12}{ms:>9,.0f}{ms / wall_ms * 100:>7.1f}%  {where}  {bar}")
+    other = wall_ms - rpc - cpu
+    print(f"  {'-' * 46}")
+    for label, value in (("network", rpc), ("compute", cpu), ("unclocked", other)):
+        print(f"  {label:<12}{value:>9,.0f}{value / wall_ms * 100:>7.1f}%")
+    return rpc, cpu
+
+
+def cmd_bench(args: argparse.Namespace) -> int:
+    """Where a route's time goes, cold and warm.
+
+    Two phases, because they have opposite shapes and different audiences.
+    *Cold* is an app's first quote: probing the universe dominates and it is
+    almost entirely network, so it moves with your connection, not with the
+    solver.  *Warm* is every quote after that in a session -- `prepare()`
+    reused, probes cached -- and it is almost entirely compute.  A session pays
+    cold once and warm per keystroke.
+    """
+    import statistics
+    import time as _time
+    from decimal import Decimal
+
+    from ..core.pipeline import RoutingError, prepare, route
+    from .boa_host import override_client
+    from .probe_cache import CachedQuoterClient
+    from .rpc import JsonRpcTransport
+    from .universe import load_pools, read_balances, resolve_dialects
+    from .wrappers import build_node_map, build_stake_arcs
+
+    chain = chain_table.get(args.chain)
+    try:
+        rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
+    except Exception as exc:
+        print(f"{BAD} node unreachable: {exc}")
+        return 4
+
+    # Baseline the link before anything else, so a slow network is visible as a
+    # number rather than as a mysteriously large `probe` stage.
+    rpc.stats.reset()
+    for _ in range(5):
+        rpc.fetch("eth_chainId", [])
+    link_ms = rpc.stats.mean_ms
+
+    try:
+        load = load_pools(chain, min_tvl=args.min_tvl, llamma=args.llamma)
+    except CurveApiError as exc:
+        print(f"{BAD} {exc}")
+        return 4
+    raw = override_client(rpc)
+    cached = CachedQuoterClient(raw, chain.chain_id, rpc.block)
+    uncached = CachedQuoterClient(raw, chain.chain_id, rpc.block, enabled=False)
+    resolve_dialects(load.pools, cached, chain)
+    read_balances(load.pools, cached)
+    nodes, _ = build_node_map(load.pools, chain, cached)
+    stake = build_stake_arcs(nodes, chain, cached)
+
+    try:
+        src = _resolve_token(None, args.src, load.pools)
+        dst = _resolve_token(None, args.dst, load.pools)
+    except KeyError as exc:
+        print(f"{BAD} {exc}")
+        return 2
+    amount = int(Decimal(args.amount.replace("_", "")) * 10 ** nodes.decimals(src))
+    gas_price = (
+        int(float(args.gas_price) * 1e9) if args.gas_price is not None else rpc.gas_price()
+    )
+
+    print(f"\n  {chain.name} · block {rpc.block:,} · {len(load.pools)} pools · "
+          f"gas {gas_price / 1e9:.4f} gwei")
+    print(f"  {nodes.symbol(src)} -> {nodes.symbol(dst)}, "
+          f"{Decimal(args.amount.replace('_', '')):,} in, {args.reps} reps (min)")
+    print(f"  link: {link_ms:.1f} ms per JSON-RPC round trip  "
+          f"({'local' if link_ms < 15 else 'remote — expect the cold phase to scale with this'})")
+
+    kw = {
+        "src_token": src, "dst_token": dst, "amount_in": amount,
+        "extra_arcs": stake, "gas_price_wei": gas_price, "max_legs": args.max_legs,
+    }
+
+    def phase(title, client, prepared):
+        try:
+            route(load.pools, nodes, client, **kw, prepared=prepared)
+        except RoutingError as exc:
+            print(f"{BAD} no route: {exc}")
+            return None
+        runs = []
+        for _ in range(args.reps):
+            started = _time.perf_counter()
+            result = route(load.pools, nodes, client, **kw, prepared=prepared)
+            runs.append((_time.perf_counter() - started, result))
+        wall, best = min(runs, key=lambda pair: pair[0])
+        spread = statistics.pstdev([r * 1000 for r, _ in runs]) if len(runs) > 1 else 0.0
+        rpc_ms, cpu_ms = _stage_table(title, wall * 1000, best.timings)
+        if spread > wall * 1000 * 0.15:
+            print(f"  {WARN} run-to-run spread {spread:.0f} ms — machine is busy")
+        return wall * 1000, rpc_ms, cpu_ms, best
+
+    cold = phase("COLD   first quote: probes the universe", uncached, None)
+    warm_state = prepare(load.pools, nodes, cached, src_token=src, dst_token=dst,
+                         extra_arcs=stake)
+    warm = phase("WARM   in-session: prepare() reused, probes cached", cached, warm_state)
+    if cold and warm:
+        print(f"\n  cold {cold[0]:,.0f} ms ({cold[1] / cold[0] * 100:.0f}% network)"
+              f"   ->   warm {warm[0]:,.0f} ms ({warm[2] / warm[0] * 100:.0f}% compute)"
+              f"   {cold[0] / warm[0]:.1f}x")
+        counters = warm[3].counters
+        print(f"  {counters.get('arcs_calibrated', 0)} arcs · "
+              f"{counters.get('active_arcs', 0)} active · "
+              f"{counters.get('cg_rounds', 0)} CG rounds · "
+              f"{counters.get('candidates', 0)} candidates "
+              f"({counters.get('candidates_quoted', 0)} quoted)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="erouter", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -572,6 +712,19 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--min-tvl", type=float, default=10_000.0)
     probe.add_argument("--pair", help="only this direction, e.g. 0,1")
     probe.set_defaults(func=cmd_probe)
+
+    bench = sub.add_parser("bench", help="where a route's time goes, cold and warm")
+    bench.add_argument("--from", dest="src", default="USDC")
+    bench.add_argument("--to", dest="dst", default="WETH")
+    bench.add_argument("--amount", default="100000", help="in human units")
+    bench.add_argument("--chain", default="ethereum")
+    bench.add_argument("--block", default="latest")
+    bench.add_argument("--min-tvl", type=float, default=10_000.0)
+    bench.add_argument("--reps", type=int, default=4, help="timed runs per phase; min wins")
+    bench.add_argument("--gas-price", default=None, help="gwei; defaults to the live price")
+    bench.add_argument("--max-legs", type=int, default=32)
+    bench.add_argument("--llamma", action="store_true")
+    bench.set_defaults(func=cmd_bench)
 
     route_cmd = sub.add_parser("route", help="compute and draw an optimal route")
     route_cmd.add_argument("--from", dest="src", required=True, help="symbol or address")

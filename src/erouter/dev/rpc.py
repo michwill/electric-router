@@ -19,6 +19,7 @@ were each established by measurement against the local Erigon node:
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -85,6 +86,24 @@ def revert_reason(data: Any) -> str:
     return "" if data is None else str(data)
 
 
+@dataclass(slots=True)
+class RpcStats:
+    """What the transport actually spent, for telling network from compute."""
+
+    round_trips: int = 0
+    seconds: float = 0.0
+    bytes_sent: int = 0
+
+    @property
+    def mean_ms(self) -> float:
+        return self.seconds / self.round_trips * 1000 if self.round_trips else 0.0
+
+    def reset(self) -> None:
+        self.round_trips = 0
+        self.seconds = 0.0
+        self.bytes_sent = 0
+
+
 class JsonRpcTransport:
     """Read-only JSON-RPC client pinned to a block."""
 
@@ -100,6 +119,8 @@ class JsonRpcTransport:
         self.timeout = timeout
         self.batch_size = batch_size
         self._id = 0
+        # Before the first fetch below: `_post` accounts into it.
+        self.stats = RpcStats()
         chain_id = int(self.fetch("eth_chainId", []), 16)
         resolved = (
             int(self.fetch("eth_blockNumber", []), 16) if block == "latest" else int(block)
@@ -147,6 +168,15 @@ class JsonRpcTransport:
 
     def _post(self, body: Any) -> Any:
         payload = json.dumps(body).encode()
+        self.stats.round_trips += 1
+        self.stats.bytes_sent += len(payload)
+        started = time.perf_counter()
+        try:
+            return self._post_inner(payload)
+        finally:
+            self.stats.seconds += time.perf_counter() - started
+
+    def _post_inner(self, payload: bytes) -> Any:
         request = urllib.request.Request(
             self.url,
             data=payload,
