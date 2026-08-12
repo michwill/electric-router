@@ -37,7 +37,7 @@ from .probe import (
     plan_grid,
     plan_refine,
 )
-from .quoter import QuoterClient
+from .quoter import MAX_LEGS, QuoterClient
 from .realize import RealizedRoute, cancel_cycles, check_one_arc_per_pool, realize
 from .refit import RefitReport, refit
 from .seed import k_shortest_paths, seed_subgraph
@@ -321,6 +321,7 @@ def route(
     refit_rounds: int = 2,
     prepared: Prepared | None = None,
     extra_arcs: list[PoolArc] | None = None,
+    max_legs: int = MAX_LEGS,
 ) -> RouteResult:
     result = RouteResult(
         src_token=src_token.lower(),
@@ -365,7 +366,7 @@ def route(
         src_node=src_node, dst_node=dst_node, max_rounds=max_rounds,
         seed_k=seed_k, verify_on_chain=verify_on_chain,
         max_candidates=max_candidates, gas_price_wei=gas_price_wei,
-        refit_rounds=refit_rounds, prepared=prepared,
+        refit_rounds=refit_rounds, prepared=prepared, max_legs=max_legs,
     )
 
 
@@ -391,6 +392,7 @@ def _quote(
     gas_price_wei: int,
     refit_rounds: int,
     prepared: Prepared | None,
+    max_legs: int = MAX_LEGS,
 ) -> RouteResult:
     """The size-dependent half: graph, solve, candidates, verify, refit."""
     amount_human = amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
@@ -545,7 +547,7 @@ def _quote(
             realize_candidates(
                 pool_set, arcs, nu, nodes,
                 src_token=src_token, dst_token=dst_token, amount_in=amount_in,
-                potentials=report.solution.u,
+                potentials=report.solution.u, max_legs=max_legs,
             )
         with clock("verify"):
             verify(
@@ -572,6 +574,7 @@ def _quote(
                 realize_candidates(
                     trial, [arc], nu, nodes,
                     src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+                    max_legs=max_legs,
                 )
                 if candidate.status == "ready":
                     pool_set.candidates.append(candidate)
@@ -583,6 +586,7 @@ def _quote(
                 realize_candidates(
                     trial, pair, nu, nodes,
                     src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+                    max_legs=max_legs,
                 )
                 if candidate.status == "ready":
                     pool_set.candidates.append(candidate)
@@ -596,6 +600,16 @@ def _quote(
 
         winner = pool_set.best
         if winner is None:
+            # The modelled route was never capped -- it is the relaxation's own
+            # answer, not a candidate -- so falling back to it would hand back
+            # a route that breaks the limit the caller set.  If nothing fits,
+            # the honest answer is that there is no route at this width.
+            if result.route and len(result.route.legs) > max_legs:
+                raise RoutingError(
+                    f"no route within {max_legs} legs: every candidate was "
+                    f"longer, and the modelled route needs "
+                    f"{len(result.route.legs)}"
+                )
             result.warnings.append(
                 "no candidate could be quoted on-chain; falling back to the "
                 "modelled route (treat the output as unverified)"
@@ -616,7 +630,7 @@ def _quote(
                         src_node=src_node, dst_node=dst_node, Psi=Psi_scaled,
                         src_token=src_token, dst_token=dst_token,
                         amount_in=amount_in, rounds=refit_rounds,
-                        gas_price_wei=gas_price_wei,
+                        gas_price_wei=gas_price_wei, max_legs=max_legs,
                     )
 
     result.price_out_per_in = float(nu[src_node] / nu[dst_node]) if nu[dst_node] else 0.0
@@ -826,6 +840,7 @@ def _refit_winner(
     amount_in: int,
     rounds: int,
     gas_price_wei: int,
+    max_legs: int = MAX_LEGS,
 ) -> None:
     """§8 -- refit the winner, re-solve, and let the chain adjudicate again.
 
@@ -880,6 +895,7 @@ def _refit_winner(
     realize_candidates(
         trial, arcs, nu, nodes,
         src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+        max_legs=max_legs,
     )
     verify_candidates(trial, client, amount_in=amount_in)
     if not refitted.ok:

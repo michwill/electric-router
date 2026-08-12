@@ -35,7 +35,7 @@ class FakePool:
 def test_flagged_pools_are_dropped():
     pools = [FakePool("0xAAA"), FakePool("0xBbB"), FakePool("0xCCC")]
     warnings: list[str] = []
-    kept, dropped = _apply_filters(pools, FakeChain(), FakeApi({"0xbbb"}), warnings)
+    kept, dropped = _apply_filters(pools, FakeChain(), FakeApi({"0xbbb"}), warnings, enabled=True)
 
     assert dropped == 1
     assert [p.address for p in kept] == ["0xAAA", "0xCCC"]
@@ -45,9 +45,22 @@ def test_flagged_pools_are_dropped():
 def test_matching_is_case_insensitive():
     """The API returns checksummed addresses; our specs are mixed case."""
     pools = [FakePool("0xDeAdBeEf"), FakePool("0xFEED")]
-    kept, dropped = _apply_filters(pools, FakeChain(), FakeApi({"0xdeadbeef"}), [])
+    kept, dropped = _apply_filters(pools, FakeChain(), FakeApi({"0xdeadbeef"}), [], enabled=True)
     assert dropped == 1
     assert [p.address for p in kept] == ["0xFEED"]
+
+
+def test_it_is_off_by_default():
+    """Measured against the live API it drops nothing -- /v2/pools already
+    excludes every flagged pool -- so nobody should pay an HTTP round trip for
+    it unless they want the cache-staleness protection."""
+    api = FakeApi({"0xaaa"})
+    pools = [FakePool("0xAAA"), FakePool("0xBBB")]
+    kept, dropped = _apply_filters(pools, FakeChain(), api, [])
+
+    assert dropped == 0
+    assert len(kept) == 2
+    assert api.calls == 0, "the filter list must not be fetched when disabled"
 
 
 def test_an_unreachable_filter_list_does_not_empty_the_universe():
@@ -55,7 +68,7 @@ def test_an_unreachable_filter_list_does_not_empty_the_universe():
     not routing.  Every quote is verified on-chain regardless."""
     pools = [FakePool("0xAAA"), FakePool("0xBBB")]
     warnings: list[str] = []
-    kept, dropped = _apply_filters(pools, FakeChain(), FakeApi(set()), warnings)
+    kept, dropped = _apply_filters(pools, FakeChain(), FakeApi(set()), warnings, enabled=True)
 
     assert dropped == 0
     assert len(kept) == 2

@@ -118,7 +118,8 @@ def cmd_pools(args: argparse.Namespace) -> int:
 
     chain = chain_table.get(args.chain)
     try:
-        load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh)
+        load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
+                          pool_filters=args.pool_filters)
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
@@ -325,7 +326,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     chain = chain_table.get(args.chain)
     started = time.monotonic()
     try:
-        load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh)
+        load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
+                          pool_filters=args.pool_filters)
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
@@ -378,6 +380,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             gas_price_wei=gas_price_wei,
             refit_rounds=args.refit,
             extra_arcs=stake_arcs,
+            max_legs=args.max_legs,
         )
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
@@ -452,6 +455,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 gas_price_wei=getattr(args, "gas_price_wei", 0),
                 refit_rounds=args.refit,
                 prepared=prepared,
+                max_legs=args.max_legs,
             )
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
@@ -590,6 +594,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     route_cmd.add_argument("--no-cache", action="store_true", help="re-probe every arc")
     route_cmd.add_argument("--refit", type=int, default=2, help="§8 refit rounds (0 = off)")
+    route_cmd.add_argument(
+        "--max-legs", type=int, default=32,
+        help="reject routes with more legs than this; 32 is the quoter's own "
+             "capacity, a deployed router will want far fewer",
+    )
+    route_cmd.add_argument(
+        "--pool-filters", action="store_true",
+        help="drop pools on Curve's pool_filters list (an extra request; "
+             "/v2/pools already excludes them, so this only guards a stale cache)",
+    )
     route_cmd.set_defaults(func=cmd_route)
 
     return parser

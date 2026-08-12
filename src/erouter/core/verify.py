@@ -49,8 +49,16 @@ def realize_candidates(
     dst_token: str,
     amount_in: int,
     potentials: np.ndarray | None = None,
+    max_legs: int = MAX_LEGS,
 ) -> None:
-    """Turn each candidate's flow into legs, marking the ones that cannot be."""
+    """Turn each candidate's flow into legs, marking the ones that cannot be.
+
+    `max_legs` defaults to the quoter's ABI capacity, which is what *we* can
+    price -- not what anything can execute.  A deployed router has its own,
+    much tighter, limit: curve_solver's caps at 4 legs and 16 ops.  Until this
+    router emits calldata there is nothing to violate, so the default stays
+    permissive and the knob exists for whoever has an executor to satisfy.
+    """
     for candidate in candidates.candidates:
         active = np.flatnonzero(candidate.psi > 0)
         if active.size == 0:
@@ -81,9 +89,9 @@ def realize_candidates(
             candidate.status = "too_wide"
             candidate.note = f"{len(route.slots)} tokens > quoter limit {MAX_SLOTS}"
             continue
-        if len(route.legs) > MAX_LEGS:
+        if len(route.legs) > max_legs:
             candidate.status = "too_long"
-            candidate.note = f"{len(route.legs)} legs > quoter limit {MAX_LEGS}"
+            candidate.note = f"{len(route.legs)} legs > limit {max_legs}"
             continue
         candidate.route = route
         candidate.status = "ready"

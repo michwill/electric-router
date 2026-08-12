@@ -35,6 +35,7 @@ def load_pools(
     api: CurveApi | None = None,
     cache: UniverseCache | None = None,
     refresh: bool = False,
+    pool_filters: bool = False,
 ) -> UniverseLoad:
     api = api or CurveApi()
     cache = cache or UniverseCache()
@@ -43,7 +44,9 @@ def load_pools(
     if not refresh:
         fresh = cache.get(chain.chain_id, min_tvl)
         if fresh is not None:
-            pools, dropped = _apply_filters(parse_universe(fresh), chain, api, warnings)
+            pools, dropped = _apply_filters(
+                parse_universe(fresh), chain, api, warnings, enabled=pool_filters
+            )
             load = UniverseLoad(pools, "cache", cache.age(chain.chain_id, min_tvl), warnings)
             load.filtered = dropped
             return load
@@ -56,29 +59,42 @@ def load_pools(
             raise
         age = cache.age(chain.chain_id, min_tvl)
         warnings.append(f"Curve API unavailable ({exc}); using a universe {age / 60:.0f} min old")
-        pools, dropped = _apply_filters(parse_universe(stale), chain, api, warnings)
+        pools, dropped = _apply_filters(
+            parse_universe(stale), chain, api, warnings, enabled=pool_filters
+        )
         load = UniverseLoad(pools, "stale", age, warnings)
         load.filtered = dropped
         return load
 
     cache.put(chain.chain_id, min_tvl, raw)
     pools = parse_universe(raw)
-    pools, dropped = _apply_filters(pools, chain, api, warnings)
+    pools, dropped = _apply_filters(pools, chain, api, warnings, enabled=pool_filters)
     load = UniverseLoad(pools, "api", 0.0, warnings)
     load.filtered = dropped
     return load
 
 
 def _apply_filters(
-    pools: list[PoolSpec], chain: Chain, api: CurveApi, warnings: list[str]
+    pools: list[PoolSpec],
+    chain: Chain,
+    api: CurveApi,
+    warnings: list[str],
+    *,
+    enabled: bool = False,
 ) -> tuple[list[PoolSpec], int]:
     """Drop pools Curve itself flags as not honouring their quotes.
 
-    Applied after the TVL floor and outside the universe cache, because the
-    list changes on Curve's schedule rather than ours -- a pool can be flagged
-    long after it was cached, and continuing to route through it because of a
-    stale snapshot is the whole failure this prevents.
+    Off by default, because measured against the live API it drops nothing:
+    `/v2/pools` already excludes all 185 flagged mainnet pools, even at
+    min_tvl=0 where it returns 2,211.  Paying an HTTP round trip on every load
+    for a filter that never fires is not worth it.
+
+    Turn it on for the case it is written for -- a universe cached before a
+    pool was flagged, since Curve's list moves on Curve's schedule -- which is
+    why it is applied on the cache and stale paths too, not only a fresh load.
     """
+    if not enabled:
+        return pools, 0
     blocked = api.pool_filters(chain.chain_id)
     if not blocked:
         return pools, 0
