@@ -183,3 +183,48 @@ def test_the_both_directions_fit_does_not_produce_the_perturbation():
     for skew in (0.5, 0.9, 1.1, 2.0):
         _, other = arc_params(tau, sig, a, np.ones(2), np.array([nu[0] * skew, 1.0]))
         assert other[0] + other[1] <= eps[0] + eps[1] + 1e-12
+
+
+def test_a_contradictory_arc_pair_is_muted_in_the_fit():
+    """A pool whose two directions disagree must not set the price frame.
+
+    §4 fits log-prices by weighted least squares, so one arc claiming WETH is
+    worth 296 crvUSD drags the whole frame -- and the frame sets `eps` and `G`
+    for *every* arc, not only the liar.  `a_f * a_r` is `Gamma_live^2` and sits
+    just under 1 for any symmetric-fee CFMM; measured on mainnet LLAMMA
+    markets, which quote from whichever band is live, it is 0.0006.
+
+    §12.2c already guards the other side of this (`a_f * a_r < 1`, no free
+    lunch).  This is the same invariant read downward.
+    """
+    from erouter.core.prices import MUTED_WEIGHT, price_fit_weights
+
+    # Two pools joining the same node pair -- the common case, and the one
+    # that node-keyed pairing gets wrong.
+    keys = [("healthy", 0, 1), ("healthy", 1, 0), ("banded", 0, 1), ("banded", 1, 0)]
+    a = np.array([1.0, 0.999, 296.0, 2.08e-6])
+    w = np.array([1e6, 1e6, 1e6, 1e6])
+
+    out = price_fit_weights(keys, a, w)
+
+    assert out[0] == 1e6 and out[1] == 1e6, "muted a healthy pool"
+    assert out[2] == MUTED_WEIGHT and out[3] == MUTED_WEIGHT, out
+
+
+def test_muting_leaves_the_price_frame_where_the_honest_pools_put_it():
+    """The muted arc must not move `nu`, but must not disconnect it either."""
+    from erouter.core.prices import price_fit_weights, reference_prices
+
+    # 0 -- 1 priced at 2.0 by two honest pools, and libelled by a third.
+    tau = np.array([0, 1, 0, 1, 0, 1], dtype=np.int64)
+    sig = np.array([1, 0, 1, 0, 1, 0], dtype=np.int64)
+    a = np.array([2.0, 0.4995, 2.0, 0.4995, 50.0, 1.2e-5])
+    w = np.full(6, 1e6)
+
+    keys = [("p1", 0, 1), ("p1", 1, 0), ("p2", 0, 1), ("p2", 1, 0),
+            ("banded", 0, 1), ("banded", 1, 0)]
+    honest = reference_prices(tau[:4], sig[:4], a[:4], w[:4], 2, 1)
+    muted = reference_prices(tau, sig, a, price_fit_weights(keys, a, w), 2, 1)
+
+    assert muted[0] == pytest.approx(honest[0], rel=1e-6), (muted, honest)
+    assert np.all(np.isfinite(muted))

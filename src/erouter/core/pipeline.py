@@ -26,7 +26,12 @@ from .gas import min_useful_flow
 from .graph import MAX_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
-from .prices import check_pair_drops, reference_prices
+from .prices import (
+    MUTED_WEIGHT,
+    check_pair_drops,
+    price_fit_weights,
+    reference_prices,
+)
 from .probe import (
     COARSE_GRID,
     RETRY_GRID,
@@ -270,10 +275,18 @@ def prepare(
         # Both directions are already present as separate arcs, so half weight
         # keeps a pool's influence from being counted twice.
         weights = np.array([max(a.tvl_usd, 1.0) / 2 for a in arcs])
+        tau_vec = np.array([a.tau for a in arcs], dtype=np.int64)
+        sig_vec = np.array([a.sigma for a in arcs], dtype=np.int64)
+        # An arc whose reverse direction contradicts it is not reporting a
+        # price and must not vote in the fit, however routable it is.
+        weights = price_fit_weights(
+            [(arc.pool.lower(), arc.i, arc.j) for arc in arcs], a_vec, weights
+        )
+        muted = int(np.count_nonzero(weights <= MUTED_WEIGHT))
+        if muted:
+            scratch.counters["arcs_muted_in_price_fit"] = muted
         nu = reference_prices(
-            np.array([a.tau for a in arcs], dtype=np.int64),
-            np.array([a.sigma for a in arcs], dtype=np.int64),
-            a_vec, weights, nodes.n_nodes, dst_node,
+            tau_vec, sig_vec, a_vec, weights, nodes.n_nodes, dst_node,
         )
 
     return Prepared(

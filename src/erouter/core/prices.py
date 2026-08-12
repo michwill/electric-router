@@ -26,6 +26,46 @@ import numpy as np
 from .graph import component_of, laplacian
 from .linalg import DEFAULT_SOLVER, SingularSystem
 
+# A pool's two directions must agree on the price to within fees: `a_f * a_r`
+# is `Gamma_live^2` (§2.6), just under 1 for any symmetric-fee CFMM.  Far below
+# it means the two probes landed in different regimes and neither `a` is a
+# marginal rate.  Measured on mainnet LLAMMA markets, which are banded and
+# quote from whichever band is live: 0.000616 and 0.002516, against 0.999+ for
+# every ordinary pool.  Such an arc is still perfectly routable -- the quoter
+# prices it exactly -- it just must not get a vote on what anything is worth.
+ROUND_TRIP_FLOOR = 0.5
+# Muted, not removed: `reference_prices` requires strictly positive weights,
+# and a vanishing one is the same thing numerically while keeping the arc in
+# the system of equations that connects the graph.
+MUTED_WEIGHT = 1e-12
+
+
+def price_fit_weights(keys: list, a: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """Mute arcs whose own reverse direction contradicts them.
+
+    §4 fits log-prices by weighted least squares, so one arc claiming WETH is
+    worth 296 crvUSD drags the whole frame -- and the frame sets `eps` and `G`
+    for *every* arc, not just the liar.  Adding 11 LLAMMA markets moved crvUSD
+    36% and USDC 27% away from parity and took USDC->sUSDS down 67%.
+
+    `keys[k]` is `(pool, i, j)`, and the partner is `(pool, j, i)`.  Pairing on
+    node indices instead is wrong and quietly so: a dozen pools join USDC and
+    USDT, so a healthy arc gets matched against some *other* pool's reverse and
+    muted for its neighbour's sins.
+    """
+    w = np.array(w, dtype=float)
+    forward = {
+        key: a[k] for k, key in enumerate(keys) if a[k] > 0
+    }
+    for k, key in enumerate(keys):
+        if a[k] <= 0:
+            continue
+        pool, i, j = key
+        back = forward.get((pool, j, i))
+        if back is not None and a[k] * back < ROUND_TRIP_FLOOR:
+            w[k] = MUTED_WEIGHT
+    return w
+
 
 def reference_prices(
     tau: np.ndarray,
