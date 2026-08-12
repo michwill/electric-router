@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
-from ..core.pools import PoolSpec, dialect_from_probes, parse_universe
+from ..core.pools import Coin, PoolSpec, dialect_from_probes, parse_universe
 from ..core.quoter import QuoterClient
 from ..core.transport import Status
 from ..core.types import ArcKind, Dialect, Probe
@@ -36,6 +36,7 @@ def load_pools(
     cache: UniverseCache | None = None,
     refresh: bool = False,
     pool_filters: bool = False,
+    llamma: bool = False,
 ) -> UniverseLoad:
     api = api or CurveApi()
     cache = cache or UniverseCache()
@@ -47,6 +48,7 @@ def load_pools(
             pools, dropped = _apply_filters(
                 parse_universe(fresh), chain, api, warnings, enabled=pool_filters
             )
+            pools += _llamma(chain, api, min_tvl, warnings) if llamma else []
             load = UniverseLoad(pools, "cache", cache.age(chain.chain_id, min_tvl), warnings)
             load.filtered = dropped
             return load
@@ -62,6 +64,7 @@ def load_pools(
         pools, dropped = _apply_filters(
             parse_universe(stale), chain, api, warnings, enabled=pool_filters
         )
+        pools += _llamma(chain, api, min_tvl, warnings) if llamma else []
         load = UniverseLoad(pools, "stale", age, warnings)
         load.filtered = dropped
         return load
@@ -69,9 +72,106 @@ def load_pools(
     cache.put(chain.chain_id, min_tvl, raw)
     pools = parse_universe(raw)
     pools, dropped = _apply_filters(pools, chain, api, warnings, enabled=pool_filters)
+    pools += _llamma(chain, api, min_tvl, warnings) if llamma else []
     load = UniverseLoad(pools, "api", 0.0, warnings)
     load.filtered = dropped
     return load
+
+
+def _llamma(chain, api, min_tvl, warnings) -> list[PoolSpec]:
+    found = llamma_pools(chain, api, min_tvl=min_tvl)
+    if found:
+        warnings.append(
+            f"{len(found)} LLAMMA market(s) added "
+            f"(${sum(p.tvl_usd for p in found):,.0f} of collateral and debt)"
+        )
+    return found
+
+
+def llamma_pools(
+    chain: Chain, api: CurveApi | None = None, *, min_tvl: float = 10_000.0
+) -> list[PoolSpec]:
+    """LLAMMA markets as ordinary two-coin crypto pools.
+
+    **Off by default: enabling this today makes routes much worse.**  Measured
+    at block 25,738,767, adding the 11 markets that clear a $10k floor took
+    USDC->sUSDS from 900,795 to 296,795 (-67%) and crvUSD->sDOLA from
+    3,502,562 to 1,500,637 (-57%), and made USDC->WETH and crvUSD->CRV fail
+    outright on the §12.4 conservation and pin-detachment guards.
+
+    The cause is calibration, not plumbing.  LLAMMA is a *banded* AMM, and the
+    reserve we size probes from is the market's borrowed balance -- 3.40 crvUSD
+    on the sUSDS market -- so the whole grid lands inside a single band where
+    the curve is nearly linear.  It fits `a = 0.9927, B = 5.8e-3` with no cap,
+    the model computes `G ~ 171`, and the solver posts millions through a
+    three-crvUSD venue.  This is §2.5's "most dangerous single mis-calibration"
+    with the peg replaced by a band, and the symptoms are the ones §2.5 and R3
+    predict: the two directions of the WETH market disagree on `a` by 7x, and
+    one arc calibrates to `a = 0` outright.
+
+    Making it usable needs band-aware capacity -- a real `cap` from the
+    liquidity actually standing in reachable bands, so §2.3's clamp can bound
+    it -- not a wider probe grid.  The plumbing here is correct and stays, so
+    that work has somewhere to land.
+
+    Everything downstream -- probing, calibration, the graph, realisation --
+    treats them like any other pool, because after this they *are* one: the
+    only genuinely different things are that they quote with the `uint256`
+    spelling (so the dialect is set here rather than probed) and that they
+    have no `balances()` getter, so the reserves come from the API.
+
+    Markets with nothing on one side are dropped.  Many are empty, and an arc
+    with a zero reserve produces a zero probe grid and then a zero `a`, which
+    §R3 is explicit about: it looks like a valid quote and poisons the
+    reference-price fit.
+    """
+    api = api or CurveApi()
+    out: list[PoolSpec] = []
+    for entry in api.llamma_markets(chain.api_name):
+        address = (entry.get("llamma") or "").strip()
+        borrowed, collateral = entry.get("borrowed_token"), entry.get("collateral_token")
+        if not address or not borrowed or not collateral:
+            continue
+        amounts = (entry.get("borrowed_balance") or 0.0, entry.get("collateral_balance") or 0.0)
+        if min(amounts) <= 0:
+            continue
+        usd = (entry.get("borrowed_balance_usd") or 0.0) + (
+            entry.get("collateral_balance_usd") or 0.0
+        )
+        if usd < min_tvl:
+            continue
+        coins = []
+        balances = []
+        for index, (token, amount) in enumerate(
+            zip((borrowed, collateral), amounts, strict=True)
+        ):
+            decimals = int(token.get("decimals") or 18)
+            coins.append(
+                Coin(
+                    index=index,
+                    address=(token.get("address") or "").lower(),
+                    symbol=token.get("symbol") or "?",
+                    decimals=decimals,
+                )
+            )
+            balances.append(int(amount * 10**decimals))
+        if not all(c.address for c in coins):
+            continue
+        out.append(
+            PoolSpec(
+                address=address,
+                name=entry.get("name") or f"LLAMMA {coins[1].symbol}",
+                # A registry key of its own, so the dialect table and any
+                # pool-type special-casing cannot mistake it for a stableswap.
+                pool_type="llamma",
+                coins=tuple(coins),
+                tvl_usd=usd,
+                dialect=Dialect.CRYPTO,
+                balances=tuple(balances),
+                note=entry.get("_llamma_kind", ""),
+            )
+        )
+    return out
 
 
 def _apply_filters(
@@ -145,6 +245,11 @@ def resolve_dialects(
 
     pending: list[PoolSpec] = []
     for pool in pools:
+        if pool.dialect is not None and pool.note != "CACHED":
+            # Already known from the source that produced it -- LLAMMA is
+            # always the uint256 spelling -- so there is nothing to probe.
+            audit.resolved += 1
+            continue
         cached = known.get(pool.address.lower())
         if cached:
             pool.dialect = Dialect(cached)
@@ -211,6 +316,10 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient) -> int:
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
+
+    # LLAMMA has no `balances()` getter; its reserves come from the market
+    # feed, and probing for them would only overwrite good numbers with none.
+    pools = [p for p in pools if not p.balances]
 
     calls: list[Call] = []
     spans: list[tuple[int, int]] = []

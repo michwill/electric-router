@@ -121,6 +121,40 @@ class CurveApi:
 
         return self._cached(f"pools:{chain_id}:{min_tvl}:{limit}", produce)
 
+    def llamma_markets(self, chain: str) -> list[dict]:
+        """crvUSD mint markets and Curve Lending markets, as raw entries.
+
+        LLAMMA is the AMM inside a crvUSD or lending market -- collateral on
+        one side, the borrowed token on the other, spread across bands.  It is
+        not in `/v2/pools`, which is why 61 mainnet venues were invisible to
+        us, including a sDOLA/crvUSD market on a pair we were losing by 13 bp.
+
+        It quotes with `get_dy(uint256,uint256,uint256)`, the crypto spelling,
+        so once it is a `PoolSpec` nothing downstream needs to know it is
+        special.  It has no `balances()` getter, though, so the reserves have
+        to come from here rather than from the chain.
+        """
+
+        def produce():
+            out: list[dict] = []
+            for kind in ("crvusd/markets", "lending/markets"):
+                try:
+                    payload = _get(
+                        f"{PRICES_V1}/{kind}/{chain}"
+                        "?fetch_on_chain=true&page=1&per_page=500"
+                    )
+                except CurveApiError:
+                    continue  # one family missing is not a reason to lose both
+                for entry in payload.get("data", []):
+                    entry["_llamma_kind"] = kind
+                    out.append(entry)
+            return out
+
+        try:
+            return self._cached(f"llamma:{chain}", produce)
+        except CurveApiError:
+            return []
+
     def pool_filters(self, chain_id: int) -> set[str]:
         """Curve's own list of pools that do not do what they advertise.
 

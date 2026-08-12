@@ -119,7 +119,8 @@ def cmd_pools(args: argparse.Namespace) -> int:
     chain = chain_table.get(args.chain)
     try:
         load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
-                          pool_filters=args.pool_filters)
+                          pool_filters=args.pool_filters,
+                          llamma=args.llamma)
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
@@ -327,7 +328,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     started = time.monotonic()
     try:
         load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
-                          pool_filters=args.pool_filters)
+                          pool_filters=args.pool_filters,
+                          llamma=args.llamma)
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
@@ -599,6 +601,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="reject routes with more legs than this. The quoter can price 128; "
              "the default is what an executor might plausibly run. Going wide is "
              "worth ~5 bp below ~4 gwei and a loss above it",
+    )
+    route_cmd.add_argument(
+        "--llamma", action="store_true",
+        help="include crvUSD/lending LLAMMA markets. EXPERIMENTAL: they are a "
+             "banded AMM and calibrate badly from a single band, which today "
+             "makes routes materially worse",
     )
     route_cmd.add_argument(
         "--pool-filters", action="store_true",
