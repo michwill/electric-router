@@ -39,6 +39,20 @@ COARSE_GRID: tuple[float, ...] = (1e-4, 1e-2)
 # return zero, which is worse because it looks like a valid quote.
 RETRY_GRID: tuple[float, ...] = (1e-3, 3e-2, 1e-1)
 
+# Where the refine pass samples, as fractions of *the trade* rather than of the
+# pool's reserve.  The quadratic is a local model, so it should be fitted where
+# the flow is going to land, not near zero.  Measured against the chain's own
+# answer at the size each leg actually carried, the reserve-sized grid was off
+# by -97,094 bp on one arc and -1,036,815 bp on another -- both shallow pools
+# where `1e-6 .. 1e-1 * reserve` samples three orders below the operating point
+# -- while these three points came within 0.1 bp on the same arcs.
+#
+# Three is enough: with the free origin they give `a` from the smallest node,
+# `B` from a secant at the largest, and two second divided differences, which
+# is every quantity the solve consumes.  Only `eta` needs more, and `eta` is a
+# diagnostic.
+TRADE_GRID: tuple[float, ...] = (0.05, 0.10, 0.20)
+
 
 @dataclass(frozen=True, slots=True)
 class ArcRef:
@@ -173,6 +187,36 @@ def plan_refine(
             plan.probes.append(Probe(arc.pool, arc.kind, arc.i, arc.j, arc.n_coins, delta))
         plan.arcs.append(arc)
         plan.deltas.append(wanted)
+        plan.spans.append((start, len(plan.probes)))
+    return plan
+
+
+def plan_sized(ladders: list[Ladder], sizes: dict[str, list[int]]) -> ProbePlan:
+    """Probe explicit per-arc sizes, skipping anything already measured.
+
+    `sizes` maps arc id to wei amounts of that arc's *input* token.  The caller
+    owns the sizing because only it knows the trade: `plan_deltas` can see a
+    reserve and nothing else.
+    """
+    plan = ProbePlan()
+    for ladder in ladders:
+        arc = ladder.arc
+        want = sizes.get(arc.id)
+        if not want:
+            continue
+        have = set(ladder.deltas)
+        floor = max(1, 10 ** max(0, arc.decimals_in - 6))
+        fresh: list[int] = []
+        for delta in sorted({max(int(d), floor) for d in want}):
+            if delta not in have and delta not in fresh:
+                fresh.append(delta)
+        if not fresh:
+            continue
+        start = len(plan.probes)
+        for delta in fresh:
+            plan.probes.append(Probe(arc.pool, arc.kind, arc.i, arc.j, arc.n_coins, delta))
+        plan.arcs.append(arc)
+        plan.deltas.append(fresh)
         plan.spans.append((start, len(plan.probes)))
     return plan
 

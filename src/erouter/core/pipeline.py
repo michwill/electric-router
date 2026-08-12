@@ -35,12 +35,14 @@ from .prices import (
 from .probe import (
     COARSE_GRID,
     RETRY_GRID,
+    TRADE_GRID,
     ArcRef,
     Ladder,
     collect,
     merge,
     plan_grid,
     plan_refine,
+    plan_sized,
 )
 from .quoter import MAX_LEGS, QuoterClient
 from .realize import RealizedRoute, cancel_cycles, check_one_arc_per_pool, realize
@@ -432,7 +434,25 @@ def _quote(
     with clock("refine"):
         wanted = {arcs[k].id for k in np.flatnonzero(seed)}
         wanted |= {a.id for a in arcs if a.tau in (src_node, dst_node) or a.sigma in (src_node, dst_node)}
-        extra = plan_refine(ladders, wanted)
+        # Sample where the flow will land, not near zero.  `Psi / nu[tau]` is
+        # the amount of this arc's input token worth the whole trade, so the
+        # fractions read directly as "5%, 10%, 20% of the swap" in whatever
+        # token this arc happens to take.  Both quantities are already in hand
+        # -- that is why the refine pass can do this and the coarse pass, which
+        # produces `nu`, cannot.
+        sizes: dict[str, list[int]] = {}
+        for arc in arcs:
+            if arc.id not in wanted:
+                continue
+            price = float(nu[arc.tau])
+            rate = nodes.rate(arc.token_in)
+            if price <= 0 or rate <= 0:
+                continue
+            whole = Psi / price / rate * 10**arc.decimals_in
+            if not math.isfinite(whole) or whole <= 0:
+                continue
+            sizes[arc.id] = [int(whole * f) for f in TRADE_GRID]
+        extra = plan_sized(ladders, sizes)
         result.counters["probes_refined"] = len(extra)
         if extra.probes:
             merge(ladders, collect(extra, client.probe(extra.probes)))
