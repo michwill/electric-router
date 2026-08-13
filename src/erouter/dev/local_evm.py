@@ -65,6 +65,13 @@ CALLER = "0x" + "11" * 20
 # exceeded"), and it refuses the *whole* batch -- so a route's worth of proofs
 # has to be split or none of it arrives.
 BATCH_LIMIT = 100
+# The storage sweep is a few thousand tiny independent reads, which is a very
+# different shape from the probe batches the transport's default is tuned for.
+# Measured on 4,136 slots: 4,513 ms on one stream, 1,238 on four, 521 on
+# sixteen, 457 on thirty-two.  Sixteen takes 2.4x of the four-stream default;
+# doubling again buys 12% more and twice the connections, which a hosted
+# endpoint is entitled to object to.
+PRIME_STREAMS = 16
 
 
 class LocalEvmError(RuntimeError):
@@ -135,6 +142,9 @@ class LocalEvm:
         limit = getattr(self.rpc, "batch_size", None)
         if isinstance(limit, int) and limit > BATCH_LIMIT:
             self.rpc.batch_size = BATCH_LIMIT
+        streams = getattr(self.rpc, "max_streams", None)
+        if isinstance(streams, int) and streams < PRIME_STREAMS:
+            self.rpc.max_streams = PRIME_STREAMS
 
     # ------------------------------------------------------------- Transport
 
