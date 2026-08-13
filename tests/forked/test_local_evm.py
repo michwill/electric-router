@@ -48,7 +48,7 @@ def warmed(rpc, chain, probes):
     from erouter.dev.local_evm import LocalEvm
 
     reference = quoter_client(rpc, chain)
-    evm = LocalEvm(rpc)
+    evm = LocalEvm(rpc, strict=True)
     data = encode_call(SIG_PROBE_BATCH, [p.as_tuple() for p in probes])
     evm.warm([Call(reference.address, data)])
     if not evm.stats.accounts:
@@ -83,15 +83,19 @@ def test_the_prefetch_is_cheap_and_reuse_is_free(warmed, chain, probes):
     assert warmed.stats.round_trips == before, "re-warming the same call hit the network"
 
 
-def test_an_unwarmed_pool_does_not_quietly_answer_zero(rpc, chain):
-    """The failure mode worth fearing: absent state reading as a valid quote."""
+def test_an_unwarmed_pool_falls_back_to_the_chain_rather_than_guessing(rpc, chain):
+    """The failure mode worth fearing: absent state reading as a valid quote.
+
+    A cached slot list cannot predict a Chainlink round advancing or a LLAMMA
+    band moving, so "prefetch complete" is not something to rely on.  The fork
+    fallback makes an incomplete prefetch slow instead of wrong.
+    """
     from erouter.dev.boa_host import quoter_client
     from erouter.dev.local_evm import LocalEvm
 
-    cold = LocalEvm(rpc)
     probe = Probe(ARCS[0][0], ArcKind.SWAP_STABLE, 0, 1, 3, 10 ** 18)
+    truth = quoter_client(rpc, chain).probe([probe])[0]
+
+    cold = LocalEvm(rpc)  # nothing warmed at all
     answers = quoter_client(cold, chain).probe([probe])
-    # With no state at all the pool has no code, so the quoter sees a failed
-    # call rather than a number -- which is exactly the three-state `Status`
-    # the transport layer exists to preserve.
-    assert not answers[0].ok or answers[0].value == 0
+    assert (answers[0].status, answers[0].value) == (truth.status, truth.value)

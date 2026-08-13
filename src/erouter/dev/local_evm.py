@@ -20,11 +20,24 @@ is still gathered at several sizes and unioned, because "measured on five
 pools" is not "true of every pool", and a LLAMMA crossing bands is exactly the
 shape that would break it.
 
-**Nothing falls back.**  The EVM is built with no `fork_url`, so a slot the
-prefetch missed reads as zero rather than being quietly fetched -- and a zero
-slot is a confidently wrong quote, which is worse than a slow one.  That is
-deliberate: `verify_against` exists to catch it, and the router's own
-verification quote does the same job for free.
+**The prefetch is an optimisation, not a correctness requirement.**  Measured
+both ways on a deliberately incomplete 3pool: with no `fork_url` the call
+*reverted*, and with one set it fetched the missing slots and matched the node
+exactly.  So the fork stays wired up as a fallback and an incomplete or stale
+slot list costs latency -- ~34 ms per slot, lazily -- rather than an answer.
+
+That matters most for the state a cached slot list cannot predict.  A proxy
+upgrade is visible, because the EIP-1967 implementation slot is itself in the
+traced set and the per-block value fetch hands over the new address.  But a
+stableswap-ng reading a Chainlink aggregator hits `s_transmissions[roundId]`,
+and the round advances on every price update, so the *derived* key genuinely
+differs between blocks; likewise a LLAMMA whose active band has moved.  Nothing
+derivable from the old values detects those.  With the fallback they are simply
+a few extra lazy reads; without it, a zero fee or a zero rate is a plausible
+wrong number, which is the one outcome worth engineering against.
+
+`strict=True` turns the fallback off, which is how the forked test asserts the
+prefetch is actually complete rather than merely load-bearing.
 """
 
 from __future__ import annotations
@@ -67,6 +80,7 @@ class LocalEvm:
     """
 
     rpc: object
+    strict: bool = False
     _evm: object = None
     _loaded: set[str] = field(default_factory=set)
     _listed: set[tuple[str, bytes]] = field(default_factory=set)
@@ -78,7 +92,11 @@ class LocalEvm:
         from pyrevm import EVM, BlockEnv
 
         header = self.rpc.fetch("eth_getBlockByNumber", [self.rpc.pin.hex_block, False])
-        self._evm = EVM(fork_url=None, tracing=False, spec_id="CANCUN")
+        self._evm = EVM(
+            fork_url=None if self.strict else self.rpc.url,
+            fork_block=None if self.strict else str(self.rpc.block),
+            tracing=False, spec_id="CANCUN",
+        )
         # pyrevm does not take the block env from anywhere, and zero is not a
         # harmless default: 3pool's `A()` ramps off `block.timestamp` and
         # underflows at zero, so every call would revert.
