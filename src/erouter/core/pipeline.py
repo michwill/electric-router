@@ -725,9 +725,19 @@ def _optimise_split(
     tuned, report = optimise_splits(
         legs, client, amount_in=amount_in, dst_slot=route.dst_slot,
         baseline=result.verified_out or 0,
+        nominal_in=[rl.amount_in for rl in route.legs],
+        nominal_out=[rl.amount_out for rl in route.legs],
     )
     result.counters["split_calls"] = report.calls
     result.counters["split_evaluations"] = report.evaluations
+    result.counters["split_probes"] = report.probes
+    result.counters["split_local"] = report.local
+    result.counters["split_mode"] = report.mode
+    result.counters["split_refined"] = report.refined
+    if report.mode == "curves":
+        result.counters["split_check_bp"] = round(report.check_bp, 3)
+    if report.predicted:
+        result.counters["split_curve_error_bp"] = round(report.curve_error_bp, 3)
     if not report.improved:
         return
     for realized, leg in zip(route.legs, tuned, strict=True):

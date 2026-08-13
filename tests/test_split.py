@@ -6,6 +6,8 @@ form, so these check the optimiser actually climbs rather than merely runs.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import numpy as np
 import pytest
 
@@ -185,3 +187,114 @@ def test_a_round_still_finding_real_money_buys_another():
                               baseline=0, max_rounds=2, hot_rounds=2)
     assert hot.rounds > capped.rounds
     assert hot.after > capped.after
+
+
+class PoolQuoter:
+    """Three CPMMs, answering probes per-pool and routes by chaining them.
+
+    `f(x) = Kx/(K+x)` makes `u = x/f` exactly affine, so the sampled curve is
+    the pool rather than an approximation of it -- which is what lets this test
+    assert convergence to the true optimum instead of merely to an improvement.
+    """
+
+    DEPTH: ClassVar[dict[str, float]] = {POOL_A: 4e6, POOL_B: 1e6, POOL_C: 2e7}
+
+    def __init__(self) -> None:
+        self.probe_calls = 0
+        self.route_calls = 0
+
+    def out(self, pool: str, x: float) -> int:
+        k = self.DEPTH[pool]
+        return int(k * x / (k + x)) if x > 0 else 0
+
+    def probe(self, probes):
+        from erouter.core.quoter import Quote, Status
+
+        self.probe_calls += 1
+        return [Quote(Status.VALUE, self.out(p.pool, p.dx)) for p in probes]
+
+    def _walk(self, legs, amount_in, dst_slot):
+        balances = {0: amount_in}
+        current, base = None, 0
+        for leg in legs:
+            if leg.src_slot != current:
+                current, base = leg.src_slot, balances.get(leg.src_slot, 0)
+            available = balances.get(leg.src_slot, 0)
+            take = available if leg.bps == 0 else min(base * leg.bps // BPS, available)
+            if take <= 0:
+                continue
+            balances[leg.src_slot] = available - take
+            balances[leg.dst_slot] = balances.get(leg.dst_slot, 0) + self.out(leg.target, take)
+        return balances.get(dst_slot, 0)
+
+    def quote_routes(self, routes, amounts_in, dst_slots):
+        self.route_calls += 1
+        return [self._walk(legs, amount, slot)
+                for legs, amount, slot in zip(routes, amounts_in, dst_slots, strict=True)]
+
+
+def true_optimum(quoter: PoolQuoter, amount: int) -> float:
+    """Best head share, by brute force over the whole simplex."""
+    best, where = -1, 0.0
+    for share in np.linspace(0.001, 0.999, 20_000):
+        through_a = quoter.out(POOL_C, quoter.out(POOL_A, share * amount))
+        value = through_a + quoter.out(POOL_B, (1.0 - share) * amount)
+        if value > best:
+            best, where = value, share
+    return where
+
+
+def test_the_sampled_curves_converge_on_the_true_optimum():
+    amount = 1_000_000
+    quoter = PoolQuoter()
+    nominal_in = [600_000, 400_000, quoter.out(POOL_A, 600_000)]
+    nominal_out = [quoter.out(POOL_A, 600_000), quoter.out(POOL_B, 400_000),
+                   quoter.out(POOL_C, quoter.out(POOL_A, 600_000))]
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=nominal_in, nominal_out=nominal_out,
+    )
+    assert report.mode == "curves"
+    assert report.improved
+    assert abs(tuned[0].bps / BPS - true_optimum(quoter, amount)) < 0.01
+
+
+def test_it_costs_exactly_two_round_trips():
+    """The whole point: sample once, adjudicate once, converge in between."""
+    amount = 1_000_000
+    quoter = PoolQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    quoter.route_calls = 0
+    _tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+    )
+    assert (quoter.probe_calls, quoter.route_calls) == (1, 1)
+    assert report.calls == 2
+    assert report.local > 100, "the local search should be free enough to converge"
+
+
+def test_an_exact_curve_predicts_the_chain_to_within_rounding():
+    """`curve_error_bp` is the number the whole approach stands on."""
+    amount = 1_000_000
+    quoter = PoolQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    _tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+    )
+    # One unit out of ~800k, which is the three `int()` truncations the walk
+    # performs -- the curve itself contributes nothing measurable.
+    assert abs(report.predicted - report.after) <= 2
+    assert abs(report.curve_error_bp) < 0.1, report.curve_error_bp
+
+
+def test_it_falls_back_to_the_chained_search_without_a_probe_path():
+    """A quoter that cannot probe still gets optimised, just more expensively."""
+    quoter = ConcaveQuoter()
+    _tuned, report = optimise(SPLIT, quoter, amount_in=1_000_000, dst_slot=2,
+                              baseline=1, nominal_in=[6, 4, 5], nominal_out=[5, 3, 4])
+    assert report.mode == "chained"
