@@ -12,3 +12,6 @@ build/
 *.npz
 out/*.json
 .DS_Store
+
+# curve_solver writes its 16 MB snapshot into the cwd when run from here
+snapshot_cache/

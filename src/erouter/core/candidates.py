@@ -259,6 +259,17 @@ def generate(
     # missing a 0.08 bp two-pool split.
     sparse_budget = max(6, int(max_candidates * 0.45))
     pin_budget = max(4, int(max_candidates * 0.30))
+    # Split the sparse budget between its two families.  They answer different
+    # questions -- a union of the cheapest *paths*, versus the *pools* the
+    # relaxation actually put flow through -- and one shared counter let the
+    # first starve the second, because paths run first and there are more of
+    # them.  Measured on USDC->sUSDS 1M, where the relaxation sprawled over 48
+    # arcs and no candidate could be realised whole: the pool family's winner
+    # was never generated, and the route came out 48.8 bp short of it and 5.4
+    # short of Curve's own solver.  Paths keep first claim, since they are the
+    # family that reliably fits the quoter's leg limit; pools inherit whatever
+    # paths leave.
+    path_budget = max(3, sparse_budget // 2)
 
     # 2. sparsification, over the k cheapest *paths* rather than the k largest
     #    arcs.  Restricting to arbitrary arcs usually leaves src and dst
@@ -266,7 +277,7 @@ def generate(
     #    is connected by construction.  `k = 1` is §6.2's `C_*`, the
     #    no-splitting fallback, and the ladder doubles as §11.1's gas move --
     #    it is also the only family that reliably fits the quoter.
-    made = 0
+    made_paths = 0
     paths = k_shortest_paths(g, src, dst, k=max(top_k) if top_k else 6)
     union: set[int] = set()
     for k, path in enumerate(paths, start=1):
@@ -277,8 +288,8 @@ def generate(
         for index in union:
             forbidden[index] = False
         label = "C* best single path" if k == 1 else f"top {k} paths"
-        made += bool(resolve(forbidden, label, "sparse"))
-        if made >= sparse_budget:
+        made_paths += bool(resolve(forbidden, label, "sparse"))
+        if made_paths >= path_budget:
             break
 
     # 2b. keep only the pools the relaxation liked best, but let the solver use
@@ -288,12 +299,14 @@ def generate(
     for k in order:
         if pools[k] not in ranked_pools:
             ranked_pools.append(pools[k])
+    pool_budget = max(3, sparse_budget - made_paths)
+    made_pools = 0
     for k in top_k:
-        if k >= len(ranked_pools) or made >= sparse_budget:
+        if k >= len(ranked_pools) or made_pools >= pool_budget:
             continue
         keep = set(ranked_pools[:k])
         forbidden = np.array([pool not in keep for pool in pools], dtype=bool)
-        made += bool(resolve(forbidden, f"top {k} pool{'s' if k > 1 else ''}", "sparse"))
+        made_pools += bool(resolve(forbidden, f"top {k} pool{'s' if k > 1 else ''}", "sparse"))
 
     out.skipped_wide = width(base.psi)
 
