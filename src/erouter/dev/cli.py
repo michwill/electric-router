@@ -340,7 +340,7 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False):
             print(f"  {WARN} no state cache for {chain.name}; run `erouter warmcache`")
         return None
     try:
-        evm = LocalEvm(rpc, cache=cache, quoter=quoter_client(rpc, chain).address)
+        evm = LocalEvm(rpc, cache=cache)
         stats = evm.prime()
         fresh = cache.unknown(p.address for p in load.pools)
         if fresh:

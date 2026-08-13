@@ -74,40 +74,7 @@ BATCH_LIMIT = 100
 # endpoint is entitled to object to.
 PRIME_STREAMS = 16
 # ...but only when the caller has not said otherwise.  A hosted endpoint that
-# allows two connections is a real constraint, and the two ways of reading
-# storage cross over: measured on 4,136 slots, the dumper below is 2,306 ms on
-# one stream against 4,587 for small reads, and 772 against 542 on sixteen.
-# Seven round trips do not get faster with more sockets; forty-three do.
-DUMP_BELOW_STREAMS = 8
-
-# Twenty-seven bytes that read their own storage.
-#
-# No contract can read another account's storage -- SLOAD reads the executing
-# account's, and there is no opcode for anyone else's.  But an `eth_call` state
-# override replaces an account's *code* while keeping its *storage*, so this
-# blob injected at a pool runs in that pool's context and can read all of it.
-# The quoter's existing `raw_batch` is then the coordinator: 600 reads per call,
-# so a universe-wide sweep is seven calls instead of 4,136.
-#
-# Calldata is a run of 32-byte slot numbers; the return is their values, in
-# order.  There is no selector dispatch, because the only caller is us.
-#
-#   36        CALLDATASIZE        [size]
-#   6000      PUSH1 0             [size, i]
-#   5b        JUMPDEST      <- 03 loop
-#   81 81 10  DUP2 DUP2 LT        [size, i, i < size]
-#   15        ISZERO
-#   6016 57   PUSH1 22 JUMPI      exit when i reaches size
-#   80 35     DUP1 CALLDATALOAD   [size, i, slot]
-#   54        SLOAD               [size, i, value]
-#   81 52     DUP2 MSTORE         mem[i] = value
-#   6020 01   PUSH1 32 ADD        i += 32
-#   6003 56   PUSH1 3 JUMP
-#   5b        JUMPDEST      <- 22 end
-#   50 6000   POP PUSH1 0
-#   f3        RETURN              return(0, size)
-DUMPER = bytes.fromhex("366000" "5b" "818110" "15" "601657" "8035" "54" "8152"
-                       "602001" "600356" "5b" "50" "6000" "f3")
+# allows two connections is a real constraint, not an oversight.
 
 
 class LocalEvmError(RuntimeError):
@@ -141,7 +108,6 @@ class LocalEvm:
     rpc: object
     strict: bool = True
     cache: object = None
-    quoter: str = ""
     _evm: object = None
     _loaded: set[str] = field(default_factory=set)
     _slots: dict[str, set[int]] = field(default_factory=dict)
@@ -272,14 +238,10 @@ class LocalEvm:
         flat = [(a, slot) for a, slots in wanted.items() for slot in sorted(slots)]
         if flat:
             _mark = _t.perf_counter()
-            streams = getattr(self.rpc, "max_streams", DEFAULT_STREAMS)
-            wide = self.quoter and streams < DUMP_BELOW_STREAMS
-            values = self._dump(flat) if wide else None
-            if values is None:
-                values = self._batched(
-                    [("eth_getStorageAt", [a, f"0x{slot:064x}", block]) for a, slot in flat])
-                values = [None if isinstance(v, Exception) or not isinstance(v, str)
-                          else int(v, 16) for v in values]
+            values = self._batched(
+                [("eth_getStorageAt", [a, f"0x{slot:064x}", block]) for a, slot in flat])
+            values = [None if isinstance(v, Exception) or not isinstance(v, str)
+                      else int(v, 16) for v in values]
             self.stats.storage_ms += (_t.perf_counter() - _mark) * 1000
             self.stats.fetch_calls += len(values)
             for (address, slot), value in zip(flat, values, strict=True):
@@ -300,29 +262,6 @@ class LocalEvm:
             for address, balance in zip(holders, got, strict=True):
                 if not isinstance(balance, Exception) and balance:
                     self._evm.set_balance(address, int(balance, 16))
-
-    def _dump(self, flat) -> list[int | None] | None:
-        """Read every slot through the dumper.  None if the node will not.
-
-        One `raw_batch` carries 600 reads, so this is seven round trips for a
-        universe against 4,136 -- but it needs state overrides, and a node that
-        rejects them has to fall back rather than get wrong answers.
-        """
-        from ..core.quoter import QuoterClient
-
-        code = "0x" + DUMPER.hex()
-        overrides = {address: {"code": code} for address in {a for a, _ in flat}}
-        client = QuoterClient(self.rpc, self.quoter, overrides=overrides)
-        try:
-            answers = client.raw([Call(a, slot.to_bytes(32, "big")) for a, slot in flat])
-        except Exception as exc:
-            self.stats.errors.append(f"dump: {str(exc)[:90]}")
-            return None
-        if len(answers) != len(flat) or not any(a.ok for a in answers):
-            self.stats.errors.append("dump: no slot answered; state overrides refused?")
-            return None
-        self.stats.round_trips += (len(flat) + 599) // 600
-        return [a.uint() if a.ok else None for a in answers]
 
     def warm(self, calls: list[Call]) -> WarmStats:
         """Load every account and slot these calls touch.
