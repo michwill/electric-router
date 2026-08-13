@@ -19,11 +19,13 @@ were each established by measurement against the local Erigon node:
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any
 
 from ..core.codec import decode, selector
@@ -34,6 +36,9 @@ USER_AGENT = "electric-router/0.1"
 # JSON-RPC batches are chunked by both count and total calldata size; a chunk
 # that fails outright is halved and retried before falling back per call.
 DEFAULT_BATCH = 500
+# "batch limit 100 exceeded (can increase by --rpc.batch.limit)" -- Erigon, and
+# geth phrases it the same way.  Parsed so the ceiling is learned once.
+_BATCH_LIMIT = re.compile(r"batch limit (\d+) exceeded")
 # Concurrent HTTP streams for independent calls.  One stream does not fill a
 # slow uplink: three 600-probe chunks measured 3,979 ms serial, 2,334 ms at
 # once.  Kept modest so a public endpoint does not read it as abuse.
@@ -126,6 +131,7 @@ class JsonRpcTransport:
         self.batch_size = batch_size
         self.max_streams = max_streams
         self._id = 0
+        self._id_lock = Lock()
         # Before the first fetch below: `_post` accounts into it.
         self.stats = RpcStats()
         chain_id = int(self.fetch("eth_chainId", []), 16)
@@ -225,26 +231,45 @@ class JsonRpcTransport:
             raise RpcError(err.get("message", str(err)), err.get("code"), err.get("data"))
         return result["result"]
 
-    def fetch_multi(self, payloads: list[tuple[str, list[Any]]]) -> list[Any]:
+    def fetch_multi(
+        self, payloads: list[tuple[str, list[Any]]], *, concurrent: bool = False
+    ) -> list[Any]:
         """Batched JSON-RPC.  Returns one entry per payload, in order.
 
         An entry is the raw result, or an `RpcError` for a per-call failure --
         never raised, because a failed quote is arc removal, not an error.
+
+        `concurrent` issues the chunks on separate connections.  It matters
+        whenever the node caps a batch well below the work in hand: a storage
+        sweep of 4,071 slots is 42 chunks at the usual 100-per-batch ceiling,
+        and in sequence those round trips dominate everything -- 7.5 s to read
+        state that the quoter can *simulate* 5,600 swaps against in 4 s.
         """
         out: list[Any] = [None] * len(payloads)
-        for lo, hi in _chunks(payloads, self.batch_size):
-            self._fetch_chunk(payloads, lo, hi, out)
+        spans = list(_chunks(payloads, self.batch_size))
+        if not concurrent or len(spans) <= 1:
+            for lo, hi in spans:
+                self._fetch_chunk(payloads, lo, hi, out)
+            return out
+        workers = min(len(spans), self.max_streams)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(lambda span: self._fetch_chunk(payloads, span[0], span[1], out), spans))
         return out
 
     def _fetch_chunk(
         self, payloads: list[tuple[str, list[Any]]], lo: int, hi: int, out: list[Any]
     ) -> None:
-        body = []
-        for i in range(lo, hi):
-            self._id += 1
-            method, params = payloads[i]
-            body.append({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
-        first_id = body[0]["id"]
+        # One contiguous id block per chunk, allocated atomically: responses
+        # are matched by `first_id + offset`, so two threads interleaving their
+        # allocations would silently mis-pair results with requests.
+        with self._id_lock:
+            first_id = self._id + 1
+            self._id += hi - lo
+        body = [
+            {"jsonrpc": "2.0", "id": first_id + (i - lo),
+             "method": payloads[i][0], "params": payloads[i][1]}
+            for i in range(lo, hi)
+        ]
         try:
             responses = self._post(body)
             if not isinstance(responses, list):
@@ -265,11 +290,25 @@ class JsonRpcTransport:
             if hi - lo == 1:
                 out[lo] = exc
                 return
+            # A node that caps batch size says so, and says the number.  Learn
+            # it instead of rediscovering it by halving on every call: at the
+            # 500 default against Erigon's 100, each chunk failed four times
+            # before fitting, turning a 4,071-slot sweep into ~135 requests.
+            self._learn_batch_limit(exc)
             # Halve and retry: an oversized or out-of-gas batch is the common
             # cause, and one bad call must not drop its 499 neighbours.
             mid = (lo + hi) // 2
             self._fetch_chunk(payloads, lo, mid, out)
             self._fetch_chunk(payloads, mid, hi, out)
+
+    def _learn_batch_limit(self, exc: RpcError) -> None:
+        match = _BATCH_LIMIT.search(str(exc))
+        if not match:
+            return
+        limit = int(match.group(1))
+        with self._id_lock:
+            if 0 < limit < self.batch_size:
+                self.batch_size = limit
 
     # ------------------------------------------------------------ capabilities
 

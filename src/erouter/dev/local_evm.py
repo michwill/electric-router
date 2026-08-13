@@ -128,6 +128,13 @@ class LocalEvm:
             excess_blob_gas=int(header.get("excessBlobGas", "0x0") or "0x0", 16),
         ))
         self._evm.set_balance(CALLER, 10 ** 24)
+        # Discovering the node's batch ceiling by failing into it is fine when
+        # chunks go out one at a time -- the first failure teaches the rest.
+        # Concurrently it is not: every in-flight chunk fails together, and the
+        # halving retries collide.  So start at a ceiling every node accepts.
+        limit = getattr(self.rpc, "batch_size", None)
+        if isinstance(limit, int) and limit > BATCH_LIMIT:
+            self.rpc.batch_size = BATCH_LIMIT
 
     # ------------------------------------------------------------- Transport
 
@@ -277,11 +284,16 @@ class LocalEvm:
         Erigon rejects the *whole* batch over its limit rather than truncating,
         so an unsplit route's worth of requests returns nothing at all.
         """
-        out: list = []
-        for lo in range(0, len(payloads), BATCH_LIMIT):
-            out.extend(self.rpc.fetch_multi(payloads[lo:lo + BATCH_LIMIT]))
-            self.stats.round_trips += 1
-        return out
+        if not payloads:
+            return []
+        self.stats.round_trips += max(1, (len(payloads) + BATCH_LIMIT - 1) // BATCH_LIMIT)
+        try:
+            return self.rpc.fetch_multi(payloads, concurrent=True)
+        except TypeError:  # a transport that predates the keyword
+            out: list = []
+            for lo in range(0, len(payloads), BATCH_LIMIT):
+                out.extend(self.rpc.fetch_multi(payloads[lo:lo + BATCH_LIMIT]))
+            return out
 
     def _warm_by_trace(self, calls: list[Call]) -> bool:
         """prestateTracer: state values straight back, no second fetch."""

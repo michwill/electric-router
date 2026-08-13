@@ -767,7 +767,12 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
           f"{before.code_blobs} code blobs, {before.pools_known} pools known")
 
     load = load_pools(chain, min_tvl=args.min_tvl, llamma=args.llamma)
-    setup = quoter_client(rpc, chain)
+    # Everything through the recorder, universe setup included.  Node merges
+    # and stake arcs read ERC4626 vaults and wrappers that no swap probe ever
+    # touches, and a cache without them cannot reach the tokens behind them --
+    # `sDOLA is not reachable from any pool`, learned the hard way.
+    recorder = Recorder(rpc)
+    setup = quoter_client(recorder, chain)
     resolve_dialects(load.pools, setup, chain)
     read_balances(load.pools, setup)
     nodes, _ = build_node_map(load.pools, chain, setup)
@@ -786,10 +791,9 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
         print(f"  {OK} nothing to do")
         return 0
 
-    recorder = Recorder(rpc)
     started = _time.perf_counter()
     try:
-        prepare(load.pools, nodes, quoter_client(recorder, chain),
+        prepare(load.pools, nodes, setup,
                 src_token=_resolve_token(nodes, args.src, load.pools),
                 dst_token=_resolve_token(nodes, args.dst, load.pools),
                 extra_arcs=stake)
