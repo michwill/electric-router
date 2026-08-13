@@ -314,6 +314,54 @@ def _resolve_token(nodes, symbol_or_address: str, pools) -> str:
     return ranked[0][0]
 
 
+def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False):
+    """A quoter backed by an in-process EVM, or None if that is not available.
+
+    The committed cache says which slots each pool reads and holds its code, so
+    the only per-block traffic is reading current values -- about a second for
+    the whole universe.  A pool the cache has never seen is discovered here and
+    written back, so keeping up with a moving universe costs an access list for
+    what moved rather than for everything.
+    """
+    try:
+        from .local_evm import LocalEvm
+        from .state_cache import StateCache
+    except ImportError as exc:
+        if not quiet:
+            print(f"  {WARN} local EVM unavailable ({exc}); quoting over the wire")
+        return None
+
+    from ..core.pipeline import build_arcs
+    from .boa_host import quoter_client
+
+    cache = StateCache.load(chain.chain_id, chain.name.lower())
+    if not cache.accounts:
+        if not quiet:
+            print(f"  {WARN} no state cache for {chain.name}; run `erouter warmcache`")
+        return None
+    try:
+        evm = LocalEvm(rpc, cache=cache)
+        stats = evm.prime()
+        fresh = cache.unknown(p.address for p in load.pools)
+        if fresh:
+            wanted = {a.lower() for a in fresh}
+            refs, _ = build_arcs([p for p in load.pools if p.address.lower() in wanted], nodes)
+            if refs:
+                evm.warm_arcs(refs, quoter_client(rpc, chain).address)
+            cache.learn_pools(p.address for p in load.pools)
+            cache.save()
+    except Exception as exc:  # a cold cache must degrade, never abort a route
+        if not quiet:
+            print(f"  {WARN} local EVM warm failed ({str(exc)[:70]}); quoting over the wire")
+        return None
+
+    if not quiet:
+        extra = f", {len(fresh)} new pool(s) learned" if fresh else ""
+        print(f"  local EVM: {stats.slots:,} slots in {stats.ms:,.0f} ms"
+              f" ({stats.accounts} accounts{extra})")
+    return quoter_client(evm, chain)
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
@@ -353,6 +401,10 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     nodes, wrappers = build_node_map(load.pools, chain, client)
     stake_arcs = build_stake_arcs(nodes, chain, client)
+    if args.local:
+        local = _local_quoter(rpc, chain, load, nodes)
+        if local is not None:
+            client = local
     # Gas is priced by default.  Leaving it at zero made every route look free
     # to branch, which is exactly backwards for the small trades where an extra
     # leg costs more than it saves.
@@ -918,6 +970,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="drop pools on Curve's pool_filters list (an extra request; "
              "/v2/pools already excludes them, so this only guards a stale cache)",
     )
+    route_cmd.add_argument(
+        "--no-local", dest="local", action="store_false",
+        help="quote over the wire instead of in an in-process EVM primed from "
+             "data/evm-state (the default; falls back to the wire on its own)",
+    )
+    route_cmd.set_defaults(local=True)
     route_cmd.set_defaults(func=cmd_route)
 
     return parser

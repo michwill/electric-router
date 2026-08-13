@@ -428,6 +428,27 @@ class LocalEvm:
         return True
 
 
+    def warm_arcs(self, refs, quoter: str, grid=None, per_call: int = 200) -> WarmStats:
+        """Discover state for specific arcs -- the ones the cache has not seen.
+
+        A new pool costs an access list over a probe batch covering only its own
+        arcs, so keeping up with a moving universe is proportional to what
+        moved.  The batch is the same shape the router itself sends, which is
+        what makes one list cover every size that arc will ever be quoted at.
+        """
+        from ..core.codec import encode_call
+        from ..core.probe import COARSE_GRID, plan_grid
+        from ..core.quoter import SIG_PROBE_BATCH
+
+        plan = plan_grid(list(refs), grid or COARSE_GRID)
+        calls = [
+            Call(quoter, encode_call(
+                SIG_PROBE_BATCH,
+                [p.as_tuple() for p in plan.probes[lo:lo + per_call]]))
+            for lo in range(0, len(plan.probes), per_call)
+        ]
+        return self.warm(calls) if calls else self.stats
+
     # --------------------------------------------------------------- checks
 
     def verify_against(self, node, calls: list[Call]) -> list[tuple[Call, int, int]]:
