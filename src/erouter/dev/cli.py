@@ -549,11 +549,11 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
 # `prepare` is a parent span wrapping these, so counting both double-counts.
 _PREPARE_CHILDREN = ("arcs", "probe", "calibrate", "component", "prices")
 # Stages whose cost is a network round trip rather than arithmetic.
-_RPC_STAGES = {"probe", "refine", "verify", "direct", "refit"}
+_RPC_STAGES = {"probe", "refine", "verify", "direct", "refit", "split"}
 _STAGE_ORDER = (
     "arcs", "probe", "calibrate", "component", "prices",
     "graph", "seed", "refine", "solve", "candidates", "direct", "verify",
-    "refit", "realize",
+    "refit", "split", "realize",
 )
 
 
@@ -684,6 +684,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     kw = {
         "src_token": src, "dst_token": dst, "amount_in": amount,
         "extra_arcs": stake, "gas_price_wei": gas_price, "max_legs": args.max_legs,
+        "optimise_split": not args.no_split,
     }
 
     def phase(title, client, prepared):
@@ -724,6 +725,9 @@ def cmd_bench(args: argparse.Namespace) -> int:
               f"{counters.get('cg_rounds', 0)} CG rounds · "
               f"{counters.get('candidates', 0)} candidates "
               f"({counters.get('candidates_quoted', 0)} quoted)")
+        print(f"  split: {counters.get('split_calls', 0)} round trips · "
+              f"{counters.get('split_evaluations', 0)} quotes · "
+              f"{counters.get('split_gain_bp', 0.0):+.2f} bp")
     return 0
 
 
@@ -765,6 +769,10 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--gas-price", default=None, help="gwei; defaults to the live price")
     bench.add_argument("--max-legs", type=int, default=32)
     bench.add_argument("--llamma", action="store_true")
+    bench.add_argument(
+        "--no-split", action="store_true",
+        help="skip the §7 split-ratio optimisation, to price what it costs",
+    )
     bench.add_argument(
         "--profile", action="store_true",
         help="also print function-level self time inside a warm route",

@@ -739,7 +739,7 @@ def _optimise_split(
     if result.winner is not None:
         result.winner.route = route
         result.winner.verified_out = report.after
-    result.counters["split_gain_bp"] = round(report.gain_bp)
+    result.counters["split_gain_bp"] = round(report.gain_bp, 2)
 
 
 def direct_candidates(
