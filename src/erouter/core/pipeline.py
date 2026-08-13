@@ -47,6 +47,7 @@ from .probe import (
 from .quoter import MAX_LEGS, QuoterClient
 from .realize import (
     RealizedRoute,
+    _forward_simulate,
     cancel_cycles,
     check_one_arc_per_pool,
     prune_dust,
@@ -55,6 +56,8 @@ from .realize import (
 from .refit import RefitReport, refit
 from .seed import k_shortest_paths, seed_subgraph
 from .solve import SolveReport, active_set_solve, solve
+from .split import optimise as optimise_splits
+from .split import should_optimise
 from .types import ArcKind, PoolArc, Probe
 from .verify import realize_candidates, verify
 
@@ -350,6 +353,7 @@ def route(
     refit_rounds: int = 2,
     prepared: Prepared | None = None,
     extra_arcs: list[PoolArc] | None = None,
+    optimise_split: bool = True,
     max_legs: int = DEFAULT_MAX_LEGS,
 ) -> RouteResult:
     result = RouteResult(
@@ -396,6 +400,7 @@ def route(
         seed_k=seed_k, verify_on_chain=verify_on_chain,
         max_candidates=max_candidates, gas_price_wei=gas_price_wei,
         refit_rounds=refit_rounds, prepared=prepared, max_legs=max_legs,
+        optimise_split=optimise_split,
     )
 
 
@@ -421,6 +426,7 @@ def _quote(
     gas_price_wei: int,
     refit_rounds: int,
     prepared: Prepared | None,
+    optimise_split: bool = True,
     max_legs: int = DEFAULT_MAX_LEGS,
 ) -> RouteResult:
     """The size-dependent half: graph, solve, candidates, verify, refit."""
@@ -689,8 +695,51 @@ def _quote(
                         gas_price_wei=gas_price_wei, max_legs=max_legs,
                     )
 
+            # --- §7: let the chain choose the split, not the model -----------
+            #
+            # Last, so it runs on whatever the refit left as the winner, and
+            # safe there because it only ever accepts a strict improvement.
+            if optimise_split and result.route is not None:
+                with clock("split"):
+                    _optimise_split(result, nodes, client, amount_in=amount_in)
+
     result.price_out_per_in = float(nu[src_node] / nu[dst_node]) if nu[dst_node] else 0.0
     return result
+
+
+def _optimise_split(
+    result: RouteResult, nodes: NodeMap, client: QuoterClient, *, amount_in: int
+) -> None:
+    """Re-split the finished route against the quoter, in place."""
+    route = result.route
+    if route is None:
+        return
+    legs = [rl.leg for rl in route.legs]
+    thetas = [rl.theta for rl in route.legs if not rl.is_conversion]
+    reason = should_optimise(
+        legs, thetas,
+        modelled_out=route.modelled_out, verified_out=result.verified_out or 0,
+    )
+    if not reason:
+        return
+    tuned, report = optimise_splits(
+        legs, client, amount_in=amount_in, dst_slot=route.dst_slot,
+        baseline=result.verified_out or 0,
+    )
+    result.counters["split_calls"] = report.calls
+    result.counters["split_evaluations"] = report.evaluations
+    if not report.improved:
+        return
+    for realized, leg in zip(route.legs, tuned, strict=True):
+        realized.leg = leg
+    # The modelled per-leg amounts described the old split; re-walk so the
+    # diagram and the JSON report the flow that is actually being quoted.
+    route.modelled_out = _forward_simulate(route, nodes)
+    result.verified_out = report.after
+    if result.winner is not None:
+        result.winner.route = route
+        result.winner.verified_out = report.after
+    result.counters["split_gain_bp"] = round(report.gain_bp)
 
 
 def direct_candidates(
