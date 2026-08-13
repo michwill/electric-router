@@ -731,9 +731,104 @@ def cmd_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_warmcache(args: argparse.Namespace) -> int:
+    """Learn every pool's storage layout and bytecode, and commit the result.
+
+    Two of the three costs of warming a local EVM answer questions that do not
+    change between blocks -- which slots a pool reads, and the code that reads
+    them.  This resolves them once so a checkout starts warm and a session pays
+    only for the storage sweep.
+
+    Incremental by construction: a pool already in the cache is not listed
+    again, so adding a newly deployed pool costs an access list for that pool
+    rather than for the universe.
+    """
+    import time as _time
+
+    from ..core.pipeline import prepare
+    from .boa_host import quoter_client
+    from .local_evm import LocalEvm, Recorder
+    from .rpc import JsonRpcTransport
+    from .state_cache import StateCache
+    from .universe import load_pools, read_balances, resolve_dialects
+    from .wrappers import build_node_map, build_stake_arcs
+
+    chain = chain_table.get(args.chain)
+    try:
+        rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
+    except Exception as exc:
+        print(f"{BAD} node unreachable: {exc}")
+        return 4
+
+    cache = StateCache.load(chain.chain_id, chain.name.lower())
+    before = cache.stats()
+    print(f"\n  {chain.name} · block {rpc.block:,}")
+    print(f"  cache: {before.accounts} accounts, {before.slots:,} slots, "
+          f"{before.code_blobs} code blobs, {before.pools_known} pools known")
+
+    load = load_pools(chain, min_tvl=args.min_tvl, llamma=args.llamma)
+    setup = quoter_client(rpc, chain)
+    resolve_dialects(load.pools, setup, chain)
+    read_balances(load.pools, setup)
+    nodes, _ = build_node_map(load.pools, chain, setup)
+    stake = build_stake_arcs(nodes, chain, setup)
+
+    # A LLAMMA reads a different set of band slots as the price moves, so its
+    # layout is a function of state and cannot be cached.  Recorded as volatile
+    # rather than silently cached wrong.
+    volatile = [p.address for p in load.pools if (p.pool_type or "").lower() == "llamma"]
+    cache.mark_volatile(volatile)
+
+    fresh = cache.unknown(p.address for p in load.pools)
+    print(f"  universe: {len(load.pools)} pools, {len(fresh)} to learn "
+          f"({len(volatile)} volatile)")
+    if not fresh:
+        print(f"  {OK} nothing to do")
+        return 0
+
+    recorder = Recorder(rpc)
+    started = _time.perf_counter()
+    try:
+        prepare(load.pools, nodes, quoter_client(recorder, chain),
+                src_token=_resolve_token(nodes, args.src, load.pools),
+                dst_token=_resolve_token(nodes, args.dst, load.pools),
+                extra_arcs=stake)
+    except Exception as exc:
+        print(f"{BAD} could not probe the universe: {exc}")
+        return 4
+    probing = (_time.perf_counter() - started) * 1000
+    print(f"  probed in {probing:,.0f} ms, {len(recorder.calls)} distinct quoter calls")
+
+    evm = LocalEvm(rpc, cache=cache)
+    stats = evm.warm(list(recorder.calls))
+    cache.learn_pools(p.address for p in load.pools)
+    cache.save()
+    after = cache.stats()
+    size = cache.path.stat().st_size if cache.path.exists() else 0
+    print(f"  learned in {stats.ms:,.0f} ms "
+          f"(lists {stats.list_ms:,.0f} · code {stats.code_ms:,.0f} · "
+          f"storage {stats.storage_ms:,.0f})")
+    print(f"  cache: {after.accounts} accounts (+{after.accounts - before.accounts}), "
+          f"{after.slots:,} slots, {after.code_blobs} code blobs")
+    print(f"  {OK} wrote {cache.path} ({size / 1024:,.0f} KiB)")
+    for line in stats.errors[:5]:
+        print(f"  {WARN} {line}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="erouter", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    warm = sub.add_parser("warmcache",
+                          help="learn pool storage layouts and code; writes data/evm-state")
+    warm.add_argument("--chain", default="ethereum")
+    warm.add_argument("--block", default="latest")
+    warm.add_argument("--min-tvl", type=float, default=10_000.0)
+    warm.add_argument("--llamma", action="store_true")
+    warm.add_argument("--from", dest="src", default="USDC")
+    warm.add_argument("--to", dest="dst", default="WETH")
+    warm.set_defaults(func=cmd_warmcache)
 
     doctor = sub.add_parser("doctor", help="check node and API capabilities")
     doctor.add_argument("--chain", help="only this chain (default: all configured)")

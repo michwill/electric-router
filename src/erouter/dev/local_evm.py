@@ -97,6 +97,7 @@ class LocalEvm:
 
     rpc: object
     strict: bool = True
+    cache: object = None
     _evm: object = None
     _loaded: set[str] = field(default_factory=set)
     _slots: dict[str, set[int]] = field(default_factory=dict)
@@ -172,6 +173,70 @@ class LocalEvm:
             self._injected.add(address)
 
     # ----------------------------------------------------------------- warm
+
+    def prime(self, pools=()) -> WarmStats:
+        """Load everything the disk cache already knows, then read values.
+
+        No access lists and no `eth_getCode` for a pool that is already in the
+        cache -- its layout and its bytecode are properties of code that does
+        not change.  What is left is the storage sweep, which is per-block and
+        irreducible, plus the balances of the few accounts that hold any.
+
+        Returns without touching the network for any pool it does not know;
+        `warm` discovers those.
+        """
+        import time as _t
+
+        if self.cache is None:
+            return self.stats
+        started = _t.perf_counter()
+        block = self.rpc.pin.hex_block
+        wanted = self.cache.slots()
+        if pools:
+            reachable = self.cache.unknown(pools)
+            self.stats.errors.extend(f"uncached pool {p[:10]}" for p in reachable[:3])
+        for address in wanted:
+            if address in self._loaded:
+                continue
+            blob = self.cache.bytecode(address)
+            from pyrevm import AccountInfo
+
+            self._evm.insert_account_info(address, AccountInfo(nonce=1, code=blob))
+            self._loaded.add(address)
+        self._read_values(wanted, block, funded=self.cache.funded)
+        self.stats.ms += (_t.perf_counter() - started) * 1000
+        self.stats.accounts = len(self._loaded)
+        return self.stats
+
+    def _read_values(self, wanted: dict, block: str, funded=None) -> None:
+        """The only genuinely per-block traffic: slot values, and live balances."""
+        import time as _t
+
+        flat = [(a, slot) for a, slots in wanted.items() for slot in sorted(slots)]
+        if flat:
+            _mark = _t.perf_counter()
+            values = self._batched(
+                [("eth_getStorageAt", [a, f"0x{slot:064x}", block]) for a, slot in flat])
+            self.stats.storage_ms += (_t.perf_counter() - _mark) * 1000
+            self.stats.fetch_calls += len(values)
+            for (address, slot), value in zip(flat, values, strict=True):
+                if isinstance(value, Exception) or not isinstance(value, str):
+                    self.stats.errors.append(f"getStorageAt {address[:10]}: {str(value)[:70]}")
+                    continue
+                self._evm.insert_account_storage(address, slot, int(value, 16))
+                self._slots.setdefault(address, set()).add(slot)
+                self.stats.slots += 1
+        # Balances only where there is one to have.  Most pools hold no native
+        # ETH at all, and the cache remembers which do -- but the ETH/stETH pool
+        # does, and a zero there makes `get_dy` answer zero (E11).
+        holders = sorted(set(funded or ()) & set(wanted)) if funded is not None else list(wanted)
+        if holders:
+            _mark = _t.perf_counter()
+            got = self._batched([("eth_getBalance", [a, block]) for a in holders])
+            self.stats.code_ms += (_t.perf_counter() - _mark) * 1000
+            for address, balance in zip(holders, got, strict=True):
+                if not isinstance(balance, Exception) and balance:
+                    self._evm.set_balance(address, int(balance, 16))
 
     def warm(self, calls: list[Call]) -> WarmStats:
         """Load every account and slot these calls touch.
@@ -304,6 +369,8 @@ class LocalEvm:
         # Only what is not already resident.  Without this an incremental warm
         # re-reads every slot of every account it has ever seen, which on five
         # successive quotes was 7,846 reads instead of a few hundred.
+        if self.cache is not None:
+            self.cache.learn_slots(touched)
         wanted = {}
         for address, keys in touched.items():
             fresh_keys = keys - self._slots.get(address, set())
@@ -311,42 +378,40 @@ class LocalEvm:
                 wanted[address] = fresh_keys
         if not wanted:
             return True
+
         from pyrevm import AccountInfo
 
         cold = [a for a in wanted if a not in self._loaded]
-        if cold:
-            # Balance is not optional, and dropping it is silent: the $77M
-            # ETH/stETH pool holds *native* ETH (E11), so a zero balance makes
-            # `get_dy` return zero rather than fail.
+        # Code only for what the disk cache cannot supply: `eth_getCode` ships
+        # whole contracts and was 6,265 ms for 198 accounts, and code does not
+        # change, so a committed cache removes this entirely on a warm repo.
+        needs_code = [a for a in cold
+                      if self.cache is None or self.cache.bytecode(a) is None]
+        blobs: dict[str, bytes] = {}
+        if needs_code:
             _mark = _t.perf_counter()
-            answers = self._batched(
-                [("eth_getCode", [a, block]) for a in cold]
-                + [("eth_getBalance", [a, block]) for a in cold])
+            answers = self._batched([("eth_getCode", [a, block]) for a in needs_code])
             self.stats.code_ms += (_t.perf_counter() - _mark) * 1000
-            codes, balances = answers[:len(cold)], answers[len(cold):]
-            for address, code, balance in zip(cold, codes, balances, strict=True):
+            self.stats.fetch_calls += len(answers)
+            for address, code in zip(needs_code, answers, strict=True):
                 blob = b"" if isinstance(code, Exception) or not code \
                     else bytes.fromhex(code[2:])
-                self._evm.insert_account_info(address, AccountInfo(nonce=1, code=blob or None))
-                self._evm.set_balance(
-                    address,
-                    0 if isinstance(balance, Exception) or not balance else int(balance, 16))
-                self._loaded.add(address)
+                blobs[address] = blob
+                if self.cache is not None and blob:
+                    self.cache.learn_code(address, blob)
+        for address in cold:
+            blob = blobs.get(address)
+            if blob is None and self.cache is not None:
+                blob = self.cache.bytecode(address)
+            self._evm.insert_account_info(address, AccountInfo(nonce=1, code=blob or None))
+            self._loaded.add(address)
 
-        flat = [(a, slot) for a in wanted for slot in sorted(wanted[a])]
-        _mark = _t.perf_counter()
-        values = self._batched(
-            [("eth_getStorageAt", [a, f"0x{slot:064x}", block]) for a, slot in flat])
-        self.stats.storage_ms += (_t.perf_counter() - _mark) * 1000
-        self.stats.fetch_calls += len(values) + len(cold)
-        for (address, slot), value in zip(flat, values, strict=True):
-            if isinstance(value, Exception) or not isinstance(value, str):
-                self.stats.errors.append(f"getStorageAt {address[:10]}: {str(value)[:80]}")
-                continue
-            self._evm.insert_account_storage(address, slot, int(value, 16))
-            self._slots.setdefault(address, set()).add(slot)
-            self.stats.slots += 1
+        self._read_values(wanted, block)
+        if self.cache is not None:
+            for address in cold:
+                self.cache.learn_funded(address, self._evm.get_balance(address))
         return True
+
 
     # --------------------------------------------------------------- checks
 
