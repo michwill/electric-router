@@ -42,7 +42,22 @@ _BATCH_LIMIT = re.compile(r"batch limit (\d+) exceeded")
 # Concurrent HTTP streams for independent calls.  One stream does not fill a
 # slow uplink: three 600-probe chunks measured 3,979 ms serial, 2,334 ms at
 # once.  Kept modest so a public endpoint does not read it as abuse.
-DEFAULT_STREAMS = 4
+#
+# Eight rather than four because the win is consistency, not throughput.  Six
+# runs of `prepare` (~5,600 probes in 600-probe chunks) measured, in ms:
+#
+#     streams    min   median   spread
+#           2  1,498    1,666    1,444
+#           4    990    1,262      707
+#           8  1,059    1,156      499
+#          16    972    1,005      437
+#
+# The *minimum* barely moves past four -- the node is execution-bound on a
+# batch that large, so more sockets buy no extra work done.  What they buy is a
+# tighter distribution.  Sixteen is better still and is what `local_evm` uses
+# for its own sweep of thousands of tiny reads, but that is a burst against a
+# node someone chose; this default is what every endpoint sees.
+DEFAULT_STREAMS = 8
 MAX_BATCH_BYTES = 16 << 20
 
 
