@@ -298,3 +298,52 @@ def test_it_falls_back_to_the_chained_search_without_a_probe_path():
     _tuned, report = optimise(SPLIT, quoter, amount_in=1_000_000, dst_slot=2,
                               baseline=1, nominal_in=[6, 4, 5], nominal_out=[5, 3, 4])
     assert report.mode == "chained"
+
+
+class LocalPoolQuoter(PoolQuoter):
+    """The same pools, but claiming quotes are cheap enough to spend freely."""
+
+    local = True
+
+
+def test_a_local_quoter_finishes_on_the_true_function():
+    """The last word comes from a real quote, not from an interpolant."""
+    amount = 1_000_000
+    quoter = LocalPoolQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+    )
+    assert report.mode == "curves"
+    assert report.polish_calls > 0, "an in-process quoter should be polished against"
+    # Every polish evaluation is a real quote, so the reported result is one.
+    assert report.after == quoter.quote_routes([tuned], [amount], [2])[0]
+    assert abs(tuned[0].bps / BPS - true_optimum(quoter, amount)) < 0.01
+
+
+def test_the_polish_never_returns_something_worse():
+    amount = 1_000_000
+    quoter = LocalPoolQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    _tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+    )
+    assert report.after >= baseline
+    assert report.polish_bp >= 0.0
+
+
+def test_a_remote_quoter_is_not_polished():
+    """On the wire each of those evaluations is a round trip; do not spend them."""
+    amount = 1_000_000
+    quoter = PoolQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    _tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+    )
+    assert report.polish_calls == 0

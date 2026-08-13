@@ -734,6 +734,9 @@ def _optimise_split(
     result.counters["split_local"] = report.local
     result.counters["split_mode"] = report.mode
     result.counters["split_refined"] = report.refined
+    if report.polish_calls:
+        result.counters["split_polish_calls"] = report.polish_calls
+        result.counters["split_polish_bp"] = round(report.polish_bp, 3)
     if report.mode == "curves":
         result.counters["split_check_bp"] = round(report.check_bp, 3)
     if report.predicted:

@@ -128,6 +128,21 @@ REFINE_NODES = 96
 # dense pass.  On the measured routes that is three legs of twelve, not twelve.
 LEG_TOL_BP = 0.05
 
+# --- the exact pass, when a quote is cheap ---------------------------------
+#
+# An in-process EVM prices a route in milliseconds, so the last word can be
+# taken from the true chained function instead of an interpolant.  The curves
+# still do the searching -- a composed evaluation is microseconds against
+# milliseconds -- but they no longer decide the answer, which is the one place
+# interpolation error would have shown up in basis points.
+POLISH_ITERS = 12
+POLISH_SWEEPS = 2
+# The curve search has already found the basin; this only refines inside it.
+POLISH_WINDOW = 0.05
+# With an exact finish available, the curves only have to be right enough to
+# land in the correct basin, so the dense second sampling pass is not needed.
+LOCAL_CHECK_TOL_BP = 10.0
+
 
 @dataclass(slots=True)
 class SplitReport:
@@ -142,6 +157,8 @@ class SplitReport:
     skipped: str = ""
     mode: str = "chained"
     probes: int = 0
+    polish_calls: int = 0
+    polish_bp: float = 0.0
     local: int = 0
     predicted: int = 0
     refined: bool = False
@@ -473,13 +490,13 @@ def takes_of(legs: list[Leg], curves, fractions, amount_in: float) -> list[float
     return out
 
 
-def _golden(objective, lo: float, hi: float) -> float:
+def _golden(objective, lo: float, hi: float, *, iters: int = GOLDEN_ITERS) -> float:
     """Maximise a unimodal `objective` on `[lo, hi]` without derivatives."""
     a, b = lo, hi
     c = b - GOLDEN * (b - a)
     d = a + GOLDEN * (b - a)
     fc, fd = objective(c), objective(d)
-    for _ in range(GOLDEN_ITERS):
+    for _ in range(iters):
         if fc < fd:
             a, c, fc = c, d, fd
             d = a + GOLDEN * (b - a)
@@ -491,7 +508,8 @@ def _golden(objective, lo: float, hi: float) -> float:
     return 0.5 * (a + b)
 
 
-def _ascend(start, evaluate, free, counter) -> tuple[list, float]:
+def _ascend(start, evaluate, free, counter, *, iters: int = GOLDEN_ITERS,
+            sweeps: int = MAX_SWEEPS, window: float = 0.0) -> tuple[list, float]:
     """Coordinate ascent, each coordinate maximised exactly by golden section.
 
     No step size, no gradient, no normalisation -- all of which existed only to
@@ -500,13 +518,19 @@ def _ascend(start, evaluate, free, counter) -> tuple[list, float]:
     """
     weights = [w.copy() for w in start]
     best = evaluate(weights)
-    for _ in range(MAX_SWEEPS):
+    for _ in range(sweeps):
         opened = best
         for g, j in free:
             others = float(weights[g][:-1].sum()) - float(weights[g][j])
             room = 1.0 - MIN_WEIGHT - others
             if room <= MIN_WEIGHT:
                 continue
+            low = MIN_WEIGHT
+            if window > 0.0:
+                here = float(weights[g][j])
+                low, room = max(low, here - window), min(room, here + window)
+                if room <= low:
+                    continue
 
             def objective(value, g=g, j=j, here=weights):
                 counter[0] += 1
@@ -515,7 +539,7 @@ def _ascend(start, evaluate, free, counter) -> tuple[list, float]:
                 trial[g][-1] = max(MIN_WEIGHT, 1.0 - float(trial[g][:-1].sum()))
                 return evaluate(trial)
 
-            where = _golden(objective, MIN_WEIGHT, room)
+            where = _golden(objective, low, room, iters=iters)
             candidate = [w.copy() for w in weights]
             candidate[g][j] = where
             candidate[g][-1] = max(MIN_WEIGHT, 1.0 - float(candidate[g][:-1].sum()))
@@ -672,6 +696,38 @@ def optimise(
     return (apply_weights(legs, groups, best_w) if report.improved else legs), report
 
 
+def polish(
+    legs, client, groups, start, free, report, *, amount_in: int, dst_slot: int,
+    baseline: int,
+) -> tuple[list, int]:
+    """Finish on the true chained function, not on an interpolant.
+
+    Only worth doing where a quote is cheap: each evaluation here is a real
+    `quote_routes`, which on the wire is a round trip and in-process is
+    milliseconds.  The window is deliberately small -- the curve search has
+    already chosen the basin, and this decides only where inside it the answer
+    sits, which is exactly the decision interpolation error was distorting.
+    """
+    calls = [0]
+
+    def exact(candidate) -> float:
+        calls[0] += 1
+        routes = [apply_weights(legs, groups, candidate)]
+        got = client.quote_routes(routes, [amount_in], [dst_slot])
+        return float(got[0]) if got else 0.0
+
+    tuned, value = _ascend(
+        [_project(w) for w in start], exact, free, [0],
+        iters=POLISH_ITERS, sweeps=POLISH_SWEEPS, window=POLISH_WINDOW,
+    )
+    report.polish_calls = calls[0]
+    report.evaluations += calls[0]
+    if value <= baseline:
+        return start, baseline
+    report.polish_bp = (value / baseline - 1) * 10_000 if baseline else 0.0
+    return tuned, int(value)
+
+
 def _trusted_curves(
     legs, client, groups, weights, report, *,
     amount_in: int, dst_slot: int, baseline: int, nominal_in, nominal_out,
@@ -698,7 +754,8 @@ def _trusted_curves(
         report.check_bp = (composed / baseline - 1) * 10_000
         return abs(report.check_bp)
 
-    if curves is None or missed() > CHECK_TOL_BP:
+    tolerance = LOCAL_CHECK_TOL_BP if getattr(client, "local", False) else CHECK_TOL_BP
+    if curves is None or missed() > tolerance:
         if curves is None:
             report.skipped = "a leg would not fit"
             return None
@@ -712,7 +769,8 @@ def _trusted_curves(
             return None
         curves = _build(points)
         report.refined = report.probes > spent
-        if curves is None or missed() > CHECK_TOL_BP:
+        tolerance = LOCAL_CHECK_TOL_BP if getattr(client, "local", False) else CHECK_TOL_BP
+    if curves is None or missed() > tolerance:
             report.skipped = f"curves miss the chain by {report.check_bp:.1f} bp"
             return None
     return curves
@@ -781,9 +839,20 @@ def _search_curves(
 
     report.predicted = int(best_value)
     pick = int(np.argmax(values))
-    if values[pick] <= baseline:
+    winner, best = candidates[pick], int(values[pick])
+
+    # The batch above is the last word only when a quote is expensive.  With an
+    # in-process EVM it is merely a good starting point, and the true function
+    # is affordable enough to be optimised directly.
+    if getattr(client, "local", False) and best > 0:
+        winner, best = polish(
+            legs, client, groups, winner, free, report,
+            amount_in=amount_in, dst_slot=dst_slot, baseline=best,
+        )
+
+    if best <= baseline:
         report.after = baseline
         return legs, report
     report.improved = True
-    report.after = int(values[pick])
-    return apply_weights(legs, groups, candidates[pick]), report
+    report.after = best
+    return apply_weights(legs, groups, winner), report

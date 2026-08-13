@@ -138,6 +138,9 @@ class LocalEvm:
 
     # ------------------------------------------------------------- Transport
 
+    #: Quotes execute in-process, so callers may spend them freely.
+    local = True
+
     @property
     def block(self) -> int:
         return self.rpc.block
