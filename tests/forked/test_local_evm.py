@@ -48,7 +48,7 @@ def warmed(rpc, chain, probes):
     from erouter.dev.local_evm import LocalEvm
 
     reference = quoter_client(rpc, chain)
-    evm = LocalEvm(rpc, strict=True)
+    evm = LocalEvm(rpc)
     data = encode_call(SIG_PROBE_BATCH, [p.as_tuple() for p in probes])
     evm.warm([Call(reference.address, data)])
     if not evm.stats.accounts:
@@ -96,6 +96,6 @@ def test_an_unwarmed_pool_falls_back_to_the_chain_rather_than_guessing(rpc, chai
     probe = Probe(ARCS[0][0], ArcKind.SWAP_STABLE, 0, 1, 3, 10 ** 18)
     truth = quoter_client(rpc, chain).probe([probe])[0]
 
-    cold = LocalEvm(rpc)  # nothing warmed at all
+    cold = LocalEvm(rpc, strict=False)  # nothing warmed, fork serves it
     answers = quoter_client(cold, chain).probe([probe])
     assert (answers[0].status, answers[0].value) == (truth.status, truth.value)

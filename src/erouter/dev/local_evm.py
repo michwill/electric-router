@@ -20,11 +20,24 @@ is still gathered at several sizes and unioned, because "measured on five
 pools" is not "true of every pool", and a LLAMMA crossing bands is exactly the
 shape that would break it.
 
-**The prefetch is an optimisation, not a correctness requirement.**  Measured
-both ways on a deliberately incomplete 3pool: with no `fork_url` the call
-*reverted*, and with one set it fetched the missing slots and matched the node
-exactly.  So the fork stays wired up as a fallback and an incomplete or stale
-slot list costs latency -- ~34 ms per slot, lazily -- rather than an answer.
+**Prefetching and falling back are mutually exclusive here, by measurement.**
+With `fork_url` set, revm loads an account from the fork *before* accepting an
+insert, so every prefetched slot is fetched over the network anyway: warming 13
+accounts and 39 slots cost 294 ms strict against 2,340 ms with the fork on, of
+which 2,042 ms was the inserts alone.  A fallback therefore does not make the
+prefetch safer, it makes it pointless.
+
+So `strict` (the default) bulk-loads and accepts that a missed slot reads as
+zero.  Measured on a deliberately incomplete 3pool that *reverted* rather than
+returning a number, and a reverted probe is arc removal, which the pipeline
+already handles -- but that is the shape of one pool, not a guarantee, and a
+missing fee or rate would read as a plausible zero instead.  What makes it safe
+is upstream: the router verifies its chosen route on the chain regardless, so a
+stale prefetch costs route quality, never a wrong answer.
+
+`strict=False` gives up the bulk load entirely and lets the fork serve every
+read lazily at ~34 ms a slot.  Slow, and correct by construction; the mode to
+reach for when a quote disagrees with the chain and the question is why.
 
 That matters most for the state a cached slot list cannot predict.  A proxy
 upgrade is visible, because the EIP-1967 implementation slot is itself in the
@@ -66,6 +79,9 @@ class WarmStats:
     fetch_calls: int = 0
     round_trips: int = 0
     ms: float = 0.0
+    list_ms: float = 0.0
+    code_ms: float = 0.0
+    storage_ms: float = 0.0
     errors: list[str] = field(default_factory=list)
 
 
@@ -80,9 +96,10 @@ class LocalEvm:
     """
 
     rpc: object
-    strict: bool = False
+    strict: bool = True
     _evm: object = None
     _loaded: set[str] = field(default_factory=set)
+    _slots: dict[str, set[int]] = field(default_factory=dict)
     _listed: set[tuple[str, bytes]] = field(default_factory=set)
     _injected: set[str] = field(default_factory=set)
     _tracing: bool | None = None
@@ -159,31 +176,32 @@ class LocalEvm:
     def warm(self, calls: list[Call]) -> WarmStats:
         """Load every account and slot these calls touch.
 
-        Two ways, and the difference is an order of magnitude.  `prestateTracer`
-        hands back the accounts, code and storage *values* a call reads, in one
-        message -- measured at 0.127 s each, so a route's worth is one batch.
-        `eth_createAccessList` only names the slots, and pulling their values
-        then costs an `eth_getProof` per account, which is Merkle proof
-        generation the caller throws away: measured at 53 ms each, 665 accounts,
-        36 seconds.  So trace when the node will, and fall back when it will
-        not -- many hosted endpoints serve no `debug_*` at all.
+        `eth_createAccessList` names the slots and `eth_getStorageAt` reads
+        their values, because neither computes anything the caller discards.
+        `prestateTracer` returns the same state in one message but re-executes
+        the call under a tracer to do it -- over a 600-probe batch that is tens
+        of seconds -- so it is the fallback, for nodes that serve `debug_*` but
+        not `eth_createAccessList`.
 
         Calls already seen are skipped, so warming a session again costs nothing.
         """
         import time as _time
 
         started = _time.perf_counter()
+        if not self.strict:
+            return self.stats  # every insert would cost a fork read; see above
         fresh = [c for c in calls if (c.to.lower(), bytes(c.data)) not in self._listed]
         if not fresh:
             return self.stats
         for one in fresh:
             self._listed.add((one.to.lower(), bytes(one.data)))
 
-        if self._tracing is not False and self._warm_by_trace(fresh):
-            self.stats.ms += (_time.perf_counter() - started) * 1000
-            self.stats.accounts = len(self._loaded)
-            return self.stats
-        self._warm_by_proof(fresh)
+        if not self._warm_by_proof(fresh) and self._tracing is not False:
+            # No access list came back at all -- the node may serve `debug_*`
+            # instead.  This must not key off "did we load a new account": an
+            # incremental warm legitimately adds only slots, and treating that
+            # as failure re-traced every quote, which cost 93 s of 105 s.
+            self._warm_by_trace(fresh)
         self.stats.ms += (_time.perf_counter() - started) * 1000
         self.stats.accounts = len(self._loaded)
         return self.stats
@@ -241,61 +259,94 @@ class LocalEvm:
                 self._loaded.add(address)
             for key, value in (entry.get("storage") or {}).items():
                 self._evm.insert_account_storage(address, int(key, 16), int(value, 16))
+                self._slots.setdefault(address, set()).add(int(key, 16))
                 self.stats.slots += 1
 
-    def _warm_by_proof(self, calls: list[Call]) -> None:
-        """accessList names the slots; getProof fetches them.  The portable path."""
+    def _warm_by_proof(self, calls: list[Call]) -> bool:
+        """accessList names the slots; getStorageAt fetches their values.
+
+        Not `eth_getProof`: it returns many slots per account in one reply,
+        which looks like the efficient choice and is not -- it computes a
+        Merkle proof per account that this caller immediately discards.
+        Measured on one route's 198 accounts and 1,212 slots: 2,343 ms by
+        proof against 1,303 ms by plain storage reads, and the gap widens with
+        account count because proofs are per-account while storage reads batch.
+
+        `eth_getCode` is the real cost here -- 6,265 ms for those 198 accounts,
+        because it ships whole contracts.  Code is immutable, so it is fetched
+        once per address per process and belongs in a disk cache next.
+        """
         block = self.rpc.pin.hex_block
         payloads = [
             ("eth_createAccessList",
              [{"from": CALLER, "to": one.to, "data": "0x" + bytes(one.data).hex()}, block])
             for one in calls
         ]
+        import time as _t
+        _mark = _t.perf_counter()
+        listed = self._batched(payloads)
+        self.stats.list_ms += (_t.perf_counter() - _mark) * 1000
         touched: dict[str, set[int]] = {}
-        for one, answer in zip(calls, self._batched(payloads), strict=True):
+        served = False
+        for one, answer in zip(calls, listed, strict=True):
             touched.setdefault(one.to.lower(), set())
             if isinstance(answer, Exception) or not isinstance(answer, dict):
                 self.stats.errors.append(f"accessList: {str(answer)[:100]}")
                 continue
+            served = True
             for entry in answer.get("accessList", []):
                 touched.setdefault(entry["address"].lower(), set()).update(
                     int(k, 16) for k in entry["storageKeys"])
         self.stats.list_calls += len(payloads)
+        if not served:
+            return False
 
-        wanted = {a: keys for a, keys in touched.items() if a not in self._loaded or keys}
+        # Only what is not already resident.  Without this an incremental warm
+        # re-reads every slot of every account it has ever seen, which on five
+        # successive quotes was 7,846 reads instead of a few hundred.
+        wanted = {}
+        for address, keys in touched.items():
+            fresh_keys = keys - self._slots.get(address, set())
+            if fresh_keys or address not in self._loaded:
+                wanted[address] = fresh_keys
         if not wanted:
-            return
-        order = list(wanted)
-        answers = self._batched(
-            [("eth_getProof", [a, [f"0x{s:064x}" for s in sorted(wanted[a])], block])
-             for a in order]
-            + [("eth_getCode", [a, block]) for a in order if a not in self._loaded]
-        )
-        self.stats.fetch_calls += len(answers)
-        proofs = answers[:len(order)]
-        codes = {a: answers[len(order) + k]
-                 for k, a in enumerate(a for a in order if a not in self._loaded)}
-        self._install(order, proofs, codes)
-
-    def _install(self, order, proofs, codes) -> None:
-        """Insert fetched accounts and slots.  Failures are recorded, not raised."""
+            return True
         from pyrevm import AccountInfo
 
-        for address, proof in zip(order, proofs, strict=True):
-            if isinstance(proof, Exception) or not isinstance(proof, dict):
-                self.stats.errors.append(f"getProof {address[:10]}: {str(proof)[:90]}")
-                continue
-            if address not in self._loaded:
-                code = codes.get(address)
-                raw = b"" if isinstance(code, Exception) or not code else bytes.fromhex(code[2:])
-                self._evm.insert_account_info(
-                    address, AccountInfo(nonce=int(proof["nonce"], 16), code=raw or None))
-                self._evm.set_balance(address, int(proof["balance"], 16))
+        cold = [a for a in wanted if a not in self._loaded]
+        if cold:
+            # Balance is not optional, and dropping it is silent: the $77M
+            # ETH/stETH pool holds *native* ETH (E11), so a zero balance makes
+            # `get_dy` return zero rather than fail.
+            _mark = _t.perf_counter()
+            answers = self._batched(
+                [("eth_getCode", [a, block]) for a in cold]
+                + [("eth_getBalance", [a, block]) for a in cold])
+            self.stats.code_ms += (_t.perf_counter() - _mark) * 1000
+            codes, balances = answers[:len(cold)], answers[len(cold):]
+            for address, code, balance in zip(cold, codes, balances, strict=True):
+                blob = b"" if isinstance(code, Exception) or not code \
+                    else bytes.fromhex(code[2:])
+                self._evm.insert_account_info(address, AccountInfo(nonce=1, code=blob or None))
+                self._evm.set_balance(
+                    address,
+                    0 if isinstance(balance, Exception) or not balance else int(balance, 16))
                 self._loaded.add(address)
-            for item in proof.get("storageProof", []):
-                self._evm.insert_account_storage(
-                    address, int(item["key"], 16), int(item["value"], 16))
-                self.stats.slots += 1
+
+        flat = [(a, slot) for a in wanted for slot in sorted(wanted[a])]
+        _mark = _t.perf_counter()
+        values = self._batched(
+            [("eth_getStorageAt", [a, f"0x{slot:064x}", block]) for a, slot in flat])
+        self.stats.storage_ms += (_t.perf_counter() - _mark) * 1000
+        self.stats.fetch_calls += len(values) + len(cold)
+        for (address, slot), value in zip(flat, values, strict=True):
+            if isinstance(value, Exception) or not isinstance(value, str):
+                self.stats.errors.append(f"getStorageAt {address[:10]}: {str(value)[:80]}")
+                continue
+            self._evm.insert_account_storage(address, slot, int(value, 16))
+            self._slots.setdefault(address, set()).add(slot)
+            self.stats.slots += 1
+        return True
 
     # --------------------------------------------------------------- checks
 
