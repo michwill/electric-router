@@ -60,6 +60,28 @@ class ConcaveQuoter:
         return out
 
 
+# Three branches out of one slot, depths four decades apart, starting at an
+# even split.  The optimum sits in a narrow valley the gradient points along
+# only loosely, so one line search cannot reach it.
+SPLIT3 = [leg(0, 1, 3300, POOL_A), leg(0, 1, 3300, POOL_B), leg(0, 1, 0, POOL_C)]
+
+
+class ValleyQuoter(ConcaveQuoter):
+    """The same payoff over a whole group, not just its head."""
+
+    def __init__(self) -> None:
+        super().__init__(depth=(1e9, 1e7, 1e5))
+
+    def quote_routes(self, routes, amounts_in, dst_slots):
+        self.calls += 1
+        out = []
+        for legs, amount in zip(routes, amounts_in, strict=True):
+            shares = [leg.bps / BPS for leg in legs]
+            shares[-1] = max(0.0, 1.0 - sum(shares[:-1]))
+            out.append(self.payoff(shares, amount))
+        return out
+
+
 def best_share(depth: tuple[float, float], amount: int) -> float:
     """Equal-marginal split: 1 - x/Ka = 1 - y/Kb with x + y = amount."""
     ka, kb = depth
@@ -149,6 +171,17 @@ def test_it_leaves_an_unsplittable_route_alone_and_spends_nothing():
 def test_it_stays_within_its_round_trip_budget():
     quoter = ConcaveQuoter()
     _tuned, report = optimise(SPLIT, quoter, amount_in=1_000_000, dst_slot=2,
-                              baseline=0, max_rounds=3)
+                              baseline=0, max_rounds=2, hot_rounds=3)
+    assert report.rounds <= 3
     # One baseline quote, then at most two batches per round.
-    assert report.calls <= 1 + 2 * 3
+    assert report.calls <= 1 + 2 * report.rounds
+
+
+def test_a_round_still_finding_real_money_buys_another():
+    """The budget is two rounds, extended only while a round is still paying."""
+    _tuned, hot = optimise(SPLIT3, ValleyQuoter(), amount_in=1_000_000, dst_slot=1,
+                           baseline=0, max_rounds=2, hot_rounds=5)
+    _tuned, capped = optimise(SPLIT3, ValleyQuoter(), amount_in=1_000_000, dst_slot=1,
+                              baseline=0, max_rounds=2, hot_rounds=2)
+    assert hot.rounds > capped.rounds
+    assert hot.after > capped.after
