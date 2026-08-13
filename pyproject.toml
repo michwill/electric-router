@@ -14,6 +14,10 @@ dependencies = ["numpy>=2,<3"]
 dev = [
     "titanoboa==0.2.8",
     "vyper==0.4.3",
+    # revm through Rust bindings: a `get_dy` is 30-449 us here against ~0.8 ms
+    # marginal on the wire, so a warmed session routes with no round trips at
+    # all.  Dev-only and compiled, hence nowhere near `core/`.
+    "pyrevm>=0.3.7,<0.4",
     "pytest>=8",
     "pytest-xdist>=3.6,<4",
     "hypothesis>=6,<7",
