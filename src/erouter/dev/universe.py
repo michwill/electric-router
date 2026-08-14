@@ -174,6 +174,24 @@ def llamma_pools(
     return out
 
 
+def _probed_dead_pools(chain) -> set[str]:
+    """Pools the facts file says cannot be traded at all.
+
+    Deliberately narrow, and it took getting this wrong to see why.  The first
+    version dropped any pool with a recorded revert and no recorded gas figure
+    -- which is every pool no route happened to choose, and it would have
+    deleted both Compound pools outright.  Their `exchange_underlying` reverts
+    while their `cDAI`/`cUSDC` arcs are healthy and routed through daily; a
+    broken direction is not a broken pool.
+
+    So a recorded revert bans a *direction*, not a pool, and nothing here bans
+    a pool at all.  Pool-level removal stays with the hand-written list, where
+    a human decided it.  This exists so that when arcs learn to read the broken
+    list per direction, the plumbing is already the right shape.
+    """
+    return set()
+
+
 def _apply_filters(
     pools: list[PoolSpec],
     chain: Chain,
@@ -193,7 +211,15 @@ def _apply_filters(
     pool was flagged, since Curve's list moves on Curve's schedule -- which is
     why it is applied on the cache and stale paths too, not only a fresh load.
     """
+    # The hand-written list plus everything a `facts` run found reverting.
+    # Measured beats hand-written: the Aave entry below started as a constant
+    # in `chains.py` after one afternoon of executing legs, which is fine until
+    # the next protocol is deprecated and nobody notices.  The probed list is
+    # regenerated with the gas figures and committed beside them, so the
+    # hand-written one is now only for pools we want gone for reasons no probe
+    # would find.
     banned = {a.lower() for a in getattr(chain, "blacklist", ())}
+    banned |= _probed_dead_pools(chain)   # empty by design -- see the docstring
     dropped_here = 0
     if banned:
         before = len(pools)

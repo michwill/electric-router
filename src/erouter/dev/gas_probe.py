@@ -205,6 +205,32 @@ _WRAPPER_CALLDATA = {
 PAYABLE = (ArcKind.WRAP_NATIVE, ArcKind.STAKE_NATIVE)
 
 
+#: A Solidity revert carries its string after a 4-byte selector and two words.
+_ERROR_SELECTOR = bytes.fromhex("08c379a0")
+
+
+def revert_reason(exc: Exception) -> str:
+    """The best short explanation available for a revert.
+
+    Worth decoding rather than storing raw: this ends up committed, and
+    "mint is paused" tells a reader what to do about it where a hex blob does
+    not.  Aave V2 answers with a bare numeric code, which stays as-is.
+    """
+    text = str(exc)
+    if "output: 0x" not in text:
+        return text[:60] or type(exc).__name__
+    blob = text.split("output: 0x")[1].split(",")[0].split("}")[0].strip()
+    try:
+        data = bytes.fromhex(blob)
+    except ValueError:
+        return text[:60]
+    if not data:
+        return "reverted without a reason"
+    if data[:4] == _ERROR_SELECTOR and len(data) > 68:
+        return data[68:].rstrip(b"\x00").decode("utf8", "replace")[:60] or "reverted"
+    return f"reverted (0x{data[:8].hex()})"
+
+
 @dataclass(slots=True)
 class Measurement:
     target: str
@@ -259,7 +285,7 @@ def measure(evm, funder: Funder, *, target: str, kind: ArcKind, token_in: str,
             evm.message_call(caller=caller, to=target, calldata=data,
                              value=amount if payable else 0)
         except Exception as exc:
-            out.note = f"reverted: {str(exc)[:60]}"
+            out.note = f"reverted: {revert_reason(exc)}"
             return out
         result = getattr(evm, "result", None)
         used = getattr(result, "gas_used", 0) if result is not None else 0

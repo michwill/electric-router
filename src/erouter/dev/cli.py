@@ -36,6 +36,7 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
     os.environ.setdefault(_var, _THREADS)
 
 import argparse  # noqa: E402
+import contextlib  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
 
@@ -990,6 +991,38 @@ def _holder(holders, token, avoid):
     return ""
 
 
+
+#: `ArcKind.SWAP_UNDERLYING` on the branch that adds it.  Reserved here so the
+#: survey's findings do not collide with the pool's own wrapped-coin arcs.
+UNDERLYING_KIND = 14
+
+
+def _underlying_swap(i: int, j: int, dx: int) -> bytes:
+    """`exchange_underlying` -- the call a lending pool cannot always honour."""
+    from ..core.keccak import keccak256
+    from .gas_probe import _pad
+
+    return (keccak256(b"exchange_underlying(int128,int128,uint256,uint256)")[:4]
+            + _pad(i) + _pad(j) + _pad(dx) + _pad(0))
+
+
+def _underlying_of(evm, pool: str, index: int) -> str:
+    """The underlying token a lending pool's coin `index` wraps, or ""."""
+    from ..core.keccak import keccak256
+    from .gas_probe import CALLER, _pad
+
+    for signature in (b"underlying_coins(int128)", b"underlying_coins(uint256)"):
+        try:
+            out = evm.message_call(caller=CALLER, to=pool,
+                                   calldata=keccak256(signature)[:4] + _pad(index))
+        except Exception:
+            continue          # Aave answers uint256 and reverts on int128 (E6)
+        raw = bytes(out)
+        if len(raw) >= 32 and int.from_bytes(raw, "big"):
+            return "0x" + raw[-20:].hex()
+    return ""
+
+
 def cmd_gascal(args: argparse.Namespace) -> int:
     """Measure what our own routes cost to execute, and commit the answer.
 
@@ -1006,7 +1039,8 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
     from ..core.pipeline import RoutingError, prepare, route
     from .boa_host import quoter_client
-    from .gas_cache import GasCache
+    from .facts import FactsCache
+    from .gas_probe import CALLER as GASCAL_CALLER
     from .gas_probe import Funder, measure_legs
     from .local_evm import LocalEvm
     from .probe_cache import CachedQuoterClient
@@ -1086,23 +1120,93 @@ def cmd_gascal(args: argparse.Namespace) -> int:
           f"in {_time.perf_counter() - started:.0f}s")
 
     from ..core.pools import registry_key
+    from ..core.types import ArcKind  # noqa: F401
 
-    cache = GasCache.load(chain.chain_id, chain.name.lower())
+    cache = FactsCache.load(chain.chain_id, chain.name.lower())
     changed = cache.learn(
         got["legs"], block=rpc.block,
         classes={p.address.lower(): registry_key(p.pool_type) for p in load.pools},
     )
+
+    # --- what quotes but cannot be traded ---------------------------------
+    #
+    # No second execution: the gas pass above already ran every leg for real,
+    # and a revert there is exactly the evidence wanted here.  Splitting them
+    # would double the work and let the two answers drift.
+    #
+    # A leg that could not be funded is *untested*, not broken.  Conflating
+    # them would delete good pools whose input token cannot be conjured, which
+    # is a far worse failure than the revert being guarded against.
+    if not args.skip_executability:
+        broken, healed = {}, []
+        for miss in got["failed"]:
+            if miss.note.startswith("reverted"):
+                broken[cache.key(miss.target, miss.kind, miss.i, miss.j)] = (
+                    miss.note.removeprefix("reverted: ").strip() or "reverted")
+        measured = {cache.key(t, k, i, j) for (t, k, i, j) in got["legs"]}
+        healed = [key for key in cache.broken if key in measured]
+        marked = cache.learn_broken(broken)
+        cleared = cache.forget_broken(healed)
+        print(f"  executability: {len(broken)} reverted, "
+              f"{len(got['legs'])} settled  ({marked} newly broken, "
+              f"{cleared} recovered)")
+        for key, reason in sorted(broken.items())[:8]:
+            print(f"      {key:<46} {reason}")
+
+    # --- the survey: protocols that quote and cannot be traded -------------
+    #
+    # The pass above only sees legs a route chose, so it can verify what we
+    # execute but never discover a pool we already refuse -- a blacklisted pool
+    # builds no arcs and is never reached again.  These are checked directly,
+    # every build, which is also what lets a pool come back if a protocol is
+    # unpaused.
+    if not args.skip_executability and getattr(chain, "watch", ()):
+        from .executability import revert_reason
+
+        found, recovered = {}, []
+        for address in chain.watch:
+            for i, j in ((0, 1), (1, 0)):
+                # 14 is the reserved `SWAP_UNDERLYING` id.  Recording these
+                # under SWAP_STABLE collided with the pool's own
+                # wrapped-coin arcs, which share (i, j) and are healthy.
+                key = cache.key(address, UNDERLYING_KIND, i, j)
+                snapshot = executing._evm.snapshot()
+                try:
+                    token = _underlying_of(executing._evm, address, i)
+                    if not token:
+                        continue
+                    if not Funder(executing._evm).fund(token, address, 10_000 * 10 ** 18):
+                        continue
+                    executing._evm.message_call(
+                        caller=GASCAL_CALLER, to=address,
+                        calldata=_underlying_swap(i, j, 10_000 * 10 ** 18))
+                    recovered.append(key)
+                except Exception as exc:
+                    found[key] = revert_reason(exc)
+                finally:
+                    with contextlib.suppress(Exception):
+                        executing._evm.revert(snapshot)
+        marked = cache.learn_broken(found)
+        cleared = cache.forget_broken(recovered)
+        print(f"  watched pools: {len(found)} of {len(chain.watch) * 2} directions "
+              f"revert ({marked} new, {cleared} recovered)")
+        for key, reason in sorted(found.items()):
+            print(f"      {key:<46} {reason}")
+
     if not args.dry_run:
         cache.save()
     stats = cache.stats()
-    print(f"  {OK} {changed} figure(s) changed; cache holds {stats['legs']:,} legs")
+    print(f"  {OK} {changed} gas figure(s) changed; {stats['legs']:,} legs, "
+          f"{stats['broken']} broken, {stats['classes']} class defaults")
     for kind, count in sorted(stats["by_kind"].items(), key=lambda kv: -kv[1]):
         print(f"      {kind:<22}{count:>5}")
-    if got["failed"]:
-        print(f"  {WARN} {len(got['failed'])} leg(s) not measured "
-              f"(they keep the assumed figure):")
-        for miss in got["failed"][:8]:
-            print(f"      {miss.target[:12]} {miss.kind.name:<18} {miss.note[:52]}")
+
+    unfunded = [m for m in got["failed"] if not m.note.startswith("reverted")]
+    if unfunded:
+        print(f"  {WARN} {len(unfunded)} leg(s) untested -- their input could not be "
+              f"funded, so they keep the assumed gas and no verdict:")
+        for miss in unfunded[:6]:
+            print(f"      {miss.target[:12]} {miss.kind.name:<18} {miss.note[:46]}")
     if args.dry_run:
         print(f"  {WARN} --dry-run: nothing written")
     return 0
@@ -1117,11 +1221,11 @@ def _gas_table(chain, args, pools=None):
     comparing against the old behaviour.
     """
     from ..core.gas import STATIC
-    from .gas_cache import GasCache
+    from .facts import FactsCache
 
     if getattr(args, "static_gas", False):
         return STATIC, 0
-    cache = GasCache.load(chain.chain_id, chain.name.lower())
+    cache = FactsCache.load(chain.chain_id, chain.name.lower())
     return cache.table(pools), len(cache.legs)
 
 def cmd_warmcache(args: argparse.Namespace) -> int:
@@ -1219,8 +1323,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     gascal = sub.add_parser(
-        "gascal",
-        help="measure execution gas from real routes; writes data/gas")
+        "facts",
+        help="probe what does not change between blocks -- execution gas, and "
+             "which arcs quote but revert; writes data/facts")
     gascal.add_argument("--chain", default="ethereum")
     gascal.add_argument("--block", default="latest")
     gascal.add_argument("--min-tvl", type=float, default=10_000.0)
@@ -1233,6 +1338,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="measure only these pairs, e.g. USDC-WETH stETH-WETH")
     gascal.add_argument("--dry-run", action="store_true",
                         help="measure and report, but do not write the cache")
+    gascal.add_argument(
+        "--skip-executability", action="store_true",
+        help="only re-measure gas, leaving the broken-arc list as it stands")
     gascal.set_defaults(func=cmd_gascal)
 
     warm = sub.add_parser("warmcache",

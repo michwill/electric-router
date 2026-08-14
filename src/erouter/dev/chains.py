@@ -43,6 +43,13 @@ class Chain:
     # down, in a protocol that will no longer accept a deposit.  Only executing
     # finds them, so they are recorded once rather than rediscovered.
     blacklist: tuple[str, ...] = ()
+    # Pools worth re-testing on every `facts` build, whether or not they are
+    # currently routable: deprecated lending protocols whose `exchange` quotes
+    # but whose `exchange_underlying` cannot deposit.  Kept explicit because
+    # there are few of them and they change on a protocol's schedule, not a
+    # block's -- and because a blacklisted pool builds no arcs, so nothing else
+    # would ever look at it again.  Re-testing is what lets one come back.
+    watch: tuple[str, ...] = ()
     # A committed endpoint, for a checkout with no `networks.py`.
     #
     # Deliberately public, and safe to be: the key serves reads only --
@@ -107,6 +114,11 @@ CHAINS: dict[str, Chain] = {
         public_rpc=(
             "https://lb.drpc.live/ethereum/"
             "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
+        ),
+        watch=(
+            "0xDeBF20617708857ebe4F679508E7b7863a8A8EeE",   # aDAI/aUSDC/aUSDT
+            "0xA2B47E3D5c44877cca798226B7B8118F9BFb7A56",   # cDAI/cUSDC
+            "0x52EA46506B9CC5Ef470C5bf89f17Dc28bB35D85C",   # cDAI/cUSDC/USDT
         ),
         blacklist=(
             # Curve.fi aDAI/aUSDC/aUSDT.  Aave V2's reserves are frozen, so the

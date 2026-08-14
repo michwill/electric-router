@@ -1,15 +1,23 @@
-"""Measured execution gas, committed alongside the code that assumed it.
+"""What is true of a chain until someone redeploys something.
 
-Gas is a property of the deployed contract and the shape of the trade, not of
-the block: a pool that costs 118,778 to swap through costs about that at every
-block until someone redeploys it.  So the measurements are worth keeping, and
-worth committing -- a checkout should route with real gas figures without
-having to execute anything first, exactly as it loads slot lists without having
-to discover them.
+Three kinds of fact share this file because they share a lifetime: none of them
+depends on the block, all of them cost execution to learn, and a checkout
+should have them without paying for that.
 
-Stored as plain JSON rather than the gzip the state cache uses.  It is three
-orders of magnitude smaller, and a committed file that a human can read in a
-diff is worth more than the bytes saved.
+* **Gas.**  A pool that costs 118,778 to swap through costs about that at every
+  block.  See `gas_probe`.
+* **Broken directions.**  An arc that quotes and then reverts -- Aave V2's
+  frozen reserves, Compound V2's paused mint.  Nothing in a pool's state gives
+  these away; only executing finds them, which is exactly why the answer is
+  worth storing rather than rediscovering.
+* **Wrapper capability.**  Whether a lending token can still be minted, still
+  be redeemed, or both.  Deprecated protocols stop taking deposits long before
+  they stop honouring withdrawals, so this is per direction, not per protocol.
+
+Slot lists and bytecode stay in `state_cache`, which is gzipped because it
+carries megabytes of code.  Facts belong in plain JSON: it is three orders of
+magnitude smaller, and a committed file a human can read in a diff is worth
+more than the bytes saved.  One command builds both.
 """
 
 from __future__ import annotations
@@ -24,11 +32,11 @@ from ..core.pools import registry_key
 from ..core.types import ArcKind
 
 VERSION = 1
-DEFAULT_DIR = Path(__file__).resolve().parents[3] / "data" / "gas"
+DEFAULT_DIR = Path(__file__).resolve().parents[3] / "data" / "facts"
 
 
 @dataclass(slots=True)
-class GasCache:
+class FactsCache:
     chain_id: int
     path: Path
     #: "address:kind:i>j" -> gas, so the file is legible in a diff
@@ -38,13 +46,17 @@ class GasCache:
     kinds: dict[int, int] = field(default_factory=dict)
     #: address -> registry class, so the aggregates survive a reload.
     class_of: dict[str, str] = field(default_factory=dict)
+    #: "address:kind:i>j" -> why it reverted.  Quotes fine, cannot be traded.
+    broken: dict[str, str] = field(default_factory=dict)
+    #: wrapper address -> {"mint": bool, "redeem": bool, "note": str}
+    wrappers: dict[str, dict] = field(default_factory=dict)
     block: int = 0
     dirty: bool = False
 
     # ------------------------------------------------------------- load/save
 
     @classmethod
-    def load(cls, chain_id: int, name: str, directory: Path | None = None) -> GasCache:
+    def load(cls, chain_id: int, name: str, directory: Path | None = None) -> FactsCache:
         path = (directory or DEFAULT_DIR) / f"{name}.json"
         cache = cls(chain_id=chain_id, path=path)
         if not path.exists():
@@ -56,6 +68,8 @@ class GasCache:
         cache.classes = {k: int(v) for k, v in raw.get("classes", {}).items()}
         cache.kinds = {int(k): int(v) for k, v in raw.get("kinds", {}).items()}
         cache.class_of = dict(raw.get("class_of", {}))
+        cache.broken = dict(raw.get("broken", {}))
+        cache.wrappers = dict(raw.get("wrappers", {}))
         cache.block = int(raw.get("block", 0))
         return cache
 
@@ -71,6 +85,8 @@ class GasCache:
             "classes": dict(sorted(self.classes.items())),
             "kinds": {str(k): v for k, v in sorted(self.kinds.items())},
             "class_of": dict(sorted(self.class_of.items())),
+            "broken": dict(sorted(self.broken.items())),
+            "wrappers": dict(sorted(self.wrappers.items())),
         }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n",
@@ -154,10 +170,56 @@ class GasCache:
                         legs[(address, int(kind), -1, -1)] = int(got)
         return GasTable(legs, self.kinds)
 
+    # ------------------------------------------------------- executability
+
+    def learn_broken(self, found: dict[str, str]) -> int:
+        """Record arc directions that quote but revert, and forget ones that
+        no longer do -- a protocol can be unpaused, and a stale entry would
+        silently cost us a pool forever."""
+        changed = 0
+        for key, reason in found.items():
+            if self.broken.get(key) != reason:
+                self.broken[key] = reason
+                changed += 1
+        self.dirty = self.dirty or bool(changed)
+        return changed
+
+    def forget_broken(self, keys) -> int:
+        """Drop entries that executed this time round."""
+        gone = [k for k in keys if k in self.broken]
+        for key in gone:
+            del self.broken[key]
+        self.dirty = self.dirty or bool(gone)
+        return len(gone)
+
+    def learn_wrapper(self, address: str, *, mint: bool, redeem: bool,
+                      note: str = "") -> bool:
+        entry = {"mint": bool(mint), "redeem": bool(redeem)}
+        if note:
+            entry["note"] = note
+        address = address.lower()
+        if self.wrappers.get(address) != entry:
+            self.wrappers[address] = entry
+            self.dirty = True
+            return True
+        return False
+
+    def is_broken(self, target: str, kind, i: int, j: int) -> str:
+        """The reason this direction cannot be traded, or "" if it can."""
+        return self.broken.get(self.key(target, kind, i, j), "")
+
+    def broken_pools(self) -> set[str]:
+        """Pools with no tradeable direction left at all."""
+        seen: dict[str, int] = {}
+        for key in self.broken:
+            seen[key.split(":")[0]] = seen.get(key.split(":")[0], 0) + 1
+        return set(seen)
+
     def stats(self) -> dict:
         by_kind: dict[str, int] = {}
         for key in self.legs:
             kind = ArcKind(int(key.split(":")[1]))
             by_kind[kind.name] = by_kind.get(kind.name, 0) + 1
         return {"legs": len(self.legs), "block": self.block, "by_kind": by_kind,
-                "classes": len(self.classes), "kinds": dict(self.kinds)}
+                "classes": len(self.classes), "kinds": dict(self.kinds),
+                "broken": len(self.broken), "wrappers": len(self.wrappers)}
