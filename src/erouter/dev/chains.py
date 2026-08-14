@@ -114,7 +114,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="ETH",
         wrapped="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         erc4626_allowlist=(SCRVUSD, SDOLA, SDAI, SUSDS, SFRXETH, SGHO, STUSDS),
-        quoter="0x88E24d1942A1a126E9330B4bc6303D40Ebf6FFD0",
+        quoter="0x977ACB8f30412278B33fA7457dcd667613f6CB93",
         public_rpc=(
             "https://lb.drpc.live/ethereum/"
             "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"

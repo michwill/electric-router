@@ -1339,9 +1339,20 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     cache.mark_volatile(volatile)
 
     fresh = cache.unknown(p.address for p in load.pools)
+    # The quoter is not a pool, so `unknown` never asks about it -- but the
+    # local EVM reads *its* code from this cache too, and a redeployment gives
+    # it an address nothing here has seen.  Reporting "nothing to do" while the
+    # contract every quote goes through is missing is the wrong answer, so it
+    # is checked explicitly.  (In practice a route recovers on its own:
+    # `refresh_arcs` passes the quoter to `warm`, which learns it.  This is so
+    # the cache is complete before one is run, not after.)
+    quoter = (getattr(chain, "quoter", "") or "").lower()
+    quoter_known = not quoter or quoter in cache.code_of
+    if not quoter_known:
+        print(f"  {WARN} quoter {quoter[:12]} is not in the cache -- learning it")
     print(f"  universe: {len(load.pools)} pools, {len(fresh)} to learn "
           f"({len(volatile)} volatile)")
-    if not fresh:
+    if not fresh and quoter_known:
         print(f"  {OK} nothing to do")
         return 0
 
