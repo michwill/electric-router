@@ -98,11 +98,23 @@ TOL_BP = 0.01
 
 # --- the sampled-curve search ---------------------------------------------
 #
-# Golden section, 32 bisections: shrinks a coordinate's bracket by 5e-7, three
-# orders below integer `bps` granularity, so the search is exact as far as the
-# executable format can express.
+# Golden section.  Each iteration shrinks the bracket by 0.618, so 20 take a
+# unit interval to 6.6e-5 -- just under the 1e-4 that integer `bps` can express,
+# and therefore exact as far as the executable format is concerned.  It was 32,
+# which reaches 5.3e-7: three orders of refinement that `apply_weights` rounds
+# away, paid for on every one of ~100,000 evaluations.
 GOLDEN = (5.0 ** 0.5 - 1.0) / 2.0
-GOLDEN_ITERS = 32
+GOLDEN_ITERS = 20
+# Screening a start does not need that precision -- it only has to say which
+# basin is worth refining.  Measured on USDC->WETH $100k: 10 starts, 11,644
+# evaluations, and 11,532 of them spent on the nine that lost.  Eight converged
+# to the same value to six figures; the winner took 112.
+SCREEN_ITERS = 6
+SCREEN_SWEEPS = 3
+# How many of the screened starts earn a full-precision ascent.  More than one
+# because screening is coarse and the margin between basins here was 0.155 bp,
+# which is not a gap a 6-bisection search can be trusted to rank.
+REFINE_STARTS = 3
 # Coordinate sweeps stop when one buys less than this, relatively.
 SWEEP_TOL = 1e-9
 MAX_SWEEPS = 12
@@ -890,9 +902,27 @@ def _search_curves(
             corner[g][j] = 1.0 - MIN_WEIGHT * (len(run) - 1)
             starts.append(corner)
 
-    best_w, best_value = None, -1.0
+    # Screen, then refine.  Every start used to run to full precision, and on a
+    # wide route that is where the whole cost sat: 11,644 evaluations over ten
+    # starts, of which 11,532 went to the nine that lost -- eight of them
+    # converging to the same value to six figures.  A start only has to say
+    # which basin it is in to be ranked, and that is a much cheaper question
+    # than where the optimum inside it lies.
+    #
+    # `REFINE_STARTS` of them go on to a full ascent rather than one, because
+    # the winner here beat the rest by 0.155 bp and a 6-bisection screen cannot
+    # be trusted to resolve that.
+    screened = []
     for start in starts:
-        found, value = _ascend([_project(w) for w in start], evaluate, free, counter)
+        projected = [_project(w) for w in start]
+        _, value = _ascend(projected, evaluate, free, counter,
+                           iters=SCREEN_ITERS, sweeps=SCREEN_SWEEPS)
+        screened.append((value, projected))
+    screened.sort(key=lambda pair: -pair[0])
+
+    best_w, best_value = None, -1.0
+    for _, projected in screened[:REFINE_STARTS]:
+        found, value = _ascend(projected, evaluate, free, counter)
         if value > best_value:
             best_w, best_value = found, value
     report.local = counter[0]
