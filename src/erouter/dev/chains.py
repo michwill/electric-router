@@ -36,6 +36,20 @@ class Chain:
     # route's upload).  A deployed quoter also takes boa out of the request
     # path, which is what the browser build needs.
     quoter: str = ""
+    # A committed endpoint, for a checkout with no `networks.py`.
+    #
+    # Deliberately public, and safe to be: the key serves reads only --
+    # `eth_getStorageAt`, `eth_getCode`, `eth_getBalance`, `eth_getBlockByNumber`,
+    # `eth_blockNumber`, `eth_createAccessList`, `eth_gasPrice` -- plus
+    # `eth_call` restricted to the quoter address above, which is a stateless
+    # view contract that can move nothing.  `eth_simulateV1` is off: it is not
+    # address-scoped, and with state overrides it can fabricate balances and
+    # execute against them, which is strictly more than `eth_call` allows.
+    #
+    # Everything the router needs runs on this: the local EVM holds the pools'
+    # code and storage and computes `get_dy` in-process, so quoting needs no
+    # execution rights at all.
+    public_rpc: str = ""
     erc4626_allowlist: tuple[str, ...] = ()
     # (token, canonical) pairs handled by ConversionKind.WSTETH.  Kept off the
     # ERC4626 list because wstETH predates that standard and exposes its own
@@ -83,6 +97,10 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         erc4626_allowlist=(SCRVUSD, SDOLA, SDAI, SUSDS, SFRXETH, SGHO, STUSDS),
         quoter="0x88E24d1942A1a126E9330B4bc6303D40Ebf6FFD0",
+        public_rpc=(
+            "https://lb.drpc.live/ethereum/"
+            "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
+        ),
         wsteth_pairs=((WSTETH, STETH),),
         stake_arcs=(
             # Lido: 1 ETH -> 1 stETH, capped by the daily staking limit.

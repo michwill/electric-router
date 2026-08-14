@@ -26,6 +26,24 @@ def _mark(value: bool) -> str:
     return OK if value else BAD
 
 
+def _rpc_url(chain, args) -> str:
+    """Where to reach the chain: the flag, then `networks.py`, then the table.
+
+    `--rpc-url` wins so an endpoint can be tried without editing the gitignored
+    `networks.py` that holds real keys.  The table's `public_rpc` is last, and
+    exists so a fresh checkout with no `networks.py` still routes.
+    """
+    override = getattr(args, "rpc_url", None)
+    if override:
+        return override
+    try:
+        return config.rpc_url(chain.rpc_attr)
+    except (KeyError, FileNotFoundError, ImportError):
+        if chain.public_rpc:
+            return chain.public_rpc
+        raise
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     names = [args.chain] if args.chain else list(chain_table.CHAINS)
     if not config.have_networks():
@@ -44,7 +62,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
         started = time.monotonic()
         try:
-            rpc = JsonRpcTransport(url, block=args.block)
+            rpc = JsonRpcTransport(url, block=args.block, chain_id=chain.chain_id)
         except (RpcError, KeyError) as exc:
             print(f"  {BAD} unreachable: {exc}")
             failures += 1
@@ -127,7 +145,8 @@ def cmd_pools(args: argparse.Namespace) -> int:
     for warning in load.warnings:
         print(f"{WARN} {warning}")
 
-    rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
+    rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
+                           chain_id=chain.chain_id)
     client = quoter_client(rpc, chain)
     audit = resolve_dialects(load.pools, client, chain, use_cache=not args.refresh)
 
@@ -195,7 +214,8 @@ def cmd_probe(args: argparse.Namespace) -> int:
         print(f"{BAD} pool {args.pool} not in the universe at min_tvl ${args.min_tvl:,.0f}")
         return 2
 
-    rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
+    rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
+                           chain_id=chain.chain_id)
     client = quoter_client(rpc, chain)
     resolve_dialects(pools, client, chain)
     read_balances(pools, client)
@@ -362,6 +382,51 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False):
     return quoter_client(evm, chain)
 
 
+# A local quote this far from the chain's own answer means the prefetched state
+# is stale, not that the route is bad.  Well under the basis point a route is
+# decided by, and well above integer rounding.
+STALE_TOL_BP = 0.5
+
+
+def _confirm_against_chain(result, rpc, chain, evm, nodes, pools, quiet=False):
+    """Quote the chosen legs on-chain and say so if the local EVM disagreed.
+
+    The local EVM is exact when its state is complete, so a disagreement is a
+    statement about the prefetch, not about the route.  One `eth_call` to the
+    quoter -- the only address a scoped key need allow -- turns a silent few
+    basis points into something that repairs itself.
+    """
+    from ..core.pipeline import build_arcs
+    from .boa_host import quoter_client
+
+    route = result.route
+    if route is None or evm is None:
+        return result
+    legs = [rl.leg for rl in route.legs]
+    amounts, slots = [result.amount_in], [route.dst_slot]
+    try:
+        onchain = quoter_client(rpc, chain).quote_routes([legs], amounts, slots)[0]
+    except Exception as exc:
+        if not quiet:
+            print(f"  {WARN} could not confirm on-chain ({str(exc)[:50]})")
+        return result
+    mine = result.verified_out or 0
+    if not (onchain and mine):
+        return result
+    gap = (mine / onchain - 1) * 10_000
+    if abs(gap) <= STALE_TOL_BP:
+        return result
+
+    used = {rl.target.lower() for rl in route.legs}
+    refs, _ = build_arcs([p for p in pools if p.address.lower() in used], nodes)
+    learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address) if refs else 0
+    if not quiet:
+        print(f"  {WARN} local state was {gap:+.2f} bp off the chain; "
+              f"re-listed {len(refs)} arcs, {learned} slot(s) were missing"
+              f"{' -- routing again' if learned else ''}")
+    return result if not learned else None  # None == repaired, route again
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
@@ -387,7 +452,8 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} {exc}")
         return 4
 
-    rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
+    rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
+                           chain_id=chain.chain_id)
     client = quoter_client(rpc, chain)
     resolve_dialects(load.pools, client, chain, use_cache=not args.refresh)
     read_balances(load.pools, client)
@@ -408,10 +474,11 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     nodes, wrappers = build_node_map(load.pools, chain, client)
     stake_arcs = build_stake_arcs(nodes, chain, client)
+    evm = None
     if args.local:
         local = _local_quoter(rpc, chain, load, nodes)
         if local is not None:
-            client = local
+            client, evm = local, getattr(local, "transport", None)
     # Gas is priced by default.  Leaving it at zero made every route look free
     # to branch, which is exactly backwards for the small trades where an extra
     # leg costs more than it saves.
@@ -447,6 +514,21 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} no route: {exc}")
         return 2
 
+    if _confirm_against_chain(result, rpc, chain, evm, nodes, load.pools) is None:
+        try:
+            result = route(
+                load.pools, nodes, client,
+                src_token=src, dst_token=dst, amount_in=amount_in,
+                verify_on_chain=not args.no_verify,
+                max_candidates=args.candidates,
+                gas_price_wei=gas_price_wei,
+                refit_rounds=args.refit,
+                extra_arcs=stake_arcs,
+                max_legs=args.max_legs,
+            )
+        except RoutingError as exc:
+            print(f"{BAD} no route after refresh: {exc}")
+            return 2
     return _present(result, args, chain, rpc, nodes, wrappers, load,
                     src, dst, amount_in, started)
 
@@ -521,6 +603,15 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
             continue
+        if _confirm_against_chain(result, rpc, chain,
+                                  getattr(client, "transport", None),
+                                  nodes, load.pools) is None:
+            result = route(load.pools, nodes, client, src_token=src, dst_token=dst,
+                           amount_in=amount_in, verify_on_chain=not args.no_verify,
+                           max_candidates=args.candidates,
+                           gas_price_wei=getattr(args, "gas_price_wei", 0),
+                           refit_rounds=args.refit, extra_arcs=stake_arcs,
+                           max_legs=args.max_legs, prepared=prepared)
         _present(result, args, chain, rpc, nodes, wrappers, load,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
@@ -697,7 +788,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
 
     chain = chain_table.get(args.chain)
     try:
-        rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
+        rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
+                           chain_id=chain.chain_id)
     except Exception as exc:
         print(f"{BAD} node unreachable: {exc}")
         return 4
@@ -814,7 +906,8 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
 
     chain = chain_table.get(args.chain)
     try:
-        rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block=args.block)
+        rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
+                           chain_id=chain.chain_id)
     except Exception as exc:
         print(f"{BAD} node unreachable: {exc}")
         return 4
@@ -891,6 +984,9 @@ def build_parser() -> argparse.ArgumentParser:
     warm.add_argument("--llamma", action="store_true")
     warm.add_argument("--from", dest="src", default="USDC")
     warm.add_argument("--to", dest="dst", default="WETH")
+    warm.add_argument(
+        "--rpc-url", default=None,
+        help="override the endpoint from networks.py (for trying a hosted RPC)")
     warm.set_defaults(func=cmd_warmcache)
 
     doctor = sub.add_parser("doctor", help="check node and API capabilities")
@@ -935,6 +1031,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", action="store_true",
         help="also print function-level self time inside a warm route",
     )
+    bench.add_argument(
+        "--rpc-url", default=None,
+        help="override the endpoint from networks.py (for trying a hosted RPC)")
     bench.set_defaults(func=cmd_bench)
 
     route_cmd = sub.add_parser("route", help="compute and draw an optimal route")
@@ -982,6 +1081,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="quote over the wire instead of in an in-process EVM primed from "
              "data/evm-state (the default; falls back to the wire on its own)",
     )
+    route_cmd.add_argument(
+        "--rpc-url", default=None,
+        help="override the endpoint from networks.py (for trying a hosted RPC)")
     route_cmd.set_defaults(local=True)
     route_cmd.set_defaults(func=cmd_route)
 

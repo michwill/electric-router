@@ -580,6 +580,23 @@ class LocalEvm:
         # Anything the dumper could not reach falls back rather than reading 0.
         return [found.get((a, slot)) for a, slot in flat]
 
+    def refresh_arcs(self, refs, quoter: str, grid=None) -> int:
+        """Re-list these arcs and load any slots the cache did not have.
+
+        `prime` refreshes every slot *value* and `cache.unknown` finds every new
+        *pool*, but neither sees a pool that has started reading a slot it was
+        not reading before -- a Chainlink aggregator that advanced a round, a
+        LLAMMA whose active band moved.  The pool is not unknown; its behaviour
+        changed.  Measured 10,802 blocks after the cache was built: 18 such
+        slots on 4 accounts, read as zero, worth 3.06 bp on one route and
+        nothing to say so.
+
+        Returns how many slots were new, so a caller can say when it mattered.
+        """
+        before = sum(len(v) for v in self._slots.values())
+        self.warm_arcs(refs, quoter, grid=grid)
+        return sum(len(v) for v in self._slots.values()) - before
+
     # --------------------------------------------------------------- checks
 
     def verify_against(self, node, calls: list[Call]) -> list[tuple[Call, int, int]]:

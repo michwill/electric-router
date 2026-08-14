@@ -140,6 +140,7 @@ class JsonRpcTransport:
         timeout: float = 300.0,
         batch_size: int = DEFAULT_BATCH,
         max_streams: int = DEFAULT_STREAMS,
+        chain_id: int | None = None,
     ) -> None:
         self.url = url
         self.timeout = timeout
@@ -149,7 +150,11 @@ class JsonRpcTransport:
         self._id_lock = Lock()
         # Before the first fetch below: `_post` accounts into it.
         self.stats = RpcStats()
-        chain_id = int(self.fetch("eth_chainId", []), 16)
+        # The chain table already knows this, and a key scoped to a narrow
+        # method list may not serve `eth_chainId` at all -- asking is a
+        # courtesy check, not a requirement.
+        if chain_id is None:
+            chain_id = int(self.fetch("eth_chainId", []), 16)
         resolved = (
             int(self.fetch("eth_blockNumber", []), 16) if block == "latest" else int(block)
         )
