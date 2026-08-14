@@ -85,14 +85,26 @@ PRIME_STREAMS = 16
 #
 # That matters exactly where requests are metered.  Measured on 4,168 slots:
 #
-#     endpoint        getStorageAt   dumper (8 streams)
-#     local node             429 ms            1,403 ms
-#     drpc (keyed)           559 ms              607 ms
-#     drpc public        185,103 ms              554 ms
+#     endpoint                     getStorageAt   dumper (8 streams)
+#     local node, LAN                     429 ms            1,403 ms
+#     local node, over a VPN            2,443 ms            2,703 ms
+#     drpc (keyed)                        559 ms              607 ms
+#     drpc public                     185,103 ms              554 ms
 #
 # An unmetered node answers 4,168 small reads faster than it runs seven big
 # `eth_call`s, and a public endpoint is 334x the other way.  So this is not the
 # default; `prefer_dump` turns it on for endpoints that count requests.
+#
+# The middle row is the same node reached over a VPN, one round trip costing
+# 228 ms instead of a LAN's fraction of one.  The dumper's disadvantage falls
+# from 3.3x to 11% -- the small reads are what a slow link punishes, and the
+# gap closes as latency rises.  Still not enough to flip the default, but the
+# LAN row on its own reads as a much stronger verdict than the truth: on a
+# merely mediocre link these two are the same speed.
+#
+# The keyed drpc cannot use this path at all.  The blob is injected by state
+# override rather than deployed, and that key's `eth_call` is restricted to the
+# quoter's address -- which is the point of the restriction, not a gap in it.
 #
 # Calldata is a run of 32-byte slot numbers, the return their values in order.
 # There is no selector dispatch, because the only caller is us.
