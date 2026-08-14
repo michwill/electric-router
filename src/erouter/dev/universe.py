@@ -193,11 +193,22 @@ def _apply_filters(
     pool was flagged, since Curve's list moves on Curve's schedule -- which is
     why it is applied on the cache and stale paths too, not only a fresh load.
     """
+    banned = {a.lower() for a in getattr(chain, "blacklist", ())}
+    dropped_here = 0
+    if banned:
+        before = len(pools)
+        pools = [p for p in pools if p.address.lower() not in banned]
+        dropped_here = before - len(pools)
+        if dropped_here:
+            warnings.append(
+                f"{dropped_here} pool(s) on {chain.name}'s blacklist skipped: they quote "
+                "but cannot be traded"
+            )
     if not enabled:
-        return pools, 0
+        return pools, dropped_here
     blocked = api.pool_filters(chain.chain_id)
     if not blocked:
-        return pools, 0
+        return pools, dropped_here
     kept = [p for p in pools if p.address.lower() not in blocked]
     dropped = len(pools) - len(kept)
     if dropped:
@@ -205,7 +216,7 @@ def _apply_filters(
             f"{dropped} pool(s) excluded by Curve's pool_filters list "
             f"({len(blocked)} flagged on this chain)"
         )
-    return kept, dropped
+    return kept, dropped + dropped_here
 
 
 @dataclass(slots=True)

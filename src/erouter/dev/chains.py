@@ -36,6 +36,13 @@ class Chain:
     # route's upload).  A deployed quoter also takes boa out of the request
     # path, which is what the browser build needs.
     quoter: str = ""
+    # Pools that quote fine and cannot be traded, so no probe should be spent
+    # on them and no route should reach them.  Not the same as the reserve
+    # check, which catches accounting that has come adrift from the tokens
+    # actually held: these hold what they claim, and the failure is one layer
+    # down, in a protocol that will no longer accept a deposit.  Only executing
+    # finds them, so they are recorded once rather than rediscovered.
+    blacklist: tuple[str, ...] = ()
     # A committed endpoint, for a checkout with no `networks.py`.
     #
     # Deliberately public, and safe to be: the key serves reads only --
@@ -100,6 +107,16 @@ CHAINS: dict[str, Chain] = {
         public_rpc=(
             "https://lb.drpc.live/ethereum/"
             "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
+        ),
+        blacklist=(
+            # Curve.fi aDAI/aUSDC/aUSDT.  Aave V2's reserves are frozen, so the
+            # deposit inside `exchange_underlying` reverts while
+            # `get_dy_underlying` -- which only runs the invariant over the
+            # pool's own balances and never touches Aave -- answers happily.
+            # Verified on a fork: quotes 1,875.46 USDC for 1,875 USDT, reverts
+            # on execution.  Curve's own solver excludes it for the same reason
+            # (curve_solver 0511e53, "Exclude frozen Aave V2 pool").
+            "0xDeBF20617708857ebe4F679508E7b7863a8A8EeE",
         ),
         wsteth_pairs=((WSTETH, STETH),),
         stake_arcs=(

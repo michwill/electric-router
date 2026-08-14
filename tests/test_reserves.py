@@ -141,3 +141,42 @@ def test_the_drop_is_all_or_nothing(held):
                       (SUSD, p.address.lower()): held})
     assert check_reserves_are_real([p], chain)
     assert not any(p.balances)
+
+
+def test_a_blacklisted_pool_never_reaches_the_universe():
+    """Quotes fine, cannot be traded: no probe should be spent reaching it.
+
+    Distinct from the reserve check above.  These pools hold exactly what they
+    claim -- the failure is a layer down, in a protocol that will not take a
+    deposit -- so nothing about their balances gives them away and only
+    executing finds them.
+    """
+    from erouter.dev import chains
+    from erouter.dev.universe import _apply_filters
+
+    chain = chains.get("ethereum")
+    banned = chain.blacklist[0]
+    kept, dropped = _apply_filters(
+        [pool("frozen", [coin(USDC, "aUSDC", 6)], (1,)),
+         pool("fine", [coin(SUSD, "DAI", 18)], (1,))],
+        chain, None, [], enabled=False,
+    )
+    assert dropped == 0, "nothing blacklisted in that pair"
+
+    frozen = pool("aave", [coin(USDC, "aUSDC", 6)], (1,))
+    frozen.address = banned
+    warnings: list[str] = []
+    kept, dropped = _apply_filters([frozen], chain, None, warnings, enabled=False)
+    assert kept == [] and dropped == 1
+    assert "cannot be traded" in warnings[0]
+
+
+def test_the_blacklist_is_case_insensitive():
+    from erouter.dev import chains
+    from erouter.dev.universe import _apply_filters
+
+    chain = chains.get("ethereum")
+    frozen = pool("aave", [coin(USDC, "aUSDC", 6)], (1,))
+    frozen.address = chain.blacklist[0].lower()
+    kept, dropped = _apply_filters([frozen], chain, None, [], enabled=False)
+    assert kept == [] and dropped == 1
