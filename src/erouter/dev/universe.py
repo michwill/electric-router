@@ -349,6 +349,87 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient) -> int:
     return filled
 
 
+# A pool holding less than this share of what it reports is not merely low on a
+# coin -- its accounting has come adrift from reality, and every quote it gives
+# is computed against tokens that are not there.
+HELD_TOLERANCE = 0.5
+
+
+def check_reserves_are_real(
+    pools: list[PoolSpec], client: QuoterClient, transport=None
+) -> list[str]:
+    """Drop pools that report more than they hold.
+
+    `get_dy` runs the invariant over the pool's *own* `balances[]` storage and
+    never asks the token whether those coins exist.  When an issuer retires or
+    migrates a token out from under a pool, the accounting keeps its old number
+    and the pool goes on quoting against liquidity it cannot pay: the sUSD/sUSDe
+    pool reports 421,778 sUSD and holds zero, quotes 652 sUSD for 100 sUSDe, and
+    reverts with `sUSD retired` on execution.  A quote that cannot settle is
+    worse than no quote, and this is one batched call per coin to find them.
+
+    Curve's own solver has no such check: it routed WETH->USDC through a lending
+    pool whose `exchange_underlying` reverts, and reported the quote validated.
+
+    Pools listing WETH may legitimately hold *native* ETH instead (E11), which
+    is 29 of the 31 apparent shortfalls on mainnet, so that is checked before
+    anything is dropped.
+    """
+    from ..core.codec import encode_call
+    from ..core.transport import Call
+
+    calls: list[Call] = []
+    meta: list[tuple[PoolSpec, int]] = []
+    for pool in pools:
+        for k, coin in enumerate(pool.coins[: len(pool.balances)]):
+            if pool.balances[k] <= 0 or coin.address.lower().startswith("0xeeee"):
+                continue
+            calls.append(Call(coin.address, encode_call("balanceOf(address)", pool.address)))
+            meta.append((pool, k))
+    if not calls:
+        return []
+
+    warnings: list[str] = []
+    short: dict[str, list[tuple[int, int, int]]] = {}
+    for (pool, k), answer in zip(meta, client.raw(calls), strict=True):
+        if answer.status is not Status.VALUE:
+            continue
+        held, reported = answer.uint(), pool.balances[k]
+        if held >= reported * HELD_TOLERANCE:
+            continue
+        short.setdefault(pool.address, []).append((k, reported, held))
+
+    # Native ETH covers a WETH slot that looks empty.
+    for address, rows in list(short.items()):
+        pool = next(p for p in pools if p.address == address)
+        native = 0
+        if transport is not None and any(
+            pool.coins[k].symbol.upper() in ("WETH", "ETH") for k, _, _ in rows
+        ):
+            try:
+                native = int(transport.fetch("eth_getBalance",
+                                             [address, transport.pin.hex_block]), 16)
+            except Exception:
+                native = 0
+        rows[:] = [r for r in rows
+                   if not (pool.coins[r[0]].symbol.upper() in ("WETH", "ETH")
+                           and native >= r[1] * HELD_TOLERANCE)]
+        if not rows:
+            del short[address]
+
+    for address, rows in short.items():
+        pool = next(p for p in pools if p.address == address)
+        k, reported, held = rows[0]
+        coin = pool.coins[k]
+        warnings.append(
+            f"{pool.name or address} dropped: reports {reported / 10 ** coin.decimals:,.2f} "
+            f"{coin.symbol} but holds {held / 10 ** coin.decimals:,.2f} -- its quotes "
+            "are computed against tokens it cannot pay out"
+        )
+        pool.balances = tuple(0 for _ in pool.balances)
+    return warnings
+
+
 def arc_refs(pools: list[PoolSpec]):
     """Every swap direction of every pool, as probe targets."""
     from ..core.probe import ArcRef

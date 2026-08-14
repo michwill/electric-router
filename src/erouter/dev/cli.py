@@ -369,7 +369,12 @@ def cmd_route(args: argparse.Namespace) -> int:
     from .boa_host import quoter_client
     from .probe_cache import CachedQuoterClient
     from .rpc import JsonRpcTransport
-    from .universe import load_pools, read_balances, resolve_dialects
+    from .universe import (
+        check_reserves_are_real,
+        load_pools,
+        read_balances,
+        resolve_dialects,
+    )
     from .wrappers import build_node_map, build_stake_arcs
 
     chain = chain_table.get(args.chain)
@@ -386,6 +391,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     client = quoter_client(rpc, chain)
     resolve_dialects(load.pools, client, chain, use_cache=not args.refresh)
     read_balances(load.pools, client)
+    for warning in check_reserves_are_real(load.pools, client, rpc):
+        print(f"{WARN} {warning}")
     if not args.no_cache:
         # Probe results are a pure function of (pool state at the pinned block,
         # size), so memoising them is exact.  A second route in the same block
