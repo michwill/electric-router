@@ -39,6 +39,11 @@ TOL = 1e-9
 # Flow below this fraction of the trade cannot matter, but chasing it can keep
 # the active set oscillating forever.  Only used as a fallback (see `solve`).
 DEGENERACY_SCREEN = 1e-4
+# How many repeated bases to tolerate *after* Bland's rule is already on before
+# calling it a cycle.  Bland changes the pivot sequence, so it deserves a few
+# iterations to break out on its own; measured cycles repeat every 2 pivots and
+# never recover, so a small number separates the two cases cleanly.
+CYCLE_PATIENCE = 3
 
 
 def _steepest_pick(mask: np.ndarray, score: np.ndarray) -> int:
@@ -157,6 +162,7 @@ def active_set_solve(
     pivots = 0
     seen_bases: set[tuple] = set()
     bland = False
+    cycles = 0
 
     for _ in range(maxit):
         idx = np.flatnonzero(A)
@@ -209,10 +215,45 @@ def active_set_solve(
         psi[~(comp[g.tau] & comp[g.sig])] = 0.0
         rho = u[g.tau] - u[g.sig] - g.eps
 
-        # Degeneracy is only seen with exact-duplicate pools, which §9.5 merges;
-        # if a basis ever repeats, fall back to Bland's rule (lowest index).
+        # A repeated basis means the pivot sequence is going in circles.  The
+        # first remedy is Bland's rule (lowest index), which is what guarantees
+        # termination for a simplex method on a standard LP.
+        #
+        # It does not always work here, and the assumption that it would cost
+        # real time.  This is a bound-constrained QP with four pivot categories
+        # -- drop a negative arc, cap an over-full one, admit from `Z`, release
+        # from `U` -- tried in a fixed order, and Bland's guarantee does not
+        # transfer to that structure.  Measured on USDC->CRV $100k: the first
+        # repeat lands at pivot 29, Bland switches on there, and the basis then
+        # repeats a further 410 times, every one of them a period-2 flip of the
+        # same pair.  All 571 remaining pivots were spent going nowhere, and
+        # only `maxit` stopped it.
+        #
+        # So once Bland is on and the basis is *still* repeating, stop and say
+        # so.  `solve` answers a non-convergence by screening out the dust arcs
+        # that oscillate and accepting the incumbent, which is a valid flow --
+        # every iterate satisfies conservation exactly, only optimality is
+        # incomplete.  Reaching that conclusion at pivot ~30 rather than 600 is
+        # the entire saving; the answer is the one it would have reached anyway.
         signature = (A.tobytes(), U.tobytes())
         if signature in seen_bases:
+            if bland:
+                cycles += 1
+                if cycles >= CYCLE_PATIENCE:
+                    # Same contract as running out of `maxit`, and for the same
+                    # reason: the caller decides whether an unconverged flow is
+                    # usable.  The screened retry passes `partial_ok`, and
+                    # refusing it there turns a route that used to be quoted
+                    # into no route at all.
+                    if partial_ok:
+                        psi = np.where(np.abs(psi) < tol, 0.0, psi)
+                        return Solution(psi, u, A, U, psi_upper, rho, pivots,
+                                        feasible=True, reason="PARTIAL")
+                    return Solution(
+                        psi, u, A, U, psi_upper, rho, pivots, feasible=False,
+                        reason=f"no convergence: cycling under Bland's rule "
+                               f"after {pivots} pivots",
+                    )
             bland = True
         seen_bases.add(signature)
 

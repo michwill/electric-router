@@ -16,12 +16,11 @@ import os
 # to its own connected component, so `n` is 5-10 -- and one route can make
 # 4,713 calls into `numpy.linalg.solve`.  At that size OpenBLAS's threading is
 # pure overhead: the arithmetic is nanoseconds and the thread handoff is not.
-# Measured end to end on eight cores, pinned against unpinned: USDC->USDT
-# $100k 5,174 vs 8,209 ms, USDC->WETH $100k 5,656 vs 9,557, stETH->WETH 50
-# 4,969 vs 8,400, USDC->CRV $100k 7,078 vs 9,003 -- 21% to 41% off, with
-# byte-identical output on the first three.  It matters more under load: the
-# same route measured 10,821 ms when the machine was busy, which is how a 5 s
-# quote becomes a 15 s one.
+# Measured on the solve stage alone, five reps, minimum, eight threads against
+# one: USDC->USDT 103 vs 55 ms, USDC->WETH 50 vs 35, stETH->WETH 106 vs 53,
+# USDC->CRV 232 vs 135.  Twice as fast in all four -- but that is 35-135 ms of
+# routes taking 600-11,400 ms, so end to end it disappears into noise.  The
+# reproducibility below is the reason this is on by default, not the speed.
 #
 # It also makes the answer reproducible.  A threaded reduction sums in whatever
 # order the threads finish, so the §12.4 flow-conservation residual moves
