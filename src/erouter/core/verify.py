@@ -26,7 +26,7 @@ from __future__ import annotations
 import numpy as np
 
 from .candidates import Candidate, CandidateSet
-from .gas import route_gas
+from .gas import GasTable, plan_gas
 from .nodes import NodeMap
 from .quoter import MAX_LEGS, MAX_SLOTS, QuoterClient
 from .realize import RealizationError, check_one_arc_per_pool, realize
@@ -104,6 +104,7 @@ def verify(
     amount_in: int,
     gas_price_wei: int = 0,
     dst_wei_per_eth: float = 0.0,
+    gas_table: GasTable | None = None,
 ) -> CandidateSet:
     """Quote every ready candidate in one call and rank them.
 
@@ -136,7 +137,7 @@ def verify(
     def score(candidate: Candidate) -> float:
         value = float(candidate.verified_out or 0)
         if gas_price_wei > 0 and dst_wei_per_eth > 0 and candidate.route:
-            gas = route_gas(leg.leg.kind for leg in candidate.route.legs)
+            gas = plan_gas((leg.leg for leg in candidate.route.legs), gas_table)
             candidate.gas = gas
             value -= gas * gas_price_wei / 1e18 * dst_wei_per_eth
         return value

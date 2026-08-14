@@ -465,6 +465,12 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} {exc}")
         return 4
 
+    gas_table, gas_measured = _gas_table(chain, args, load.pools)
+    if gas_measured:
+        print(f"  gas: {gas_measured:,} legs priced from measured execution")
+    elif not getattr(args, "static_gas", False):
+        print(f"  {WARN} gas: no measurements; using the assumed per-kind table"
+              f" (run `erouter gascal`)")
     rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
                            chain_id=chain.chain_id)
     client = quoter_client(rpc, chain)
@@ -538,6 +544,7 @@ def cmd_route(args: argparse.Namespace) -> int:
                 refit_rounds=args.refit,
                 extra_arcs=stake_arcs,
                 max_legs=args.max_legs,
+                gas_table=gas_table,
             )
         except RoutingError as exc:
             print(f"{BAD} no route after refresh: {exc}")
@@ -561,6 +568,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
 
     from ..core.pipeline import RoutingError, prepare, route
 
+    gas_table, _ = _gas_table(chain, args, load.pools)
     symbol_src, symbol_dst = nodes.symbol(src), nodes.symbol(dst)
     print(f"  {chain.name} · block {rpc.block:,} · {symbol_src} -> {symbol_dst}")
     print("  preparing (probing arcs, fitting reference prices)...", flush=True)
@@ -612,6 +620,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 refit_rounds=args.refit,
                 prepared=prepared,
                 max_legs=args.max_legs,
+                gas_table=gas_table,
             )
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
@@ -624,7 +633,8 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                            max_candidates=args.candidates,
                            gas_price_wei=getattr(args, "gas_price_wei", 0),
                            refit_rounds=args.refit, extra_arcs=stake_arcs,
-                           max_legs=args.max_legs, prepared=prepared)
+                           max_legs=args.max_legs, prepared=prepared,
+                           gas_table=gas_table)
         _present(result, args, chain, rpc, nodes, wrappers, load,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
@@ -819,6 +829,12 @@ def cmd_bench(args: argparse.Namespace) -> int:
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
+    gas_table, gas_measured = _gas_table(chain, args, load.pools)
+    if gas_measured:
+        print(f"  gas: {gas_measured:,} legs priced from measured execution")
+    elif not getattr(args, "static_gas", False):
+        print(f"  {WARN} gas: no measurements; using the assumed per-kind table"
+              f" (run `erouter gascal`)")
     raw = quoter_client(rpc, chain)
     cached = CachedQuoterClient(raw, chain.chain_id, rpc.block)
     uncached = CachedQuoterClient(raw, chain.chain_id, rpc.block, enabled=False)
@@ -848,6 +864,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     kw = {
         "src_token": src, "dst_token": dst, "amount_in": amount,
         "extra_arcs": stake, "gas_price_wei": gas_price, "max_legs": args.max_legs,
+        "gas_table": gas_table,
         "optimise_split": not args.no_split,
     }
 
@@ -894,6 +911,191 @@ def cmd_bench(args: argparse.Namespace) -> int:
               f"{counters.get('split_gain_bp', 0.0):+.2f} bp")
     return 0
 
+
+
+
+
+#: Multiples of a "unit" trade.  Three decades, because gas is size-dependent:
+#: a crypto pool rebalances inside `exchange` at some sizes and not others, and
+#: the dearest sample is the one we keep.
+GASCAL_SIZES = (0.1, 1.0, 10.0)
+#: One unit, by decimals: $10k of a stablecoin, 10 of an 18-decimal asset.
+GASCAL_UNIT = {6: 10_000, 8: 1, 18: 10}
+#: Enough of the graph to reach every arc kind -- swaps of both dialects, a
+#: vault deposit and redeem, a wrap and an unwrap.
+GASCAL_TOKENS = ("USDC", "USDT", "DAI", "crvUSD", "WETH", "stETH", "wstETH",
+                 "sDAI", "sUSDS", "CRV", "sDOLA", "rETH")
+
+
+def _gascal_pairs(nodes, pools, args):
+    """Every ordered pair among the tokens this chain can resolve."""
+    if getattr(args, "pairs", None):
+        wanted = [tuple(p.split("-", 1)) for p in args.pairs]
+    else:
+        wanted = [(a, b) for a in GASCAL_TOKENS for b in GASCAL_TOKENS if a != b]
+    out, seen = [], set()
+    for src_symbol, dst_symbol in wanted:
+        try:
+            src = _resolve_token(nodes, src_symbol, pools)
+            dst = _resolve_token(nodes, dst_symbol, pools)
+        except KeyError:
+            continue          # a token this chain does not have is not an error
+        if src == dst or (src, dst) in seen:
+            continue
+        seen.add((src, dst))
+        decimals = nodes.decimals(src)
+        out.append((src, dst, GASCAL_UNIT.get(decimals, 10) * 10 ** decimals))
+    return out[:args.max_pairs]
+
+
+
+def _holder(holders, token, avoid):
+    """The richest holder of `token` that is not the pool we are about to trade on.
+
+    A ranked list rather than the maximum, because for several tokens the
+    largest holder *is* the pool under test -- stETH's biggest pool holder is
+    the ETH/stETH pool itself -- and taking only the top one silently gave up
+    on exactly the legs the fallback exists to rescue.
+    """
+    for address, _ in holders.get(token.lower(), ()):
+        if address.lower() != avoid.lower():
+            return address
+    return ""
+
+
+def cmd_gascal(args: argparse.Namespace) -> int:
+    """Measure what our own routes cost to execute, and commit the answer.
+
+    Driven by realised routes rather than a synthetic ladder, because gas is
+    state-dependent in ways a ladder cannot reach: a crypto pool may rebalance
+    inside `exchange` and cost tens of thousands more, and only at some sizes.
+    The legs a route actually chose, at the sizes it chose, are the sample that
+    matters.
+
+    Everything runs in revm against local state, so a full pass costs no round
+    trips beyond the ones routing already pays.
+    """
+    import time as _time
+
+    from ..core.pipeline import RoutingError, prepare, route
+    from .boa_host import quoter_client
+    from .gas_cache import GasCache
+    from .gas_probe import Funder, measure_legs
+    from .local_evm import LocalEvm
+    from .probe_cache import CachedQuoterClient
+    from .rpc import JsonRpcTransport
+    from .state_cache import StateCache
+    from .universe import load_pools, read_balances, resolve_dialects
+    from .wrappers import build_node_map, build_stake_arcs
+
+    chain = chain_table.get(args.chain)
+    try:
+        rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
+                               chain_id=chain.chain_id)
+    except Exception as exc:
+        print(f"{BAD} node unreachable: {exc}")
+        return 4
+
+    load = load_pools(chain, min_tvl=args.min_tvl)
+    setup = CachedQuoterClient(quoter_client(rpc, chain), chain.chain_id, rpc.block)
+    resolve_dialects(load.pools, setup, chain)
+    read_balances(load.pools, setup)
+    nodes, _ = build_node_map(load.pools, chain, setup)
+    stake = build_stake_arcs(nodes, chain, setup)
+
+    quoting = LocalEvm(rpc, cache=StateCache.load(chain.chain_id, chain.name.lower()))
+    quoting.prime()
+    client = quoter_client(quoting, chain)
+
+    pairs = _gascal_pairs(nodes, load.pools, args)
+    print(f"  {chain.name} · block {rpc.block:,} · {len(pairs)} pairs x "
+          f"{len(GASCAL_SIZES)} sizes")
+
+    legs: dict = {}
+    routed = 0
+    started = _time.perf_counter()
+    for src, dst, unit in pairs:
+        try:
+            prepared = prepare(load.pools, nodes, client, src_token=src,
+                               dst_token=dst, extra_arcs=stake)
+        except RoutingError:
+            continue
+        for scale in GASCAL_SIZES:
+            try:
+                result = route(load.pools, nodes, client, src_token=src,
+                               dst_token=dst, amount_in=int(unit * scale),
+                               extra_arcs=stake, gas_price_wei=args.gas_price_wei,
+                               prepared=prepared, max_legs=args.max_legs)
+            except RoutingError:
+                continue
+            routed += 1
+            for leg in result.route.legs:
+                key = (leg.target.lower(), leg.leg.kind, leg.leg.i, leg.leg.j)
+                if key not in legs or leg.amount_in > legs[key][1]:
+                    legs[key] = (leg.token_in, leg.amount_in)
+    print(f"  {routed} routes -> {len(legs)} distinct legs "
+          f"in {_time.perf_counter() - started:.0f}s")
+
+    # Who holds each token, for legs whose input cannot be conjured by writing
+    # a slot.  A pool's own reserves are exactly the account we need, and the
+    # universe already read them.
+    holders: dict[str, list[tuple[str, int]]] = {}
+    for pool in load.pools:
+        for coin, held in zip(pool.coins, pool.held or pool.balances, strict=False):
+            if held > 0:
+                holders.setdefault(coin.address.lower(), []).append((pool.address, held))
+    for ranked in holders.values():   # richest first, so a swap of any size funds
+        ranked.sort(key=lambda kv: -kv[1])
+
+    executing = LocalEvm(rpc, strict=False)   # may fetch whatever execution touches
+    started = _time.perf_counter()
+    got = measure_legs(
+        executing._evm,
+        [(t, k, i, j, token, amount, _holder(holders, token, t))
+         for (t, k, i, j), (token, amount) in legs.items()],
+        funder=Funder(executing._evm),
+    )
+    print(f"  measured {len(got['legs'])}/{len(legs)} legs "
+          f"in {_time.perf_counter() - started:.0f}s")
+
+    from ..core.pools import registry_key
+
+    cache = GasCache.load(chain.chain_id, chain.name.lower())
+    changed = cache.learn(
+        got["legs"], block=rpc.block,
+        classes={p.address.lower(): registry_key(p.pool_type) for p in load.pools},
+    )
+    if not args.dry_run:
+        cache.save()
+    stats = cache.stats()
+    print(f"  {OK} {changed} figure(s) changed; cache holds {stats['legs']:,} legs")
+    for kind, count in sorted(stats["by_kind"].items(), key=lambda kv: -kv[1]):
+        print(f"      {kind:<22}{count:>5}")
+    if got["failed"]:
+        print(f"  {WARN} {len(got['failed'])} leg(s) not measured "
+              f"(they keep the assumed figure):")
+        for miss in got["failed"][:8]:
+            print(f"      {miss.target[:12]} {miss.kind.name:<18} {miss.note[:52]}")
+    if args.dry_run:
+        print(f"  {WARN} --dry-run: nothing written")
+    return 0
+
+
+def _gas_table(chain, args, pools=None):
+    """Measured execution gas, or the static table when none was measured.
+
+    Off by default is the wrong default here: the figures are committed, so a
+    checkout has them, and routing with gas we invented when gas we measured is
+    sitting in the repo would be strictly worse.  `--static-gas` opts out, for
+    comparing against the old behaviour.
+    """
+    from ..core.gas import STATIC
+    from .gas_cache import GasCache
+
+    if getattr(args, "static_gas", False):
+        return STATIC, 0
+    cache = GasCache.load(chain.chain_id, chain.name.lower())
+    return cache.table(pools), len(cache.legs)
 
 def cmd_warmcache(args: argparse.Namespace) -> int:
     """Learn every pool's storage layout and bytecode, and commit the result.
@@ -989,6 +1191,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="erouter", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
 
+    gascal = sub.add_parser(
+        "gascal",
+        help="measure execution gas from real routes; writes data/gas")
+    gascal.add_argument("--chain", default="ethereum")
+    gascal.add_argument("--block", default="latest")
+    gascal.add_argument("--min-tvl", type=float, default=10_000.0)
+    gascal.add_argument("--rpc-url", default=None)
+    gascal.add_argument("--max-legs", type=int, default=32)
+    gascal.add_argument("--max-pairs", type=int, default=40)
+    gascal.add_argument("--gas-price-wei", type=int, default=int(0.1e9))
+    gascal.add_argument(
+        "--pairs", nargs="*", default=None, metavar="SRC-DST",
+        help="measure only these pairs, e.g. USDC-WETH stETH-WETH")
+    gascal.add_argument("--dry-run", action="store_true",
+                        help="measure and report, but do not write the cache")
+    gascal.set_defaults(func=cmd_gascal)
+
     warm = sub.add_parser("warmcache",
                           help="learn pool storage layouts and code; writes data/evm-state")
     warm.add_argument("--chain", default="ethereum")
@@ -1047,6 +1266,11 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument(
         "--rpc-url", default=None,
         help="override the endpoint from networks.py (for trying a hosted RPC)")
+    bench.add_argument(
+        "--static-gas", action="store_true",
+        help="price legs from the assumed per-kind table instead of the "
+             "measured figures in data/gas -- for comparing against the old "
+             "behaviour")
     bench.set_defaults(func=cmd_bench)
 
     route_cmd = sub.add_parser("route", help="compute and draw an optimal route")
@@ -1098,6 +1322,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rpc-url", default=None,
         help="override the endpoint from networks.py (for trying a hosted RPC)")
     route_cmd.set_defaults(local=True)
+    route_cmd.add_argument(
+        "--static-gas", action="store_true",
+        help="price legs from the assumed per-kind table instead of the "
+             "measured figures in data/gas -- for comparing against the old "
+             "behaviour")
     route_cmd.set_defaults(func=cmd_route)
 
     return parser

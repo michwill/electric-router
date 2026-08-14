@@ -22,7 +22,7 @@ import numpy as np
 
 from .calibrate import Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
-from .gas import min_useful_flow
+from .gas import GasTable, min_useful_flow
 from .graph import MAX_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
@@ -355,6 +355,7 @@ def route(
     extra_arcs: list[PoolArc] | None = None,
     optimise_split: bool = True,
     max_legs: int = DEFAULT_MAX_LEGS,
+    gas_table: GasTable | None = None,
 ) -> RouteResult:
     result = RouteResult(
         src_token=src_token.lower(),
@@ -415,6 +416,7 @@ def route(
         seed_k=seed_k, verify_on_chain=verify_on_chain,
         max_candidates=max_candidates, gas_price_wei=gas_price_wei,
         refit_rounds=refit_rounds, prepared=prepared, max_legs=max_legs,
+        gas_table=gas_table,
         optimise_split=optimise_split,
     )
 
@@ -443,6 +445,7 @@ def _quote(
     prepared: Prepared | None,
     optimise_split: bool = True,
     max_legs: int = DEFAULT_MAX_LEGS,
+    gas_table: GasTable | None = None,
 ) -> RouteResult:
     """The size-dependent half: graph, solve, candidates, verify, refit."""
     amount_human = amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
@@ -630,6 +633,7 @@ def _quote(
             verify(
                 pool_set, client, amount_in=amount_in,
                 gas_price_wei=gas_price_wei, dst_wei_per_eth=dst_wei_per_eth,
+                    gas_table=gas_table,
             )
         result.candidates = pool_set
         result.counters["candidates"] = len(pool_set)
@@ -673,6 +677,7 @@ def _quote(
                 verify(
                     pool_set, client, amount_in=amount_in,
                     gas_price_wei=gas_price_wei, dst_wei_per_eth=dst_wei_per_eth,
+                    gas_table=gas_table,
                 )
 
         winner = pool_set.best
@@ -708,6 +713,7 @@ def _quote(
                         src_token=src_token, dst_token=dst_token,
                         amount_in=amount_in, rounds=refit_rounds,
                         gas_price_wei=gas_price_wei, max_legs=max_legs,
+                        gas_table=gas_table,
                     )
 
             # --- §7: let the chain choose the split, not the model -----------
@@ -974,6 +980,7 @@ def _refit_winner(
     rounds: int,
     gas_price_wei: int,
     max_legs: int = MAX_LEGS,
+    gas_table: GasTable | None = None,
 ) -> None:
     """§8 -- refit the winner, re-solve, and let the chain adjudicate again.
 
@@ -1044,6 +1051,7 @@ def _refit_winner(
     verify_candidates(
         pool_set, client, amount_in=amount_in, gas_price_wei=gas_price_wei,
         dst_wei_per_eth=_dst_per_eth(nodes, nu, dst_token),
+        gas_table=gas_table,
     )
     best = pool_set.best
     if best is not None:
