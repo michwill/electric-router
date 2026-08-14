@@ -8,14 +8,42 @@ support, and the Curve API behind its User-Agent requirement.
 
 from __future__ import annotations
 
-import argparse
-import sys
-import time
+import os
 
-from . import chains as chain_table
-from . import config
-from .curve_api import CurveApi, CurveApiError
-from .rpc import JsonRpcTransport, RpcError
+# Before numpy loads, and therefore before anything that imports it.
+#
+# The solve is thousands of *tiny* factorisations -- §9.4 restricts each pivot
+# to its own connected component, so `n` is 5-10 -- and one route can make
+# 4,713 calls into `numpy.linalg.solve`.  At that size OpenBLAS's threading is
+# pure overhead: the arithmetic is nanoseconds and the thread handoff is not.
+# Measured end to end on eight cores, pinned against unpinned: USDC->USDT
+# $100k 5,174 vs 8,209 ms, USDC->WETH $100k 5,656 vs 9,557, stETH->WETH 50
+# 4,969 vs 8,400, USDC->CRV $100k 7,078 vs 9,003 -- 21% to 41% off, with
+# byte-identical output on the first three.  It matters more under load: the
+# same route measured 10,821 ms when the machine was busy, which is how a 5 s
+# quote becomes a 15 s one.
+#
+# It also makes the answer reproducible.  A threaded reduction sums in whatever
+# order the threads finish, so the §12.4 flow-conservation residual moves
+# between runs; on that pair it straddled the tolerance and the route failed
+# outright with eight threads while succeeding with one.  A router whose answer
+# depends on how busy the machine is cannot be verified against anything.
+#
+# Set EROUTER_BLAS_THREADS to override -- the §4 price fit is one dense solve
+# at n~300 per block and is the only part that could want more.
+_THREADS = os.environ.get("EROUTER_BLAS_THREADS", "1")
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_var, _THREADS)
+
+import argparse  # noqa: E402
+import sys  # noqa: E402
+import time  # noqa: E402
+
+from . import chains as chain_table  # noqa: E402
+from . import config  # noqa: E402
+from .curve_api import CurveApi, CurveApiError  # noqa: E402
+from .rpc import JsonRpcTransport, RpcError  # noqa: E402
 
 OK = "\x1b[32m✔\x1b[0m"
 BAD = "\x1b[31m✘\x1b[0m"
