@@ -141,6 +141,21 @@ class GasTable:
 
 
 #: The empty table: every leg falls back to the static per-kind figure.
+#
+# Measuring gas turned out to buy accuracy rather than output.  Both tables
+# were run over USDC->WETH at $10k and $100k, at 1, 5, 20 and 50 gwei, with
+# both routes priced under the *measured* figures so the comparison was between
+# two routes rather than two beliefs: the chosen route was identical every
+# time, net delta +0.00 bp throughout.  A wider sweep moved one case in ten per
+# gas price, never by more than 3.2 bp of gross output.
+#
+# That is not the same as gas being inert.  The gas *price* clearly steers the
+# router -- the same $10k trade takes 790k gas at 1 gwei and 251k at 5 -- but
+# the 1.3x to 3.2x correction between these two tables is smaller than the
+# output gap between the candidates it has to choose among, so it rarely
+# decides anything.  The value is in the figures being true: what a quote
+# reports, what a pool deployed tomorrow inherits, and what a leg cap will be
+# built on.
 STATIC = GasTable()
 
 
