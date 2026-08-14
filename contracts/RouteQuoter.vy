@@ -56,6 +56,11 @@ UNWRAP_NATIVE: public(constant(uint8)) = 10  # 1:1, no call
 WSTETH_UNWRAP: public(constant(uint8)) = 11  # getStETHByWstETH(uint256)
 WSTETH_WRAP: public(constant(uint8)) = 12  # getWstETHByStETH(uint256)
 STAKE_NATIVE: public(constant(uint8)) = 13  # native -> LST, 1:1, no call
+# 14 is not used.  It was `SWAP_UNDERLYING` on an abandoned branch that quoted
+# `get_dy_underlying`, and `data/facts` still records that survey's findings
+# under it; reusing the number would make those entries read as a live kind.
+LEND_MINT: public(constant(uint8)) = 15  # exchangeRateStored(), underlying -> cToken
+LEND_REDEEM: public(constant(uint8)) = 16  # exchangeRateStored(), cToken -> underlying
 
 
 struct Res:
@@ -173,6 +178,22 @@ def _quote(target: address, kind: uint8, i: uint8, j: uint8, n: uint8, dx: uint2
         return self._static(
             target, concat(method_id("getWstETHByStETH(uint256)"), abi_encode(dx))
         )
+
+    if kind == LEND_REDEEM:
+        # Compound's cTokens have no `previewRedeem`.  The rate is the whole
+        # conversion -- `underlying = cTokens * rate / 1e18` -- and it already
+        # carries the decimal difference between the two tokens, so nothing
+        # here needs to know what they are.
+        rate: Res = self._static(target, method_id("exchangeRateStored()"))
+        if rate.status != STATUS_VALUE or rate.value == 0:
+            return Res(status=STATUS_WRONG_ABI, value=0)
+        return Res(status=STATUS_VALUE, value=dx * rate.value // 10**18)
+
+    if kind == LEND_MINT:
+        minted: Res = self._static(target, method_id("exchangeRateStored()"))
+        if minted.status != STATUS_VALUE or minted.value == 0:
+            return Res(status=STATUS_WRONG_ABI, value=0)
+        return Res(status=STATUS_VALUE, value=dx * 10**18 // minted.value)
 
     if kind == ERC4626_DEPOSIT:
         return self._static(

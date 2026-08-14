@@ -50,6 +50,11 @@ _BY_KIND: dict[ArcKind, int] = {
     ArcKind.WSTETH_WRAP: 60_000,
     ArcKind.WSTETH_UNWRAP: 60_000,
     ArcKind.STAKE_NATIVE: 60_000,
+    # Measured: `cDAI.redeem` of 100k cDAI cost 172,906 -- a lending redemption
+    # touches an interest-accrual write a swap never does, so it is dearer than
+    # any of them.  `facts` replaces this with the real figure per token.
+    ArcKind.LEND_MINT: 170_000,
+    ArcKind.LEND_REDEEM: 173_000,
 }
 
 # What an unrecognised leg is assumed to cost -- the swap figure, so a new arc

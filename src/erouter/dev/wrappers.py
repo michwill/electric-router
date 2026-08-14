@@ -384,3 +384,97 @@ def build_stake_arcs(
             note=f"mint {nodes.symbol(vault)}",
         ))
     return arcs
+
+
+def build_lending_arcs(
+    nodes: NodeMap, chain: Chain, client: QuoterClient, facts=None
+) -> list[PoolArc]:
+    """Leaving a lending wrapper, where the protocol still allows it.
+
+    Curve's lending pools trade wrapped tokens -- cDAI against cUSDC -- and the
+    underlying only reachable through `exchange_underlying`, which on both
+    surviving deployments reverts: Compound V2 answers "mint is paused" and
+    Aave V2's reserves are frozen.  Doing the conversion *outside* the pool is
+    the same trade in three steps, and the step that fails is the deposit, not
+    the withdrawal.
+
+    So a redemption is its own arc.  That makes `USDT -> cDAI -> DAI` routable
+    through a pool whose own `exchange_underlying` cannot run, and it is why
+    these are arcs rather than node merges: a merge is symmetric and would
+    claim the mint direction too.
+
+    Linear, like the mint arcs above -- `underlying = cTokens * rate` with the
+    rate carrying the decimal difference -- so `B = 0` and the §5.5 certificate
+    survives them.  The cap is the market's own cash: redemption pays out of
+    it, and an uncapped linear arc with `eps < 0` gives unbounded flow (§2.3
+    rule 2).
+
+    `facts` is the committed capability table.  A direction absent from it is
+    not built, which is how a paused mint stays out of the graph without a
+    blacklist and how it would return on its own if the protocol reopened.
+    """
+    wrappers = getattr(facts, "wrappers", {}) or {}
+    if not wrappers:
+        return []
+
+    known = [(a.lower(), entry) for a, entry in wrappers.items()
+             if nodes.has(a.lower()) and (entry.get("redeem") or entry.get("mint"))]
+    if not known:
+        return []
+
+    calls: list[Call] = []
+    for address, _ in known:
+        calls.extend([
+            Call(address, encode_call("underlying()")),
+            Call(address, encode_call("exchangeRateStored()")),
+            Call(address, encode_call("getCash()")),
+        ])
+    answers = client.raw(calls)
+
+    arcs: list[PoolArc] = []
+    for k, (address, entry) in enumerate(known):
+        under_ans, rate_ans, cash_ans = answers[3 * k : 3 * k + 3]
+        if under_ans.status is not Status.VALUE or rate_ans.status is not Status.VALUE:
+            continue
+        underlying = "0x" + under_ans.data[-20:].hex()
+        if not nodes.has(underlying):
+            continue
+        rate = rate_ans.uint()
+        cash = cash_ans.uint() if cash_ans.status is Status.VALUE else 0
+        if rate == 0 or cash == 0:
+            continue
+        wrapped_dec = nodes.decimals(address)
+        under_dec = nodes.decimals(underlying)
+        tau, sigma = nodes.node(address), nodes.node(underlying)
+        if tau == sigma:
+            continue
+
+        if entry.get("redeem"):
+            # `a` is in value coordinates: how much underlying one wrapped
+            # token buys, both sides measured in their own units.
+            per_token = rate / 10 ** 18 * 10 ** wrapped_dec / 10 ** under_dec
+            arcs.append(PoolArc(
+                id=f"redeem:{address}:{address[:10]}>{underlying[:10]}",
+                pool=address, kind=ArcKind.LEND_REDEEM, i=0, j=0, n_coins=0,
+                token_in=address, token_out=underlying, tau=tau, sigma=sigma,
+                a=per_token, B=0.0,
+                # Only what the market can actually pay out today.
+                cap=cash / 10 ** under_dec / max(per_token, 1e-30),
+                clamped=True, convex_flag=False,
+                decimals_in=wrapped_dec, decimals_out=under_dec,
+                tvl_usd=0.0,
+                note=f"redeem {nodes.symbol(address)}",
+            ))
+        if entry.get("mint"):
+            arcs.append(PoolArc(
+                id=f"lend:{address}:{underlying[:10]}>{address[:10]}",
+                pool=address, kind=ArcKind.LEND_MINT, i=0, j=0, n_coins=0,
+                token_in=underlying, token_out=address, tau=sigma, sigma=tau,
+                a=10 ** 18 / rate * 10 ** under_dec / 10 ** wrapped_dec, B=0.0,
+                cap=float("inf") if False else cash / 10 ** under_dec,
+                clamped=True, convex_flag=False,
+                decimals_in=under_dec, decimals_out=wrapped_dec,
+                tvl_usd=0.0,
+                note=f"mint {nodes.symbol(address)}",
+            ))
+    return arcs

@@ -1,5 +1,5 @@
 {
- "block": 25755378,
+ "block": 25755651,
  "broken": {
   "0x52ea46506b9cc5ef470c5bf89f17dc28bb35d85c:14:0>1": "reverted without a reason",
   "0x52ea46506b9cc5ef470c5bf89f17dc28bb35d85c:14:1>0": "reverted without a reason",
@@ -405,7 +405,7 @@
   "factory-crypto:1": 252703,
   "factory-tricrypto:1": 186427,
   "factory:0": 129027,
-  "main:0": 124526,
+  "main:0": 124514,
   "main:1": 324624,
   "stableswapng:0": 160508,
   "twocryptong:1": 182106
@@ -504,7 +504,7 @@
   "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7:0:0>1": 121578,
   "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7:0:0>2": 120764,
   "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7:0:1>0": 131938,
-  "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7:0:1>2": 124526,
+  "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7:0:1>2": 124514,
   "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7:0:2>0": 136278,
   "0xbebc44782c7db0a1a60cb6fe97d0b483032ff1c7:0:2>1": 132456,
   "0xbec570d92afb7ffc553bdd9d4b4638121000b10d:1:1>0": 235052,
@@ -527,5 +527,15 @@
   "0xf76329c6dc10fdfbee6ca520d0bf4d474e95e46e:0:1>0": 141311
  },
  "version": 1,
- "wrappers": {}
+ "wrappers": {
+  "0x39aa39c021dfbae8fac545936693ac917d5e7563": {
+   "mint": false,
+   "note": "mint is paused"
+  },
+  "0x5d3a536e4d6dbd6114cc1ead35777bab948e3643": {
+   "mint": false,
+   "note": "mint is paused",
+   "redeem": true
+  }
+ }
 }

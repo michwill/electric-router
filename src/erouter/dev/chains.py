@@ -50,6 +50,10 @@ class Chain:
     # block's -- and because a blacklisted pool builds no arcs, so nothing else
     # would ever look at it again.  Re-testing is what lets one come back.
     watch: tuple[str, ...] = ()
+    # (wrapper, underlying, family) -- lending tokens whose mint and redeem are
+    # tested on every `facts` build.  What survives becomes an arc; see
+    # `wrappers.build_lending_arcs`.
+    wrappers: tuple[tuple[str, str, str], ...] = ()
     # A committed endpoint, for a checkout with no `networks.py`.
     #
     # Deliberately public, and safe to be: the key serves reads only --
@@ -114,6 +118,12 @@ CHAINS: dict[str, Chain] = {
         public_rpc=(
             "https://lb.drpc.live/ethereum/"
             "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
+        ),
+        wrappers=(
+            ("0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643",   # cDAI
+             "0x6B175474E89094C44Da98b954EedeAC495271d0F", "ctoken"),
+            ("0x39AA39c021dfbaE8faC545936693aC917d5E7563",   # cUSDC
+             "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", "ctoken"),
         ),
         watch=(
             "0xDeBF20617708857ebe4F679508E7b7863a8A8EeE",   # aDAI/aUSDC/aUSDT

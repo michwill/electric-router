@@ -64,10 +64,19 @@ WRAPPER_CALLS = {
 
 @dataclass(slots=True)
 class Capability:
+    """What a wrapper will still do.  `None` means untested, not refused.
+
+    The distinction is the whole point.  cUSDC's redeem could not be funded --
+    conjuring a cToken means writing a balance the protocol computes rather
+    than stores -- and reporting that as "cannot redeem" would deny a working
+    arc for the rest of the file's life.  A direction is only ever recorded
+    once it has actually been attempted.
+    """
+
     address: str
     family: str
-    mint: bool = False
-    redeem: bool = False
+    mint: bool | None = None
+    redeem: bool | None = None
     notes: dict = field(default_factory=dict)
 
 
@@ -88,11 +97,12 @@ def try_wrapper(evm, funder: Funder, *, token: str, underlying: str, family: str
         try:
             if not funder.fund(spend, target, amount * 2):
                 out.notes[direction] = "not funded"
-                continue
+                continue          # leaves the direction `None`: untested
             try:
                 evm.message_call(caller=CALLER, to=target, calldata=data)
                 setattr(out, direction, True)
             except Exception as exc:
+                setattr(out, direction, False)
                 out.notes[direction] = revert_reason(exc)
         finally:
             with contextlib.suppress(Exception):

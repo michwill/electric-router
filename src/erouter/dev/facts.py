@@ -192,9 +192,21 @@ class FactsCache:
         self.dirty = self.dirty or bool(gone)
         return len(gone)
 
-    def learn_wrapper(self, address: str, *, mint: bool, redeem: bool,
+    def learn_wrapper(self, address: str, *, mint: bool | None, redeem: bool | None,
                       note: str = "") -> bool:
-        entry = {"mint": bool(mint), "redeem": bool(redeem)}
+        """Record only what was actually attempted.
+
+        `None` is untested and is left out entirely, so a direction nobody
+        could fund does not read later as one the protocol refused.  Absent and
+        False both keep the arc unbuilt, but only False is a claim.
+        """
+        entry: dict = {}
+        if mint is not None:
+            entry["mint"] = bool(mint)
+        if redeem is not None:
+            entry["redeem"] = bool(redeem)
+        if not entry:
+            return False
         if note:
             entry["note"] = note
         address = address.lower()

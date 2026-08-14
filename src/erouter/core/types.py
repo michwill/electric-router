@@ -27,6 +27,22 @@ class ArcKind(IntEnum):
     WSTETH_UNWRAP = 11  # getStETHByWstETH(uint256)
     WSTETH_WRAP = 12  # getWstETHByStETH(uint256)
     STAKE_NATIVE = 13  # native -> LST at 1:1 (Lido submit, frxETHMinter)
+    # 14 is deliberately absent.  It was `SWAP_UNDERLYING` on an abandoned
+    # branch, and `data/facts` still records that survey under it.
+    LEND_MINT = 15  # underlying -> cToken, at `exchangeRateStored`
+    LEND_REDEEM = 16  # cToken -> underlying, at `exchangeRateStored`
+
+    @property
+    def is_lending(self) -> bool:
+        """A lending wrapper leg, which is not a swap and not a merge.
+
+        Not a merge because the two directions differ: Compound V2 answers
+        "mint is paused" and redeems fine, Aave V2's reserves are frozen the
+        same way.  A node merge is symmetric and could not say that, which is
+        why these are arcs -- built per direction, and only where `data/facts`
+        recorded the direction working.
+        """
+        return self in (ArcKind.LEND_MINT, ArcKind.LEND_REDEEM)
 
     @property
     def is_swap(self) -> bool:

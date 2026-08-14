@@ -43,6 +43,7 @@ import time  # noqa: E402
 from . import chains as chain_table  # noqa: E402
 from . import config  # noqa: E402
 from .curve_api import CurveApi, CurveApiError  # noqa: E402
+from .facts import FactsCache  # noqa: E402
 from .rpc import JsonRpcTransport, RpcError  # noqa: E402
 
 OK = "\x1b[32m✔\x1b[0m"
@@ -362,7 +363,8 @@ def _resolve_token(nodes, symbol_or_address: str, pools) -> str:
     return ranked[0][0]
 
 
-def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False):
+def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
+                  fresh_quoter: bool = False):
     """A quoter backed by an in-process EVM, or None if that is not available.
 
     The committed cache says which slots each pool reads and holds its code, so
@@ -420,6 +422,16 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False):
         extra += f", {learned} stale slot(s) recovered" if learned else ""
         print(f"  local EVM: {stats.slots:,} slots in {stats.ms:,.0f} ms"
               f" ({stats.accounts} accounts{extra})")
+    if fresh_quoter:
+        # The local EVM loads the *deployed* quoter's code from the state
+        # cache, so a kind added since that deployment is priced as a revert --
+        # which reads as "this leg cannot be traded" and is silently routed
+        # around.  Injecting the compiled runtime instead makes new kinds
+        # usable here before they exist on chain.  Only ever local: the wire
+        # path still talks to what is actually deployed.
+        from .boa_host import override_client
+
+        return override_client(evm)
     return quoter_client(evm, chain)
 
 
@@ -481,7 +493,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         read_balances,
         resolve_dialects,
     )
-    from .wrappers import build_node_map, build_stake_arcs
+    from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
 
     chain = chain_table.get(args.chain)
     started = time.monotonic()
@@ -521,9 +533,14 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     nodes, wrappers = build_node_map(load.pools, chain, client)
     stake_arcs = build_stake_arcs(nodes, chain, client)
+    # Leaving a lending wrapper, where `data/facts` says the protocol still
+    # allows it.  Rides with the stake arcs: same shape, same treatment.
+    stake_arcs = stake_arcs + build_lending_arcs(
+        nodes, chain, client, FactsCache.load(chain.chain_id, chain.name.lower()))
     evm = None
     if args.local:
-        local = _local_quoter(rpc, chain, load, nodes)
+        local = _local_quoter(rpc, chain, load, nodes,
+                              fresh_quoter=getattr(args, 'fresh_quoter', False))
         if local is not None:
             client, evm = local, getattr(local, "transport", None)
     # Gas is priced by default.  Leaving it at zero made every route look free
@@ -835,7 +852,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     from .probe_cache import CachedQuoterClient
     from .rpc import JsonRpcTransport
     from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import build_node_map, build_stake_arcs
+    from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
 
     chain = chain_table.get(args.chain)
     try:
@@ -870,6 +887,10 @@ def cmd_bench(args: argparse.Namespace) -> int:
     read_balances(load.pools, cached)
     nodes, _ = build_node_map(load.pools, chain, cached)
     stake = build_stake_arcs(nodes, chain, cached)
+    # Leaving a lending wrapper, where `data/facts` says the protocol still
+    # allows it.  Rides with the stake arcs: same shape, same treatment.
+    stake = stake + build_lending_arcs(
+        nodes, chain, cached, FactsCache.load(chain.chain_id, chain.name.lower()))
 
     try:
         src = _resolve_token(None, args.src, load.pools)
@@ -1047,7 +1068,7 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     from .rpc import JsonRpcTransport
     from .state_cache import StateCache
     from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import build_node_map, build_stake_arcs
+    from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
 
     chain = chain_table.get(args.chain)
     try:
@@ -1063,6 +1084,10 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     read_balances(load.pools, setup)
     nodes, _ = build_node_map(load.pools, chain, setup)
     stake = build_stake_arcs(nodes, chain, setup)
+    # Leaving a lending wrapper, where `data/facts` says the protocol still
+    # allows it.  Rides with the stake arcs: same shape, same treatment.
+    stake = stake + build_lending_arcs(
+        nodes, chain, setup, FactsCache.load(chain.chain_id, chain.name.lower()))
 
     quoting = LocalEvm(rpc, cache=StateCache.load(chain.chain_id, chain.name.lower()))
     quoting.prime()
@@ -1193,6 +1218,33 @@ def cmd_gascal(args: argparse.Namespace) -> int:
         for key, reason in sorted(found.items()):
             print(f"      {key:<46} {reason}")
 
+    # --- can a lending wrapper still be entered, and still be left? ---------
+    #
+    # Both directions attempted separately, because on a deprecated protocol
+    # they genuinely differ.  What comes out of this gates `build_lending_arcs`:
+    # a direction absent here is never built, so a paused mint stays out of the
+    # graph without anyone maintaining a list, and returns on its own if the
+    # protocol reopens.
+    if not args.skip_executability and getattr(chain, "wrappers", ()):
+        from .executability import try_wrapper
+
+        for token, underlying, family in chain.wrappers:
+            # Not `got`: that name holds `measure_legs`' result, which is read
+            # again below.  Shadowing it crashed the command after the cache
+            # had already been written, so the failure looked like the probe
+            # never running.
+            able = try_wrapper(executing._evm, Funder(executing._evm), token=token,
+                               underlying=underlying, family=family,
+                               amount=10_000 * 10 ** 8)
+            note = able.notes.get("mint") or able.notes.get("redeem") or ""
+            if cache.learn_wrapper(able.address, mint=able.mint, redeem=able.redeem,
+                                   note=note):
+                def word(state):
+                    return "yes" if state else ("no" if state is False else "untested")
+                print(f"      {able.address[:12]} {family:<8} "
+                      f"mint {word(able.mint):<8} redeem {word(able.redeem):<8} "
+                      f"{note[:40]}")
+
     if not args.dry_run:
         cache.save()
     stats = cache.stats()
@@ -1248,7 +1300,7 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     from .rpc import JsonRpcTransport
     from .state_cache import StateCache
     from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import build_node_map, build_stake_arcs
+    from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
 
     chain = chain_table.get(args.chain)
     try:
@@ -1275,6 +1327,10 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     read_balances(load.pools, setup)
     nodes, _ = build_node_map(load.pools, chain, setup)
     stake = build_stake_arcs(nodes, chain, setup)
+    # Leaving a lending wrapper, where `data/facts` says the protocol still
+    # allows it.  Rides with the stake arcs: same shape, same treatment.
+    stake = stake + build_lending_arcs(
+        nodes, chain, setup, FactsCache.load(chain.chain_id, chain.name.lower()))
 
     # A LLAMMA reads a different set of band slots as the price moves, so its
     # layout is a function of state and cannot be cached.  Recorded as volatile
@@ -1457,6 +1513,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--rpc-url", default=None,
         help="override the endpoint from networks.py (for trying a hosted RPC)")
     route_cmd.set_defaults(local=True)
+    route_cmd.add_argument(
+        "--fresh-quoter", action="store_true",
+        help="run the compiled quoter in the local EVM instead of the deployed "
+             "one, so leg kinds newer than the deployment can be priced. The "
+             "wire path is unaffected and still sees what is on chain")
     route_cmd.add_argument(
         "--static-gas", action="store_true",
         help="price legs from the assumed per-kind table instead of the "
