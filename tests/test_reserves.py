@@ -104,20 +104,32 @@ def test_a_pool_holding_native_eth_is_not_dropped():
     class Node:
         pin = type("P", (), {"hex_block": "0x1"})()
 
-        def fetch(self, method, params):
-            return hex(100 * 10 ** 18)  # the pool's native balance covers it
+        def fetch_multi(self, payloads, concurrent=False):
+            # the pool's native balance covers the empty WETH slot
+            return [hex(100 * 10 ** 18) for _ in payloads]
 
     assert check_reserves_are_real([p], chain, Node()) == []
     assert p.balances == (100 * 10 ** 18, 1_000 * 10 ** 6)
 
 
-def test_a_zero_balance_coin_is_not_probed():
+def test_a_zero_balance_coin_is_not_a_rug():
     """Lending pools list underlying coins at zero; that is shape, not a rug."""
     p = pool("lending", [coin(USDC, "aUSDC", 6, 0), coin(SUSD, "USDC", 6, 0)],
              (1_000 * 10 ** 6, 0))
     chain = Holdings({(USDC, p.address.lower()): 1_000 * 10 ** 6})
     assert check_reserves_are_real([p], chain) == []
-    assert chain.calls == 1, "the zero-balance coin should not have been asked about"
+    assert p.balances == (1_000 * 10 ** 6, 0)
+
+
+def test_holdings_read_alongside_the_balances_cost_no_second_pass():
+    """`read_balances` already asked, in a batch it was already sending."""
+    p = pool("prefetched", [coin(USDC, "USDC", 6, 0), coin(SUSD, "sUSD", 18, 0)],
+             (1_000 * 10 ** 6, 1_000 * 10 ** 18))
+    p.held = (1_000 * 10 ** 6, 0)  # as `read_balances` would have left it
+    chain = Holdings({})
+    warnings = check_reserves_are_real([p], chain)
+    assert chain.calls == 0, "the check must not re-ask what it already knows"
+    assert warnings and not any(p.balances)
 
 
 @pytest.mark.parametrize("held", [0, 1, 10 ** 6])

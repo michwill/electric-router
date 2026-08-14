@@ -89,6 +89,10 @@ class PoolSpec:
     dialect: Dialect | None = None
     note: str = ""
     balances: tuple[int, ...] = ()
+    # What the pool's coins say it *holds*, against what its own accounting
+    # reports above.  Filled alongside `balances` because it rides the same
+    # batch; see `check_reserves_are_real` for why the difference matters.
+    held: tuple[int, ...] = ()
     extra: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------ metadata

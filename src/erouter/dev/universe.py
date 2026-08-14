@@ -321,6 +321,10 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient) -> int:
     # feed, and probing for them would only overwrite good numbers with none.
     pools = [p for p in pools if not p.balances]
 
+    # Three calls per coin, not two: what the pool says it has, in both
+    # spellings, and what the coin says it holds.  The third rides the same
+    # batch, so knowing whether a pool's accounting is real costs no extra
+    # round trip -- measured, it was 3,653 ms as a separate pass.
     calls: list[Call] = []
     spans: list[tuple[int, int]] = []
     for pool in pools:
@@ -328,22 +332,28 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient) -> int:
         for k in range(pool.n_coins):
             calls.append(Call(pool.address, encode_call("balances(uint256)", k)))
             calls.append(Call(pool.address, encode_call("balances(int128)", k)))
+            coin = pool.coins[k] if k < len(pool.coins) else None
+            target = coin.address if coin else pool.address
+            calls.append(Call(target, encode_call("balanceOf(address)", pool.address)))
         spans.append((start, len(calls)))
 
     answers = client.raw(calls)
     filled = 0
     for pool, (lo, hi) in zip(pools, spans, strict=True):
         chunk = answers[lo:hi]
-        balances = []
+        balances, held = [], []
         for k in range(pool.n_coins):
-            as_uint, as_int = chunk[2 * k], chunk[2 * k + 1]
+            as_uint, as_int, owns = chunk[3 * k], chunk[3 * k + 1], chunk[3 * k + 2]
             if as_uint.status is Status.VALUE:
                 balances.append(as_uint.uint())
             elif as_int.status is Status.VALUE:
                 balances.append(as_int.uint())
             else:
                 balances.append(0)
+            # -1 means the coin would not say, which is not evidence of anything.
+            held.append(owns.uint() if owns.status is Status.VALUE else -1)
         pool.balances = tuple(balances)
+        pool.held = tuple(held)
         if any(balances):
             filled += 1
     return filled
@@ -353,6 +363,10 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient) -> int:
 # coin -- its accounting has come adrift from reality, and every quote it gives
 # is computed against tokens that are not there.
 HELD_TOLERANCE = 0.5
+
+
+def _pool(pools: list[PoolSpec], address: str) -> PoolSpec:
+    return next(p for p in pools if p.address == address)
 
 
 def check_reserves_are_real(
@@ -378,47 +392,69 @@ def check_reserves_are_real(
     from ..core.codec import encode_call
     from ..core.transport import Call
 
-    calls: list[Call] = []
-    meta: list[tuple[PoolSpec, int]] = []
-    for pool in pools:
-        for k, coin in enumerate(pool.coins[: len(pool.balances)]):
-            if pool.balances[k] <= 0 or coin.address.lower().startswith("0xeeee"):
-                continue
-            calls.append(Call(coin.address, encode_call("balanceOf(address)", pool.address)))
-            meta.append((pool, k))
-    if not calls:
-        return []
+    # `read_balances` already asked, in the batch it was already sending.  Only
+    # a pool it skipped -- LLAMMA, whose reserves come from the market feed --
+    # needs asking here, and then only if a client was given.
+    missing = [p for p in pools if len(p.held) != len(p.balances)]
+    if missing and client is not None:
+        calls: list[Call] = []
+        meta: list[tuple[PoolSpec, int]] = []
+        for pool in missing:
+            for k, coin in enumerate(pool.coins[: len(pool.balances)]):
+                calls.append(Call(coin.address,
+                                  encode_call("balanceOf(address)", pool.address)))
+                meta.append((pool, k))
+        found: dict[int, list[int]] = {}
+        for (pool, _k), answer in zip(meta, client.raw(calls), strict=True):
+            found.setdefault(id(pool), []).append(
+                answer.uint() if answer.status is Status.VALUE else -1)
+        for pool in missing:
+            pool.held = tuple(found.get(id(pool), []))
 
     warnings: list[str] = []
     short: dict[str, list[tuple[int, int, int]]] = {}
-    for (pool, k), answer in zip(meta, client.raw(calls), strict=True):
-        if answer.status is not Status.VALUE:
-            continue
-        held, reported = answer.uint(), pool.balances[k]
-        if held >= reported * HELD_TOLERANCE:
-            continue
-        short.setdefault(pool.address, []).append((k, reported, held))
+    for pool in pools:
+        for k, coin in enumerate(pool.coins[: min(len(pool.balances), len(pool.held))]):
+            reported, held = pool.balances[k], pool.held[k]
+            if reported <= 0 or held < 0:
+                continue  # nothing there, or the coin would not say
+            if coin.address.lower().startswith("0xeeee"):
+                continue  # native ETH is not an ERC20 and answers nothing useful
+            if held >= reported * HELD_TOLERANCE:
+                continue
+            short.setdefault(pool.address, []).append((k, reported, held))
 
-    # Native ETH covers a WETH slot that looks empty.
+    # Native ETH covers a WETH slot that looks empty -- 29 of the 31 apparent
+    # shortfalls on mainnet.  One batch, because asking 29 times in sequence
+    # cost 1,962 ms and this whole check is otherwise free.
+    wants_native = [
+        address for address, rows in short.items()
+        if any(_pool(pools, address).coins[k].symbol.upper() in ("WETH", "ETH")
+               for k, _, _ in rows)
+    ]
+    native: dict[str, int] = {}
+    if wants_native and transport is not None:
+        block = transport.pin.hex_block
+        try:
+            answers = transport.fetch_multi(
+                [("eth_getBalance", [a, block]) for a in wants_native], concurrent=True)
+        except TypeError:
+            answers = transport.fetch_multi([("eth_getBalance", [a, block])
+                                             for a in wants_native])
+        for address, answer in zip(wants_native, answers, strict=True):
+            native[address] = 0 if isinstance(answer, Exception) else int(answer, 16)
+
     for address, rows in list(short.items()):
-        pool = next(p for p in pools if p.address == address)
-        native = 0
-        if transport is not None and any(
-            pool.coins[k].symbol.upper() in ("WETH", "ETH") for k, _, _ in rows
-        ):
-            try:
-                native = int(transport.fetch("eth_getBalance",
-                                             [address, transport.pin.hex_block]), 16)
-            except Exception:
-                native = 0
+        pool = _pool(pools, address)
+        have = native.get(address, 0)
         rows[:] = [r for r in rows
                    if not (pool.coins[r[0]].symbol.upper() in ("WETH", "ETH")
-                           and native >= r[1] * HELD_TOLERANCE)]
+                           and have >= r[1] * HELD_TOLERANCE)]
         if not rows:
             del short[address]
 
     for address, rows in short.items():
-        pool = next(p for p in pools if p.address == address)
+        pool = _pool(pools, address)
         k, reported, held = rows[0]
         coin = pool.coins[k]
         warnings.append(
