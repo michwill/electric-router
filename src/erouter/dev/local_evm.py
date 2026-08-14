@@ -73,6 +73,48 @@ BATCH_LIMIT = 100
 # doubling again buys 12% more and twice the connections, which a hosted
 # endpoint is entitled to object to.
 PRIME_STREAMS = 16
+
+# Twenty-seven bytes that read their own storage.
+#
+# No contract can read another account's storage -- SLOAD reads the executing
+# account's, and there is no opcode for anyone else's.  But an `eth_call` state
+# override replaces an account's *code* while keeping its *storage*, so this
+# blob injected at a pool runs in that pool's context and can read all of it.
+# The quoter's `raw_batch` is the coordinator, 600 reads a call, so a universe
+# sweep is seven requests instead of 4,168.
+#
+# That matters exactly where requests are metered.  Measured on 4,168 slots:
+#
+#     endpoint        getStorageAt   dumper (8 streams)
+#     local node             429 ms            1,403 ms
+#     drpc (keyed)           559 ms              607 ms
+#     drpc public        185,103 ms              554 ms
+#
+# An unmetered node answers 4,168 small reads faster than it runs seven big
+# `eth_call`s, and a public endpoint is 334x the other way.  So this is not the
+# default; `prefer_dump` turns it on for endpoints that count requests.
+#
+# Calldata is a run of 32-byte slot numbers, the return their values in order.
+# There is no selector dispatch, because the only caller is us.
+#
+#   36        CALLDATASIZE        [size]
+#   6000      PUSH1 0             [size, i]
+#   5b        JUMPDEST      <- 03 loop
+#   81 81 10  DUP2 DUP2 LT        [size, i, i < size]
+#   15        ISZERO
+#   6016 57   PUSH1 22 JUMPI      exit when i reaches size
+#   80 35     DUP1 CALLDATALOAD   [size, i, slot]
+#   54        SLOAD               [size, i, value]
+#   81 52     DUP2 MSTORE         mem[i] = value
+#   6020 01   PUSH1 32 ADD        i += 32
+#   6003 56   PUSH1 3 JUMP
+#   5b        JUMPDEST      <- 22 end
+#   50 6000   POP PUSH1 0
+#   f3        RETURN              return(0, size)
+DUMPER = bytes.fromhex("366000" "5b" "818110" "15" "601657" "8035" "54" "8152"
+                       "602001" "600356" "5b" "50" "6000" "f3")
+# Reads per `raw_batch`; the contract's own MAX_PROBES.
+DUMP_CHUNK = 600
 # ...but only when the caller has not said otherwise.  A hosted endpoint that
 # allows two connections is a real constraint, not an oversight.
 
@@ -108,6 +150,8 @@ class LocalEvm:
     rpc: object
     strict: bool = True
     cache: object = None
+    quoter: str = ""
+    prefer_dump: bool = False
     _evm: object = None
     _loaded: set[str] = field(default_factory=set)
     _slots: dict[str, set[int]] = field(default_factory=dict)
@@ -238,10 +282,12 @@ class LocalEvm:
         flat = [(a, slot) for a, slots in wanted.items() for slot in sorted(slots)]
         if flat:
             _mark = _t.perf_counter()
-            values = self._batched(
-                [("eth_getStorageAt", [a, f"0x{slot:064x}", block]) for a, slot in flat])
-            values = [None if isinstance(v, Exception) or not isinstance(v, str)
-                      else int(v, 16) for v in values]
+            values = self._dump(wanted, flat) if (self.prefer_dump and self.quoter) else None
+            if values is None:
+                values = self._batched(
+                    [("eth_getStorageAt", [a, f"0x{slot:064x}", block]) for a, slot in flat])
+                values = [None if isinstance(v, Exception) or not isinstance(v, str)
+                          else int(v, 16) for v in values]
             self.stats.storage_ms += (_t.perf_counter() - _mark) * 1000
             self.stats.fetch_calls += len(values)
             for (address, slot), value in zip(flat, values, strict=True):
@@ -463,6 +509,76 @@ class LocalEvm:
             for lo in range(0, len(plan.probes), per_call)
         ]
         return self.warm(calls) if calls else self.stats
+
+    def _dump(self, wanted: dict, flat) -> list[int | None] | None:
+        """Read every slot by becoming the account that owns it.
+
+        Chunks carry only the overrides they use: 683 code overrides in one
+        request is silently dropped by the node (`MISSING`, not an error), and
+        the sweep comes back 86% complete with nothing to say it is short.
+
+        The coordinator is never overridden.  The quoter's own address is in
+        the state cache -- `warm` records it as the call target -- and giving
+        *it* the dumper makes the request execute the dumper instead of
+        `raw_batch`, which loses the whole chunk.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        from ..core.codec import decode, encode_call
+        from ..core.quoter import SIG_RAW_BATCH
+
+        quoter = self.quoter.lower()
+        groups: list[list[str]] = []
+        current: list[str] = []
+        held = 0
+        for address, slots in wanted.items():
+            if address.lower() == quoter or not slots:
+                continue
+            if held and held + len(slots) > DUMP_CHUNK:
+                groups.append(current)
+                current, held = [], 0
+            current.append(address)
+            held += len(slots)
+        if current:
+            groups.append(current)
+        if not groups:
+            return None
+
+        code = "0x" + DUMPER.hex()
+        jobs = []
+        for group in groups:
+            pairs = [(a, slot) for a in group for slot in sorted(wanted[a])]
+            jobs.append((
+                encode_call(SIG_RAW_BATCH, [a for a, _ in pairs],
+                            [slot.to_bytes(32, "big") for _, slot in pairs]),
+                {a: {"code": code} for a in group},
+                pairs,
+            ))
+
+        found: dict[tuple[str, int], int] = {}
+
+        def run(job) -> bool:
+            data, overrides, pairs = job
+            try:
+                raw = self.rpc.call(self.quoter, data, overrides=overrides)
+                answers = decode(["(uint8,uint256)[]"], raw)[0]
+            except Exception as exc:
+                self.stats.errors.append(f"dump: {str(exc)[:80]}")
+                return False
+            if len(answers) != len(pairs):
+                return False
+            for (address, slot), (status, value) in zip(pairs, answers, strict=True):
+                if status == 0:
+                    found[(address, slot)] = int(value)
+            return True
+
+        workers = min(len(jobs), max(1, getattr(self.rpc, "max_streams", 8)))
+        self.stats.round_trips += len(jobs)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            if not all(list(pool.map(run, jobs))):
+                return None
+        # Anything the dumper could not reach falls back rather than reading 0.
+        return [found.get((a, slot)) for a, slot in flat]
 
     # --------------------------------------------------------------- checks
 

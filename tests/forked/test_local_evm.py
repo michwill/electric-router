@@ -100,3 +100,44 @@ def test_an_unwarmed_pool_falls_back_to_the_chain_rather_than_guessing(rpc, chai
     answers = quoter_client(cold, chain).probe([probe])
     assert (answers[0].status, answers[0].value) == (truth.status, truth.value)
 
+
+
+def test_the_dumper_reads_exactly_what_getStorageAt_does(rpc, chain, probes):
+    """27 hand-assembled bytes, checked against the RPC they replace.
+
+    They read storage by *becoming* each account -- an `eth_call` override swaps
+    the code and keeps the storage -- so a slip in the loop is a wrong slot
+    rather than a crash.  The only defence worth having is every slot, both
+    ways.  Two failures this has already caught: passing every override in one
+    request (silently dropped, 86% of slots returned with nothing to say so),
+    and overriding the *coordinator*, whose address the state cache holds
+    because `warm` records it as the call target.
+    """
+    from erouter.core.codec import encode_call
+    from erouter.core.quoter import SIG_PROBE_BATCH
+    from erouter.dev.boa_host import quoter_client
+    from erouter.dev.local_evm import LocalEvm
+
+    if not rpc.supports_state_override():
+        pytest.skip("node rejects state overrides")
+    quoter = quoter_client(rpc, chain).address
+    data = encode_call(SIG_PROBE_BATCH, [p.as_tuple() for p in probes])
+
+    plain = LocalEvm(rpc)
+    plain.warm([Call(quoter, data)])
+    if not plain.stats.accounts:
+        pytest.skip(f"node served no prefetch: {plain.stats.errors[:2]}")
+
+    dumped = LocalEvm(rpc, quoter=quoter, prefer_dump=True)
+    dumped.warm([Call(quoter, data)])
+    assert not dumped.stats.errors, dumped.stats.errors[:2]
+    assert dumped.stats.slots == plain.stats.slots, "the dumper returned fewer slots"
+
+    checked = 0
+    for account, slots in plain._slots.items():
+        for slot in slots:
+            assert plain._evm.storage(account, slot) == dumped._evm.storage(account, slot), (
+                f"{account} slot {slot}"
+            )
+            checked += 1
+    assert checked > 20, f"only {checked} slots compared"
