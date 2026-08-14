@@ -41,6 +41,11 @@ CONTRACT = REPO / "contracts" / "RouteQuoter.vy"
 # deployed contract behaves identically to the one we have been overriding.
 SANITY_POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"  # 3pool
 SANITY_DX = 1_000 * 10**6  # 1,000 USDC
+# The kinds a redeployment is usually *for*: whatever the deployed contract
+# could not price is exactly what nobody notices is missing, because an
+# unknown kind comes back REVERTED and the router quietly routes around it.
+SANITY_CDAI = "0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643"
+SANITY_CDAI_DX = 100_000 * 10**8
 
 
 def account_load(name: str):
@@ -140,6 +145,22 @@ def main() -> int:
             return 1
         print("    agree")
 
+        # Every kind, not just the one that has always worked.  A kind the
+        # deployment is missing does not fail loudly: it answers REVERTED, and
+        # the router treats that as "this leg cannot be traded" and silently
+        # takes a worse route.
+        lend = [Probe(SANITY_CDAI, ArcKind.LEND_REDEEM, 0, 0, 0, SANITY_CDAI_DX)]
+        got = QuoterClient(rpc, address).probe(lend)[0]
+        want = override_client(rpc).probe(lend)[0]
+        print("\n  sanity 100,000 cDAI -> DAI (LEND_REDEEM)")
+        print(f"    deployed   {got.value:,} ({got.status.name})")
+        print(f"    override   {want.value:,} ({want.status.name})")
+        if got.value != want.value or not got.ok:
+            print("  ! the deployed quoter cannot price LEND_REDEEM -- lending")
+            print("    arcs would be built and then silently routed around")
+            return 1
+        print("    agree")
+
         if args.verify:
             from boa.explorer import Etherscan
 
@@ -149,9 +170,14 @@ def main() -> int:
             else:
                 print("  ! no ETHERSCAN_API_KEY in networks.py; skipping verification")
 
-        print("\n  add to src/erouter/dev/chains.py:")
-        print(f'      quoter="{address}",   # in the {chain.name} entry')
-        print("  after which routing stops sending the bytecode with every call.")
+        print("\n  next, in order:")
+        print(f'   1. src/erouter/dev/chains.py: quoter="{address}"')
+        print("   2. erouter warmcache   -- the local EVM reads the quoter's code")
+        print("      from data/evm-state, and this address is not in it yet; without")
+        print("      this every local quote returns nothing")
+        print(f"   3. whitelist {address} on the RPC key, and drop the old one")
+        print("   4. erouter route --from cDAI --to DAI --amount 100000")
+        print("      -- should now work without --fresh-quoter")
     else:
         print("\n  fork rehearsal only -- nothing was broadcast.")
         print("  re-run with --broadcast (and --verify) when you want it on chain.")
