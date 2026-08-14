@@ -347,3 +347,78 @@ def test_a_remote_quoter_is_not_polished():
         nominal_out=[500_000, 380_000, 490_000],
     )
     assert report.polish_calls == 0
+
+
+# --- the specialised evaluator --------------------------------------------
+#
+# `make_evaluator` exists only to be fast; `walk(_fractions(...))` stays as the
+# definition of what it computes.  These hold the two together, because a
+# divergence would show up as a slightly wrong split rather than as a failure.
+
+def _eval_legs():
+    """Two groups sharing a slot, plus an ungrouped leg -- every branch."""
+    return [
+        Leg(target="0x" + "11" * 20, kind=ArcKind.SWAP_STABLE, i=0, j=1,
+            src_slot=0, dst_slot=1, bps=6000),
+        Leg(target="0x" + "22" * 20, kind=ArcKind.SWAP_STABLE, i=0, j=1,
+            src_slot=0, dst_slot=1, bps=0),
+        Leg(target="0x" + "33" * 20, kind=ArcKind.SWAP_CRYPTO, i=0, j=1,
+            src_slot=1, dst_slot=2, bps=3000),
+        Leg(target="0x" + "44" * 20, kind=ArcKind.SWAP_CRYPTO, i=0, j=1,
+            src_slot=1, dst_slot=2, bps=0),
+    ]
+
+
+def _eval_curves(n):
+    from erouter.core.curves import fit
+    made = []
+    for k in range(n):
+        xs = [10.0 ** e for e in range(1, 7)]
+        rate = 0.99 - 0.01 * k
+        made.append(fit(xs, [x * rate * (1.0 - x / 1e9) for x in xs]))
+    return made
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_the_fast_evaluator_matches_the_readable_one(seed):
+    from erouter.core.split import _fractions, make_evaluator, walk
+
+    legs = _eval_legs()
+    groups = [[0, 1], [2, 3]]
+    curves = _eval_curves(len(legs))
+    rng = np.random.default_rng(seed)
+    fast = make_evaluator(legs, groups, curves, 1e6, 2)
+
+    for _ in range(20):
+        weights = [rng.random(2), rng.random(2)]
+        slow = walk(legs, curves, _fractions(legs, groups, weights), 1e6, 2)
+        assert fast(weights) == pytest.approx(slow, rel=1e-12), (
+            "the specialised evaluator drifted from walk(_fractions(...))"
+        )
+
+
+def test_the_fast_evaluator_does_not_mutate_its_input():
+    """The golden-section closure shares the untouched groups rather than
+    copying them, which is only safe while this holds."""
+    from erouter.core.split import make_evaluator
+
+    legs = _eval_legs()
+    groups = [[0, 1], [2, 3]]
+    weights = [np.array([0.3, 0.7]), np.array([0.4, 0.6])]
+    before = [w.copy() for w in weights]
+    make_evaluator(legs, groups, _eval_curves(len(legs)), 1e6, 2)(weights)
+    for got, want in zip(weights, before, strict=True):
+        assert np.array_equal(got, want)
+
+
+def test_an_ungrouped_leg_keeps_its_realised_share():
+    """Only grouped legs are searched; the rest keep the bps they were given."""
+    from erouter.core.split import _fractions, make_evaluator, walk
+
+    legs = _eval_legs()
+    groups = [[2, 3]]                      # leg 0/1 left out of the search
+    curves = _eval_curves(len(legs))
+    weights = [np.array([0.25, 0.75])]
+    fast = make_evaluator(legs, groups, curves, 1e6, 2)
+    slow = walk(legs, curves, _fractions(legs, groups, weights), 1e6, 2)
+    assert fast(weights) == pytest.approx(slow, rel=1e-12)
