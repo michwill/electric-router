@@ -320,6 +320,51 @@ def active_set_solve(
     return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True)
 
 
+def optimality_gap(
+    solution: Solution, g: ArcArrays, available: np.ndarray, dst_node: int,
+    tol: float = TOL,
+) -> float:
+    """How much objective is still on the table at this point (§5.5).
+
+    An arc held at zero whose reduced cost `rho` is positive wants flow.  Admit
+    it and it settles where the element law puts it, `psi = G rho`, taking the
+    objective down by `G rho^2 / 2` -- the same quantity the gas screen uses to
+    decide whether a leg pays for itself.  Summing that over every arc that
+    wants in bounds the total remaining improvement from above: they are priced
+    against the *current* potentials, and admitting one moves the potentials
+    against the others, so the true gain is no larger.
+
+    Active arcs need no term.  `psi` is computed as `G rho` for them, so the
+    element law holds identically and their contribution is zero by
+    construction rather than by tolerance.
+
+    This is what makes the certificate a statement about the answer instead of
+    about the loop that produced it: a solve that stopped early because it was
+    cycling is still optimal if nothing wants in, and this measures that
+    directly.
+
+    Only arcs the trade can actually reach are counted.  §9.4 leaves `u = 0` at
+    both ends of anything outside `dst`'s component, so a favourably dislocated
+    arc out there shows `rho = -eps > 0` and appears to want flow that no route
+    could carry -- the same conjured-flow shape the solve zeroes `psi` for.
+    Counting those put the bound five orders above the objective itself.
+
+    `tol` is the solver's own entering threshold, deliberately the same one: an
+    arc the pivoting would not admit is not an arc that wants in, and counting
+    it would build a gap out of arithmetic noise.  The arcs that keep USDC->CRV
+    cycling price at `rho = 5.6e-17`, eight orders under it.
+    """
+    live = np.flatnonzero(solution.psi > 0)
+    if live.size == 0:
+        return 0.0
+    reach = component_of(dst_node, g.tau[live], g.sig[live], g.n_nodes)
+    connected = reach[g.tau] & reach[g.sig]
+    wants_in = available & connected & (solution.psi <= 0) & (solution.rho > tol)
+    if not wants_in.any():
+        return 0.0
+    return float(np.sum(0.5 * g.G[wants_in] * solution.rho[wants_in] ** 2))
+
+
 def price_out(
     u: np.ndarray, g: ArcArrays, in_S: np.ndarray, tol: float = TOL
 ) -> np.ndarray:
@@ -345,6 +390,10 @@ class SolveReport:
     in_S: np.ndarray
     reason: str = ""
     notes: list[str] = field(default_factory=list)
+    #: Upper bound on the objective still available, in the solve's own units.
+    #: Zero means nothing wants in -- the point is optimal however it was
+    #: reached.  See `optimality_gap`.
+    gap: float = 0.0
 
 
 def solve(
@@ -443,11 +492,19 @@ def solve(
     flagged_active = bool(np.any(g.flagged & (report_solution.psi > 0)))
     certificate = not flagged_active and not banned.any()
     reason = ""
-    if degenerate:
+    # What a solve that stopped early actually left behind, rather than whether
+    # it stopped early.  A screened or cycling solve that nothing wants to
+    # improve on *is* optimal, and saying otherwise throws away a certificate
+    # the answer has earned.  Measured on USDC->CRV $100k, where the screen did
+    # refuse arcs that wanted in: the bound is 0.024 bp against a modelled loss
+    # of 660 bp -- so the label is right there, but only this says by how much.
+    gap = optimality_gap(report_solution, g, in_S & ~banned, dst, tol)
+    if degenerate and gap > 0.0:
         certificate = False
         reason = "DEGENERATE"
     if flagged_active:
         reason = "CHORD_ACTIVE"
     elif banned.any():
         reason = "RESTRICTED"
-    return SolveReport(report_solution, certificate, rounds, in_S, reason=reason)
+    return SolveReport(report_solution, certificate, rounds, in_S, reason=reason,
+                       gap=gap)

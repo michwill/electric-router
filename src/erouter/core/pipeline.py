@@ -592,13 +592,19 @@ def _quote(
         #
         # `cond` is only computed here, on the path that is about to fail, so
         # the usual route pays nothing for it.
-        conditioned = _achievable_kcl(g, psi, dst_node)
+        conditioned = _achievable_kcl(g, report.solution.A, dst_node)
         if residual > max(tolerance, conditioned):
             raise RoutingError(
                 f"flow conservation is violated by {residual:.3e} of the routed "
                 f"value (achievable at this conditioning: {conditioned:.3e})"
             )
         result.counters["kcl_conditioning_allowed"] = 1
+    # §12.2b: a certificate that failed is worth far less than a certificate
+    # that failed by a known amount.  `gap` bounds the objective still on the
+    # table, so a DEGENERATE route can say "optimal to within 0.024 bp" rather
+    # than only "not proven optimal".
+    if report.gap > 0 and Psi_scaled > 0:
+        result.counters["optimality_gap_bp"] = report.gap / Psi_scaled * 1e4
     result.counters["active_arcs"] = int(active.size)
     result.counters["pivots"] = report.solution.pivots
     result.counters["cg_rounds"] = report.cg_rounds
@@ -1207,7 +1213,7 @@ def _kcl_tolerance(Psi: float, g_scale: float) -> float:
     return KCL_RELATIVE + KCL_ABSOLUTE * g_scale / max(Psi, 1e-30)
 
 
-def _achievable_kcl(g: ArcArrays, psi: np.ndarray, dst: int) -> float:
+def _achievable_kcl(g: ArcArrays, active: np.ndarray, dst: int) -> float:
     """The KCL residual a backward-stable solve could deliver on this graph.
 
     `k * eps` is the relative error a linear solve of condition number `k`
@@ -1224,7 +1230,12 @@ def _achievable_kcl(g: ArcArrays, psi: np.ndarray, dst: int) -> float:
     """
     from .graph import component_of, laplacian
 
-    live = np.flatnonzero(psi > 0)
+    # The *active set*, not the arcs that ended up carrying flow.  The solve
+    # factorises the Laplacian of everything in `A`, zero-flow arcs included,
+    # and that is the system whose conditioning limited `u`.  Measuring the
+    # smaller psi>0 system understated the bound 651-fold on USDC->CRV and let
+    # the gate keep rejecting a solve that was doing as well as it could.
+    live = np.flatnonzero(active)
     if live.size == 0:
         return 0.0
     comp = component_of(dst, g.tau[live], g.sig[live], g.n_nodes)
