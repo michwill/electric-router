@@ -363,12 +363,24 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False):
         evm = LocalEvm(rpc, cache=cache)
         stats = evm.prime()
         fresh = cache.unknown(p.address for p in load.pools)
+        # Re-list every arc, not only the new pools.  `prime` refreshes values
+        # and `unknown` finds new pools, but neither sees a pool that has begun
+        # reading a slot it did not read before -- an oracle round that
+        # advanced, a band that moved.  Those slots then read as zero, which is
+        # not a small error: it gives an arc the wrong `a`, `B` and `cap`, and
+        # the solve built on it violates flow conservation outright.  Measured
+        # at a block 10,802 after the cache was built, 18 such slots turned
+        # USDC->sUSDS 3M from a route into a hard failure, and recovering them
+        # brought every size back to within 0.2 bp of the wire path.
+        #
+        # One access-list pass over 887 arcs, ~1.0-1.4 s, concurrent.  It has
+        # to happen *before* routing: a route that fails produces no output to
+        # compare, so the after-the-fact check downstream never fires.
+        refs, _ = build_arcs(load.pools, nodes)
+        learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address) if refs else 0
         if fresh:
-            wanted = {a.lower() for a in fresh}
-            refs, _ = build_arcs([p for p in load.pools if p.address.lower() in wanted], nodes)
-            if refs:
-                evm.warm_arcs(refs, quoter_client(rpc, chain).address)
             cache.learn_pools(p.address for p in load.pools)
+        if fresh or learned:
             cache.save()
     except Exception as exc:  # a cold cache must degrade, never abort a route
         if not quiet:
@@ -376,7 +388,8 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False):
         return None
 
     if not quiet:
-        extra = f", {len(fresh)} new pool(s) learned" if fresh else ""
+        extra = f", {len(fresh)} new pool(s)" if fresh else ""
+        extra += f", {learned} stale slot(s) recovered" if learned else ""
         print(f"  local EVM: {stats.slots:,} slots in {stats.ms:,.0f} ms"
               f" ({stats.accounts} accounts{extra})")
     return quoter_client(evm, chain)
