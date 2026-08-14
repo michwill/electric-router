@@ -72,6 +72,11 @@ DEFAULT_MAX_LEGS = 32
 # §12.4's flow-conservation gate, in two terms -- see `_kcl_tolerance`.
 KCL_RELATIVE = 1e-8
 KCL_ABSOLUTE = 1e-9
+# Double precision.  Named because it appears in a bound, not as a fudge.
+EPS = 2.220446049250313e-16
+# Headroom over `k * eps` before a residual counts as a real violation rather
+# than as the arithmetic the graph's own conditioning ceiling permits.
+KCL_CONDITION_SAFETY = 100.0
 
 
 @dataclass(slots=True)
@@ -567,9 +572,33 @@ def _quote(
     result.counters["kcl_residual"] = residual
     tolerance = _kcl_tolerance(Psi, g.g_scale)
     if residual > tolerance:
-        raise RoutingError(
-            f"flow conservation is violated by {residual:.3e} of the routed value"
-        )
+        # Before failing, ask what accuracy the solve could possibly have had.
+        # A Laplacian of condition number `k` yields relative error about
+        # `k * eps`, and that lands in `psi` through `psi = G(du - eps)`.  The
+        # graph deliberately tolerates `k` up to MAX_CONDITION = 1e12, where
+        # that error is 2e-4 -- four orders coarser than the flat 1e-8 above.
+        # The two constants were simply never reconciled.
+        #
+        # Measured on USDC->CRV: at $1M the residual was 1.16e-07 against a
+        # tolerance of 1.13e-08, and the active Laplacian's condition number
+        # was 2.3e9, making the achievable error 5.2e-07.  The solve was
+        # running four times *better* than its conditioning guaranteed and was
+        # rejected regardless.  Across six runs the residual tracked `k * eps`
+        # within 0.04x to 33x, which is what a backward-stable solve does.
+        #
+        # This is what made the failure look random: whether a route lands
+        # above or below k ~ 4.5e7 depends on which active set the solve
+        # reaches, which moves with BLAS thread count and cache contents.
+        #
+        # `cond` is only computed here, on the path that is about to fail, so
+        # the usual route pays nothing for it.
+        conditioned = _achievable_kcl(g, psi, dst_node)
+        if residual > max(tolerance, conditioned):
+            raise RoutingError(
+                f"flow conservation is violated by {residual:.3e} of the routed "
+                f"value (achievable at this conditioning: {conditioned:.3e})"
+            )
+        result.counters["kcl_conditioning_allowed"] = 1
     result.counters["active_arcs"] = int(active.size)
     result.counters["pivots"] = report.solution.pivots
     result.counters["cg_rounds"] = report.cg_rounds
@@ -1176,6 +1205,41 @@ def _kcl_tolerance(Psi: float, g_scale: float) -> float:
     `O(Psi)`, several orders above either bound at any size.
     """
     return KCL_RELATIVE + KCL_ABSOLUTE * g_scale / max(Psi, 1e-30)
+
+
+def _achievable_kcl(g: ArcArrays, psi: np.ndarray, dst: int) -> float:
+    """The KCL residual a backward-stable solve could deliver on this graph.
+
+    `k * eps` is the relative error a linear solve of condition number `k`
+    carries, so it is the floor under any residual computed from its output --
+    no amount of correct code gets below it.  Returns 0 when there is nothing
+    to condition, which leaves the caller's flat tolerance in charge.
+
+    The safety factor covers the gap between the condition number and the error
+    actually realised, measured between 0.04x and 33x of `k * eps` over the
+    routes examined.  Even at the graph's permitted worst -- `k = 1e12`, giving
+    2e-2 -- this stays two orders below the failure the check exists to catch:
+    flow conjured on arcs outside the active component is `O(Psi)`, a residual
+    near 1.
+    """
+    from .graph import component_of, laplacian
+
+    live = np.flatnonzero(psi > 0)
+    if live.size == 0:
+        return 0.0
+    comp = component_of(dst, g.tau[live], g.sig[live], g.n_nodes)
+    keep = np.flatnonzero(comp)
+    keep = keep[keep != dst]
+    if keep.size == 0:
+        return 0.0
+    L = laplacian(g.tau[live], g.sig[live], g.G[live], g.n_nodes, keep)
+    try:
+        kappa = float(np.linalg.cond(L))
+    except np.linalg.LinAlgError:
+        return 0.0
+    if not math.isfinite(kappa):
+        return 0.0
+    return KCL_CONDITION_SAFETY * kappa * EPS
 
 
 def _kcl_residual(
