@@ -386,7 +386,22 @@ def route(
     # and the §8 refit re-anchors `B` at one size's realised flows, so handing
     # the same objects to the next quote would leak this size into it.
     arcs = [copy.copy(a) for a in prepared.arcs]
-    nu, ladders = prepared.nu, prepared.ladders
+    # The ladders need the same treatment, and used not to get it.  §8 probes
+    # at the sizes *this* quote realised and `merge`s them in, so a second
+    # quote through the same `Prepared` recalibrated from a ladder carrying the
+    # first quote's sizes.  Measured on USDC->CRV $100k: 252 of 862 ladders
+    # moved after one route, and quoting the same trade again returned 26 bp
+    # less.  Whichever quote ran second lost, which is how it hid -- it looks
+    # like a routing difference rather than contamination.
+    #
+    # Shallow is enough for the lists, which `merge` rebinds rather than
+    # mutates, but `failures` is updated in place and needs its own dict.
+    ladders = []
+    for ladder in prepared.ladders:
+        clone = copy.copy(ladder)
+        clone.failures = dict(ladder.failures)
+        ladders.append(clone)
+    nu = prepared.nu
     result.arcs = arcs
     result.nu = nu
     result.pool_names = dict(prepared.pool_names)
