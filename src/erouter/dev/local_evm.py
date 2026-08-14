@@ -102,6 +102,18 @@ PRIME_STREAMS = 16
 # LAN row on its own reads as a much stronger verdict than the truth: on a
 # merely mediocre link these two are the same speed.
 #
+# Batching the chunks into one JSON-RPC request would not help: they already
+# go out concurrently, and the cost is the node's, not the wire's.  Measured
+# over the VPN, 8 chunks of ~600 slots: 8,520 ms one at a time, 3,216 ms all at
+# once, with the slowest single chunk at 2,251 ms.  Each chunk is ~1 s of node
+# execution -- building a state overlay for ~70 accounts and running 600
+# SLOADs through `eth_call` costs far more per slot than serving
+# `eth_getStorageAt` from the database.  That is why the two paths respond to
+# different things: small reads pay latency, so their disadvantage grows with
+# it, while the dumper pays node CPU and barely moves.  The residual gap
+# between 3,216 and 2,251 is the node declining to run `eth_call`s fully in
+# parallel, which is not ours to fix.
+#
 # The keyed drpc cannot use this path at all.  The blob is injected by state
 # override rather than deployed, and that key's `eth_call` is restricted to the
 # quoter's address -- which is the point of the restriction, not a gap in it.
