@@ -897,19 +897,30 @@ def two_step_candidates(
     """
     src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
 
-    def slots(pool: PoolSpec, node: int) -> list[int]:
-        return [
-            k for k, c in enumerate(pool.coins)
-            if nodes.has(c.address) and nodes.node(c.address) == node
-        ]
+    # Which pools hold which node, and at which coin indices, resolved once.
+    #
+    # Round B otherwise walks the whole universe for each of the ~30
+    # intermediate tokens it is considering: 11,610 pool scans, each asking
+    # `nodes` about every coin, for a question that does not depend on the
+    # token being asked about.  The index costs one pass over the pools.
+    tradeable = [pool for pool in pools if pool.swap_kind is not None]
+    slots_of: list[dict[int, list[int]]] = []
+    holders: dict[int, list[int]] = {}
+    for index, pool in enumerate(tradeable):
+        per_node: dict[int, list[int]] = {}
+        for k, coin in enumerate(pool.coins):
+            if nodes.has(coin.address):
+                per_node.setdefault(nodes.node(coin.address), []).append(k)
+        slots_of.append(per_node)
+        for node_id in per_node:
+            holders.setdefault(node_id, []).append(index)
 
     # --- round A: src -> M ------------------------------------------------
     probes: list[Probe] = []
     first: list[tuple[PoolSpec, int, int, int]] = []
-    for pool in pools:
-        if pool.swap_kind is None:
-            continue
-        for i in slots(pool, src_node):
+    for index in holders.get(src_node, ()):
+        pool = tradeable[index]
+        for i in slots_of[index][src_node]:
             for j, coin in enumerate(pool.coins):
                 if j == i or not nodes.has(coin.address):
                     continue
@@ -939,14 +950,13 @@ def two_step_candidates(
     probes = []
     second: list[tuple[int, PoolSpec, int, int]] = []
     for middle, (canonical, _p1, _i1, _j1) in ranked:
-        for pool in pools:
-            if pool.swap_kind is None:
-                continue
-            for i in slots(pool, middle):
+        for index in holders.get(middle, ()):
+            pool = tradeable[index]
+            for i in slots_of[index][middle]:
                 start = nodes.from_canonical_wei(pool.coins[i].address, canonical)
                 if start <= 0:
                     continue
-                for j in slots(pool, dst_node):
+                for j in slots_of[index].get(dst_node, ()):
                     if i == j:
                         continue
                     probes.append(

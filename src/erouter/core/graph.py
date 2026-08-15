@@ -345,16 +345,18 @@ def component_of(root: int, tau: np.ndarray, sig: np.ndarray, n: int) -> np.ndar
     if len(tau) == 0:
         return seen
     # Iterate to a fixed point; the arc count is small and this is branch-free.
+    #
+    # Both directions in one sweep, over an arc list doubled once up front,
+    # rather than two half-sweeps per iteration.  The fixed point is the same
+    # and the arrays are tiny -- which is the point: at this size the cost is
+    # numpy's per-call dispatch, not the work, so halving the number of calls
+    # inside the loop is most of what there is to win.  Called 679 times in a
+    # route, once per pivot per §9.4.
+    src = np.concatenate((tau, sig))
+    dst = np.concatenate((sig, tau))
     for _ in range(n):
-        grew = False
-        reach_sig = seen[tau] & ~seen[sig]
-        if reach_sig.any():
-            seen[sig[reach_sig]] = True
-            grew = True
-        reach_tau = seen[sig] & ~seen[tau]
-        if reach_tau.any():
-            seen[tau[reach_tau]] = True
-            grew = True
-        if not grew:
+        reach = seen[src] & ~seen[dst]
+        if not reach.any():
             break
+        seen[dst[reach]] = True
     return seen

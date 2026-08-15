@@ -136,33 +136,47 @@ class NodeMap:
 
     # -------------------------------------------------------------- lookup
 
+    # Every one of these tries the address as given before lowering it, and
+    # the difference is not cosmetic: `node` and `has` are called 32,000 times
+    # in a single route -- the direct-chain search alone asks about every coin
+    # of every pool, twice -- and almost always with an address that came from
+    # a `PoolSpec`, which is already lowercase.  Lowering it again allocates a
+    # string per call to look up the same key.  Measured, `str.lower` was the
+    # seventh-hottest call in the profile.
+    #
+    # The fallback stays, because the symbol resolver and the CLI do hand
+    # checksummed addresses in; they simply pay for it.
+
     def node(self, token: str) -> int:
-        return self.node_of[token.lower()]
+        found = self.node_of.get(token)
+        return found if found is not None else self.node_of[token.lower()]
 
     def has(self, token: str) -> bool:
-        return token.lower() in self.node_of
+        return token in self.node_of or token.lower() in self.node_of
 
     def canonical(self, token: str) -> str:
         return self.canonical_of[self.node(token)]
 
     def rate(self, token: str) -> float:
         """Canonical units per unit of `token` (1.0 for a canonical token)."""
-        conversion = self.conversion.get(token.lower())
+        conversion = self.conversion.get(token) or self.conversion.get(token.lower())
         return conversion.rate if conversion else 1.0
 
     def to_canonical_wei(self, token: str, amount: int) -> int:
-        conversion = self.conversion.get(token.lower())
+        conversion = self.conversion.get(token) or self.conversion.get(token.lower())
         return conversion.to_canonical(amount) if conversion else amount
 
     def from_canonical_wei(self, token: str, amount: int) -> int:
-        conversion = self.conversion.get(token.lower())
+        conversion = self.conversion.get(token) or self.conversion.get(token.lower())
         return conversion.from_canonical(amount) if conversion else amount
 
     def symbol(self, token: str) -> str:
-        return self.symbol_of.get(token.lower(), token[:10])
+        found = self.symbol_of.get(token)
+        return found if found is not None else self.symbol_of.get(token.lower(), token[:10])
 
     def decimals(self, token: str) -> int:
-        return self.decimals_of.get(token.lower(), 18)
+        found = self.decimals_of.get(token)
+        return found if found is not None else self.decimals_of.get(token.lower(), 18)
 
     def node_symbol(self, node: int) -> str:
         """A label for the merged node, e.g. `ETH/WETH`."""
