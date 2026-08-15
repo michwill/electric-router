@@ -26,17 +26,34 @@ from __future__ import annotations
 import numpy as np
 
 from .candidates import Candidate, CandidateSet
-from .gas import GasTable, plan_gas
+from .gas import GasTable, leg_gas, plan_gas
 from .nodes import NodeMap
 from .quoter import MAX_LEGS, MAX_SLOTS, QuoterClient
 from .realize import RealizationError, check_one_arc_per_pool, realize
-from .types import PoolArc
+from .types import ArcKind, PoolArc
 
 # Per-kind execution gas lives in `gas.py`; a flat per-leg figure over-charged
 # wraps by 3x and under-charged single-coin withdrawals.
 # Outputs within this relative distance are the same answer; take the cheaper
 # route to execute.  0.05 bp is far below any gas cost worth the extra hop.
-TIE_TOLERANCE = 5e-6
+# What counts as "the same answer".  A flat fraction was wrong in both
+# directions, because it stands in for a cost `score` has already subtracted.
+#
+# `score` nets gas off every candidate before ranking, so the only thing left
+# for a tolerance to absorb is noise in the quotes themselves -- integer
+# rounding, around 1e-12 relative.  A flat 5e-6 was instead absorbing a whole
+# basis point of real difference at low gas: measured on WETH->stETH 100 at
+# 0.049 gwei, a 4-leg route quoting 100.000239 stETH lost to a 2-leg one at
+# 99.999824, because 0.0415 bp fell under the 0.05 bp line -- while the two
+# extra legs cost 1.5e-5 stETH of gas, thirty times less than the gain thrown
+# away.  Minting stETH is exactly 1:1 and can never lose; the router had the
+# answer and discarded it.
+#
+# So the tolerance is what one more leg actually costs, in output units, and
+# nothing more.  At 30 gwei that is large and the preference for short routes
+# comes back on its own; at 0.05 gwei it is nearly zero and a real gain is
+# taken.  The floor keeps a tie from turning on the last bit of a quote.
+TIE_FLOOR = 1e-12
 
 
 def realize_candidates(
@@ -159,7 +176,10 @@ def verify(
     if not usable:
         return candidates
     best_score = max(score(c) for c in usable)
-    tolerance = abs(best_score) * TIE_TOLERANCE
+    # One leg's gas, priced in the output token -- the actual cost of the extra
+    # hop this tolerance exists to protect against.
+    per_leg = leg_gas(ArcKind.SWAP_STABLE) * gas_price_wei / 1e18 * dst_wei_per_eth
+    tolerance = max(per_leg, abs(best_score) * TIE_FLOOR)
 
     def rank_key(candidate: Candidate) -> tuple:
         value = score(candidate)

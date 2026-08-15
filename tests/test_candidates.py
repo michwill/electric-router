@@ -8,7 +8,7 @@ from erouter.core import graph
 from erouter.core.candidates import CandidateSet, conflicting_pools, generate
 from erouter.core.solve import active_set_solve
 from erouter.core.types import ArcKind, PoolArc
-from erouter.core.verify import TIE_TOLERANCE, verify
+from erouter.core.verify import verify
 
 POOL = ["0x" + f"{k:02x}" * 20 for k in range(1, 9)]
 
@@ -184,17 +184,42 @@ def test_a_clearly_better_route_wins_regardless_of_length():
     assert candidates.best.label == "long"  # 100 bp is worth the extra hops
 
 
-def test_indistinguishable_outputs_prefer_the_shorter_route():
+def test_a_gain_smaller_than_the_gas_prefers_the_shorter_route():
     """Measured on mainnet: the relaxation takes a 25-leg route to gain
-    0.02 bp over a 1-leg one.  Any real gas price makes that strictly worse."""
-    tiny = int(1_000_000 * (1 + TIE_TOLERANCE / 2))
+    0.02 bp over a 1-leg one.  A real gas price makes that strictly worse, and
+    the price is what decides it -- the tolerance is one leg's gas in output
+    units, not a constant standing in for it."""
     candidates = CandidateSet([
         _candidate("long", 25),
         _candidate("short", 1),
     ])
-    verify(candidates, FakeClient([tiny, 1_000_000]), amount_in=10**6)
+    verify(
+        candidates,
+        FakeClient([10**18 + 10**12, 10**18]),   # +0.01 bp for 24 more legs
+        amount_in=10**18,
+        gas_price_wei=30 * 10**9,
+        dst_wei_per_eth=10**18,
+    )
     assert candidates.best.label == "short"
-    assert candidates.best.verified_out == 1_000_000
+
+
+def test_the_same_gain_is_taken_when_gas_is_nearly_free():
+    """The other half, and the bug this replaced: at 0.05 gwei a flat tolerance
+    threw away 0.04 bp on WETH->stETH -- a route ending in a 1:1 stETH mint,
+    which cannot lose -- because 30x more gas than the trade would ever pay was
+    assumed."""
+    candidates = CandidateSet([
+        _candidate("long", 4),
+        _candidate("short", 2),
+    ])
+    verify(
+        candidates,
+        FakeClient([10**18 + 4 * 10**14, 10**18]),
+        amount_in=10**18,
+        gas_price_wei=int(0.049 * 10**9),
+        dst_wei_per_eth=10**18,
+    )
+    assert candidates.best.label == "long"
 
 
 def test_gas_price_penalises_extra_legs():
