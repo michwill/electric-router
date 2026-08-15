@@ -971,3 +971,110 @@ def _search_curves(
     report.improved = True
     report.after = best
     return apply_weights(legs, groups, winner), report
+
+
+@dataclass(slots=True)
+class ScoutResult:
+    """One candidate topology, re-split against the shared curves."""
+
+    index: int
+    predicted: float
+    legs: list[Leg]
+
+
+def scout(plans, client: QuoterClient, *, amount_in: int,
+          report: SplitReport | None = None) -> list[ScoutResult]:
+    """Re-split several candidate topologies against **one** probe batch.
+
+    The problem this exists for: candidates are ranked on the split the model
+    gave them, and the model's split is excellent on narrow topologies and
+    terrible on wide ones.  Measured on WETH->USDC 300, the winning 5-leg route
+    gained 0.14 bp when its split was tuned while a 14-leg candidate gained
+    102 -- so the wide one looked 100 bp worse than it was, lost the ranking,
+    and never reached the pass that would have fixed it.  The router shipped a
+    route 22 bp below its own best idea.
+
+    Tuning each candidate properly is not affordable: it triples a warm route,
+    median +1.4 s and up to +12 s, for a median gain of 0.01 bp.  Nor does
+    scouting with a cheap round then converging the winner -- measured at 136%
+    of the cost, because the optimiser's expense is its *first* round, the one
+    that samples curves, not the convergence afterwards.
+
+    What makes it cheap is that the candidates are nested: `top 6 pools`,
+    `top 8 pools` and `top 12 pools` are largely the same arcs.  So the arcs
+    are pooled, sampled once at the widest ladder anyone needs, and every
+    candidate is then optimised against that shared set in pure Python, where
+    an evaluation is microseconds.  One batch, no matter how many candidates.
+
+    `plans` is `(legs, dst_slot, nominal_in, nominal_out)` per candidate.
+    Returns a `ScoutResult` per usable candidate with the *predicted* output --
+    predicted, not verified: composing interpolated curves is what the model
+    was doing wrong in the first place, so nothing here may be believed without
+    a real quote.  The caller quotes the survivors.
+    """
+    tops: dict[tuple, float] = {}
+    for legs, _dst, nominal_in, nominal_out in plans:
+        try:
+            reach = reachable_tops(legs, nominal_in, nominal_out, amount_in)
+        except (ValueError, ZeroDivisionError):
+            continue
+        for leg, top in zip(legs, reach, strict=True):
+            key = (leg.target.lower(), int(leg.kind), leg.i, leg.j)
+            tops[key] = max(tops.get(key, 0.0), float(top))
+    if not tops:
+        return []
+
+    # One synthetic leg per distinct arc, laddered to the widest size any
+    # candidate could hand it.  A curve sampled wide still serves a narrower
+    # use: it is a function of the input, and the extra nodes only sit above.
+    keys = list(tops)
+    probe_legs = [
+        Leg(target=key[0], kind=ArcKind(key[1]), i=key[2], j=key[3],
+            n=max(key[2], key[3]) + 1, src_slot=0, dst_slot=1)
+        for key in keys
+    ]
+    points = _probe_ladders(
+        probe_legs, client, [curve_mod.sizes(tops[key]) for key in keys],
+        report, optional=True,
+    )
+    if points is None:
+        return []
+    built = _build(points)
+    if built is None:
+        return []
+    shared = dict(zip(keys, built, strict=True))
+
+    out: list[ScoutResult] = []
+    for index, (legs, dst_slot, _nominal_in, _nominal_out) in enumerate(plans):
+        try:
+            curves = [
+                shared[(leg.target.lower(), int(leg.kind), leg.i, leg.j)]
+                for leg in legs
+            ]
+        except KeyError:  # an arc the batch could not price
+            continue
+        groups = split_groups(legs)
+        if not groups:
+            continue
+        weights = weights_of(legs, groups)
+        free = [(g, j) for g, run in enumerate(groups) for j in range(len(run) - 1)]
+        if not free:
+            continue
+        evaluate = make_evaluator(legs, groups, curves, amount_in, dst_slot)
+        counter = [0]
+        # Screening depth only.  This has to rank topologies, not locate an
+        # optimum inside one -- the winner gets the real optimiser afterwards.
+        best_w, best_value = None, -1.0
+        for start in ([w.copy() for w in weights],
+                      [np.full(w.size, 1.0 / w.size) for w in weights]):
+            projected = [_project(w) for w in start]
+            found, value = _ascend(projected, evaluate, free, counter,
+                                   iters=SCREEN_ITERS, sweeps=SCREEN_SWEEPS)
+            if value > best_value:
+                best_w, best_value = found, value
+        if best_w is None:
+            continue
+        out.append(ScoutResult(index=index, predicted=best_value,
+                               legs=apply_weights(legs, groups, best_w)))
+    out.sort(key=lambda found: -found.predicted)
+    return out

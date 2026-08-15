@@ -422,3 +422,43 @@ def test_an_ungrouped_leg_keeps_its_realised_share():
     fast = make_evaluator(legs, groups, curves, 1e6, 2)
     slow = walk(legs, curves, _fractions(legs, groups, weights), 1e6, 2)
     assert fast(weights) == pytest.approx(slow, rel=1e-12)
+
+
+def test_scout_shares_one_probe_batch_across_candidates():
+    """The whole point: candidates are nested, so their arcs are sampled once
+    between them rather than once each -- which is what makes scouting many
+    topologies cost about what scouting one costs."""
+    from erouter.core.split import scout
+
+    narrow = [leg(0, 2, 5_000, POOL_A), leg(0, 2, 0, POOL_B)]
+    wide = [leg(0, 2, 3_000, POOL_A), leg(0, 2, 3_000, POOL_B),
+            leg(0, 2, 0, POOL_C)]
+    client = PoolQuoter()
+    plans = [
+        (narrow, 2, [500_000, 500_000], [400_000, 400_000]),
+        (wide, 2, [300_000, 300_000, 400_000], [250_000, 250_000, 350_000]),
+    ]
+    found = scout(plans, client, amount_in=1_000_000)
+
+    assert client.probe_calls == 1          # one batch, both candidates
+    assert {f.index for f in found} == {0, 1}
+    assert all(f.predicted > 0 for f in found)
+    # Sorted best-first, and the wider topology should win on a concave payoff:
+    # three pools spread the same flow further than two.
+    assert found[0].index == 1
+
+
+def test_scout_returns_weights_that_sum_to_the_whole_input():
+    """Scouted legs are handed straight to the quoter, so their `bps` have to
+    be a valid plan -- the last leg of each group sweeping the remainder."""
+    from erouter.core.split import scout
+
+    wide = [leg(0, 2, 3_000, POOL_A), leg(0, 2, 3_000, POOL_B),
+            leg(0, 2, 0, POOL_C)]
+    found = scout([(wide, 2, [300_000, 300_000, 400_000],
+                    [250_000, 250_000, 350_000])],
+                  PoolQuoter(), amount_in=1_000_000)
+    assert found
+    tuned = found[0].legs
+    assert tuned[-1].bps == 0                       # the sweep
+    assert 0 < sum(one.bps for one in tuned[:-1]) < BPS

@@ -57,7 +57,9 @@ from .refit import RefitReport, refit
 from .risk import REVERT_COST_BP, RiskTable
 from .seed import k_shortest_paths, seed_subgraph
 from .solve import SolveReport, active_set_solve, solve
+from .split import ScoutResult as ScoutSplits
 from .split import optimise as optimise_splits
+from .split import scout as scout_splits
 from .split import should_optimise
 from .types import ArcKind, PoolArc, Probe
 from .verify import (
@@ -780,10 +782,21 @@ def _quote(
                         revert_cost_bp=revert_cost_bp, leg_cost_bp=leg_cost_bp,
                     )
 
+            # --- is a wider candidate being hidden by its own split? ---------
+            #
+            # Ranking compares candidates on the split the model gave them, and
+            # only the winner is ever re-split -- so a wide topology whose model
+            # split is bad loses before it can be fixed.  See `split.scout`.
+            if optimise_split and result.route is not None:
+                with clock("scout"):
+                    _scout_wider(result, pool_set, nodes, client,
+                                 amount_in=amount_in)
+
             # --- §7: let the chain choose the split, not the model -----------
             #
-            # Last, so it runs on whatever the refit left as the winner, and
-            # safe there because it only ever accepts a strict improvement.
+            # Last, so it runs on whatever the refit and the scout left as the
+            # winner, and safe there because it only ever accepts a strict
+            # improvement.
             if optimise_split and result.route is not None:
                 with clock("split"):
                     _optimise_split(result, nodes, client, amount_in=amount_in)
@@ -806,6 +819,116 @@ def _quote(
 
     result.price_out_per_in = float(nu[src_node] / nu[dst_node]) if nu[dst_node] else 0.0
     return result
+
+
+#: A candidate has to be this many legs wider than the winner before it is
+#: worth scouting.  The failure is specific to wide topologies -- the model's
+#: split error grows with the number of branches -- and scouting a candidate
+#: the same size as the winner buys nothing measurable.
+SCOUT_WIDER_BY = 3
+#: How many of the widest candidates go into the shared batch.  They ride one
+#: probe batch between them, so this is cheap to raise; three covered every
+#: case measured.
+SCOUT_CANDIDATES = 3
+#: How far a scouted candidate must beat the incumbent before it is adopted.
+#
+# The comparison is made *before* either route has been through the split
+# stage, and the incumbent gains from that too -- measured at about 0.14 bp on
+# the narrow topologies that usually hold the lead.  Adopting on a hair
+# therefore loses: USDC->CRV $100k swapped a 29-leg route for a 32-leg one that
+# quoted better at the time and finished 0.12 bp worse once both had been
+# split.  Half a basis point clears the incumbent's own upside with room, and
+# keeps the wins that matter -- the two real ones measured were 20.1 and
+# 0.9 bp.  It also keeps the router from adopting a wider route, and paying to
+# optimise it, for a gain nobody would notice.
+SCOUT_MARGIN_BP = 0.5
+
+
+def _scout_wider(
+    result: RouteResult, pool_set: CandidateSet, nodes: NodeMap,
+    client: QuoterClient, *, amount_in: int,
+) -> None:
+    """Re-split the widest candidates against one shared probe batch, and adopt
+    one only if the chain agrees it is better.
+
+    Nothing here trusts the curves.  `scout` returns a *predicted* output, the
+    predictions order the candidates, and then the best of them is quoted for
+    real alongside the incumbent -- so the worst case is one wasted batch and
+    one wasted quote, never a route chosen on an interpolation.
+    """
+    winner, route = result.winner, result.route
+    if winner is None or route is None or pool_set is None:
+        return
+    incumbent_legs = len(route.legs)
+    wider = sorted(
+        (c for c in pool_set.candidates
+         if c.ok and c.route and c is not winner
+         and len(c.route.legs) >= incumbent_legs + SCOUT_WIDER_BY),
+        key=lambda c: -len(c.route.legs),
+    )[:SCOUT_CANDIDATES]
+    if not wider:
+        return
+
+    # The incumbent goes into the batch too, at index 0.  Comparing a tuned
+    # challenger against an untuned incumbent is the same mistake the ranking
+    # was making, one level up: USDC->CRV $100k swapped a 29-leg route for a
+    # 32-leg one that led before either was split and finished 0.11 bp behind
+    # after both were.  Its arcs are in the shared sample already, so tuning it
+    # costs nothing but the comparison it makes honest.
+    entrants = [winner, *wider]
+    plans = [
+        ([rl.leg for rl in c.route.legs], c.route.dst_slot,
+         [rl.amount_in for rl in c.route.legs],
+         [rl.amount_out for rl in c.route.legs])
+        for c in entrants
+    ]
+    found = scout_splits(plans, client, amount_in=amount_in)
+    result.counters["scout_candidates"] = len(plans)
+    if not found:
+        return
+
+    incumbent = float(result.verified_out or 0)
+    tuned_incumbent = next((f for f in found if f.index == 0), None)
+    challenger = next((f for f in found if f.index != 0), None)
+    if challenger is None:
+        return
+    # A topology change has to clear a margin; re-splitting what we already
+    # hold does not, since it cannot change what executes beyond its weights.
+    floor = incumbent * (1.0 + SCOUT_MARGIN_BP / 1e4)
+    proposals: list[tuple[ScoutSplits, float]] = []
+    if tuned_incumbent is not None and tuned_incumbent.predicted > incumbent:
+        proposals.append((tuned_incumbent, incumbent))
+    if challenger.predicted > floor:
+        proposals.append((challenger, floor))
+    if not proposals:
+        return
+
+    quoted = client.quote_routes(
+        [found.legs for found, _ in proposals],
+        [amount_in] * len(proposals),
+        [entrants[found.index].route.dst_slot for found, _ in proposals],
+    )
+    result.counters["scout_predicted_bp"] = round(
+        (challenger.predicted / max(incumbent, 1.0) - 1) * 1e4, 2)
+
+    best_value, best_found = incumbent, None
+    for (found, bar), value in zip(proposals, quoted, strict=True):
+        value = float(value)
+        if value > max(best_value, bar):
+            best_value, best_found = value, found
+    if best_found is None:
+        return
+
+    candidate = entrants[best_found.index]
+    for realized, leg in zip(candidate.route.legs, best_found.legs, strict=True):
+        realized.leg = leg
+    candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)
+    candidate.verified_out = int(best_value)
+    result.counters["scout_gain_bp"] = round(
+        (best_value / max(incumbent, 1.0) - 1) * 1e4, 2)
+    result.route = candidate.route
+    result.verified_out = int(best_value)
+    result.winner = candidate
 
 
 def _optimise_split(
