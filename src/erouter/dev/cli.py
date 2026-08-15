@@ -1517,6 +1517,9 @@ def _route_options(args=None) -> dict:
     got = getattr(args, "revert_cost_bp", None)
     if got is not None:
         options["revert_cost_bp"] = float(got)
+    got = getattr(args, "leg_cost_bp", None)
+    if got is not None:
+        options["leg_cost_bp"] = float(got)
     if getattr(args, "no_impact", False):
         options["measure_impact"] = False
     return options
@@ -1833,6 +1836,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-risk", action="store_true",
         help="rank on quoted output alone, ignoring how often each pool's own "
              "minimum-out would trip before the route lands")
+    route_cmd.add_argument(
+        "--leg-cost-bp", type=float, default=None,
+        help="what one leg is charged beyond its gas, in basis points of the "
+             "trade (default 0.02). Only bites when gas is near zero; see "
+             "scripts/leg_cost_frontier.py")
     route_cmd.add_argument(
         "--no-impact", action="store_true",
         help="skip the price-impact measurement, which re-quotes the finished "

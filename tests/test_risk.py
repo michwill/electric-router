@@ -444,3 +444,40 @@ def test_a_flat_route_has_no_price_impact():
     impact, _, _ = price_impact(FakeClient([50_000]), Route(),
                                 amount_in=1_000_000, verified_out=1_000_000)
     assert abs(impact) < 1e-9
+
+
+# ------------------------------------------------------------- leg cost
+
+
+def test_a_leg_is_charged_beyond_its_gas():
+    """The tail the relaxation takes when gas is near zero: measured, a $10k
+    trade went 31 legs to gain 0.62 bp over a 10-leg route."""
+    long_route = _candidate("long", [POOL[k % 8] for k in range(20)])
+    short = _candidate("short", [POOL[0]])
+    candidates = CandidateSet([long_route, short])
+    # +0.3 bp for 19 more legs, against 0.02 bp a leg.
+    verify(candidates, FakeClient([1_000_030, 1_000_000]), amount_in=10**6,
+           leg_cost_bp=0.02)
+    assert candidates.best.label == "short"
+
+
+def test_legs_that_earn_their_keep_are_untouched():
+    """The charge has to leave the large trades alone, where extra legs are
+    worth tens of basis points each."""
+    long_route = _candidate("long", [POOL[k % 8] for k in range(12)])
+    short = _candidate("short", [POOL[0]])
+    candidates = CandidateSet([long_route, short])
+    verify(candidates, FakeClient([1_006_000, 1_000_000]), amount_in=10**6,
+           leg_cost_bp=0.02)   # +60 bp against 0.24 bp of charge
+    assert candidates.best.label == "long"
+
+
+def test_a_wrap_is_not_charged_as_complexity():
+    """Conversions are exempt: a wrap is a leg to the executor but not a
+    decision the router is choosing between."""
+    wrapped = _candidate("wrapped", [POOL[0], POOL[1]], kind=ArcKind.WRAP_NATIVE)
+    plain = _candidate("plain", [POOL[0]])
+    candidates = CandidateSet([wrapped, plain])
+    verify(candidates, FakeClient([1_000_001, 1_000_000]), amount_in=10**6,
+           leg_cost_bp=1.0)
+    assert candidates.best.label == "wrapped"

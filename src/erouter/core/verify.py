@@ -68,6 +68,38 @@ TIE_FLOOR = 1e-12
 # token.
 IMPACT_FRACTION = 0.05
 
+#: What one leg is charged beyond its gas, in basis points of the trade.
+#
+# Gas is a real per-leg price and at any ordinary gas price it decides this on
+# its own: measured on USDC->WETH $10k, the winner is 9 legs at 0.045 gwei,
+# 3 at 5 gwei and 1 at 30.  This term is for the case gas stops arbitrating,
+# where the relaxation will take a long tail of branches for a fraction of a
+# basis point each.  On that same trade, going from 2 legs to 3 buys 8.4 bp
+# and going from 3 to 9 buys 0.85 -- while at $100k, 6 legs to 12 buys 60.
+# Whatever is charged has to leave the second of those alone.
+#
+# The value is the measured knee.  Swept at 0.045 gwei, where gas stops
+# arbitrating (`scripts/leg_cost_frontier.py`), as legs taken and basis points
+# given up against charging nothing:
+#
+#     case                     0.0      0.02      0.05       0.1       0.2
+#     USDC->WETH  10k     31L +0.00 10L +0.62 10L +0.62 10L +0.62  9L +0.88
+#     USDC->WETH 100k     12L +0.00 12L +0.00 12L +0.00 12L +0.00 12L +0.00
+#     USDC->WETH   1M     12L +0.00 12L +0.00 12L +0.00 12L +0.00 12L +0.00
+#     USDC->USDT   1M      4L +0.00  2L +0.00  2L +0.00  2L +0.00  1L +0.11
+#     USDC->USDT  20M      4L +0.00  4L +0.00  2L +0.20  1L +0.34  1L +0.34
+#     crvUSD->WETH 1M     11L +0.00 11L +0.00 11L +0.00 11L +0.00 11L +0.00
+#
+# 0.02 takes 21 legs off the $10k trade for 0.62 bp and halves USDC->USDT $1M
+# for nothing, while costing zero on every case where the legs are earning
+# their keep.  Above 0.1 it starts buying simplicity with real money.
+#
+# Proportional rather than absolute, which is the right shape: what avoiding a
+# leg is worth scales with the trade, and so does what the leg earns, so the
+# charge stays self-limiting -- 12 legs cost 0.24 bp against the 60 bp they buy
+# at $100k.
+LEG_COST_BP = 0.02
+
 
 def realize_candidates(
     candidates: CandidateSet,
@@ -137,6 +169,7 @@ def verify(
     gas_table: GasTable | None = None,
     risk_table: RiskTable | None = None,
     revert_cost_bp: float = REVERT_COST_BP,
+    leg_cost_bp: float = LEG_COST_BP,
 ) -> CandidateSet:
     """Quote every ready candidate in one call and rank them.
 
@@ -169,6 +202,12 @@ def verify(
 
     def score(candidate: Candidate) -> float:
         value = float(candidate.verified_out or 0)
+        if leg_cost_bp and candidate.route:
+            # Conversions are exempt: a wrap is a leg to the executor but not a
+            # decision the router is choosing between, and charging it would
+            # penalise the ETH/WETH boundary rather than complexity.
+            hops = sum(1 for leg in candidate.route.legs if not leg.is_conversion)
+            value -= value * hops * leg_cost_bp / 1e4
         gas_cost = 0.0
         if gas_price_wei > 0 and dst_wei_per_eth > 0 and candidate.route:
             gas = plan_gas((leg.leg for leg in candidate.route.legs), gas_table)
