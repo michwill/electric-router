@@ -182,7 +182,7 @@ def cmd_pools(args: argparse.Namespace) -> int:
     source = load.source + (f" ({load.age / 60:.0f} min old)" if load.source != "api" else "")
     print(
         f"\n\x1b[1m{chain.name}\x1b[0m  block {rpc.block:,}  "
-        f"min_tvl ${args.min_tvl:,.0f}  universe from {source}"
+        f"min_tvl ${_floor_shown(chain, args.min_tvl)}  universe from {source}"
     )
     print(
         f"  {len(load.pools):>4} pools   {count_swap_arcs(load.pools):>5} swap arcs   "
@@ -320,6 +320,21 @@ def cmd_probe(args: argparse.Namespace) -> int:
             f"ASYM {asym(fit.a, reverse.a, fit.B, reverse.B):+.6f}"
         )
     return 0
+
+
+def _floor_shown(chain, asked: float) -> str:
+    """The floor that was really applied, which is not always the one asked for.
+
+    A Curve Lite deployment is smaller than the $10,000 default -- fantom's 321
+    pools come to $0.9M between them -- so `lite.list_pools` drops the floor to
+    zero rather than return an empty universe.  Printing the requested figure
+    there would describe a filter that did not run.
+    """
+    from .lite import LITE_MIN_TVL
+
+    if getattr(chain, "lite", False):
+        return f"{min(asked, LITE_MIN_TVL):,.0f} (lite)"
+    return f"{asked:,.0f}"
 
 
 def _certificate_note(result) -> str | None:

@@ -14,6 +14,7 @@ from ..core.pools import Coin, PoolSpec, dialect_from_probes, parse_universe
 from ..core.quoter import QuoterClient
 from ..core.transport import Status
 from ..core.types import ArcKind, Dialect, Probe
+from . import lite
 from .cache import DialectCache, UniverseCache
 from .chains import Chain
 from .curve_api import CurveApi, CurveApiError
@@ -26,6 +27,18 @@ class UniverseLoad:
     age: float = 0.0
     warnings: list[str] = field(default_factory=list)
     filtered: int = 0
+
+
+def _list_pools(chain: Chain, api: CurveApi, min_tvl: float) -> list[dict]:
+    """The pool list, from whichever API serves this chain.
+
+    Lite deployments answer on `api2.curve.finance` and are not in the Prices
+    API at all -- asking it for one returns a 404, not an empty list.  The
+    floor comes down with them: see `lite.LITE_MIN_TVL`.
+    """
+    if chain.lite:
+        return lite.list_pools(chain.chain_id, min_tvl=min(min_tvl, lite.LITE_MIN_TVL))
+    return api.list_pools(chain.chain_id, min_tvl=min_tvl)
 
 
 def load_pools(
@@ -54,7 +67,7 @@ def load_pools(
             return load
 
     try:
-        raw = api.list_pools(chain.chain_id, min_tvl=min_tvl)
+        raw = _list_pools(chain, api, min_tvl)
     except CurveApiError as exc:
         stale = cache.get(chain.chain_id, min_tvl, allow_stale=True)
         if stale is None:

@@ -35,6 +35,11 @@ class Chain:
     # along as a state override on every call (7,486 bytes, ~14% of a cold
     # route's upload).  A deployed quoter also takes boa out of the request
     # path, which is what the browser build needs.
+    # Served by `api2.curve.finance` rather than the Prices API -- a factory
+    # deployment with no trade indexing.  See `dev/lite.py`; the only chain in
+    # both lists is sonic, where Prices wins because it has the whole
+    # deployment and Lite reports a fraction of it.
+    lite: bool = False
     quoter: str = ""
     # Pools that quote fine and cannot be traded, so no probe should be spent
     # on them and no route should reach them.  Not the same as the reserve
@@ -218,6 +223,29 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="BSC",
         native_symbol="BNB",
         wrapped="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+    ),
+    # --- Curve Lite deployments ------------------------------------------
+    #
+    # Small enough that the mainnet $10,000 pool floor would empty them: all
+    # of fantom's 321 pools come to $0.9M.  `lite.LITE_MIN_TVL` is what the
+    # loader uses for these instead.
+    "avalanche": Chain(
+        name="avalanche",
+        chain_id=43114,
+        api_name="avalanche",
+        rpc_attr="AVALANCHE",
+        native_symbol="AVAX",
+        wrapped="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX
+        lite=True,
+    ),
+    "fantom": Chain(
+        name="fantom",
+        chain_id=250,
+        api_name="fantom",
+        rpc_attr="FANTOM",
+        native_symbol="FTM",
+        wrapped="0x21be370D5312f44cB42ce377BC9b8a0cEF1A4C83",  # WFTM
+        lite=True,
     ),
     "sonic": Chain(
         name="sonic",
