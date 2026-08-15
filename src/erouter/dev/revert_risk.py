@@ -74,13 +74,14 @@ BOUND_OF_FEE = 0.2
 #     floor    USDC->WETH 100k   WETH->USDC 30   stETH->WETH   USDC->USDT 5M
 #     0.5 bp             70.5%           58.0%          0.4%            0.0%
 #     1.0 bp             60.2%           55.6%          0.2%            0.0%
-#     3.0 bp              ~12%            ~15%          0.0%            0.0%
+#     2.0 bp             24.3%           31.7%          0.1%            0.0%
 #     5.0 bp              5.1%            1.5%          0.0%            0.0%
 #    10.0 bp              0.7%            0.5%          0.0%            0.0%
 #
-# The knee is between 1 and 2 bp; 3 bp sits past it, taking the volatile routes
-# from "fails more often than not" to a few percent, while a larger floor buys
-# progressively less for a proportionally larger slippage allowance.
+# The knee is between 1 and 2 bp.  5 bp sits well past it, which is the point:
+# the estimate is noisy enough between sampling windows -- TricryptoUSDC read
+# 0.7% at a 2 bp bound in one half hour and 8.7% at 3 bp in the next -- that a
+# floor chosen at the knee would land on the wrong side of it half the time.
 #
 # Only where the pair moves.  On a pegged pair this would be a large allowance
 # against a spread of one or two, and those arcs do not need it: 705 of the 831
@@ -91,10 +92,10 @@ BOUND_OF_FEE = 0.2
 #
 # This has to match whatever the executor actually sets, since it is the
 # executor's parameter being modelled.  It also means the sandwich argument on
-# a pool charging under 15 bp now rests on the absolute size of the bound
-# rather than on its ratio to the fee: 3 bp of a $10k trade is not worth
-# sandwiching, 3 bp of a $10M trade might be.
-BOUND_FLOOR_BP = 3.0
+# a pool charging under 25 bp now rests on the absolute size of the bound
+# rather than on its ratio to the fee: 5 bp of a $10k trade is not worth
+# sandwiching, 5 bp of a $10M trade might be.
+BOUND_FLOOR_BP = 5.0
 #: Below this a rate is not moving as far as our own quotes can resolve.
 SCALE_FLOOR_BP = 0.005
 #: Never claim an arc is safer than this: the tail is extrapolated past the

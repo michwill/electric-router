@@ -238,13 +238,15 @@ def test_a_bound_far_outside_the_data_is_priced_far_below_one_in_n():
 
 
 def test_a_bound_inside_the_typical_move_is_priced_from_the_count():
-    """TriCRV's case: a 0.83 bp bound against a rate that moves further than
-    that most minutes.  Here the data speaks for itself and no extrapolation
-    should talk it down."""
+    """A rate that moves further than its own bound most minutes.  Here the
+    data speaks for itself and no extrapolation should talk it down.
+
+    The fee is well above the floor on purpose, so this measures the count
+    rather than `BOUND_FLOOR_BP`."""
     key = "a|b@" + POOL[1]
     series = {key: PriceSeries(token=key, pool=POOL[1],
-                               prices=_walk(25, 2.0, seed=2))}
-    out = breach_risk(series, {POOL[1].lower(): 0.000336},
+                               prices=_walk(25, 20.0, seed=2))}
+    out = breach_risk(series, {POOL[1].lower(): 0.0034},   # 34 bp fee, 6.8 bp bound
                       [_arc(key, POOL[1], 0, 1)])
     assert out[POOL[1].lower() + ":0>1"]["p"] > 0.2
 

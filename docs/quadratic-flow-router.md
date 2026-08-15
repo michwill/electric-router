@@ -779,7 +779,7 @@ Break token conservation, which is an assumption of `(P)` itself, not of the qua
 
 The network here is purely dissipative — no reactive elements, no memory — because pool state is frozen during the trade. Routing across blocks or against time-varying reserves adds state and leaves resistive-network territory entirely. Out of scope.
 
-One consequence of time does have to be priced, though, and like gas it is priced *outside* `(P)` (§11.1). Each leg executes with a minimum-out — a fraction of that pool's fee, the level at which sandwiching stops paying, floored at 3 bp on arcs whose own rate is measured to move — and that bound is also a revert trigger: the route lands only if every pool it touches stays inside its own bound during the minute or two between the quote and inclusion. `P(fails) = 1 − Π(1 − pᵢ)`, with `pᵢ` measured per arc (`dev/revert_risk.py`, stored in `data/facts`).
+One consequence of time does have to be priced, though, and like gas it is priced *outside* `(P)` (§11.1). Each leg executes with a minimum-out — a fraction of that pool's fee, the level at which sandwiching stops paying, floored at 5 bp on arcs whose own rate is measured to move — and that bound is also a revert trigger: the route lands only if every pool it touches stays inside its own bound during the minute or two between the quote and inclusion. `P(fails) = 1 − Π(1 − pᵢ)`, with `pᵢ` measured per arc (`dev/revert_risk.py`, stored in `data/facts`).
 
 **A failure costs a resubmission, not the trade**, and that fixes the scale of the whole term. Candidate selection maximises
 
