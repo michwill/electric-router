@@ -54,6 +54,12 @@ class Chain:
     # tested on every `facts` build.  What survives becomes an arc; see
     # `wrappers.build_lending_arcs`.
     wrappers: tuple[tuple[str, str, str], ...] = ()
+    # Tokens that hold a peg.  Used only to decide how much a routing gain has
+    # to be worth before another leg is taken: a pair of these moves 0.17 bp
+    # over a thousand blocks, where ETH moves 125, so a gain worth chasing on
+    # one is noise on the other.  Membership is not measurable by execution the
+    # way redemption is -- it is a claim about what a token is for.
+    stables: tuple[str, ...] = ()
     # A committed endpoint, for a checkout with no `networks.py`.
     #
     # Deliberately public, and safe to be: the key serves reads only --
@@ -118,6 +124,16 @@ CHAINS: dict[str, Chain] = {
         public_rpc=(
             "https://lb.drpc.live/ethereum/"
             "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
+        ),
+        stables=(
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",   # USDC
+            "0xdAC17F958D2ee523a2206206994597C13D831ec7",   # USDT
+            "0x6B175474E89094C44Da98b954EedeAC495271d0F",   # DAI
+            CRVUSD,
+            "0x853d955aCEf822Db058eb8505911ED77F175b99e",   # FRAX
+            "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",   # USDe
+            "0xdC035D45d973E3EC169d2276DDab16f1e407384F",   # USDS
+            "0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f",   # GHO
         ),
         wrappers=(
             ("0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643",   # cDAI

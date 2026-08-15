@@ -122,6 +122,7 @@ def verify(
     gas_price_wei: int = 0,
     dst_wei_per_eth: float = 0.0,
     gas_table: GasTable | None = None,
+    min_gain_bp: float = 0.0,
 ) -> CandidateSet:
     """Quote every ready candidate in one call and rank them.
 
@@ -176,14 +177,34 @@ def verify(
     if not usable:
         return candidates
     best_score = max(score(c) for c in usable)
-    # One leg's gas, priced in the output token -- the actual cost of the extra
-    # hop this tolerance exists to protect against.
+    # What one more leg has to earn.  Gas is the floor -- `score` has already
+    # subtracted it, so this is what the *next* leg costs -- but gas is not the
+    # whole price of a leg.  Each one is another chance for the state to move
+    # between quoting and inclusion, and that risk is not modelled anywhere, so
+    # `min_gain_bp` stands in for it.
+    #
+    # Measured across leg counts at three sizes: what splitting buys is set by
+    # trade size against pool depth, not by which assets are involved.  Every
+    # pair plateaus by 3 legs at $10k; the same pairs still gain 31-38 bp at 12
+    # legs at $1M.  The waste is the tail -- steps worth 0.017 to 0.13 bp --
+    # and a floor per leg removes exactly that while leaving the rest.
     per_leg = leg_gas(ArcKind.SWAP_STABLE) * gas_price_wei / 1e18 * dst_wei_per_eth
-    tolerance = max(per_leg, abs(best_score) * TIE_FLOOR)
+    if min_gain_bp > 0:
+        per_leg = max(per_leg, abs(best_score) * min_gain_bp / 1e4)
+    def charged(candidate: Candidate) -> float:
+        """Output, less gas, less what each leg must earn to justify itself."""
+        return score(candidate) - per_leg * legs(candidate)
+
+    best_charged = max(charged(c) for c in usable)
+    tie = abs(best_score) * TIE_FLOOR
 
     def rank_key(candidate: Candidate) -> tuple:
-        value = score(candidate)
-        bucket = 0 if best_score - value <= tolerance else 1
+        # Charging every leg is what makes the floor *per leg*: two extra legs
+        # have to earn twice as much as one.  A flat tolerance could not say
+        # that -- it treated a 2-leg and a 25-leg route the same distance from
+        # the winner as equally tied.
+        value = charged(candidate)
+        bucket = 0 if best_charged - value <= tie else 1
         return (bucket, legs(candidate) if bucket == 0 else 0, -value)
 
     ranked = sorted(usable, key=rank_key)

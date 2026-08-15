@@ -592,6 +592,7 @@ def cmd_route(args: argparse.Namespace) -> int:
                 extra_arcs=stake_arcs,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
+                min_gain_bp=_min_gain_bp(chain, src, dst),
             )
         except RoutingError as exc:
             print(f"{BAD} no route after refresh: {exc}")
@@ -668,6 +669,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 prepared=prepared,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
+                min_gain_bp=_min_gain_bp(chain, src, dst),
             )
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
@@ -681,7 +683,8 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                            gas_price_wei=getattr(args, "gas_price_wei", 0),
                            refit_rounds=args.refit, extra_arcs=stake_arcs,
                            max_legs=args.max_legs, prepared=prepared,
-                           gas_table=gas_table)
+                           gas_table=gas_table,
+                           min_gain_bp=_min_gain_bp(chain, src, dst))
         _present(result, args, chain, rpc, nodes, wrappers, load,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
@@ -1390,6 +1393,22 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(f"  {WARN} --dry-run: nothing written")
     return 0
+
+
+
+# What another leg has to earn before it is worth taking, in basis points.
+# Measured: a pair of pegged tokens moves 0.17 bp over a thousand blocks while
+# USDC/WETH moves 125, so the same gain is signal on one and noise on the
+# other.  Gas is charged separately and is the floor under both.
+MIN_GAIN_STABLE_BP = 0.01
+MIN_GAIN_VOLATILE_BP = 0.1
+
+
+def _min_gain_bp(chain, src: str, dst: str) -> float:
+    """The per-leg floor for this pair."""
+    stables = {t.lower() for t in getattr(chain, "stables", ())}
+    both_pegged = src.lower() in stables and dst.lower() in stables
+    return MIN_GAIN_STABLE_BP if both_pegged else MIN_GAIN_VOLATILE_BP
 
 
 def _gas_table(chain, args, pools=None):
