@@ -37,7 +37,8 @@ from .gas_probe import (
     revert_reason,  # re-exported: callers read it from here
 )
 
-__all__ = ["WRAPPER_CALLS", "Capability", "revert_reason", "try_wrapper"]
+__all__ = ["WRAPPER_CALLS", "Capability", "discover_wrappers",
+           "revert_reason", "try_wrapper"]
 
 
 #: How each wrapper is entered and left.  `None` means the protocol has no such
@@ -81,7 +82,7 @@ class Capability:
 
 
 def try_wrapper(evm, funder: Funder, *, token: str, underlying: str, family: str,
-                amount: int) -> Capability:
+                amount: int, holders: dict | None = None) -> Capability:
     """Can this wrapper still be entered, and can it still be left?
 
     Both are attempted independently, because on a deprecated protocol they
@@ -94,12 +95,22 @@ def try_wrapper(evm, funder: Funder, *, token: str, underlying: str, family: str
     for direction, build in calls.items():
         target, data, spend = build(token, underlying, amount, CALLER)
         snapshot = evm.snapshot()
+        caller = CALLER
         try:
             if not funder.fund(spend, target, amount * 2):
-                out.notes[direction] = "not funded"
-                continue          # leaves the direction `None`: untested
+                # A share balance the protocol computes rather than stores
+                # cannot be conjured by writing a slot, so borrow it from
+                # someone holding the token -- a pool's own reserves will do.
+                lent = (funder.lend_from(spend, (holders or {}).get(spend.lower(), ""),
+                                         target, amount)
+                        if (holders or {}).get(spend.lower()) else None)
+                if lent is None:
+                    out.notes[direction] = "not funded"
+                    continue      # leaves the direction `None`: untested
+                caller = lent
+                evm.set_balance(caller, 10 ** 20)
             try:
-                evm.message_call(caller=CALLER, to=target, calldata=data)
+                evm.message_call(caller=caller, to=target, calldata=data)
                 setattr(out, direction, True)
             except Exception as exc:
                 setattr(out, direction, False)
@@ -108,3 +119,47 @@ def try_wrapper(evm, funder: Funder, *, token: str, underlying: str, family: str
             with contextlib.suppress(Exception):
                 evm.revert(snapshot)
     return out
+
+
+def discover_wrappers(pools, client) -> list[tuple[str, str, str]]:
+    """Every coin that wraps another token, found by asking rather than listing.
+
+    Mintability and redeemability are properties of a *token*, not of a pool or
+    a swap, and the asymmetry is everywhere once looked for: Compound's mint is
+    paused while redeem works, Aave's reserves are frozen, sUSDe mints on
+    demand and redeems on a seven-day cooldown, pufETH redeems through a queue,
+    sfrxUSD reports `maxDeposit == 0`.  E8 found thirty-one linear ERC4626
+    tokens and concluded that linearity says nothing about whether you can get
+    back out -- which is why merging them is gated on a hand-written allowlist.
+
+    Executing both directions answers what that allowlist is guessing at, so
+    the discovery has to be universal: every coin of every pool at every index,
+    not a list someone maintains.
+
+    `asset()` identifies an ERC4626 vault and `underlying()` a cToken.  Both are
+    view calls and go out in one batch.
+    """
+    from ..core.codec import encode_call
+    from ..core.transport import Call, Status
+
+    tokens = sorted({coin.address.lower() for pool in pools for coin in pool.coins})
+    if not tokens:
+        return []
+    calls: list[Call] = []
+    for token in tokens:
+        calls.append(Call(token, encode_call("asset()")))
+        calls.append(Call(token, encode_call("underlying()")))
+    answers = client.raw(calls)
+
+    found: list[tuple[str, str, str]] = []
+    for k, token in enumerate(tokens):
+        for answer, family in ((answers[2 * k], "erc4626"),
+                               (answers[2 * k + 1], "ctoken")):
+            if answer.status is not Status.VALUE or len(answer.data) < 32:
+                continue
+            underlying = "0x" + answer.data[-20:].hex()
+            if int(underlying, 16) == 0 or underlying == token:
+                continue
+            found.append((token, underlying, family))
+            break
+    return found
