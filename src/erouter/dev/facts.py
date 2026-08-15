@@ -17,6 +17,10 @@ should have them without paying for that.
   slippage bound inside a couple of minutes, which is how often a route
   through it reverts.  Set by the pool's fee against its own volatility, and
   both hold still for months.  See `revert_risk`.
+* **Wide-bound pools.**  The handful that trade a moving pair on a stablecoin
+  fee, so a fraction of that fee is not a bound anything could execute
+  against.  A list rather than a rule: a fee and a pair are both facts about a
+  deployment, and a list is auditable in a diff.
 
 Slot lists and bytecode stay in `state_cache`, which is gzipped because it
 carries megabytes of code.  Facts belong in plain JSON: it is three orders of
@@ -61,6 +65,11 @@ class FactsCache:
     #: "address:i>j" -> {"p", "bound_bp", "scale_bp", "active", "n"}: the
     #: chance this arc's own minimum-out trips first.  See `revert_risk`.
     breach: dict[str, dict] = field(default_factory=dict)
+    #: pool address -> {"fee_bp", "drift_bp", "pair"}: pools that trade a
+    #: moving pair on a stablecoin-sized fee, so 20% of that fee is not a
+    #: survivable minimum-out and the absolute floor applies instead.  A short,
+    #: readable list rather than a rule, because it is short.
+    wide_bounds: dict[str, dict] = field(default_factory=dict)
     block: int = 0
     dirty: bool = False
 
@@ -83,6 +92,7 @@ class FactsCache:
         cache.broken = dict(raw.get("broken", {}))
         cache.wrappers = dict(raw.get("wrappers", {}))
         cache.breach = dict(raw.get("breach", {}))
+        cache.wide_bounds = dict(raw.get("wide_bounds", {}))
         cache.block = int(raw.get("block", 0))
         return cache
 
@@ -103,6 +113,7 @@ class FactsCache:
             "broken": dict(sorted(self.broken.items())),
             "wrappers": dict(sorted(self.wrappers.items())),
             "breach": dict(sorted(self.breach.items())),
+            "wide_bounds": dict(sorted(self.wide_bounds.items())),
         }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n",
@@ -282,6 +293,22 @@ class FactsCache:
         self.dirty = self.dirty or bool(changed)
         return changed
 
+    def learn_wide_bounds(self, found: dict[str, dict]) -> int:
+        """Replace the exception list wholesale.
+
+        Replacing rather than merging: a pool drops off the list when its fee
+        rises or its pair stops moving, and a stale entry would keep handing
+        out an allowance nothing justifies.  The count returned is of pools
+        added or changed, so a quiet re-probe says so.
+        """
+        changed = sum(1 for a, e in found.items()
+                      if self.wide_bounds.get(a.lower()) != e)
+        replacement = {a.lower(): dict(e) for a, e in found.items()}
+        if replacement != self.wide_bounds:
+            self.wide_bounds = replacement
+            self.dirty = True
+        return changed
+
     def risk_table(self) -> RiskTable:
         """The pure-core view: `(address, i, j) -> probability`, and nothing
         else.
@@ -334,4 +361,5 @@ class FactsCache:
         return {"legs": len(self.legs), "block": self.block, "by_kind": by_kind,
                 "classes": len(self.classes), "kinds": dict(self.kinds),
                 "broken": len(self.broken), "wrappers": len(self.wrappers),
-                "breach": len(self.breach)}
+                "breach": len(self.breach),
+                "wide_bounds": len(self.wide_bounds)}

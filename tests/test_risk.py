@@ -318,20 +318,76 @@ def test_a_deposit_leg_takes_the_pool_figure_not_a_swap_pair():
     assert table.survival([deposit]) == 0.98
 
 
-def test_a_moving_pair_gets_the_absolute_floor_under_its_bound():
-    """Twenty percent of a 0.1 bp fee is 0.02 bp, which the pair crosses on
-    accrual alone.  Curve.fi Strategic USD Reserve priced at 10.3% for that
-    reason and USDC->USDT gave up 1.6 bp routing around it."""
+def test_a_listed_pool_gets_the_absolute_floor_under_its_bound():
+    """Twenty percent of a 3.3 bp fee is 0.65 bp, against a rate that jumps
+    ~0.9 bp per trade: TricryptoUSDC failed more often than it landed."""
     from erouter.dev.revert_risk import BOUND_FLOOR_BP, bound_bp
 
-    assert bound_bp(0.00001, 0.1) == BOUND_FLOOR_BP        # 0.1 bp fee, moves
-    # 146 bp fee, as Yield Basis charges: nowhere near the floor.
-    assert round(bound_bp(0.0146, 0.1), 4) == 29.2
+    assert bound_bp(0.00033, wide=True) == BOUND_FLOOR_BP
+    # 146 bp fee, as Yield Basis charges: nowhere near the floor, listed or not.
+    assert round(bound_bp(0.0146, wide=True), 4) == 29.2
 
 
-def test_a_pegged_pair_keeps_the_fee_fraction():
-    """0.5 bp is a large allowance against a spread of one or two, and a pair
-    that never moves does not need it."""
-    from erouter.dev.revert_risk import SCALE_FLOOR_BP, bound_bp
+def test_a_pool_off_the_list_keeps_the_fee_fraction():
+    """5 bp is a large allowance against a spread of one or two, and a pool on
+    a pegged pair does not need it."""
+    from erouter.dev.revert_risk import bound_bp
 
-    assert bound_bp(0.0001, SCALE_FLOOR_BP) == 0.2         # 1 bp fee, pegged
+    assert bound_bp(0.0001) == 0.2                         # 1 bp fee, unlisted
+
+
+def test_the_list_names_low_fee_pools_on_moving_pairs():
+    """Both conditions, because either alone is the wrong answer: a volatile
+    pool that charges for it needs nothing, and a pegged pair would only be
+    handed an allowance many times its own spread."""
+    from erouter.dev.revert_risk import wide_bound_pools
+
+    def series(pair, pool, prices):
+        return {f"{pair}@{pool}": PriceSeries(token=pair, pool=pool, prices=prices)}
+
+    volatile = [1.0, 1.01, 0.99, 1.02, 1.0]     # ~100 bp steps
+    pegged = [1.0, 1.000001, 1.0, 1.000002, 1.0]
+    cheap, dear = POOL[0].lower(), POOL[1].lower()
+    quiet = POOL[2].lower()
+
+    listed = wide_bound_pools({**series("a|b", cheap, volatile),
+                               **series("c|d", dear, volatile),
+                               **series("e|f", quiet, pegged)},
+                              {cheap: 0.00033, dear: 0.0146, quiet: 0.00001})
+    assert set(listed) == {cheap}               # dear charges enough; quiet does not move
+    assert listed[cheap]["fee_bp"] == 3.3
+    assert listed[cheap]["drift_bp"] > 90
+
+
+def test_the_list_is_keyed_on_the_pair_not_on_one_pool_trading():
+    """The defect this replaces: a pool that saw no trade in the sample looked
+    pegged whatever it trades.  TricryptoINV's USDC/INV rate moves 1,178 bp in
+    four hours, and a per-arc test left it on a 0.75 bp bound."""
+    from erouter.dev.revert_risk import wide_bound_pools
+
+    busy, quiet = POOL[3].lower(), POOL[4].lower()
+    series = {
+        f"a|b@{busy}": PriceSeries(token="a|b", pool=busy,
+                                   prices=[1.0, 1.05, 0.97, 1.03, 1.0]),
+        f"a|b@{quiet}": PriceSeries(token="a|b", pool=quiet,
+                                    prices=[1.0, 1.0, 1.0, 1.0, 1.0]),
+    }
+    listed = wide_bound_pools(series, {busy: 0.0001, quiet: 0.0001})
+    assert quiet in listed  # the pair moves, even though this pool did not
+
+
+def test_the_list_also_names_a_pool_whose_own_rate_wobbles():
+    """The pair test alone is not enough.  Curve.fi Strategic USD Reserve
+    charges 0.1 bp, putting its bound at 0.02, and trips a fifth of the time
+    while trading USDC against USDT -- a pair nobody would call volatile.  Left
+    off the list it binds every route it appears in."""
+    from erouter.dev.revert_risk import wide_bound_pools
+
+    pool = POOL[5].lower()
+    pegged = {f"a|b@{pool}": PriceSeries(token="a|b", pool=pool,
+                                         prices=[1.0, 1.0, 1.0, 1.0, 1.0])}
+    fees = {pool: 0.00001}                       # 0.1 bp fee, 0.02 bp bound
+    assert wide_bound_pools(pegged, fees) == {}  # pair alone says no
+    listed = wide_bound_pools(pegged, fees, {f"{pool}:0>1": {"p": 0.217}})
+    assert pool in listed
+    assert listed[pool]["tight_p"] == 0.217

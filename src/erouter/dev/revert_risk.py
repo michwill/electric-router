@@ -48,6 +48,7 @@ import math
 
 from ..core.codec import encode_call
 from ..core.transport import Call
+from .drift import series_drift_bp
 
 #: Five-block steps, twenty-five of them: roughly a minute apart over half an
 #: hour.  Ordered so consecutive samples are adjacent in time.
@@ -83,19 +84,45 @@ BOUND_OF_FEE = 0.2
 # 0.7% at a 2 bp bound in one half hour and 8.7% at 3 bp in the next -- that a
 # floor chosen at the knee would land on the wrong side of it half the time.
 #
-# Only where the pair moves.  On a pegged pair this would be a large allowance
-# against a spread of one or two, and those arcs do not need it: 705 of the 831
-# measured never moved beyond what our own quotes resolve.  "Moves" is the
-# measurement rather than a token list -- an arc whose typical jump clears the
-# resolution floor -- which is why ETH/stETH stays on the tight side despite
-# holding two volatile assets.  Its *rate* does not move.
+# Applied only to the pools on the exception list -- see `wide_bound_pools`.
+# On a pegged pair this would be a large allowance against a spread of one or
+# two, and most pools do not need it: a volatile pool usually charges enough
+# that 20% of its fee already clears this.
 #
 # This has to match whatever the executor actually sets, since it is the
 # executor's parameter being modelled.  It also means the sandwich argument on
-# a pool charging under 25 bp now rests on the absolute size of the bound
-# rather than on its ratio to the fee: 5 bp of a $10k trade is not worth
-# sandwiching, 5 bp of a $10M trade might be.
+# a listed pool rests on the absolute size of the bound rather than on its
+# ratio to the fee: 5 bp of a $10k trade is not worth sandwiching, 5 bp of a
+# $10M trade might be.
 BOUND_FLOOR_BP = 5.0
+#: What counts as a pair whose rate moves, in basis points over the ~4-hour
+#: drift series.
+#
+# Measured, the two populations do not overlap -- there is a factor of eight
+# between the loosest pair anyone would call pegged and the tightest anyone
+# would call volatile:
+#
+#     wstETH/pufETH 0.000   tBTC/WBTC 0.000   crvUSD/sfrxUSD 0.050
+#     USDC/crvUSD   0.196   USDC/USDT 0.349   crvUSD/frxUSD  0.526
+#     ---------------------------------------------------------------
+#     WETH/WBTC     4.088   USDC/WETH 37.343  crvUSD/CRV    79.336
+#
+# So the cut is not delicate.  It is deliberately made against the *pair*,
+# aggregated over every pool that holds it, rather than against one pool's own
+# recent trading: quiet pools are common, and a pool that saw no trade in half
+# an hour looks pegged whatever it trades.  An earlier per-arc test did exactly
+# that and put 156 arcs on volatile pairs -- including TricryptoINV's USDC/INV,
+# whose rate moves 1,178 bp in four hours -- on the tight side with a 0.75 bp
+# bound and a measured risk of zero.
+PAIR_DRIFT_CUT_BP = 2.0
+#: How often a fee-derived bound may trip before the pool is listed anyway.
+#
+# The pair test is about the market; this one is about the pool.  A vault pair
+# accruing, an internal rebalance, an oracle step -- all move a pool's own rate
+# without moving the pair, and on a sub-basis-point bound any of them is enough
+# to fail a route.  One in a hundred attempts is already far more than the
+# ranking term can price.
+TIGHT_TRIP_CUT = 0.01
 #: Below this a rate is not moving as far as our own quotes can resolve.
 SCALE_FLOOR_BP = 0.005
 #: Never claim an arc is safer than this: the tail is extrapolated past the
@@ -141,18 +168,94 @@ def jump_scale_bp(moves: list[float]) -> float:
     return max(jumps[len(jumps) // 2], SCALE_FLOOR_BP)
 
 
-def bound_bp(fee: float, scale_bp: float, floor_bp: float = BOUND_FLOOR_BP) -> float:
+def pair_drift_bp(series) -> dict[tuple[str, str], float]:
+    """Worst drift per canonical pair, over every pool that holds it.
+
+    The series keys carry the canonical pair already -- `"tokenIn|tokenOut@pool"`
+    -- so this needs no node map.  Worst rather than deepest: a quiet pool has a
+    rate that does not move, which says the pool saw no trades, not that the
+    pair holds still.
+    """
+    out: dict[tuple[str, str], float] = {}
+    for key, entry in series.items():
+        pair, _, _pool = key.partition("@")
+        left, _, right = pair.partition("|")
+        both = (left, right) if left <= right else (right, left)
+        out[both] = max(out.get(both, 0.0), series_drift_bp(list(entry.prices)))
+    return out
+
+
+def wide_bound_pools(series, fees: dict[str, float], tight: dict | None = None, *,
+                     cut_bp: float = PAIR_DRIFT_CUT_BP,
+                     trip_cut: float = TIGHT_TRIP_CUT,
+                     floor_bp: float = BOUND_FLOOR_BP) -> dict[str, dict]:
+    """Pools whose own fee does not buy them a survivable minimum-out.
+
+    A fraction of the fee is the right rule nearly everywhere, because a pool
+    that trades a volatile pair usually charges for it -- Yield Basis WETH's
+    218 bp fee puts its bound at 43.7 and nothing else is needed.  The
+    exceptions are pools that charge like a stablecoin venue and move like
+    something else, and there are few enough of them to name.
+
+    A pool whose fee already clears the floor is never listed: it gains
+    nothing.  Past that there are two ways to qualify, and both are needed
+    because each misses what the other catches:
+
+    * **its pair moves** -- `series` is the long-horizon drift sample, and the
+      question is what the pair does across every pool that holds it.  Half an
+      hour of one quiet pool cannot answer that: a per-arc version of this test
+      left 156 arcs on volatile pairs holding sub-basis-point bounds, including
+      TricryptoINV's USDC/INV at 0.75 bp against a rate that moves 1,178 bp in
+      four hours.
+    * **the tight bound was seen to trip** -- `tight` is `breach_risk` scored
+      at the fee-derived bound, so this catches a pool whose own rate wobbles
+      more than its pair does.  Curve.fi Strategic USD Reserve charges 0.1 bp,
+      putting its bound at 0.02, and trips a fifth of the time while trading
+      USDC against USDT -- a pair that by any reasonable measure is pegged.
+      The pair test alone leaves it binding every route it appears in.
+
+    Returns `{address: {"fee_bp", "drift_bp", "tight_p", "pair"}}`, so the
+    committed list says why a pool is on it and a human can disagree in a diff.
+    """
+    drift = pair_drift_bp(series)
+    worst_tight: dict[str, float] = {}
+    for key, entry in (tight or {}).items():
+        address = key.split(":")[0]
+        worst_tight[address] = max(worst_tight.get(address, 0.0), entry["p"])
+
+    listed: dict[str, dict] = {}
+    for key in series:
+        pair, _, pool = key.partition("@")
+        left, _, right = pair.partition("|")
+        pool = pool.lower()
+        fee = fees.get(pool)
+        if fee is None or fee * BOUND_OF_FEE * 1e4 >= floor_bp:
+            continue  # its own fee is enough
+        both = (left, right) if left <= right else (right, left)
+        moved = drift.get(both, 0.0)
+        trips = worst_tight.get(pool, 0.0)
+        if moved <= cut_bp and trips < trip_cut:
+            continue
+        prior = listed.get(pool)
+        if prior is None or moved > prior["drift_bp"]:
+            listed[pool] = {"fee_bp": round(fee * 1e4, 4),
+                            "drift_bp": round(moved, 4),
+                            "tight_p": round(trips, 6),
+                            "pair": f"{left}|{right}"}
+    return listed
+
+
+def bound_bp(fee: float, wide: bool = False,
+             floor_bp: float = BOUND_FLOOR_BP) -> float:
     """The minimum-out this arc executes with, in basis points.
 
-    A fraction of the pool's fee, floored for arcs that move -- see
-    `BOUND_FLOOR_BP`.  `floor_bp` is a parameter so the same sampled series can
-    be scored against several candidate floors; the choice is an execution
-    parameter, and picking it is worth a measurement rather than a guess.
+    A fraction of the pool's fee, floored for pools on the exception list.
+    `floor_bp` is a parameter so the same sampled series can be scored against
+    several candidate floors; the choice is an execution parameter, and picking
+    it is worth a measurement rather than a guess.
     """
     bound = fee * BOUND_OF_FEE * 1e4
-    if scale_bp > SCALE_FLOOR_BP:
-        bound = max(bound, floor_bp)
-    return bound
+    return max(bound, floor_bp) if wide else bound
 
 
 def tail_model(standardised: list[float]):
@@ -185,7 +288,7 @@ def tail_model(standardised: list[float]):
     return tail
 
 
-def breach_risk(series, fees: dict[str, float], arcs=None, *,
+def breach_risk(series, fees: dict[str, float], arcs=None, *, wide=(),
                 horizon: int = HORIZON,
                 floor_bp: float = BOUND_FLOOR_BP) -> dict[str, dict]:
     """Per-arc risk, from rate series and pool fees.
@@ -218,7 +321,7 @@ def breach_risk(series, fees: dict[str, float], arcs=None, *,
     tail = tail_model(pooled)
     out: dict[str, dict] = {}
     for key, pool, scale, moves in measured:
-        bound = bound_bp(fees[pool], scale, floor_bp)
+        bound = bound_bp(fees[pool], pool in wide, floor_bp)
         jumps = sum(1 for m in moves if m > 0)
         # How often a window contains a move at all.  Half an event stands in
         # for none, so an arc that saw no trade in half an hour is priced low

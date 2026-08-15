@@ -1434,20 +1434,43 @@ def cmd_gascal(args: argparse.Namespace) -> int:
         # --- how often each pool's own minimum-out would trip ---------------
         #
         # The same arcs, resampled at a minute apart instead of hours, scored
-        # against 20% of each pool's fee -- the bound that makes sandwiching
-        # unprofitable, and therefore the level a route reverts at.  One
-        # request per block for the whole universe, so the second sweep costs
-        # what the first did.
-        from .revert_risk import FINE_BLOCKS, breach_risk, read_fees
+        # against the bound the executor will really set: 20% of the pool's fee,
+        # floored for the pools on the exception list.  One request per block
+        # for the whole universe, so the second sweep costs what the first did.
+        #
+        # The list comes from the *four-hour* series above rather than from
+        # this one, and that ordering matters: what it asks is what the pair
+        # does, and half an hour of a quiet pool cannot answer it.
+        from .revert_risk import (
+            FINE_BLOCKS,
+            breach_risk,
+            read_fees,
+            wide_bound_pools,
+        )
 
         client = quoter_client(rpc, chain)
         fees = read_fees(client, load.pools)
         fine = sample_rates(rpc, client.address, arcs, blocks=FINE_BLOCKS)
-        risk = breach_risk(fine, fees, arcs)
+        # Scored twice against the same samples.  The first pass puts every
+        # pool on its fee-derived bound, which is the evidence for whether that
+        # bound is survivable; the list is drawn from it and from the pair
+        # drift; the second pass is the answer, against the bound the executor
+        # will really set.
+        tight = breach_risk(fine, fees, arcs)
+        wide = wide_bound_pools(rates, fees, tight)
+        changed_wide = cache.learn_wide_bounds(wide)
+        by_address = {p.address.lower(): (p.name or p.address)[:20]
+                      for p in load.pools}
+        print(f"  wide bounds: {len(wide)} pool(s) cannot execute against a "
+              f"fraction of their own fee ({changed_wide} changed)")
+        for address, entry in sorted(wide.items(), key=lambda kv: -kv[1]["tight_p"])[:6]:
+            print(f"      {by_address.get(address, address[:12]):<22}"
+                  f"fee {entry['fee_bp']:>6.2f} bp   pair moves "
+                  f"{entry['drift_bp']:>8.2f} bp   tight bound trips "
+                  f"{entry['tight_p'] * 100:>5.1f}%")
+        risk = breach_risk(fine, fees, arcs, wide=set(wide))
         changed_risk = cache.learn_breach(risk)
         if risk:
-            by_address = {p.address.lower(): (p.name or p.address)[:20]
-                          for p in load.pools}
             worst = sorted(risk.items(), key=lambda kv: -kv[1]["p"])[:3]
             median_p = sorted(e["p"] for e in risk.values())[len(risk) // 2]
             named = ", ".join(
