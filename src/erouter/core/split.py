@@ -151,6 +151,20 @@ POLISH_ITERS = 12
 POLISH_SWEEPS = 2
 # The curve search has already found the basin; this only refines inside it.
 POLISH_WINDOW = 0.05
+#: Skip the polish when the curves already agree with the chain this closely.
+#
+# Polish exists to correct interpolation drift, and the run measures that drift
+# for free -- `check_bp` composes the curves at the weights a real chained quote
+# was taken at.  When it is small there is nothing left to find, and measured,
+# it is usually small: WETH->USDC 300 checked at -0.078 bp and polishing bought
+# 0.031 for 241 sequential quotes, about 770 ms; USDC->sUSDS $1M checked at
+# -0.045 and bought exactly nothing for 121 calls.  Each of those calls is a
+# chained `quote_routes`, ~3.2 ms in-process and a round trip on the wire, so
+# this is the single most expensive thing the router does per basis point.
+#
+# The threshold is above the drift both those cases showed and below the
+# 1.0 bp at which `_trusted_curves` stops believing the curves at all.
+POLISH_CHECK_BP = 0.15
 # With an exact finish available, the curves only have to be right enough to
 # land in the correct basin, so the dense second sampling pass is not needed.
 LOCAL_CHECK_TOL_BP = 10.0
@@ -170,6 +184,7 @@ class SplitReport:
     mode: str = "chained"
     probes: int = 0
     polish_calls: int = 0
+    polish_skipped: bool = False
     polish_bp: float = 0.0
     local: int = 0
     predicted: int = 0
@@ -958,8 +973,11 @@ def _search_curves(
 
     # The batch above is the last word only when a quote is expensive.  With an
     # in-process EVM it is merely a good starting point, and the true function
-    # is affordable enough to be optimised directly.
-    if getattr(client, "local", False) and best > 0:
+    # is affordable enough to be optimised directly -- but only where the
+    # curves and the chain actually disagree.  See `POLISH_CHECK_BP`.
+    drifting = abs(report.check_bp) >= POLISH_CHECK_BP
+    report.polish_skipped = not drifting
+    if getattr(client, "local", False) and best > 0 and drifting:
         winner, best = polish(
             legs, client, groups, winner, free, report,
             amount_in=amount_in, dst_slot=dst_slot, baseline=best,

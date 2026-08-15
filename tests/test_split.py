@@ -306,8 +306,43 @@ class LocalPoolQuoter(PoolQuoter):
     local = True
 
 
-def test_a_local_quoter_finishes_on_the_true_function():
-    """The last word comes from a real quote, not from an interpolant."""
+class DriftingQuoter(LocalPoolQuoter):
+    """Chained quotes that the leg-by-leg probes do not predict.
+
+    The probes see each pool alone; the chained walk here charges a little
+    extra, so composing the curves lands away from the truth -- which is the
+    only condition under which polishing on the true function can pay.
+    """
+
+    def quote_routes(self, routes, amounts_in, dst_slots):
+        # 0.3 bp: past `POLISH_CHECK_BP` so polish engages, well short of
+        # `CHECK_TOL_BP` where the curves stop being believed at all.
+        return [int(v * 0.99997)
+                for v in super().quote_routes(routes, amounts_in, dst_slots)]
+
+
+def test_a_local_quoter_finishes_on_the_true_function_when_the_curves_drift():
+    """The last word comes from a real quote, not from an interpolant -- but
+    only where the two actually disagree."""
+    amount = 1_000_000
+    quoter = DriftingQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+    )
+    assert report.mode == "curves"
+    assert abs(report.check_bp) >= 0.15
+    assert report.polish_calls > 0, "drifting curves should be polished against"
+    # Every polish evaluation is a real quote, so the reported result is one.
+    assert report.after == quoter.quote_routes([tuned], [amount], [2])[0]
+
+
+def test_polish_is_skipped_when_the_curves_already_match():
+    """Polish corrects interpolation drift and nothing else, so when the check
+    says there is none it is 241 sequential quotes for nothing.  Measured on
+    WETH->USDC 300: 0.031 bp for ~770 ms."""
     amount = 1_000_000
     quoter = LocalPoolQuoter()
     baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
@@ -316,10 +351,10 @@ def test_a_local_quoter_finishes_on_the_true_function():
         nominal_in=[600_000, 400_000, 500_000],
         nominal_out=[500_000, 380_000, 490_000],
     )
-    assert report.mode == "curves"
-    assert report.polish_calls > 0, "an in-process quoter should be polished against"
-    # Every polish evaluation is a real quote, so the reported result is one.
-    assert report.after == quoter.quote_routes([tuned], [amount], [2])[0]
+    assert abs(report.check_bp) < 0.15
+    assert report.polish_skipped and report.polish_calls == 0
+    # ...and the answer is still the optimum, reached on the curves alone.
+    assert report.improved
     assert abs(tuned[0].bps / BPS - true_optimum(quoter, amount)) < 0.01
 
 
