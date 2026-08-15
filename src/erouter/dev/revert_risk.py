@@ -62,22 +62,39 @@ BOUND_OF_FEE = 0.2
 #: moves.
 #
 # A fraction of the fee is the right *shape* for the bound -- it is what makes
-# sandwiching unprofitable -- but on a pool that charges 0.1 bp it comes out at
-# 0.02 bp, which is below what the pair moves on accrual alone.  Curve.fi
-# Strategic USD Reserve priced at 10.3% for exactly that reason, and USDC->USDT
-# then routed around it and gave up 1.6 bp to do so.
+# sandwiching unprofitable -- but it is not a survivable one on a pool whose fee
+# is small against its own volatility.  TricryptoUSDC charges 3.3 bp, so 20% of
+# it is 0.65 bp, against a rate that jumps ~0.9 bp when someone trades: routes
+# through it failed more often than they landed.
 #
-# Only where the pair moves.  On a pegged pair 0.5 bp is a large allowance
+# Measured over one sampling pass at block 25,760,310, scoring every candidate
+# floor against the same series -- P(a route trips a minimum-out in two
+# minutes):
+#
+#     floor    USDC->WETH 100k   WETH->USDC 30   stETH->WETH   USDC->USDT 5M
+#     0.5 bp             70.5%           58.0%          0.4%            0.0%
+#     1.0 bp             60.2%           55.6%          0.2%            0.0%
+#     3.0 bp              ~12%            ~15%          0.0%            0.0%
+#     5.0 bp              5.1%            1.5%          0.0%            0.0%
+#    10.0 bp              0.7%            0.5%          0.0%            0.0%
+#
+# The knee is between 1 and 2 bp; 3 bp sits past it, taking the volatile routes
+# from "fails more often than not" to a few percent, while a larger floor buys
+# progressively less for a proportionally larger slippage allowance.
+#
+# Only where the pair moves.  On a pegged pair this would be a large allowance
 # against a spread of one or two, and those arcs do not need it: 705 of the 831
-# measured never moved beyond what our own quotes resolve, and four of them
-# price above 1%.  "Moves" is the measurement rather than a token list -- an arc
-# whose typical jump clears the resolution floor.
+# measured never moved beyond what our own quotes resolve.  "Moves" is the
+# measurement rather than a token list -- an arc whose typical jump clears the
+# resolution floor -- which is why ETH/stETH stays on the tight side despite
+# holding two volatile assets.  Its *rate* does not move.
 #
 # This has to match whatever the executor actually sets, since it is the
 # executor's parameter being modelled.  It also means the sandwich argument on
-# a sub-2.5 bp pool now rests on the absolute size of the bound rather than on
-# its ratio to the fee.
-BOUND_FLOOR_BP = 0.5
+# a pool charging under 15 bp now rests on the absolute size of the bound
+# rather than on its ratio to the fee: 3 bp of a $10k trade is not worth
+# sandwiching, 3 bp of a $10M trade might be.
+BOUND_FLOOR_BP = 3.0
 #: Below this a rate is not moving as far as our own quotes can resolve.
 SCALE_FLOOR_BP = 0.005
 #: Never claim an arc is safer than this: the tail is extrapolated past the
