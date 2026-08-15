@@ -58,6 +58,26 @@ FINE_BLOCKS = tuple(k * STEP_BLOCKS for k in range(SAMPLES))
 HORIZON = 2
 #: The minimum-out, as a fraction of the pool's own fee.
 BOUND_OF_FEE = 0.2
+#: An absolute floor under that, in basis points, for arcs whose rate actually
+#: moves.
+#
+# A fraction of the fee is the right *shape* for the bound -- it is what makes
+# sandwiching unprofitable -- but on a pool that charges 0.1 bp it comes out at
+# 0.02 bp, which is below what the pair moves on accrual alone.  Curve.fi
+# Strategic USD Reserve priced at 10.3% for exactly that reason, and USDC->USDT
+# then routed around it and gave up 1.6 bp to do so.
+#
+# Only where the pair moves.  On a pegged pair 0.5 bp is a large allowance
+# against a spread of one or two, and those arcs do not need it: 705 of the 831
+# measured never moved beyond what our own quotes resolve, and four of them
+# price above 1%.  "Moves" is the measurement rather than a token list -- an arc
+# whose typical jump clears the resolution floor.
+#
+# This has to match whatever the executor actually sets, since it is the
+# executor's parameter being modelled.  It also means the sandwich argument on
+# a sub-2.5 bp pool now rests on the absolute size of the bound rather than on
+# its ratio to the fee.
+BOUND_FLOOR_BP = 0.5
 #: Below this a rate is not moving as far as our own quotes can resolve.
 SCALE_FLOOR_BP = 0.005
 #: Never claim an arc is safer than this: the tail is extrapolated past the
@@ -101,6 +121,18 @@ def jump_scale_bp(moves: list[float]) -> float:
     if not jumps:
         return SCALE_FLOOR_BP
     return max(jumps[len(jumps) // 2], SCALE_FLOOR_BP)
+
+
+def bound_bp(fee: float, scale_bp: float) -> float:
+    """The minimum-out this arc executes with, in basis points.
+
+    A fraction of the pool's fee, floored for arcs that move -- see
+    `BOUND_FLOOR_BP`.
+    """
+    bound = fee * BOUND_OF_FEE * 1e4
+    if scale_bp > SCALE_FLOOR_BP:
+        bound = max(bound, BOUND_FLOOR_BP)
+    return bound
 
 
 def tail_model(standardised: list[float]):
@@ -165,18 +197,18 @@ def breach_risk(series, fees: dict[str, float], arcs=None, *,
     tail = tail_model(pooled)
     out: dict[str, dict] = {}
     for key, pool, scale, moves in measured:
-        bound_bp = fees[pool] * BOUND_OF_FEE * 1e4
+        bound = bound_bp(fees[pool], scale)
         jumps = sum(1 for m in moves if m > 0)
         # How often a window contains a move at all.  Half an event stands in
         # for none, so an arc that saw no trade in half an hour is priced low
         # rather than at zero -- it is quiet, not frozen.
         active = max(jumps, 0.5) / len(moves)
-        modelled = active * tail(bound_bp / scale)
+        modelled = active * tail(bound / scale)
         # A move that was actually seen past the bound outranks any model of
         # how likely one was.
-        seen = sum(1 for m in moves if m > bound_bp) / len(moves)
+        seen = sum(1 for m in moves if m > bound) / len(moves)
         risk = min(max(max(seen, modelled), RISK_FLOOR), RISK_CEILING)
-        out[key] = {"p": round(risk, 6), "bound_bp": round(bound_bp, 4),
+        out[key] = {"p": round(risk, 6), "bound_bp": round(bound, 4),
                     "scale_bp": round(scale, 4), "active": round(active, 4),
                     "n": len(moves)}
     return out

@@ -1391,7 +1391,11 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     # version stored one price per token and divided, and each token was priced
     # in whatever its own deepest pool paired it with, so the ratio was
     # meaningless.  One series per arc, one request per block.
-    if not args.skip_executability:
+    # Gated on its own flag, not on `--skip-executability`.  These two answer
+    # unrelated questions and age at different rates: what a pool costs to
+    # execute holds for months, while how far its rate moves against its own
+    # bound is this week's market.
+    if not args.skip_drift:
         from .drift import SAMPLE_BLOCKS, SAMPLE_FRACTION, sample_rates
 
         deepest: dict[str, tuple] = {}
@@ -1644,6 +1648,9 @@ def build_parser() -> argparse.ArgumentParser:
     gascal.add_argument(
         "--skip-executability", action="store_true",
         help="only re-measure gas, leaving the broken-arc list as it stands")
+    gascal.add_argument(
+        "--skip-drift", action="store_true",
+        help="leave the rate series and per-arc minimum-out risk as they stand")
     gascal.set_defaults(func=cmd_gascal)
 
     warm = sub.add_parser("warmcache",

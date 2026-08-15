@@ -280,3 +280,22 @@ def test_a_deposit_leg_takes_the_pool_figure_not_a_swap_pair():
     deposit = Leg(POOL[0], ArcKind.DEPOSIT_FIXED, i=0, j=1, n=3,
                   src_slot=0, dst_slot=1)
     assert table.survival([deposit]) == 0.98
+
+
+def test_a_moving_pair_gets_the_absolute_floor_under_its_bound():
+    """Twenty percent of a 0.1 bp fee is 0.02 bp, which the pair crosses on
+    accrual alone.  Curve.fi Strategic USD Reserve priced at 10.3% for that
+    reason and USDC->USDT gave up 1.6 bp routing around it."""
+    from erouter.dev.revert_risk import BOUND_FLOOR_BP, bound_bp
+
+    assert bound_bp(0.00001, 0.1) == BOUND_FLOOR_BP        # 0.1 bp fee, moves
+    # 146 bp fee, as Yield Basis charges: nowhere near the floor.
+    assert round(bound_bp(0.0146, 0.1), 4) == 29.2
+
+
+def test_a_pegged_pair_keeps_the_fee_fraction():
+    """0.5 bp is a large allowance against a spread of one or two, and a pair
+    that never moves does not need it."""
+    from erouter.dev.revert_risk import SCALE_FLOOR_BP, bound_bp
+
+    assert bound_bp(0.0001, SCALE_FLOOR_BP) == 0.2         # 1 bp fee, pegged
