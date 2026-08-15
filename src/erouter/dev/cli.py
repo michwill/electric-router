@@ -507,6 +507,7 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     gas_table, gas_measured = _gas_table(chain, args, load.pools)
     risk_table, risk_measured = _risk_table(chain, args)
+    revert_cost = _revert_cost(args)
     if gas_measured:
         print(f"  gas: {gas_measured:,} legs priced from measured execution")
     elif not getattr(args, "static_gas", False):
@@ -581,6 +582,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             max_legs=args.max_legs,
             gas_table=gas_table,
             risk_table=risk_table,
+            **revert_cost,
         )
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
@@ -599,6 +601,7 @@ def cmd_route(args: argparse.Namespace) -> int:
                 max_legs=args.max_legs,
                 gas_table=gas_table,
                 risk_table=risk_table,
+                **revert_cost,
             )
         except RoutingError as exc:
             print(f"{BAD} no route after refresh: {exc}")
@@ -624,6 +627,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
 
     gas_table, _ = _gas_table(chain, args, load.pools)
     risk_table, _ = _risk_table(chain, args)
+    revert_cost = _revert_cost(args)
     symbol_src, symbol_dst = nodes.symbol(src), nodes.symbol(dst)
     print(f"  {chain.name} · block {rpc.block:,} · {symbol_src} -> {symbol_dst}")
     print("  preparing (probing arcs, fitting reference prices)...", flush=True)
@@ -677,6 +681,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
                 risk_table=risk_table,
+                **revert_cost,
             )
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
@@ -691,7 +696,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                            refit_rounds=args.refit, extra_arcs=stake_arcs,
                            max_legs=args.max_legs, prepared=prepared,
                            gas_table=gas_table,
-                           risk_table=risk_table)
+                           risk_table=risk_table, **revert_cost)
         _present(result, args, chain, rpc, nodes, wrappers, load,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
@@ -888,6 +893,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
         return 4
     gas_table, gas_measured = _gas_table(chain, args, load.pools)
     risk_table, _ = _risk_table(chain, args)
+    revert_cost = _revert_cost(args)
     if gas_measured:
         print(f"  gas: {gas_measured:,} legs priced from measured execution")
     elif not getattr(args, "static_gas", False):
@@ -927,7 +933,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     kw = {
         "src_token": src, "dst_token": dst, "amount_in": amount,
         "extra_arcs": stake, "gas_price_wei": gas_price, "max_legs": args.max_legs,
-        "gas_table": gas_table, "risk_table": risk_table,
+        "gas_table": gas_table, "risk_table": risk_table, **revert_cost,
         "optimise_split": not args.no_split,
     }
 
@@ -1473,6 +1479,17 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
 
 
+def _revert_cost(args=None) -> dict:
+    """The `--revert-cost-bp` override, as kwargs, or nothing at all.
+
+    Absent means `core.risk.REVERT_COST_BP`, which is where the default and
+    the reasoning for it live; passing it through as `**{}` keeps that single
+    source of truth instead of copying the number here.
+    """
+    got = getattr(args, "revert_cost_bp", None)
+    return {} if got is None else {"revert_cost_bp": float(got)}
+
+
 def _risk_table(chain, args=None):
     """Per-pool minimum-out risk, measured, or nothing at all.
 
@@ -1784,6 +1801,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-risk", action="store_true",
         help="rank on quoted output alone, ignoring how often each pool's own "
              "minimum-out would trip before the route lands")
+    route_cmd.add_argument(
+        "--revert-cost-bp", type=float, default=None,
+        help="what one failed attempt costs, in basis points of the trade "
+             "(default 1.0): gas plus whatever the price did while the user "
+             "resubmitted. Raise it to buy safety with price")
     route_cmd.set_defaults(func=cmd_route)
 
     return parser

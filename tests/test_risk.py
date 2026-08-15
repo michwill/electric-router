@@ -1,10 +1,12 @@
 """Per-pool minimum-out risk, and what it does to ranking.
 
-The router prices a route as `output * P(lands) - gas`, where `P(lands)` is the
-chance every leg's minimum-out -- a fraction of that pool's fee -- still holds
-when the transaction is mined a minute or two later.  These tests fix the two
-halves of that: the table (`core/risk.py`) and the estimator that fills it
-(`dev/revert_risk.py`).
+The router nets off what a route costs to attempt: gas, plus the chance one of
+its minimum-outs -- each a fraction of its pool's fee -- has been overtaken by
+the time the transaction is mined a minute or two later.  A failure costs a
+resubmission rather than the trade, so that second term is a fraction of a
+basis point; the tests below fix its *size*, not only its sign, because the
+size is the whole argument.  Two halves: the table (`core/risk.py`) and the
+estimator that fills it (`dev/revert_risk.py`).
 """
 
 from __future__ import annotations
@@ -23,6 +25,14 @@ from erouter.dev.drift import PriceSeries
 from erouter.dev.revert_risk import breach_risk, jump_scale_bp, tail_model
 
 POOL = ["0x" + f"{k:02x}" * 20 for k in range(1, 9)]
+
+
+def _score(candidate, risk):
+    """What `verify` ranks on, recomputed here so a test can name the size of
+    the premium rather than only its sign."""
+    from erouter.core.risk import expected_value
+
+    return expected_value(float(candidate.verified_out), candidate.survival)
 
 
 class FakeClient:
@@ -106,10 +116,11 @@ def test_wraps_and_redemptions_carry_no_rate_risk():
 # ------------------------------------------------------------- the ranking
 
 
-def test_a_route_through_a_dangerous_pool_loses_its_advantage():
-    """The measured case.  USDC->WETH gains 71 bp by splitting through TriCRV
-    and TricryptoUSDC, which breach a quarter and a sixth of the time: about
-    62% survival, so the expected outcome is far below a single safe hop."""
+def test_a_dangerous_route_pays_a_fraction_of_a_basis_point():
+    """The premium has to stay small enough to be a tie-break.  TriCRV and
+    TricryptoUSDC together land about 62% of the time; that is worth 0.4 bp of
+    a route, not the 3,800 bp `output * survival` would charge -- and a 71 bp
+    advantage is still an advantage."""
     risk = RiskTable({(POOL[0], 0, 1): 1e-5, (POOL[1], 0, 1): 0.25,
                       (POOL[2], 0, 1): 0.167})
     candidates = CandidateSet([
@@ -118,8 +129,24 @@ def test_a_route_through_a_dangerous_pool_loses_its_advantage():
     ])
     verify(candidates, FakeClient([1_007_100, 1_000_000]), amount_in=10**6,
            risk_table=risk)
+    assert candidates.best.label == "split"
+    split = candidates.candidates[0]
+    assert 0.6 < split.survival < 0.64
+    charged_bp = (1 - _score(split, risk) / split.verified_out) * 1e4
+    assert 0.3 < charged_bp < 0.5
+
+
+def test_a_dangerous_route_loses_when_its_edge_is_under_the_premium():
+    """...and the same 0.4 bp is decisive when the gain is smaller than it."""
+    risk = RiskTable({(POOL[0], 0, 1): 1e-5, (POOL[1], 0, 1): 0.25,
+                      (POOL[2], 0, 1): 0.167})
+    candidates = CandidateSet([
+        _candidate("split", [POOL[1], POOL[2]]),
+        _candidate("direct", [POOL[0]]),
+    ])
+    verify(candidates, FakeClient([1_000_020, 1_000_000]), amount_in=10**6,
+           risk_table=risk)  # +0.2 bp for a 38% chance of not landing
     assert candidates.best.label == "direct"
-    assert 0.6 < candidates.candidates[0].survival < 0.64
 
 
 def test_a_long_route_through_safe_pools_keeps_its_gain():
@@ -136,16 +163,23 @@ def test_a_long_route_through_safe_pools_keeps_its_gain():
     assert candidates.best.label == "long"
 
 
-def test_gas_is_charged_whether_or_not_the_route_lands():
-    """Expected output is `out * survival - gas`, not `(out - gas) * survival`:
-    a reverted transaction still pays for its execution."""
+def test_a_failed_attempt_pays_gas_twice():
+    """It pays for itself and the retry pays again -- so gas carries a
+    `1 + P(fails)` factor, while the output only loses what resubmitting is
+    worth."""
+    from erouter.core.risk import expected_value
+
+    gas = 173_000 * 1e-9          # 71,000 base + 102,000 swap, at 1 gwei
+    assert expected_value(10**18, 1.0, gas_cost=gas * 1e18) == 10**18 - gas * 1e18
+    half = expected_value(10**18, 0.5, gas_cost=gas * 1e18)
+    assert abs(half - (10**18 * (1 - 0.5e-4) - 1.5 * gas * 1e18)) < 1
+
     risk = RiskTable({(POOL[0], 0, 1): 0.5})
     candidates = CandidateSet([_candidate("one", [POOL[0]])])
     verify(candidates, FakeClient([10**18]), amount_in=10**18,
            gas_price_wei=10**9, dst_wei_per_eth=10**18, risk_table=risk)
     candidate = candidates.candidates[0]
     assert candidate.survival == 0.5
-    # 71,000 base + 102,000 for the swap, at 1 gwei.
     assert candidate.gas == 173_000
 
 

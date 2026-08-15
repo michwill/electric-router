@@ -779,9 +779,17 @@ Break token conservation, which is an assumption of `(P)` itself, not of the qua
 
 The network here is purely dissipative — no reactive elements, no memory — because pool state is frozen during the trade. Routing across blocks or against time-varying reserves adds state and leaves resistive-network territory entirely. Out of scope.
 
-One consequence of time does have to be priced, though, and like gas it is priced *outside* `(P)` (§11.1). Each leg executes with a minimum-out — set to a fraction of that pool's fee, the level at which sandwiching stops paying — and that bound is also a revert trigger: the route lands only if every pool it touches stays inside its own bound during the minute or two between the quote and inclusion. So candidate selection maximises `verified_output × Π(1 − pᵢ) − gas_cost`, with `pᵢ` measured per arc (`dev/revert_risk.py`, stored in `data/facts`). Gas is subtracted after the product because it is spent whether or not the route lands.
+One consequence of time does have to be priced, though, and like gas it is priced *outside* `(P)` (§11.1). Each leg executes with a minimum-out — a fraction of that pool's fee, floored at 0.5 bp where the pair moves, which is the level at which sandwiching stops paying — and that bound is also a revert trigger: the route lands only if every pool it touches stays inside its own bound during the minute or two between the quote and inclusion. `P(fails) = 1 − Π(1 − pᵢ)`, with `pᵢ` measured per arc (`dev/revert_risk.py`, stored in `data/facts`).
 
-This is a term on the *candidate*, not an element law: it is a product over the chosen arcs, so it is no more admissible inside the convex program than a fixed per-arc cost is, and for the same reason. It also subsumes the question of how many legs a route should have. Measured, `pᵢ` is not a property of the asset class — Yield Basis WETH is maximally volatile and never breaches, because its 218 bp fee puts the bound at 43.7 bp, while TriCRV's 3.36 bp fee gives a 0.67 bp bound against a rate that moves several bp a minute and breaches around half the time — so a leg budget prices exactly the wrong thing. Nine arcs in ten never breach, and the ones that do should be avoided individually rather than paid for by every long route.
+**A failure costs a resubmission, not the trade**, and that fixes the scale of the whole term. Candidate selection maximises
+
+```
+verified_output × (1 − P(fails) × REVERT_COST_BP/1e4) − gas_cost × (1 + P(fails))
+```
+
+with `REVERT_COST_BP ≈ 1`: gas, plus whatever the price did while the user resubmitted. Ranking on `output × Π(1 − pᵢ)` instead — pricing a failure as losing the entire notional — was measured to pay 17–126 bp for safety on volatile pairs and to flip between routes 1–20% apart in price on nothing but which candidates a given run generated. The gas term keeps its own `(1 + P(fails))` because a failed attempt pays for itself and the retry pays again.
+
+This is a term on the *candidate*, not an element law: it is a function of the chosen arc set, so it is no more admissible inside the convex program than a fixed per-arc cost is, and for the same reason. It also replaces any notion of a leg budget. Measured, `pᵢ` is not a property of the asset class — Yield Basis WETH is maximally volatile and never breaches, because its 218 bp fee puts the bound at 43.7 bp, while TriCRV's 3.36 bp fee gives a 0.77 bp bound against a rate that moves several bp a minute and breaches around 40% of the time — so a leg budget prices exactly the wrong thing. Nine arcs in ten never breach, and the ones that do are worth a fraction of a basis point each, which separates two otherwise equal routes and never buys a materially worse price.
 
 ### 11.6 What is deliberately not used
 

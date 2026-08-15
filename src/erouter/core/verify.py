@@ -30,7 +30,7 @@ from .gas import GasTable, leg_gas, plan_gas
 from .nodes import NodeMap
 from .quoter import MAX_LEGS, MAX_SLOTS, QuoterClient
 from .realize import RealizationError, check_one_arc_per_pool, realize
-from .risk import RiskTable
+from .risk import REVERT_COST_BP, RiskTable, expected_value
 from .types import ArcKind, PoolArc
 
 # Per-kind execution gas lives in `gas.py`; a flat per-leg figure over-charged
@@ -124,14 +124,15 @@ def verify(
     dst_wei_per_eth: float = 0.0,
     gas_table: GasTable | None = None,
     risk_table: RiskTable | None = None,
+    revert_cost_bp: float = REVERT_COST_BP,
 ) -> CandidateSet:
     """Quote every ready candidate in one call and rank them.
 
-    Ranking is by *expected* verified output: what the route quotes, times the
-    chance every one of its minimum-outs holds until it lands, less the gas --
-    which is paid either way.  Both corrections need the caller to have
-    supplied the means to value them in the output token; neither is an element
-    law and neither may enter the convex core (§11.1).
+    Ranking is by verified output net of what the route costs to attempt: gas,
+    plus the chance one of its minimum-outs trips first, charged at what a
+    resubmission is worth rather than at the trade.  Both corrections need the
+    caller to have supplied the means to value them in the output token;
+    neither is an element law and neither may enter the convex core (§11.1).
     """
     # Quote whatever is new.  Ranking happens unconditionally below: this is
     # called more than once per route (candidates, then the direct floor, then
@@ -156,26 +157,23 @@ def verify(
 
     def score(candidate: Candidate) -> float:
         value = float(candidate.verified_out or 0)
-        if risk_table is not None and candidate.route:
-            # Expected, not quoted.  Every leg carries a minimum-out at a
-            # fraction of its pool's fee, so the route lands only if none of
-            # those pools moves past its own bound while the user is
-            # confirming; `survival` is the chance of that.  Measured, this is
-            # what decides leg count: a USDC->WETH route through TriCRV and
-            # TricryptoUSDC survives about 62% of the time, which no 71 bp
-            # advantage can pay for, while a route through pools whose fees are
-            # wide against their volatility survives essentially always and can
-            # afford a dozen legs.  See `core/risk.py`.
-            candidate.survival = risk_table.survival(
-                leg.leg for leg in candidate.route.legs)
-            value *= candidate.survival
+        gas_cost = 0.0
         if gas_price_wei > 0 and dst_wei_per_eth > 0 and candidate.route:
-            # Subtracted after the survival factor, not before: gas is spent
-            # whether or not the route lands.
             gas = plan_gas((leg.leg for leg in candidate.route.legs), gas_table)
             candidate.gas = gas
-            value -= gas * gas_price_wei / 1e18 * dst_wei_per_eth
-        return value
+            gas_cost = gas * gas_price_wei / 1e18 * dst_wei_per_eth
+        if risk_table is None or not candidate.route:
+            return value - gas_cost
+        # Every leg carries a minimum-out at a fraction of its pool's fee, so
+        # the route lands only if none of those pools moves past its own bound
+        # while the user is confirming.  `survival` is the chance of that; the
+        # cost of the other case is one more transaction and a basis point of
+        # price movement, not the trade.  See `core/risk.py` -- the scale of
+        # this term is the whole argument.
+        candidate.survival = risk_table.survival(
+            leg.leg for leg in candidate.route.legs)
+        return expected_value(value, candidate.survival, gas_cost=gas_cost,
+                              revert_cost_bp=revert_cost_bp)
 
     def legs(candidate: Candidate) -> int:
         return len(candidate.route.legs) if candidate.route else 1_000
