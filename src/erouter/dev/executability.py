@@ -96,6 +96,12 @@ def refused_by_protocol(exc: Exception) -> bool:
     unredeemable in one run -- and `redeem: false` is what gates a merge, so
     that mistake is expensive in exactly one direction.
     """
+    # boa raises `BoaError` precisely when the contract call failed, and its
+    # message is a formatted trace that contains the word "revert" nowhere.
+    # Matching on the text alone recorded every refusal as untested -- sUSDe,
+    # which is the whole reason this probe exists, among them.
+    if type(exc).__name__ == "BoaError":
+        return True
     text = str(exc)
     if "Transaction(" in text:
         return False
@@ -241,3 +247,95 @@ def discover_wrappers(pools, client) -> list[tuple[str, str, str]]:
             found.append((token, underlying, family))
             break
     return found
+
+
+# --- the same questions, asked where impersonation is allowed --------------
+#
+# revm refuses a caller that has code (EIP-3607), and every holder of these
+# tokens is a pool, so borrowing from one is impossible there -- which left 19
+# redemptions untestable.  boa's fork env has no such rule: `prank` makes any
+# address the sender, including a contract.  It is slower than revm, which is
+# why quoting does not use it, but this runs once per facts build over a few
+# dozen tokens and buys the verdicts revm cannot reach.
+
+MINIMAL_ERC20 = """[
+  {"name":"balanceOf","type":"function","stateMutability":"view",
+   "inputs":[{"name":"a","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
+  {"name":"approve","type":"function","stateMutability":"nonpayable",
+   "inputs":[{"name":"s","type":"address"},{"name":"v","type":"uint256"}],"outputs":[]}
+]"""
+
+WRAPPER_ABI = {
+    "ctoken": """[
+      {"name":"mint","type":"function","stateMutability":"nonpayable",
+       "inputs":[{"name":"a","type":"uint256"}],"outputs":[]},
+      {"name":"redeem","type":"function","stateMutability":"nonpayable",
+       "inputs":[{"name":"a","type":"uint256"}],"outputs":[]}
+    ]""",
+    "erc4626": """[
+      {"name":"deposit","type":"function","stateMutability":"nonpayable",
+       "inputs":[{"name":"a","type":"uint256"},{"name":"r","type":"address"}],
+       "outputs":[]},
+      {"name":"redeem","type":"function","stateMutability":"nonpayable",
+       "inputs":[{"name":"s","type":"uint256"},{"name":"r","type":"address"},
+                 {"name":"o","type":"address"}],"outputs":[]}
+    ]""",
+}
+
+
+def probe_wrappers_by_prank(wrappers, holders, *, share: int = 4) -> list[Capability]:
+    """Mint and redeem as an address that actually holds the tokens.
+
+    `holders` maps a token to someone holding it.  Each attempt runs inside an
+    `anchor()` so nothing it does survives, and `prank` makes the holder the
+    sender -- which is the whole point, since the holders are contracts.
+
+    `share` is the divisor applied to the holder's balance: a quarter of what
+    it has is a real redemption, and cannot be refused merely for exceeding the
+    balance.  Both directions are attempted independently, and a direction that
+    could not be attempted stays `None` -- untested, never refused.
+    """
+    import boa
+
+    out: list[Capability] = []
+    for token, underlying, family in wrappers:
+        got = Capability(address=token.lower(), family=family)
+        abi = WRAPPER_ABI.get(family)
+        if abi is None:
+            out.append(got)
+            continue
+        contract = boa.loads_abi(abi).at(token)
+        erc20 = boa.loads_abi(MINIMAL_ERC20)
+
+        for direction, spend_token in (("mint", underlying), ("redeem", token)):
+            holder = (holders or {}).get(spend_token.lower(), "")
+            if not holder:
+                got.notes[direction] = "no holder"
+                continue
+            try:
+                with boa.env.anchor():
+                    held = erc20.at(spend_token).balanceOf(holder)
+                    if held <= 0:
+                        got.notes[direction] = "holder is empty"
+                        continue
+                    amount = max(held // share, 1)
+                    with boa.env.prank(holder):
+                        if direction == "mint":
+                            erc20.at(spend_token).approve(token, amount)
+                            if family == "ctoken":
+                                contract.mint(amount)
+                            else:
+                                contract.deposit(amount, holder)
+                        elif family == "ctoken":
+                            contract.redeem(amount)
+                        else:
+                            contract.redeem(amount, holder, holder)
+                    setattr(got, direction, True)
+            except Exception as exc:
+                # boa surfaces the contract's revert; anything else is this
+                # harness failing to ask, which is not a refusal.
+                if refused_by_protocol(exc) or "revert" in str(exc).lower():
+                    setattr(got, direction, False)
+                got.notes[direction] = revert_reason(exc)
+        out.append(got)
+    return out

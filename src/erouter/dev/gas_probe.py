@@ -223,6 +223,24 @@ PAYABLE = (ArcKind.WRAP_NATIVE, ArcKind.STAKE_NATIVE)
 _ERROR_SELECTOR = bytes.fromhex("08c379a0")
 
 
+def _boa_reason(exc: Exception) -> str:
+    """One committable line out of boa's multi-line failure trace.
+
+    boa reports a contract failure as a formatted trace with a banner, a stack
+    and the raw calldata.  None of that belongs in a committed file; the last
+    meaningful line usually names the contract or the decoded error.
+    """
+    # Only a decoded error is worth keeping.  The trace is mostly frames --
+    # "<Unknown contract 0x...>" names where it stopped, not why, and that is
+    # noise in a file meant to be read in a diff.
+    for line in reversed([x.strip() for x in str(exc).splitlines() if x.strip()]):
+        if line.startswith(("=", "[E]", "0x", "b'", 'b"', "<", "(")):
+            continue
+        if ":" in line or line.isidentifier() or " " in line:
+            return line[:60]
+    return "reverted"
+
+
 def revert_reason(exc: Exception) -> str:
     """The best short explanation available for a revert.
 
@@ -230,6 +248,8 @@ def revert_reason(exc: Exception) -> str:
     "mint is paused" tells a reader what to do about it where a hex blob does
     not.  Aave V2 answers with a bare numeric code, which stays as-is.
     """
+    if type(exc).__name__ == "BoaError":
+        return _boa_reason(exc)
     text = str(exc)
     if "output: 0x" not in text:
         return text[:60] or type(exc).__name__

@@ -1227,43 +1227,80 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
     # --- can each wrapper still be entered, and still be left? -------------
     #
-    # A property of the token, not of a pool or a swap, and the asymmetry is
-    # everywhere: Compound's mint is paused while redeem works, sUSDe mints on
-    # demand and redeems on a seven-day cooldown, pufETH redeems through a
-    # queue.  So every coin of every pool is checked, both ways, rather than a
-    # list someone maintains -- which is also what R5's ERC4626 allowlist is
-    # standing in for until this can replace it.
+    # A property of the token, not of a pool or a swap, so every coin of every
+    # pool is asked both ways rather than a list someone maintains.
+    #
+    # Under boa rather than revm, and only here.  revm refuses a caller that
+    # has code (EIP-3607) and every holder of these tokens is a pool, so
+    # borrowing from one is impossible there -- which left 19 redemptions
+    # untestable and no way to reach them.  `boa.env.prank` has no such rule.
+    # It is slower, which is why quoting does not use it, but it costs 71s once
+    # per build and takes redemption coverage from 11 of 30 to all of them.
     if not args.skip_executability:
-        from .executability import discover_wrappers, try_wrapper
+        import boa
 
-        wrappers = discover_wrappers(load.pools, setup)
-        print(f"  wrappers: {len(wrappers)} token(s) wrap another")
-        # The richest holder of each token, for the ones a slot write cannot
-        # fund -- a share balance the protocol computes is not a slot.
-        richest = {token: ranked[0] for token, ranked in holders.items() if ranked}
+        from .executability import discover_wrappers, probe_wrappers_by_prank
+
+        found = discover_wrappers(load.pools, setup)
+        richest = {token: ranked[0][0] for token, ranked in holders.items() if ranked}
+        boa.fork(_rpc_url(chain, args), block_identifier=rpc.block)
+        boa.env._fork_try_prefetch_state = True
+        # Not `got`: that name holds `measure_legs`' result and is read again
+        # below.  This is the second time shadowing it has crashed the command
+        # after the cache was already written, which makes the failure look
+        # like the probe never ran.
+        able = probe_wrappers_by_prank(found, richest)
         tally = {"mint": 0, "redeem": 0, "refused": 0, "untested": 0}
-        for token, underlying, family in wrappers:
-            unit = 10 ** (nodes.decimals(token) if nodes.has(token) else 18)
-            # A flat hundred tokens.  Sizing this to a tenth of the richest
-            # holder's balance was tried and changed nothing -- 42 of 82
-            # attempts went unfunded either way -- so the amount was never the
-            # constraint.  What blocks the rest is getting the token at all:
-            # a share balance the protocol computes is not a slot to write, and
-            # for many of these no pool holds enough to lend.
-            amount = 100 * unit
-            able = try_wrapper(
-                executing._evm, Funder(executing._evm), token=token,
-                underlying=underlying, family=family, amount=amount,
-                holders={t: who for t, (who, _) in richest.items()},
-            )
+        for capability in able:
             for way in ("mint", "redeem"):
-                state = getattr(able, way)
+                state = getattr(capability, way)
                 tally[way if state else ("refused" if state is False else "untested")] += 1
             cache.learn_wrapper(
-                able.address, mint=able.mint, redeem=able.redeem,
-                note=able.notes.get("mint") or able.notes.get("redeem") or "")
-        print(f"      {tally['mint']} mintable, {tally['redeem']} redeemable, "
-              f"{tally['refused']} refused, {tally['untested']} could not be funded")
+                capability.address, mint=capability.mint, redeem=capability.redeem,
+                note=capability.notes.get("redeem") or capability.notes.get("mint") or "")
+        print(f"  wrappers: {len(found)} token(s) wrap another -- "
+              f"{tally['mint']} mintable, {tally['redeem']} redeemable, "
+              f"{tally['refused']} refused, {tally['untested']} untested")
+
+    # --- the survey: protocols that quote and cannot be traded -------------
+    #
+    # The pass above only sees legs a route chose, so it can verify what we
+    # execute but never discover a pool we already refuse -- a blacklisted pool
+    # builds no arcs and is never reached again.  These are checked directly,
+    # every build, which is also what lets a pool come back if a protocol is
+    # unpaused.
+    if not args.skip_executability and getattr(chain, "watch", ()):
+        from .executability import revert_reason
+
+        found, recovered = {}, []
+        for address in chain.watch:
+            for i, j in ((0, 1), (1, 0)):
+                # 14 is the reserved `SWAP_UNDERLYING` id.  Recording these
+                # under SWAP_STABLE collided with the pool's own
+                # wrapped-coin arcs, which share (i, j) and are healthy.
+                key = cache.key(address, UNDERLYING_KIND, i, j)
+                snapshot = executing._evm.snapshot()
+                try:
+                    token = _underlying_of(executing._evm, address, i)
+                    if not token:
+                        continue
+                    if not Funder(executing._evm).fund(token, address, 10_000 * 10 ** 18):
+                        continue
+                    executing._evm.message_call(
+                        caller=GASCAL_CALLER, to=address,
+                        calldata=_underlying_swap(i, j, 10_000 * 10 ** 18))
+                    recovered.append(key)
+                except Exception as exc:
+                    found[key] = revert_reason(exc)
+                finally:
+                    with contextlib.suppress(Exception):
+                        executing._evm.revert(snapshot)
+        marked = cache.learn_broken(found)
+        cleared = cache.forget_broken(recovered)
+        print(f"  watched pools: {len(found)} of {len(chain.watch) * 2} directions "
+              f"revert ({marked} new, {cleared} recovered)")
+        for key, reason in sorted(found.items()):
+            print(f"      {key:<46} {reason}")
 
     # --- the survey: protocols that quote and cannot be traded -------------
     #
