@@ -56,6 +56,14 @@ def to_json(
                 "fee": round(result.fee_bp, 4),
                 "impact": round(result.impact_bp, 4),
             },
+            # Quoted, not modelled: the same route re-priced at a fraction of
+            # the size, so `bp` is what this trade's size cost it.
+            "price_impact": None if result.price_impact_bp is None else {
+                "bp": round(result.price_impact_bp, 4),
+                "fraction": result.impact_fraction,
+                "reference_in": str(result.impact_reference_in),
+                "reference_out": str(result.impact_reference_out),
+            },
         },
         "legs": [],
         "nodes": [],

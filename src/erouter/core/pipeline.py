@@ -60,7 +60,7 @@ from .solve import SolveReport, active_set_solve, solve
 from .split import optimise as optimise_splits
 from .split import should_optimise
 from .types import ArcKind, PoolArc, Probe
-from .verify import realize_candidates, verify
+from .verify import IMPACT_FRACTION, price_impact, realize_candidates, verify
 
 # What the router will *propose* by default, as opposed to what the quoter can
 # *price* (MAX_LEGS, 128).  Raising the quoter's capacity is free -- it is a
@@ -94,6 +94,13 @@ class RouteResult:
     price_out_per_in: float = 0.0
     fee_bp: float = 0.0
     impact_bp: float = 0.0
+    #: Measured price impact: how much worse the price is at full size than
+    #: down the same route at `impact_fraction` of it.  `impact_bp` above is
+    #: the *modelled* figure from the resistor term; this one is quoted.
+    price_impact_bp: float | None = None
+    impact_fraction: float = 0.0
+    impact_reference_in: int = 0
+    impact_reference_out: int = 0
     candidates: CandidateSet | None = None
     refit_report: RefitReport | None = None
     winner: Candidate | None = None
@@ -364,6 +371,8 @@ def route(
     gas_table: GasTable | None = None,
     risk_table: RiskTable | None = None,
     revert_cost_bp: float = REVERT_COST_BP,
+    measure_impact: bool = True,
+    impact_fraction: float = IMPACT_FRACTION,
 ) -> RouteResult:
     result = RouteResult(
         src_token=src_token.lower(),
@@ -424,6 +433,7 @@ def route(
         seed_k=seed_k, verify_on_chain=verify_on_chain,
         max_candidates=max_candidates, gas_price_wei=gas_price_wei,
         refit_rounds=refit_rounds, prepared=prepared, max_legs=max_legs,
+        measure_impact=measure_impact, impact_fraction=impact_fraction,
         gas_table=gas_table, risk_table=risk_table, revert_cost_bp=revert_cost_bp,
         optimise_split=optimise_split,
     )
@@ -456,6 +466,8 @@ def _quote(
     gas_table: GasTable | None = None,
     risk_table: RiskTable | None = None,
     revert_cost_bp: float = REVERT_COST_BP,
+    measure_impact: bool = True,
+    impact_fraction: float = IMPACT_FRACTION,
 ) -> RouteResult:
     """The size-dependent half: graph, solve, candidates, verify, refit."""
     amount_human = amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
@@ -763,6 +775,22 @@ def _quote(
             if optimise_split and result.route is not None:
                 with clock("split"):
                     _optimise_split(result, nodes, client, amount_in=amount_in)
+
+            # --- what the size itself cost ----------------------------------
+            #
+            # Last of all, on the route as finally split, so the figure
+            # describes what will be executed rather than an intermediate.
+            if measure_impact and result.route is not None and result.verified_out:
+                with clock("impact"):
+                    measured = price_impact(
+                        client, result.route, amount_in=amount_in,
+                        verified_out=result.verified_out,
+                        fraction=impact_fraction,
+                    )
+                if measured is not None:
+                    (result.price_impact_bp, result.impact_reference_in,
+                     result.impact_reference_out) = measured
+                    result.impact_fraction = impact_fraction
 
     result.price_out_per_in = float(nu[src_node] / nu[dst_node]) if nu[dst_node] else 0.0
     return result

@@ -212,6 +212,11 @@ def _ledger(diagram: Diagram, paint) -> list[str]:
         if value is None:
             continue
         out.append(f"    {label:<24} {value:8.2f} bp")
+    impact = diagram.ledger.get("price_impact_bp")
+    if impact is not None:
+        share = diagram.ledger.get("impact_fraction", 0.0)
+        out.append(f"    {'price impact':<24} {impact:8.2f} bp"
+                   f"   vs the same route at {share * 100:.0f}% of size")
     delta = diagram.ledger.get("model_delta_bp")
     if delta is not None:
         note = "model is conservative" if delta >= 0 else paint("MODEL BEAT REALITY", RED)

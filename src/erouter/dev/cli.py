@@ -329,6 +329,9 @@ def _ledger(result, nodes, dst, in_human, out_human) -> dict:
         "impact_bp": result.impact_bp,
         "total_bp": result.fee_bp + result.impact_bp,
     }
+    if result.price_impact_bp is not None:
+        ledger["price_impact_bp"] = result.price_impact_bp
+        ledger["impact_fraction"] = result.impact_fraction
     price = result.price_out_per_in
     if price > 0 and in_human > 0:
         ideal = in_human * price
@@ -507,7 +510,7 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     gas_table, gas_measured = _gas_table(chain, args, load.pools)
     risk_table, risk_measured = _risk_table(chain, args)
-    revert_cost = _revert_cost(args)
+    route_opts = _route_options(args)
     if gas_measured:
         print(f"  gas: {gas_measured:,} legs priced from measured execution")
     elif not getattr(args, "static_gas", False):
@@ -582,7 +585,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             max_legs=args.max_legs,
             gas_table=gas_table,
             risk_table=risk_table,
-            **revert_cost,
+            **route_opts,
         )
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
@@ -601,7 +604,7 @@ def cmd_route(args: argparse.Namespace) -> int:
                 max_legs=args.max_legs,
                 gas_table=gas_table,
                 risk_table=risk_table,
-                **revert_cost,
+                **route_opts,
             )
         except RoutingError as exc:
             print(f"{BAD} no route after refresh: {exc}")
@@ -627,7 +630,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
 
     gas_table, _ = _gas_table(chain, args, load.pools)
     risk_table, _ = _risk_table(chain, args)
-    revert_cost = _revert_cost(args)
+    route_opts = _route_options(args)
     symbol_src, symbol_dst = nodes.symbol(src), nodes.symbol(dst)
     print(f"  {chain.name} · block {rpc.block:,} · {symbol_src} -> {symbol_dst}")
     print("  preparing (probing arcs, fitting reference prices)...", flush=True)
@@ -681,7 +684,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
                 risk_table=risk_table,
-                **revert_cost,
+                **route_opts,
             )
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
@@ -696,7 +699,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                            refit_rounds=args.refit, extra_arcs=stake_arcs,
                            max_legs=args.max_legs, prepared=prepared,
                            gas_table=gas_table,
-                           risk_table=risk_table, **revert_cost)
+                           risk_table=risk_table, **route_opts)
         _present(result, args, chain, rpc, nodes, wrappers, load,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
@@ -893,7 +896,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
         return 4
     gas_table, gas_measured = _gas_table(chain, args, load.pools)
     risk_table, _ = _risk_table(chain, args)
-    revert_cost = _revert_cost(args)
+    route_opts = _route_options(args)
     if gas_measured:
         print(f"  gas: {gas_measured:,} legs priced from measured execution")
     elif not getattr(args, "static_gas", False):
@@ -933,7 +936,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     kw = {
         "src_token": src, "dst_token": dst, "amount_in": amount,
         "extra_arcs": stake, "gas_price_wei": gas_price, "max_legs": args.max_legs,
-        "gas_table": gas_table, "risk_table": risk_table, **revert_cost,
+        "gas_table": gas_table, "risk_table": risk_table, **route_opts,
         "optimise_split": not args.no_split,
     }
 
@@ -1502,15 +1505,21 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
 
 
-def _revert_cost(args=None) -> dict:
-    """The `--revert-cost-bp` override, as kwargs, or nothing at all.
+def _route_options(args=None) -> dict:
+    """The `route()` knobs the CLI exposes, as kwargs -- and only the ones the
+    user actually set.
 
-    Absent means `core.risk.REVERT_COST_BP`, which is where the default and
-    the reasoning for it live; passing it through as `**{}` keeps that single
-    source of truth instead of copying the number here.
+    An unset knob is left out entirely rather than defaulted here, so
+    `core.risk.REVERT_COST_BP` and `core.verify.IMPACT_FRACTION` stay the
+    single source of truth for their own values instead of being copied.
     """
+    options: dict = {}
     got = getattr(args, "revert_cost_bp", None)
-    return {} if got is None else {"revert_cost_bp": float(got)}
+    if got is not None:
+        options["revert_cost_bp"] = float(got)
+    if getattr(args, "no_impact", False):
+        options["measure_impact"] = False
+    return options
 
 
 def _risk_table(chain, args=None):
@@ -1824,6 +1833,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-risk", action="store_true",
         help="rank on quoted output alone, ignoring how often each pool's own "
              "minimum-out would trip before the route lands")
+    route_cmd.add_argument(
+        "--no-impact", action="store_true",
+        help="skip the price-impact measurement, which re-quotes the finished "
+             "route at 5% of the size -- 3 ms against a local EVM, one more "
+             "round trip over the wire")
     route_cmd.add_argument(
         "--revert-cost-bp", type=float, default=None,
         help="what one failed attempt costs, in basis points of the trade "

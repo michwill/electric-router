@@ -391,3 +391,56 @@ def test_the_list_also_names_a_pool_whose_own_rate_wobbles():
     listed = wide_bound_pools(pegged, fees, {f"{pool}:0>1": {"p": 0.217}})
     assert pool in listed
     assert listed[pool]["tight_p"] == 0.217
+
+
+# ---------------------------------------------------------- price impact
+
+
+class _route_stub:
+    """The two attributes `price_impact` reads off a realised route."""
+
+    dst_slot = 1
+
+    @property
+    def wire_legs(self):
+        return ["leg"]
+
+
+def test_price_impact_is_the_price_gap_against_a_small_trade():
+    """Price is input over output, and the impact is what the size costs:
+    `price(full) / price(small) - 1`."""
+    from erouter.core.verify import price_impact
+
+    Route = _route_stub
+
+    # 1,000,000 in -> 990,000 out; at 5% the same route pays 50,000 -> 49,900,
+    # so the small trade's rate is 0.998 against the full trade's 0.99.
+    client = FakeClient([49_900])
+    impact, ref_in, ref_out = price_impact(
+        client, Route(), amount_in=1_000_000, verified_out=990_000)
+    assert (ref_in, ref_out) == (50_000, 49_900)
+    assert abs(impact - (0.998 / 0.99 - 1) * 1e4) < 1e-6
+
+
+def test_price_impact_needs_something_to_compare():
+    """A size that rounds to nothing, or a reference quote that reverts,
+    yields no figure rather than a fabricated one."""
+    from erouter.core.verify import price_impact
+
+    Route = _route_stub
+
+    assert price_impact(FakeClient([1]), Route(), amount_in=10,
+                        verified_out=10) is None          # 5% of 10 is 0
+    assert price_impact(FakeClient([0]), Route(), amount_in=10**18,
+                        verified_out=10**18) is None      # reference reverted
+
+
+def test_a_flat_route_has_no_price_impact():
+    """A 1:1 conversion prices the same at any size."""
+    from erouter.core.verify import price_impact
+
+    Route = _route_stub
+
+    impact, _, _ = price_impact(FakeClient([50_000]), Route(),
+                                amount_in=1_000_000, verified_out=1_000_000)
+    assert abs(impact) < 1e-9

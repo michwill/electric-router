@@ -56,6 +56,18 @@ from .types import ArcKind, PoolArc
 # taken.  The floor keeps a tie from turning on the last bit of a quote.
 TIE_FLOOR = 1e-12
 
+#: Fraction of the trade re-quoted to find what the same route would have paid
+#: if the trade had been small.
+#
+# The finished route is quoted a second time at this fraction of the input.
+# Every leg's share is a fraction of its slot's balance, so scaling the input
+# scales every branch with it: the shape of the route is held fixed and only
+# the size changes, which is exactly the comparison price impact is supposed to
+# make.  5% is small enough that its own impact is a rounding error against the
+# full trade's and large enough to stay clear of integer dust on a six-decimal
+# token.
+IMPACT_FRACTION = 0.05
+
 
 def realize_candidates(
     candidates: CandidateSet,
@@ -272,3 +284,49 @@ def summary(candidates: CandidateSet, decimals: int, limit: int = 12) -> list[di
             }
         )
     return rows
+
+
+def price_impact(
+    client: QuoterClient,
+    route,
+    *,
+    amount_in: int,
+    verified_out: int,
+    fraction: float = IMPACT_FRACTION,
+) -> tuple[float, int, int] | None:
+    """How much worse this trade's price is than a small one down the same route.
+
+    Price is input over output, as the trader pays it, and the impact is the
+    difference between the price at full size and at `fraction` of it:
+
+        impact = price(full) / price(small) - 1
+
+    Returns `(impact_bp, reference_in, reference_out)`, or `None` when there is
+    nothing to compare -- a size that rounds to zero, or a quote that reverts at
+    the smaller size, which happens on legs whose pool has a minimum.
+
+    One extra `quote_routes` call, at the same block, on the route that was
+    already chosen.  Against an in-process EVM that is about 3 ms; over the wire
+    it is one more round trip, which is why the caller can turn it off.
+
+    **What this is not.**  The reference trade has its own impact, so this
+    understates the true spot-relative figure by roughly `fraction` of it --
+    about 5%, in the same direction for every route, and not corrected for here
+    because correcting would mean assuming a shape for the impact curve.  The
+    honest reading is "what this trade costs against a small one", which is also
+    the comparison a user is actually making.
+    """
+    reference_in = int(amount_in * fraction)
+    if reference_in <= 0 or amount_in <= 0 or verified_out <= 0:
+        return None
+    quoted = client.quote_routes(
+        [route.wire_legs], [reference_in], [route.dst_slot]
+    )
+    reference_out = int(quoted[0]) if quoted else 0
+    if reference_out <= 0:
+        return None
+    rate_small = reference_out / reference_in
+    rate_full = verified_out / amount_in
+    if rate_small <= 0 or rate_full <= 0:
+        return None
+    return (rate_small / rate_full - 1.0) * 1e4, reference_in, reference_out
