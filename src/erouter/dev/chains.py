@@ -211,6 +211,14 @@ CHAINS: dict[str, Chain] = {
         native_symbol="frxETH",
         wrapped="0xFC00000000000000000000000000000000000006",  # wfrxETH
     ),
+    "bsc": Chain(
+        name="bsc",
+        chain_id=56,
+        api_name="bsc",
+        rpc_attr="BSC",
+        native_symbol="BNB",
+        wrapped="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+    ),
     "sonic": Chain(
         name="sonic",
         chain_id=146,

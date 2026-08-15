@@ -166,8 +166,8 @@ def cmd_pools(args: argparse.Namespace) -> int:
     chain = chain_table.get(args.chain)
     try:
         load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
-                          pool_filters=args.pool_filters,
-                          llamma=args.llamma)
+                          pool_filters=getattr(args, "pool_filters", False),
+                          llamma=getattr(args, "llamma", False))
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
@@ -320,6 +320,28 @@ def cmd_probe(args: argparse.Namespace) -> int:
             f"ASYM {asym(fit.a, reverse.a, fit.B, reverse.B):+.6f}"
         )
     return 0
+
+
+def _certificate_note(result) -> str | None:
+    """Why there is no proof, and what the relaxation's own bound was.
+
+    "RESTRICTED" on its own reads worse than it is.  It says the winning
+    candidate was a restriction of the full program -- almost always because
+    `C0`, the only candidate that can carry the certificate, put flow through
+    one pool twice and a view-only chained quote cannot see its own earlier
+    leg.  The gap is the §5.5 bound on what the relaxation still had on the
+    table, which is the number that says whether the missing proof matters.
+
+    It bounds the *relaxation*, not the executed route: the winner is a
+    different candidate, quoted on-chain.  So it is reported as what it is.
+    """
+    reason = result.certificate_reason
+    if reason is None:
+        return None
+    gap = result.counters.get("optimality_gap_bp")
+    if gap is None:
+        return reason
+    return f"{reason} · relaxation gap {gap:.3f} bp"
 
 
 def _ledger(result, nodes, dst, in_human, out_human) -> dict:
@@ -502,8 +524,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     started = time.monotonic()
     try:
         load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
-                          pool_filters=args.pool_filters,
-                          llamma=args.llamma)
+                          pool_filters=getattr(args, "pool_filters", False),
+                          llamma=getattr(args, "llamma", False))
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
@@ -749,7 +771,7 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
             f"{result.counters.get('arcs_priced_out', 0)} priced out"
         ),
         certificate=result.certificate,
-        certificate_reason=result.certificate_reason,
+        certificate_reason=_certificate_note(result),
         pool_names=result.pool_names,
         ledger=None if lean else _ledger(result, nodes, dst, in_human, out_human),
         diagnostics={} if lean else {
