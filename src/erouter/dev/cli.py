@@ -1127,7 +1127,14 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     # universe already read them.
     holders: dict[str, list[tuple[str, int]]] = {}
     for pool in load.pools:
-        for coin, held in zip(pool.coins, pool.held or pool.balances, strict=False):
+        # `held`, never `balances`.  The latter is the pool's own accounting,
+        # which is a claim rather than a holding -- the same fiction
+        # `check_reserves_are_real` exists to catch.  Borrowing against it
+        # picks an address that reports reserves and owns nothing, and the
+        # transfer then fails for a reason that has nothing to do with the
+        # token being tested: eight of eight sampled holders had recorded
+        # reserves and a `balanceOf` of zero.
+        for coin, held in zip(pool.coins, pool.held, strict=False):
             if held > 0:
                 holders.setdefault(coin.address.lower(), []).append((pool.address, held))
     for ranked in holders.values():   # richest first, so a swap of any size funds

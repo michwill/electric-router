@@ -149,6 +149,20 @@ class Funder:
         raw = bytes(out)
         return int.from_bytes(raw[-32:], "big") if len(raw) >= 32 else -1
 
+    def balance_of(self, token: str, owner: str) -> int:
+        """What `owner` holds, as the token itself reports it.
+
+        Asked as `CALLER`, deliberately.  Asking *as the owner* made every
+        holder look empty: the call failed and `-1` was then flattened to `0`,
+        which reads as "holds nothing" and is indistinguishable from it.  The
+        same balance read as a neutral caller comes back correct, so this is a
+        question about who asks and not about what is there.
+
+        Returns -1 when the token will not answer, so a caller can tell a
+        refusal from a zero.
+        """
+        return self._read(token, _BALANCE_OF, [owner])
+
     def fund(self, token: str, spender: str, amount: int) -> bool:
         """Leave `CALLER` holding `amount` and `spender` approved for it."""
         token, spender = token.lower(), spender.lower()

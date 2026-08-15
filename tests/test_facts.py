@@ -144,3 +144,30 @@ def test_revert_reasons_are_decoded():
     assert revert_reason(RuntimeError("Revert { gas_used: 1, output: 0x }")) == (
         "reverted without a reason"
     )
+
+
+# --- a refusal must come from the contract, not from the harness -----------
+
+@pytest.mark.parametrize("text,refusal", [
+    ("Revert { gas_used: 1, output: 0x }", True),
+    ("Revert { gas_used: 1, output: 0x08c379a0 }", True),
+    ("Halt { reason: OutOfGas }", True),
+    ("Transaction(RejectCallerWithCode)", False),
+    ("Transaction(LackOfFundForMaxFee { fee: 1, balance: 0 })", False),
+])
+def test_only_the_contract_can_refuse(text, refusal):
+    """EIP-3607 rejects a caller that has code, which is what impersonating a
+    pool asks for -- and it says nothing about the token.  Counting it as a
+    refusal marked thirteen vaults unredeemable in one run, and `redeem: false`
+    is what gates a merge, so the error is expensive in one direction only."""
+    from erouter.dev.executability import refused_by_protocol
+
+    assert refused_by_protocol(RuntimeError(text)) is refusal
+
+
+def test_a_harness_failure_leaves_the_verdict_open(tmp_path):
+    """Untested must stay absent from the record rather than become `False`."""
+    cache = FactsCache(chain_id=1, path=tmp_path / "ethereum.json")
+    cache.learn_wrapper("0xvault", mint=True, redeem=None, note="RejectCallerWithCode")
+    assert "redeem" not in cache.wrappers["0xvault"]
+    assert cache.wrappers["0xvault"]["mint"] is True

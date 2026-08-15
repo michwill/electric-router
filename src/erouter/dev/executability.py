@@ -38,7 +38,7 @@ from .gas_probe import (
 )
 
 __all__ = ["WRAPPER_CALLS", "Capability", "discover_wrappers",
-           "revert_reason", "try_wrapper"]
+           "refused_by_protocol", "revert_reason", "try_wrapper"]
 
 
 #: How each wrapper is entered and left.  `None` means the protocol has no such
@@ -81,43 +81,121 @@ class Capability:
     notes: dict = field(default_factory=dict)
 
 
+def refused_by_protocol(exc: Exception) -> bool:
+    """Did the contract say no, or did the harness fail to ask?
+
+    revm reports the two differently and the difference is the whole verdict.
+    `Revert {...}` and `Halt {...}` come from executing the contract -- that is
+    a refusal.  `Transaction(...)` is rejected before execution begins, and the
+    ones seen here are entirely about the caller: `RejectCallerWithCode` is
+    EIP-3607 refusing to let an account with code send a transaction, which is
+    what impersonating a pool asks for, and `LackOfFundForMaxFee` is an unfunded
+    caller.  Neither says anything about the token.
+
+    Recording those as refusals is how thirteen vaults came to be marked
+    unredeemable in one run -- and `redeem: false` is what gates a merge, so
+    that mistake is expensive in exactly one direction.
+    """
+    text = str(exc)
+    if "Transaction(" in text:
+        return False
+    return "Revert" in text or "Halt" in text or "revert" in text.lower()
+
+
+def _obtain(evm, funder: Funder, token: str, spender: str, amount: int,
+            holders: dict | None) -> str:
+    """Get `amount` of `token` into someone's hands, and say whose.
+
+    Writing the balance slot works for an ordinary ERC20.  It does not work for
+    a token whose balance is *computed* -- a rebasing supply, a share converted
+    at a rate -- so the fallback borrows from an address that already holds
+    some, which for these tokens is a pool's own reserves.  Returns "" when
+    neither works, which is untested rather than refused.
+    """
+    if funder.fund(token, spender, amount * 2):
+        return CALLER
+    holder = (holders or {}).get(token.lower(), "")
+    if holder:
+        lent = funder.lend_from(token, holder, spender, amount)
+        if lent is not None:
+            evm.set_balance(lent, 10 ** 20)
+            return lent
+    return ""
+
+
 def try_wrapper(evm, funder: Funder, *, token: str, underlying: str, family: str,
                 amount: int, holders: dict | None = None) -> Capability:
     """Can this wrapper still be entered, and can it still be left?
 
     Both are attempted independently, because on a deprecated protocol they
-    genuinely differ: Compound V2 answers "mint is paused" and redeems fine.
+    genuinely differ: Compound V2 answers "mint is paused" and redeems fine,
+    sUSDe mints on demand and refuses redemption inside seven days.
+
+    Redemption is the harder one to test, because it needs the share token and
+    a share balance is not a slot to write.  So it is tested by becoming an
+    address that already holds some -- a pool's own reserves -- and redeeming
+    part of what it has.
     """
     out = Capability(address=token.lower(), family=family)
     calls = WRAPPER_CALLS.get(family)
     if calls is None:
         return out
-    for direction, build in calls.items():
-        target, data, spend = build(token, underlying, amount, CALLER)
-        snapshot = evm.snapshot()
-        caller = CALLER
-        try:
-            if not funder.fund(spend, target, amount * 2):
-                # A share balance the protocol computes rather than stores
-                # cannot be conjured by writing a slot, so borrow it from
-                # someone holding the token -- a pool's own reserves will do.
-                lent = (funder.lend_from(spend, (holders or {}).get(spend.lower(), ""),
-                                         target, amount)
-                        if (holders or {}).get(spend.lower()) else None)
-                if lent is None:
-                    out.notes[direction] = "not funded"
-                    continue      # leaves the direction `None`: untested
-                caller = lent
+
+    mint_target, mint_data, mint_spend = calls["mint"](token, underlying, amount, CALLER)
+    snapshot = evm.snapshot()
+    try:
+        caller = _obtain(evm, funder, mint_spend, mint_target, amount, holders)
+        if not caller:
+            out.notes["mint"] = "not funded"
+        else:
+            try:
+                evm.message_call(caller=caller, to=mint_target, calldata=mint_data)
+                out.mint = True
+            except Exception as exc:
+                out.mint = False if refused_by_protocol(exc) else None
+                out.notes["mint"] = revert_reason(exc)
+    finally:
+        with contextlib.suppress(Exception):
+            evm.revert(snapshot)
+
+    # Redemption is tested on shares that already exist.  Minting some first
+    # and redeeming those would be a different question with the same shape:
+    # a vault with a cooldown refuses a share minted a moment ago while
+    # honouring one an owner has held for a week, so fresh shares manufacture
+    # refusals that no real holder would meet.  A pool's reserves have been
+    # sitting there, which is exactly the position a router would redeem from.
+    #
+    # No approval is needed to burn your own: ERC4626's `redeem` takes an owner
+    # and a cToken's burns the caller's balance, so becoming the holder is the
+    # whole trick.
+    snapshot = evm.snapshot()
+    try:
+        caller, shares = "", 0
+        if funder.fund(token, token, amount * 2):
+            caller, shares = CALLER, amount
+        else:
+            holder = (holders or {}).get(token.lower(), "")
+            held = max(0, funder.balance_of(token, holder)) if holder else 0
+            if held > 0:
+                # Half of what it holds, so the redemption is a real one and
+                # still cannot be refused for asking beyond the balance.
+                caller, shares = holder, max(min(amount, held // 2), 1)
                 evm.set_balance(caller, 10 ** 20)
+        if not caller or shares <= 0:
+            out.notes.setdefault("redeem", "no holder to redeem from")
+        else:
+            target, data, _ = calls["redeem"](token, underlying, shares, caller)
             try:
                 evm.message_call(caller=caller, to=target, calldata=data)
-                setattr(out, direction, True)
+                out.redeem = True
             except Exception as exc:
-                setattr(out, direction, False)
-                out.notes[direction] = revert_reason(exc)
-        finally:
-            with contextlib.suppress(Exception):
-                evm.revert(snapshot)
+                # Only the contract's own refusal counts.  Anything rejected
+                # before it ran is this harness's limit, not the vault's.
+                out.redeem = False if refused_by_protocol(exc) else None
+                out.notes["redeem"] = revert_reason(exc)
+    finally:
+        with contextlib.suppress(Exception):
+            evm.revert(snapshot)
     return out
 
 
