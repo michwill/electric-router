@@ -152,6 +152,7 @@ class WarmStats:
     accounts: int = 0
     slots: int = 0
     list_calls: int = 0
+    retried: int = 0
     fetch_calls: int = 0
     round_trips: int = 0
     ms: float = 0.0
@@ -182,6 +183,7 @@ class LocalEvm:
     _listed: set[tuple[str, bytes]] = field(default_factory=set)
     _injected: set[str] = field(default_factory=set)
     _tracing: bool | None = None
+    _al_shape: dict | None = None
     stats: WarmStats = field(default_factory=WarmStats)
 
     def __post_init__(self) -> None:
@@ -383,6 +385,55 @@ class LocalEvm:
                 out.extend(self.rpc.fetch_multi(payloads[lo:lo + BATCH_LIMIT]))
             return out
 
+    #: Request shapes for `eth_createAccessList`, cheapest first.  No single
+    #: one works everywhere, which is only discoverable by asking:
+    #:
+    #:     chain     as-is   +gas   +gas +gasPrice 0
+    #:     ethereum  ok      ok     ok
+    #:     arbitrum  ok      ok     "gasPrice must be non-zero"
+    #:     polygon   ok      ok     "gasPrice must be non-zero"
+    #:     sonic     "insufficient funds"  "failed to apply"  ok
+    #:
+    #: Sonic prices the simulation against the sender's balance, so it refuses
+    #: a large cap it cannot pay for and wants either a small one or a zero
+    #: price; arbitrum and polygon reject a zero price outright.  Hence: try
+    #: them in order once per endpoint and remember which answered.
+    ACCESS_LIST_SHAPES = (
+        {},
+        {"gas": "0x1e8480"},                      # 2M, small enough to afford
+        {"gas": "0x1e8480", "gasPrice": "0x0"},
+        {"gasPrice": "0x0"},
+    )
+
+    def _access_list_shape(self, sample: Call | None = None) -> dict:
+        """The first shape this endpoint accepts, resolved once per session.
+
+        Probed with a *real* call rather than a synthetic one.  Fraxtal accepts
+        the bare request for a transfer to an empty account and then fails the
+        same request against a contract, so a trivial probe picks a shape that
+        does not work -- measured, it warmed 7 accounts and still reported
+        "failed to apply transaction" on the call that mattered.
+        """
+        if self._al_shape is not None:
+            return self._al_shape
+        probe = {"from": CALLER, "to": CALLER, "data": "0x"}
+        if sample is not None:
+            probe = {"from": CALLER, "to": sample.to,
+                     "data": "0x" + bytes(sample.data).hex()}
+        block = self.rpc.pin.hex_block
+        for shape in self.ACCESS_LIST_SHAPES:
+            try:
+                got = self.rpc.fetch("eth_createAccessList", [{**probe, **shape}, block])
+            except Exception:
+                continue
+            if isinstance(got, dict) and "accessList" in got:
+                self._al_shape = shape
+                return shape
+        # Nothing worked: keep the plain shape so the caller sees the real
+        # error and falls back to the tracer, rather than failing silently.
+        self._al_shape = {}
+        return self._al_shape
+
     def _warm_by_trace(self, calls: list[Call]) -> bool:
         """prestateTracer: state values straight back, no second fetch."""
         block = self.rpc.pin.hex_block
@@ -442,9 +493,11 @@ class LocalEvm:
         once per address per process and belongs in a disk cache next.
         """
         block = self.rpc.pin.hex_block
+        extra = self._access_list_shape(calls[0] if calls else None)
         payloads = [
             ("eth_createAccessList",
-             [{"from": CALLER, "to": one.to, "data": "0x" + bytes(one.data).hex()}, block])
+             [{"from": CALLER, "to": one.to, "data": "0x" + bytes(one.data).hex(),
+               **extra}, block])
             for one in calls
         ]
         import time as _t
@@ -453,7 +506,34 @@ class LocalEvm:
         self.stats.list_ms += (_t.perf_counter() - _mark) * 1000
         touched: dict[str, set[int]] = {}
         served = False
-        for one, answer in zip(calls, listed, strict=True):
+        pending = list(zip(calls, listed, strict=True))
+        # Retry what failed under the next shape, rather than dropping it.
+        #
+        # A fixed shape per endpoint is not enough: `lb.drpc.live` is a load
+        # balancer, so two requests a second apart can land on backends that
+        # disagree about whether a zero gas price or a large cap is acceptable.
+        # Measured across nine chains, the same chain resolved to `{}` on one
+        # run and to a gas cap on the next, and a failure here is not a warning
+        # -- it is slots the local EVM will read as zero, which is a wrong
+        # quote rather than a missing one.
+        for shape in self.ACCESS_LIST_SHAPES[1:]:
+            failed = [one for one, answer in pending
+                      if isinstance(answer, Exception) or not isinstance(answer, dict)]
+            ok = [pair for pair in pending
+                  if not (isinstance(pair[1], Exception) or not isinstance(pair[1], dict))]
+            if not failed:
+                break
+            retry = self._batched([
+                ("eth_createAccessList",
+                 [{"from": CALLER, "to": one.to,
+                   "data": "0x" + bytes(one.data).hex(), **shape}, block])
+                for one in failed
+            ])
+            self.stats.list_calls += len(failed)
+            self.stats.retried += len(failed)
+            pending = ok + list(zip(failed, retry, strict=True))
+
+        for one, answer in pending:
             touched.setdefault(one.to.lower(), set())
             if isinstance(answer, Exception) or not isinstance(answer, dict):
                 self.stats.errors.append(f"accessList: {str(answer)[:100]}")
