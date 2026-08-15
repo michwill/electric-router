@@ -241,6 +241,12 @@ def _candidates(diagram: Diagram, paint) -> list[str]:
         value = entry.get("out", "")
         delta = entry.get("delta_bp")
         suffix = "" if delta is None else f"   {delta:+.2f} bp"
+        # What the route is charged for the chance one of its pools moves past
+        # its own minimum-out before inclusion.  Only shown when it is not
+        # essentially certain, so a safe route stays uncluttered.
+        survival = entry.get("survival")
+        if survival is not None and survival < 0.9995:
+            suffix += f"   lands {survival * 100:.1f}%"
         out.append(f"    {mark}{entry.get('label', ''):<28} {value:>20}  {status}{suffix}")
     return [*out, ""]
 

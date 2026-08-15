@@ -77,6 +77,8 @@ class Candidate:
     note: str = ""
     rank: int | None = None
     gas: int = 0
+    #: P(every leg's minimum-out holds until inclusion); 1.0 until priced.
+    survival: float = 1.0
 
     @property
     def ok(self) -> bool:

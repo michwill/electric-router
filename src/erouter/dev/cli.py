@@ -506,12 +506,15 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 4
 
     gas_table, gas_measured = _gas_table(chain, args, load.pools)
-    facts_for_drift = FactsCache.load(chain.chain_id, chain.name.lower())
+    risk_table, risk_measured = _risk_table(chain, args)
     if gas_measured:
         print(f"  gas: {gas_measured:,} legs priced from measured execution")
     elif not getattr(args, "static_gas", False):
         print(f"  {WARN} gas: no measurements; using the assumed per-kind table"
               f" (run `erouter gascal`)")
+    if risk_measured:
+        print(f"  risk: {risk_measured:,} pools priced by how often their own "
+              f"minimum-out would trip")
     rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
                            chain_id=chain.chain_id)
     client = quoter_client(rpc, chain)
@@ -576,6 +579,8 @@ def cmd_route(args: argparse.Namespace) -> int:
             refit_rounds=args.refit,
             extra_arcs=stake_arcs,
             max_legs=args.max_legs,
+            gas_table=gas_table,
+            risk_table=risk_table,
         )
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
@@ -593,7 +598,7 @@ def cmd_route(args: argparse.Namespace) -> int:
                 extra_arcs=stake_arcs,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
-                min_gain_bp=_min_gain_bp(chain, src, dst, facts_for_drift, nodes),
+                risk_table=risk_table,
             )
         except RoutingError as exc:
             print(f"{BAD} no route after refresh: {exc}")
@@ -618,7 +623,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
     from ..core.pipeline import RoutingError, prepare, route
 
     gas_table, _ = _gas_table(chain, args, load.pools)
-    facts_for_drift = FactsCache.load(chain.chain_id, chain.name.lower())
+    risk_table, _ = _risk_table(chain, args)
     symbol_src, symbol_dst = nodes.symbol(src), nodes.symbol(dst)
     print(f"  {chain.name} · block {rpc.block:,} · {symbol_src} -> {symbol_dst}")
     print("  preparing (probing arcs, fitting reference prices)...", flush=True)
@@ -671,7 +676,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 prepared=prepared,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
-                min_gain_bp=_min_gain_bp(chain, src, dst, facts_for_drift, nodes),
+                risk_table=risk_table,
             )
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
@@ -686,7 +691,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                            refit_rounds=args.refit, extra_arcs=stake_arcs,
                            max_legs=args.max_legs, prepared=prepared,
                            gas_table=gas_table,
-                           min_gain_bp=_min_gain_bp(chain, src, dst, facts_for_drift, nodes))
+                           risk_table=risk_table)
         _present(result, args, chain, rpc, nodes, wrappers, load,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
@@ -882,6 +887,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
         print(f"{BAD} {exc}")
         return 4
     gas_table, gas_measured = _gas_table(chain, args, load.pools)
+    risk_table, _ = _risk_table(chain, args)
     if gas_measured:
         print(f"  gas: {gas_measured:,} legs priced from measured execution")
     elif not getattr(args, "static_gas", False):
@@ -921,7 +927,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
     kw = {
         "src_token": src, "dst_token": dst, "amount_in": amount,
         "extra_arcs": stake, "gas_price_wei": gas_price, "max_legs": args.max_legs,
-        "gas_table": gas_table,
+        "gas_table": gas_table, "risk_table": risk_table,
         "optimise_split": not args.no_split,
     }
 
@@ -1415,6 +1421,34 @@ def cmd_gascal(args: argparse.Namespace) -> int:
         print(f"  drift: {len(rates)} pair rate(s) sampled at {len(SAMPLE_BLOCKS)} "
               f"blocks ({moved} changed)")
 
+        # --- how often each pool's own minimum-out would trip ---------------
+        #
+        # The same arcs, resampled at a minute apart instead of hours, scored
+        # against 20% of each pool's fee -- the bound that makes sandwiching
+        # unprofitable, and therefore the level a route reverts at.  One
+        # request per block for the whole universe, so the second sweep costs
+        # what the first did.
+        from .revert_risk import FINE_BLOCKS, breach_risk, read_fees
+
+        client = quoter_client(rpc, chain)
+        fees = read_fees(client, load.pools)
+        fine = sample_rates(rpc, client.address, arcs, blocks=FINE_BLOCKS)
+        risk = breach_risk(fine, fees, arcs)
+        changed_risk = cache.learn_breach(risk)
+        if risk:
+            by_address = {p.address.lower(): (p.name or p.address)[:20]
+                          for p in load.pools}
+            worst = sorted(risk.items(), key=lambda kv: -kv[1]["p"])[:3]
+            median_p = sorted(e["p"] for e in risk.values())[len(risk) // 2]
+            named = ", ".join(
+                f"{by_address.get(key.split(':')[0], key[:10])} {e['p'] * 100:.1f}%"
+                for key, e in worst)
+            print(f"  risk: {len(risk)} arc(s) priced over "
+                  f"{len(FINE_BLOCKS)} samples ({changed_risk} changed); "
+                  f"median {median_p * 100:.2f}%, worst {named}")
+        else:
+            print(f"  {WARN} risk: no pool answered fee() with a usable series")
+
     if not args.dry_run:
         cache.save()
     stats = cache.stats()
@@ -1435,52 +1469,34 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
 
 
-# What another leg has to earn before it is worth taking, in basis points.
-# Measured: a pair of pegged tokens moves 0.17 bp over a thousand blocks while
-# USDC/WETH moves 125, so the same gain is signal on one and noise on the
-# other.  Gas is charged separately and is the floor under both.
-MIN_GAIN_STABLE_BP = 0.01
-MIN_GAIN_VOLATILE_BP = 0.1
+def _risk_table(chain, args=None):
+    """Per-pool minimum-out risk, measured, or nothing at all.
 
+    Every leg executes with a minimum-out at a fraction of its pool's fee, so
+    the route lands only if none of those pools moves past its own bound in the
+    minute or two before inclusion.  `core/risk.py` turns that into the
+    quantity worth ranking on -- expected output rather than quoted output --
+    and this hands it the measured probabilities.
 
-def _min_gain_bp(chain, src: str, dst: str, facts=None, nodes=None) -> float:
-    """The per-leg floor for this pair, measured where it can be.
+    Returning `None` when nothing has been measured is deliberate.  An empty
+    table is not a table of zeros: it would price every pool at the default and
+    charge a long route several percent on the strength of no evidence.  A
+    *partial* table is different -- there the default is filling a gap in a real
+    measurement, which is what it is for.
 
-    A gain has to beat what the pair does on its own, and that is a property of
-    the *pair*, not of either token.  Classifying tokens as pegged or not could
-    not say that and got WETH->stETH wrong: both move ~125 bp against the
-    dollar, the rate between them barely moves, and a 1:1 Lido mint worth
-    0.04 bp was refused for failing a threshold set by ETH's volatility.
-    `facts` holds a price series per token; the pair's drift is how much the
-    ratio moves.
-
-    The hand-written classes remain only for pairs with no measurement, and
-    even then as a bound rather than an answer: an unmeasured pair is not
-    thereby a volatile one, but assuming the smaller floor would be the
-    optimistic error, and this is the direction that only costs basis points.
+    This replaces a per-pair `min_gain_bp` floor derived from drift.  That
+    number was sound as a measurement and wrong as an instrument: it could only
+    say "long routes are suspect", where the pool it should have been indicting
+    was TriCRV specifically.  The drift series is still collected.
     """
-    # NOT YET USED for the floor.  The measurement is sound -- ETH/stETH
-    # 0.05 bp against USDC/WETH 21.79, which is the distinction the token
-    # classes could not draw -- but feeding it into candidate ranking picks
-    # routes far below the best available: on USDC->WETH $1M the winner came
-    # out 66 bp under a candidate that had quoted `ok` and ranked sixth, which
-    # a tolerance of 10.9 bp cannot explain.  Something in the bucketing is
-    # wrong, and until it is understood a large measured drift is a large
-    # licence to choose badly.  The series is collected and committed; only
-    # this last step is held back.
-    if nodes is not None:
-        src, dst = nodes.canonical(src), nodes.canonical(dst)
-    measured = facts.drift_bp(src, dst) if facts is not None else None
-    if measured is not None:
-        # Half of what the pair moves on its own: a gain the same size as the
-        # drift is a coin flip.  Charged once against the whole route, not per
-        # leg -- see `verify.rank_key`.
-        from .drift import DRIFT_FLOOR_BP
+    from .facts import FactsCache
 
-        return max(measured / 2.0, DRIFT_FLOOR_BP)
-    stables = {t.lower() for t in getattr(chain, "stables", ())}
-    both_pegged = src.lower() in stables and dst.lower() in stables
-    return MIN_GAIN_STABLE_BP if both_pegged else MIN_GAIN_VOLATILE_BP
+    if getattr(args, "no_risk", False):
+        return None, 0
+    cache = FactsCache.load(chain.chain_id, chain.name.lower())
+    if not cache.breach:
+        return None, 0
+    return cache.risk_table(), len(cache.breach)
 
 
 def _gas_table(chain, args, pools=None):
@@ -1693,6 +1709,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="price legs from the assumed per-kind table instead of the "
              "measured figures in data/gas -- for comparing against the old "
              "behaviour")
+    bench.add_argument(
+        "--no-risk", action="store_true",
+        help="rank on quoted output alone, ignoring per-pool minimum-out risk")
     bench.set_defaults(func=cmd_bench)
 
     route_cmd = sub.add_parser("route", help="compute and draw an optimal route")
@@ -1754,6 +1773,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="price legs from the assumed per-kind table instead of the "
              "measured figures in data/gas -- for comparing against the old "
              "behaviour")
+    route_cmd.add_argument(
+        "--no-risk", action="store_true",
+        help="rank on quoted output alone, ignoring how often each pool's own "
+             "minimum-out would trip before the route lands")
     route_cmd.set_defaults(func=cmd_route)
 
     return parser

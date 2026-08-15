@@ -13,6 +13,10 @@ should have them without paying for that.
 * **Wrapper capability.**  Whether a lending token can still be minted, still
   be redeemed, or both.  Deprecated protocols stop taking deposits long before
   they stop honouring withdrawals, so this is per direction, not per protocol.
+* **Minimum-out risk.**  How often a pool's rate moves further than its own
+  slippage bound inside a couple of minutes, which is how often a route
+  through it reverts.  Set by the pool's fee against its own volatility, and
+  both hold still for months.  See `revert_risk`.
 
 Slot lists and bytecode stay in `state_cache`, which is gzipped because it
 carries megabytes of code.  Facts belong in plain JSON: it is three orders of
@@ -29,6 +33,7 @@ from statistics import median
 
 from ..core.gas import GasTable
 from ..core.pools import registry_key
+from ..core.risk import DEFAULT_RISK, RiskTable
 from ..core.types import ArcKind
 
 VERSION = 1
@@ -53,6 +58,9 @@ class FactsCache:
     broken: dict[str, str] = field(default_factory=dict)
     #: wrapper address -> {"mint": bool, "redeem": bool, "note": str}
     wrappers: dict[str, dict] = field(default_factory=dict)
+    #: "address:i>j" -> {"p", "bound_bp", "scale_bp", "active", "n"}: the
+    #: chance this arc's own minimum-out trips first.  See `revert_risk`.
+    breach: dict[str, dict] = field(default_factory=dict)
     block: int = 0
     dirty: bool = False
 
@@ -74,6 +82,7 @@ class FactsCache:
         cache.prices = {k: list(v) for k, v in raw.get("prices", {}).items()}
         cache.broken = dict(raw.get("broken", {}))
         cache.wrappers = dict(raw.get("wrappers", {}))
+        cache.breach = dict(raw.get("breach", {}))
         cache.block = int(raw.get("block", 0))
         return cache
 
@@ -93,6 +102,7 @@ class FactsCache:
                        for k, v in sorted(self.prices.items())},
             "broken": dict(sorted(self.broken.items())),
             "wrappers": dict(sorted(self.wrappers.items())),
+            "breach": dict(sorted(self.breach.items())),
         }
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n",
@@ -256,6 +266,55 @@ class FactsCache:
             return True
         return False
 
+    def learn_breach(self, found: dict[str, dict]) -> int:
+        """Record per-arc minimum-out risk, replacing what was there.
+
+        Replacing rather than merging: `p` is a property of the pool's fee
+        against its current volatility, and both change.  A figure measured
+        against last year's fee is not evidence about today's.
+        """
+        changed = 0
+        for key, entry in found.items():
+            key = key.lower()
+            if self.breach.get(key) != entry:
+                self.breach[key] = dict(entry)
+                changed += 1
+        self.dirty = self.dirty or bool(changed)
+        return changed
+
+    def risk_table(self) -> RiskTable:
+        """The pure-core view: `(address, i, j) -> probability`, and nothing
+        else.
+
+        Every pool also gets a `(-1, -1)` entry from the worst of its own arcs,
+        which is what a direction the sweep never sampled inherits -- the same
+        specific-to-general walk `GasTable` does, erring high because an
+        unsampled pair of a pool we know is not evidence of safety.
+
+        A pool the sweep never saw at all -- one that does not answer `fee()`,
+        so it has no bound to measure against -- falls to the table's default,
+        raised here to the measured 75th percentile if that is higher than the
+        constant.  Not the upper decile: the distribution is bimodal, and its
+        top tenth is the crypto pools, which would charge 120 bp for a gap in
+        our own sampling rather than for anything about the pool.
+        """
+        arcs: dict[tuple[str, int, int], float] = {}
+        worst: dict[str, float] = {}
+        for key, entry in self.breach.items():
+            if "p" not in entry:
+                continue
+            address, pair = key.split(":")
+            i, j = pair.split(">")
+            arcs[(address, int(i), int(j))] = float(entry["p"])
+            worst[address] = max(worst.get(address, 0.0), float(entry["p"]))
+        for address, value in worst.items():
+            arcs.setdefault((address, -1, -1), value)
+        default = DEFAULT_RISK
+        if arcs:
+            ordered = sorted(arcs.values())
+            default = max(DEFAULT_RISK, ordered[int(0.75 * (len(ordered) - 1))])
+        return RiskTable(arcs, default=default)
+
     def is_broken(self, target: str, kind, i: int, j: int) -> str:
         """The reason this direction cannot be traded, or "" if it can."""
         return self.broken.get(self.key(target, kind, i, j), "")
@@ -274,4 +333,5 @@ class FactsCache:
             by_kind[kind.name] = by_kind.get(kind.name, 0) + 1
         return {"legs": len(self.legs), "block": self.block, "by_kind": by_kind,
                 "classes": len(self.classes), "kinds": dict(self.kinds),
-                "broken": len(self.broken), "wrappers": len(self.wrappers)}
+                "broken": len(self.broken), "wrappers": len(self.wrappers),
+                "breach": len(self.breach)}

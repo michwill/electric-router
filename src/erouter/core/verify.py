@@ -30,6 +30,7 @@ from .gas import GasTable, leg_gas, plan_gas
 from .nodes import NodeMap
 from .quoter import MAX_LEGS, MAX_SLOTS, QuoterClient
 from .realize import RealizationError, check_one_arc_per_pool, realize
+from .risk import RiskTable
 from .types import ArcKind, PoolArc
 
 # Per-kind execution gas lives in `gas.py`; a flat per-leg figure over-charged
@@ -122,14 +123,15 @@ def verify(
     gas_price_wei: int = 0,
     dst_wei_per_eth: float = 0.0,
     gas_table: GasTable | None = None,
-    min_gain_bp: float = 0.0,
+    risk_table: RiskTable | None = None,
 ) -> CandidateSet:
     """Quote every ready candidate in one call and rank them.
 
-    Ranking is by *verified* output.  Gas only breaks ties, and only when the
-    caller supplied a price and a way to value it in the output token -- a
-    fixed cost per leg is not an element law and must not enter the convex
-    core (§11.1).
+    Ranking is by *expected* verified output: what the route quotes, times the
+    chance every one of its minimum-outs holds until it lands, less the gas --
+    which is paid either way.  Both corrections need the caller to have
+    supplied the means to value them in the output token; neither is an element
+    law and neither may enter the convex core (§11.1).
     """
     # Quote whatever is new.  Ranking happens unconditionally below: this is
     # called more than once per route (candidates, then the direct floor, then
@@ -154,7 +156,22 @@ def verify(
 
     def score(candidate: Candidate) -> float:
         value = float(candidate.verified_out or 0)
+        if risk_table is not None and candidate.route:
+            # Expected, not quoted.  Every leg carries a minimum-out at a
+            # fraction of its pool's fee, so the route lands only if none of
+            # those pools moves past its own bound while the user is
+            # confirming; `survival` is the chance of that.  Measured, this is
+            # what decides leg count: a USDC->WETH route through TriCRV and
+            # TricryptoUSDC survives about 62% of the time, which no 71 bp
+            # advantage can pay for, while a route through pools whose fees are
+            # wide against their volatility survives essentially always and can
+            # afford a dozen legs.  See `core/risk.py`.
+            candidate.survival = risk_table.survival(
+                leg.leg for leg in candidate.route.legs)
+            value *= candidate.survival
         if gas_price_wei > 0 and dst_wei_per_eth > 0 and candidate.route:
+            # Subtracted after the survival factor, not before: gas is spent
+            # whether or not the route lands.
             gas = plan_gas((leg.leg for leg in candidate.route.legs), gas_table)
             candidate.gas = gas
             value -= gas * gas_price_wei / 1e18 * dst_wei_per_eth
@@ -177,31 +194,20 @@ def verify(
     if not usable:
         return candidates
     best_score = max(score(c) for c in usable)
-    # What one more leg has to earn.  Gas is the floor -- `score` has already
-    # subtracted it, so this is what the *next* leg costs -- but gas is not the
-    # whole price of a leg.  Each one is another chance for the state to move
-    # between quoting and inclusion, and that risk is not modelled anywhere, so
-    # `min_gain_bp` stands in for it.
+    # What one more leg has to earn to be worth taking.  Both of its costs are
+    # already inside `score` -- gas subtracted, revert risk multiplied in -- so
+    # what is left for a tolerance to absorb is one leg's gas, the granularity
+    # at which two scores are the same answer.
     #
-    # Measured across leg counts at three sizes: what splitting buys is set by
-    # trade size against pool depth, not by which assets are involved.  Every
-    # pair plateaus by 3 legs at $10k; the same pairs still gain 31-38 bp at 12
-    # legs at $1M.  The waste is the tail -- steps worth 0.017 to 0.13 bp --
-    # and a floor per leg removes exactly that while leaving the rest.
+    # An earlier version added a `min_gain_bp` term here, standing in for the
+    # risk of the price moving before inclusion because nothing modelled it.
+    # Something does now, and per pool rather than per route: a threshold on
+    # the gain could only ever say "long routes are suspect", where the
+    # survival product says which pools are dangerous and leaves the rest
+    # alone.  The pair-drift measurement that fed it is still collected; it is
+    # simply no longer the instrument.
     per_leg = leg_gas(ArcKind.SWAP_STABLE) * gas_price_wei / 1e18 * dst_wei_per_eth
-    # `min_gain_bp` is charged once, not per leg.  A route executes as a single
-    # transaction, so the price moving between the quote and inclusion hits all
-    # of it together -- the risk does not scale with how many pools are
-    # touched.  Charging it per leg billed a 12-leg route on a pair drifting
-    # 21 bp some 131 bp, drove it to 2 legs, and threw away a 71 bp advantage
-    # that was really there.  What extra legs do add is gas, which `score` has
-    # already subtracted, and revert surface, which is not a price.
-    #
-    # So this is a threshold on the *gain*: an advantage smaller than what the
-    # pair moves on its own is not an advantage, however many legs bought it.
-    # Below it, the shorter route wins on the tie-break.
-    tolerance = max(per_leg, abs(best_score) * min_gain_bp / 1e4,
-                    abs(best_score) * TIE_FLOOR)
+    tolerance = max(per_leg, abs(best_score) * TIE_FLOOR)
 
     def rank_key(candidate: Candidate) -> tuple:
         value = score(candidate)
@@ -215,14 +221,16 @@ def verify(
     # but "the router is never worse than a pool you could find by inspection"
     # is a promise, not an emergent property, so it is enforced rather than
     # assumed.
+    #
+    # Compared on `score`, not on the raw quote, so that the floor speaks the
+    # same language as the ranking.  Risk pricing makes the difference real: a
+    # single hop through a pool that breaches a quarter of the time can quote
+    # the largest number on the page and still be the worse trade, and a floor
+    # reading raw output would promote it over the safe route that beat it.
     floor = max(
-        (c for c in usable if c.kind == "direct"),
-        key=lambda c: c.verified_out or 0,
-        default=None,
+        (c for c in usable if c.kind == "direct"), key=score, default=None,
     )
-    if floor is not None and ranked and (ranked[0].verified_out or 0) < (
-        floor.verified_out or 0
-    ):
+    if floor is not None and ranked and score(ranked[0]) < score(floor):
         ranked.remove(floor)
         ranked.insert(0, floor)
 
@@ -260,6 +268,7 @@ def summary(candidates: CandidateSet, decimals: int, limit: int = 12) -> list[di
                     else f"{candidate.verified_out / 10**decimals:,.6f}"
                 ),
                 "delta_bp": None if delta is None else round(delta, 2),
+                "survival": round(candidate.survival, 6),
                 "note": candidate.note,
                 "certificate": candidate.certificate,
             }

@@ -779,6 +779,10 @@ Break token conservation, which is an assumption of `(P)` itself, not of the qua
 
 The network here is purely dissipative — no reactive elements, no memory — because pool state is frozen during the trade. Routing across blocks or against time-varying reserves adds state and leaves resistive-network territory entirely. Out of scope.
 
+One consequence of time does have to be priced, though, and like gas it is priced *outside* `(P)` (§11.1). Each leg executes with a minimum-out — set to a fraction of that pool's fee, the level at which sandwiching stops paying — and that bound is also a revert trigger: the route lands only if every pool it touches stays inside its own bound during the minute or two between the quote and inclusion. So candidate selection maximises `verified_output × Π(1 − pᵢ) − gas_cost`, with `pᵢ` measured per arc (`dev/revert_risk.py`, stored in `data/facts`). Gas is subtracted after the product because it is spent whether or not the route lands.
+
+This is a term on the *candidate*, not an element law: it is a product over the chosen arcs, so it is no more admissible inside the convex program than a fixed per-arc cost is, and for the same reason. It also subsumes the question of how many legs a route should have. Measured, `pᵢ` is not a property of the asset class — Yield Basis WETH is maximally volatile and never breaches, because its 218 bp fee puts the bound at 43.7 bp, while TriCRV's 3.36 bp fee gives a 0.67 bp bound against a rate that moves several bp a minute and breaches around half the time — so a leg budget prices exactly the wrong thing. Nine arcs in ten never breach, and the ones that do should be avoided individually rather than paid for by every long route.
+
 ### 11.6 What is deliberately not used
 
 **Path enumeration.** Exponential, and it double-counts impact on shared pools.
