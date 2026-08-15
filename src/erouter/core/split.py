@@ -51,7 +51,7 @@ third trip are the three whose coarse curves failed their own check.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -162,9 +162,19 @@ POLISH_WINDOW = 0.05
 # chained `quote_routes`, ~3.2 ms in-process and a round trip on the wire, so
 # this is the single most expensive thing the router does per basis point.
 #
-# The threshold is above the drift both those cases showed and below the
-# 1.0 bp at which `_trusted_curves` stops believing the curves at all.
-POLISH_CHECK_BP = 0.15
+# The threshold is well below the 1.0 bp at which `_trusted_curves` stops
+# believing the curves at all, and above the drift observed when polishing was
+# worthless.  Note the drift is only a *ceiling* on what polish can find, and a
+# loose one: measured, it returned 40% of the check in one case and 2.5% in
+# another (0.031 bp at a -0.078 check, 0.005 bp at -0.199).  So a quarter of a
+# basis point of drift is not a quarter of a basis point of opportunity, and
+# 241 sequential quotes is a great deal to spend finding out.
+#
+# Reused curves (`scout`) come off a shared ladder sized for the widest
+# candidate, so they are a little coarser than a bespoke sample and check
+# correspondingly worse -- which is what set this threshold: at 0.15 the very
+# case reuse was meant to speed up went back to polishing for 0.005 bp.
+POLISH_CHECK_BP = 0.25
 # With an exact finish available, the curves only have to be right enough to
 # land in the correct basin, so the dense second sampling pass is not needed.
 LOCAL_CHECK_TOL_BP = 10.0
@@ -185,6 +195,7 @@ class SplitReport:
     probes: int = 0
     polish_calls: int = 0
     polish_skipped: bool = False
+    reused: bool = False
     polish_bp: float = 0.0
     local: int = 0
     predicted: int = 0
@@ -672,8 +683,13 @@ def optimise(
     nominal_out: list[int] | None = None,
     max_rounds: int = MAX_ROUNDS,
     hot_rounds: int = HOT_ROUNDS,
+    curves=None,
 ) -> tuple[list[Leg], SplitReport]:
     """Re-split a finished route.  Returns the best legs found and a report.
+
+    `curves` lets a caller hand over a sample it already paid for -- the scout
+    holds one for every candidate it considered.  They are still checked
+    against the chain; only the sampling is skipped.
 
     Sampled curves when the caller can supply the realised per-leg amounts --
     two round trips, converged.  The chained hill-climb otherwise, and as a
@@ -700,7 +716,7 @@ def optimise(
         curves = _trusted_curves(
             legs, client, groups, weights, report, amount_in=amount_in,
             dst_slot=dst_slot, baseline=baseline,
-            nominal_in=nominal_in, nominal_out=nominal_out,
+            nominal_in=nominal_in, nominal_out=nominal_out, curves=curves,
         )
         if curves is not None:
             return _search_curves(
@@ -841,6 +857,7 @@ def polish(
 def _trusted_curves(
     legs, client, groups, weights, report, *,
     amount_in: int, dst_slot: int, baseline: int, nominal_in, nominal_out,
+    curves=None,
 ):
     """Sample the legs, and refuse to optimise on curves that fail their check.
 
@@ -851,12 +868,20 @@ def _trusted_curves(
     -- so a curve set that misses gets one dense pass at the sizes the legs
     actually operate at, and if it still misses, the chained search takes over.
     """
-    tops = reachable_tops(legs, nominal_in, nominal_out, amount_in)
-    points = _probe_ladders(legs, client, [curve_mod.sizes(t) for t in tops], report)
-    if points is None:
-        report.skipped = "a leg would not probe"
-        return None
-    curves = _build(points)
+    # Curves the caller already sampled are used as they are -- but they are
+    # still *checked*, below.  The check is one chained quote and it is what
+    # the whole approach rests on; only the sampling is skipped, and only when
+    # somebody else already paid for it at a ladder at least as wide.
+    points = None
+    if curves is None:
+        tops = reachable_tops(legs, nominal_in, nominal_out, amount_in)
+        points = _probe_ladders(legs, client, [curve_mod.sizes(t) for t in tops], report)
+        if points is None:
+            report.skipped = "a leg would not probe"
+            return None
+        curves = _build(points)
+    else:
+        report.reused = True
     start = _fractions(legs, groups, weights)
 
     def missed() -> float:
@@ -869,6 +894,22 @@ def _trusted_curves(
         if curves is None:
             report.skipped = "a leg would not fit"
             return None
+        if points is None:
+            # Reused curves that miss: re-sample properly rather than refine
+            # something we do not hold the sample points for.
+            report.reused = False
+            tops = reachable_tops(legs, nominal_in, nominal_out, amount_in)
+            points = _probe_ladders(
+                legs, client, [curve_mod.sizes(t) for t in tops], report)
+            if points is None:
+                report.skipped = "a leg would not probe"
+                return None
+            curves = _build(points)
+            if curves is not None and missed() <= tolerance:
+                return curves
+            if curves is None:
+                report.skipped = "a leg would not fit"
+                return None
         spent = report.probes
         points = refine_curves(
             legs, client, curves, takes_of(legs, curves, start, amount_in),
@@ -998,6 +1039,11 @@ class ScoutResult:
     index: int
     predicted: float
     legs: list[Leg]
+    #: The curves this candidate was scored on, aligned to its legs.  Handed
+    #: back so the winner's own split pass can reuse them instead of sampling
+    #: the same arcs a second time -- measured, that second sampling is 400 to
+    #: 800 ms of EVM on exactly the wide routes that are slowest.
+    curves: list = field(default_factory=list)
 
 
 def scout(plans, client: QuoterClient, *, amount_in: int,
@@ -1093,6 +1139,7 @@ def scout(plans, client: QuoterClient, *, amount_in: int,
         if best_w is None:
             continue
         out.append(ScoutResult(index=index, predicted=best_value,
-                               legs=apply_weights(legs, groups, best_w)))
+                               legs=apply_weights(legs, groups, best_w),
+                               curves=curves))
     out.sort(key=lambda found: -found.predicted)
     return out

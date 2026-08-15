@@ -109,6 +109,11 @@ class RouteResult:
     impact_fraction: float = 0.0
     impact_reference_in: int = 0
     impact_reference_out: int = 0
+    #: Curves the scout paid for, handed to the split pass so it does not
+    #: sample the same arcs twice.  Lives on the result rather than on the
+    #: route: a `RealizedRoute` is a serialisable description of a trade and
+    #: has no business carrying probe samples.
+    scout_curves: list = field(default_factory=list)
     candidates: CandidateSet | None = None
     refit_report: RefitReport | None = None
     winner: Candidate | None = None
@@ -924,6 +929,11 @@ def _scout_wider(
         realized.leg = leg
     candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)
     candidate.verified_out = int(best_value)
+    # The split pass runs on this route next and would sample the very arcs
+    # the scout just sampled.  Hand them over: same block, same ladders, and
+    # they are re-checked against the chain there anyway.
+    result.counters["scout_curves"] = len(best_found.curves)
+    result.scout_curves = best_found.curves
     result.counters["scout_gain_bp"] = round(
         (best_value / max(incumbent, 1.0) - 1) * 1e4, 2)
     result.route = candidate.route
@@ -951,7 +961,9 @@ def _optimise_split(
         baseline=result.verified_out or 0,
         nominal_in=[rl.amount_in for rl in route.legs],
         nominal_out=[rl.amount_out for rl in route.legs],
+        curves=result.scout_curves or None,
     )
+    result.counters["split_reused_curves"] = int(report.reused)
     result.counters["split_calls"] = report.calls
     result.counters["split_evaluations"] = report.evaluations
     result.counters["split_probes"] = report.probes

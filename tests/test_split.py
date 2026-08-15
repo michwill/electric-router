@@ -15,6 +15,7 @@ from erouter.core.split import (
     BPS,
     apply_weights,
     optimise,
+    scout,
     should_optimise,
     split_groups,
     weights_of,
@@ -497,3 +498,49 @@ def test_scout_returns_weights_that_sum_to_the_whole_input():
     tuned = found[0].legs
     assert tuned[-1].bps == 0                       # the sweep
     assert 0 < sum(one.bps for one in tuned[:-1]) < BPS
+
+
+def test_handed_curves_are_checked_but_not_resampled():
+    """The scout has already paid for a sample; the split pass should reuse it
+    and still hold it to the chain."""
+    amount = 1_000_000
+    quoter = LocalPoolQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    scouted = scout([(SPLIT, 2, [600_000, 400_000, 500_000],
+                      [500_000, 380_000, 490_000])], quoter, amount_in=amount)
+    assert scouted and scouted[0].curves
+
+    before = quoter.probe_calls
+    tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+        curves=scouted[0].curves,
+    )
+    assert report.reused
+    assert quoter.probe_calls == before      # nothing re-sampled
+    assert report.check_bp != 0.0 or report.mode == "curves"   # still checked
+    assert report.after >= baseline
+    assert abs(tuned[0].bps / BPS - true_optimum(quoter, amount)) < 0.01
+
+
+def test_handed_curves_that_miss_the_chain_are_resampled():
+    """Reuse is an optimisation, not a promise: curves that fail their check
+    fall back to a real sample rather than being optimised on."""
+    amount = 1_000_000
+    quoter = LocalPoolQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    # Curves that claim every leg is a 1:1 pass-through: badly wrong, and the
+    # check against the chained baseline will say so.
+    from erouter.core import curves as curve_mod
+
+    before = quoter.probe_calls
+    _, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+        curves=[curve_mod.linear(1.0) for _ in SPLIT],
+    )
+    assert not report.reused
+    assert quoter.probe_calls > before       # it went and sampled properly
+    assert report.after >= baseline
