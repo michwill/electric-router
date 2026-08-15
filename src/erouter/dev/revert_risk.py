@@ -123,15 +123,17 @@ def jump_scale_bp(moves: list[float]) -> float:
     return max(jumps[len(jumps) // 2], SCALE_FLOOR_BP)
 
 
-def bound_bp(fee: float, scale_bp: float) -> float:
+def bound_bp(fee: float, scale_bp: float, floor_bp: float = BOUND_FLOOR_BP) -> float:
     """The minimum-out this arc executes with, in basis points.
 
     A fraction of the pool's fee, floored for arcs that move -- see
-    `BOUND_FLOOR_BP`.
+    `BOUND_FLOOR_BP`.  `floor_bp` is a parameter so the same sampled series can
+    be scored against several candidate floors; the choice is an execution
+    parameter, and picking it is worth a measurement rather than a guess.
     """
     bound = fee * BOUND_OF_FEE * 1e4
     if scale_bp > SCALE_FLOOR_BP:
-        bound = max(bound, BOUND_FLOOR_BP)
+        bound = max(bound, floor_bp)
     return bound
 
 
@@ -166,7 +168,8 @@ def tail_model(standardised: list[float]):
 
 
 def breach_risk(series, fees: dict[str, float], arcs=None, *,
-                horizon: int = HORIZON) -> dict[str, dict]:
+                horizon: int = HORIZON,
+                floor_bp: float = BOUND_FLOOR_BP) -> dict[str, dict]:
     """Per-arc risk, from rate series and pool fees.
 
     `series` is what `drift.sample_rates` returns -- one `PriceSeries` per arc,
@@ -197,7 +200,7 @@ def breach_risk(series, fees: dict[str, float], arcs=None, *,
     tail = tail_model(pooled)
     out: dict[str, dict] = {}
     for key, pool, scale, moves in measured:
-        bound = bound_bp(fees[pool], scale)
+        bound = bound_bp(fees[pool], scale, floor_bp)
         jumps = sum(1 for m in moves if m > 0)
         # How often a window contains a move at all.  Half an event stands in
         # for none, so an arc that saw no trade in half an hour is priced low
