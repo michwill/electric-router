@@ -738,6 +738,10 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
         title=(
             f"{in_human:,.6f} {nodes.symbol(src)}  ->  {out_human:,.6f} {nodes.symbol(dst)}"
             f"        {price:,.4f} {nodes.symbol(src)}/{nodes.symbol(dst)}"
+            # Next to the price, because it qualifies the price -- and in the
+            # header rather than the loss ledger, which the compact view drops.
+            + ("" if result.price_impact_bp is None
+               else f"  ·  impact {result.price_impact_bp:,.2f} bp")
         ),
         subtitle=(
             f"{chain.name} · block {rpc.block:,} · {elapsed:.0f} ms · "

@@ -123,3 +123,15 @@ def test_a_false_certificate_states_its_reason(hybrid):
     )
     text = render(diagram, color=False)
     assert "CHORD_ACTIVE" in text  # never swallowed (§15)
+
+
+def test_a_long_title_does_not_break_the_frame():
+    """The title grows -- amounts, a rate, the price impact -- and a box whose
+    top border is shorter than its contents is worse than a truncated title."""
+    from erouter.core.render_text import render
+    from erouter.core.rendermodel import Diagram
+
+    diagram = Diagram(title="x" * 400, subtitle="y" * 400, certificate=True)
+    lines = render(diagram, unicode=True, width=90, legend=False).splitlines()
+    widths = {len(line) for line in lines[:5] if line}
+    assert widths == {90}, widths

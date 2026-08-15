@@ -111,7 +111,13 @@ def _header(diagram: Diagram, glyph, width, paint, unicode) -> list[str]:
     lines = [glyph["tl"] + glyph["h"] * inner + glyph["tr"]]
     for text in (diagram.title, diagram.subtitle):
         if text:
-            lines.append(glyph["v"] + f" {text}".ljust(inner) + glyph["v"])
+            # Truncate, don't just pad: a title longer than the box used to run
+            # past the right border and break the frame, and the title carries
+            # a growing amount -- amounts, a rate, and now the price impact.
+            line = f" {text}"
+            if len(line) > inner:
+                line = line[: max(inner - 1, 0)] + "…" if inner else ""
+            lines.append(glyph["v"] + line.ljust(inner) + glyph["v"])
     mark = (
         paint(f"{glyph['ok']} certificate", GREEN)
         if diagram.certificate
