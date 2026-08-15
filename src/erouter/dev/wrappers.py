@@ -52,17 +52,62 @@ class WrapperReport:
         return [v for v in self.vaults if not v.merged and v.reason]
 
 
+def merge_candidates(chain: Chain, facts=None) -> list[str]:
+    """Which vaults are worth *trying* to merge, from measurement where there is
+    any.
+
+    R5 gates merging on an allowlist because linearity says nothing about
+    whether you can get back out: pufETH reports `asset = WETH`, converts with
+    no error and caps at `2**256-1`, yet redeems through a queue.  Merging it
+    would declare it equal to WETH at NAV and mint the market's discount from
+    nothing.  `maxRedeem` cannot answer either -- it is per-owner and returns 0
+    for an address holding no shares.
+
+    Executing both directions can answer it, and `data/facts` now does, so the
+    list stops being a judgement and becomes a measurement.  It is still an
+    allowlist -- a vault has to earn its way on by redeeming, not merely by
+    failing to look suspicious -- but nobody maintains it, and a vault that
+    stops honouring redemptions falls off at the next facts build rather than
+    when someone notices.
+
+    The hand-written list stays as an addition, not a replacement: a vault the
+    harness could not test is absent from the facts, and absent must not mean
+    refused.  Measurement can only widen this, never narrow it below what a
+    human vouched for.
+
+    And `oneway_vaults` always wins.  A measured redemption is one redemption,
+    of one size, at one block, by one holder -- it is not proof that the exit
+    is open.  pufETH proves the point: this probe found its `redeem` answering
+    and would have merged it, which is precisely the case R5 exists to forbid,
+    because the way out is a withdrawal queue and a merge claims there is none.
+    Measurement may say "this looks fine"; only a human may say "and I know
+    why it is fine".  So the deny list is not a fallback for what measurement
+    misses, it is a veto over what measurement is not competent to judge.
+    """
+    hand = [v.lower() for v in chain.erc4626_allowlist]
+    wrappers = getattr(facts, "wrappers", None) or {}
+    measured = [
+        address for address, entry in wrappers.items()
+        if entry.get("mint") is True and entry.get("redeem") is True
+    ]
+    denied = {v.lower() for v in getattr(chain, "oneway_vaults", ())}
+    denied |= {token.lower() for token, _, _, _, _ in getattr(chain, "stake_arcs", ())}
+    return sorted((set(hand) | set(measured)) - denied)
+
+
 def build_node_map(
     pools: list[PoolSpec],
     chain: Chain,
     client: QuoterClient,
     *,
     value_wei: int = 0,
+    facts=None,
 ) -> tuple[NodeMap, WrapperReport]:
     """Every pool coin as a node, with wrappers and vaults merged in.
 
     `value_wei` is the size of the trade being routed, used only to decide
     whether a vault's deposit cap is large enough to call it unbounded.
+    `facts` supplies measured mint/redeem verdicts; see `merge_candidates`.
     """
     nodes = NodeMap()
     report = WrapperReport()
@@ -102,7 +147,7 @@ def build_node_map(
         _merge_wsteth(nodes, report, pairs, client)
 
     # --- ERC4626: allowlist, then verify ---------------------------------
-    candidates = [v.lower() for v in chain.erc4626_allowlist if nodes.has(v.lower())]
+    candidates = [v for v in merge_candidates(chain, facts) if nodes.has(v)]
     if candidates:
         _merge_vaults(nodes, report, candidates, client, value_wei)
 

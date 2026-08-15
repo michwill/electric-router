@@ -11,6 +11,7 @@ of a broken one, and that a chain stub cannot crash the lookup.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -171,3 +172,41 @@ def test_a_harness_failure_leaves_the_verdict_open(tmp_path):
     cache.learn_wrapper("0xvault", mint=True, redeem=None, note="RejectCallerWithCode")
     assert "redeem" not in cache.wrappers["0xvault"]
     assert cache.wrappers["0xvault"]["mint"] is True
+
+
+# --- measurement may widen the merge list, never override a veto ----------
+
+class FakeChain:
+    erc4626_allowlist = ("0xAAA",)
+    oneway_vaults = ("0xPUF",)
+    stake_arcs = ()
+
+
+def test_measurement_widens_the_merge_list():
+    """A vault that mints and redeems earns its way on without anyone adding
+    it, which is the point: the list stops being maintained by hand."""
+    from erouter.dev.wrappers import merge_candidates
+
+    facts = FactsCache(chain_id=1, path=Path("/nowhere"))
+    facts.wrappers = {"0xbbb": {"mint": True, "redeem": True}}
+    assert merge_candidates(FakeChain(), facts) == ["0xaaa", "0xbbb"]
+
+
+def test_a_one_way_vault_is_never_merged_however_it_measures():
+    """pufETH's `redeem` answers -- measured, 87 shares out for 93 WETH -- and
+    the vault holds zero WETH against 22,278 shares outstanding.  One
+    redemption of one size is not an open exit, and a merge claims an exit at
+    every size.  Measurement may say "this looks fine"; only a human may say
+    "and I know why".
+    """
+    from erouter.dev.wrappers import merge_candidates
+
+    facts = FactsCache(chain_id=1, path=Path("/nowhere"))
+    facts.wrappers = {"0xpuf": {"mint": True, "redeem": True}}
+    assert "0xpuf" not in merge_candidates(FakeChain(), facts)
+
+
+def test_without_facts_the_hand_written_list_still_stands():
+    from erouter.dev.wrappers import merge_candidates
+
+    assert merge_candidates(FakeChain(), None) == ["0xaaa"]

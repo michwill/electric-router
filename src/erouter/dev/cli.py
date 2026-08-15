@@ -531,7 +531,9 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} {exc}")
         return 2
 
-    nodes, wrappers = build_node_map(load.pools, chain, client)
+    nodes, wrappers = build_node_map(
+        load.pools, chain, client,
+        facts=FactsCache.load(chain.chain_id, chain.name.lower()))
     stake_arcs = build_stake_arcs(nodes, chain, client)
     # Leaving a lending wrapper, where `data/facts` says the protocol still
     # allows it.  Rides with the stake arcs: same shape, same treatment.
@@ -885,7 +887,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
     uncached = CachedQuoterClient(raw, chain.chain_id, rpc.block, enabled=False)
     resolve_dialects(load.pools, cached, chain)
     read_balances(load.pools, cached)
-    nodes, _ = build_node_map(load.pools, chain, cached)
+    nodes, _ = build_node_map(load.pools, chain, cached,
+                              facts=FactsCache.load(chain.chain_id, chain.name.lower()))
     stake = build_stake_arcs(nodes, chain, cached)
     # Leaving a lending wrapper, where `data/facts` says the protocol still
     # allows it.  Rides with the stake arcs: same shape, same treatment.
@@ -1082,7 +1085,8 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     setup = CachedQuoterClient(quoter_client(rpc, chain), chain.chain_id, rpc.block)
     resolve_dialects(load.pools, setup, chain)
     read_balances(load.pools, setup)
-    nodes, _ = build_node_map(load.pools, chain, setup)
+    nodes, _ = build_node_map(load.pools, chain, setup,
+                              facts=FactsCache.load(chain.chain_id, chain.name.lower()))
     stake = build_stake_arcs(nodes, chain, setup)
     # Leaving a lending wrapper, where `data/facts` says the protocol still
     # allows it.  Rides with the stake arcs: same shape, same treatment.
@@ -1449,7 +1453,8 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     setup = quoter_client(recorder, chain)
     resolve_dialects(load.pools, setup, chain)
     read_balances(load.pools, setup)
-    nodes, _ = build_node_map(load.pools, chain, setup)
+    nodes, _ = build_node_map(load.pools, chain, setup,
+                              facts=FactsCache.load(chain.chain_id, chain.name.lower()))
     stake = build_stake_arcs(nodes, chain, setup)
     # Leaving a lending wrapper, where `data/facts` says the protocol still
     # allows it.  Rides with the stake arcs: same shape, same treatment.
