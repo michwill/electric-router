@@ -506,6 +506,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 4
 
     gas_table, gas_measured = _gas_table(chain, args, load.pools)
+    facts_for_drift = FactsCache.load(chain.chain_id, chain.name.lower())
     if gas_measured:
         print(f"  gas: {gas_measured:,} legs priced from measured execution")
     elif not getattr(args, "static_gas", False):
@@ -592,7 +593,7 @@ def cmd_route(args: argparse.Namespace) -> int:
                 extra_arcs=stake_arcs,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
-                min_gain_bp=_min_gain_bp(chain, src, dst),
+                min_gain_bp=_min_gain_bp(chain, src, dst, facts_for_drift, nodes),
             )
         except RoutingError as exc:
             print(f"{BAD} no route after refresh: {exc}")
@@ -617,6 +618,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
     from ..core.pipeline import RoutingError, prepare, route
 
     gas_table, _ = _gas_table(chain, args, load.pools)
+    facts_for_drift = FactsCache.load(chain.chain_id, chain.name.lower())
     symbol_src, symbol_dst = nodes.symbol(src), nodes.symbol(dst)
     print(f"  {chain.name} · block {rpc.block:,} · {symbol_src} -> {symbol_dst}")
     print("  preparing (probing arcs, fitting reference prices)...", flush=True)
@@ -669,7 +671,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 prepared=prepared,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
-                min_gain_bp=_min_gain_bp(chain, src, dst),
+                min_gain_bp=_min_gain_bp(chain, src, dst, facts_for_drift, nodes),
             )
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
@@ -684,7 +686,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                            refit_rounds=args.refit, extra_arcs=stake_arcs,
                            max_legs=args.max_legs, prepared=prepared,
                            gas_table=gas_table,
-                           min_gain_bp=_min_gain_bp(chain, src, dst))
+                           min_gain_bp=_min_gain_bp(chain, src, dst, facts_for_drift, nodes))
         _present(result, args, chain, rpc, nodes, wrappers, load,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
@@ -1376,6 +1378,43 @@ def cmd_gascal(args: argparse.Namespace) -> int:
                       f"mint {word(able.mint):<8} redeem {word(able.redeem):<8} "
                       f"{note[:40]}")
 
+    # --- what each pair does on its own ------------------------------------
+    #
+    # The floor a routing gain must clear is the pair's own movement.  Measured
+    # from a pool holding both tokens, which is the rate itself -- an earlier
+    # version stored one price per token and divided, and each token was priced
+    # in whatever its own deepest pool paired it with, so the ratio was
+    # meaningless.  One series per arc, one request per block.
+    if not args.skip_executability:
+        from .drift import SAMPLE_BLOCKS, SAMPLE_FRACTION, sample_rates
+
+        deepest: dict[str, tuple] = {}
+        for pool in load.pools:
+            kind = pool.swap_kind
+            if kind is None or not pool.balances:
+                continue
+            for i, j in pool.swap_pairs():
+                if i >= len(pool.balances) or pool.balances[i] <= 0:
+                    continue
+                # Every pool holding the pair, not just the deepest: the
+                # busiest one is what reveals the movement, and it is not
+                # always the biggest.
+                # Canonical, not raw.  ETH and WETH are one node, so pools
+                # quoting each of them against stETH answer the same question;
+                # keyed raw they split into two keys over disjoint pools and
+                # disagreed -- 0.0533 bp against 1.2915 for the same pair.
+                key = (f"{nodes.canonical(pool.coins[i].address)}"
+                       f"|{nodes.canonical(pool.coins[j].address)}"
+                       f"@{pool.address.lower()}")
+                dx = max(int(pool.balances[i] * SAMPLE_FRACTION), 1)
+                deepest[key] = (key, pool.address, int(kind), i, j, pool.n_coins,
+                                dx, pool.tvl_usd)
+        arcs = [entry[:-1] for entry in deepest.values()]
+        rates = sample_rates(rpc, quoter_client(rpc, chain).address, arcs)
+        moved = cache.learn_prices(rates)
+        print(f"  drift: {len(rates)} pair rate(s) sampled at {len(SAMPLE_BLOCKS)} "
+              f"blocks ({moved} changed)")
+
     if not args.dry_run:
         cache.save()
     stats = cache.stats()
@@ -1404,8 +1443,41 @@ MIN_GAIN_STABLE_BP = 0.01
 MIN_GAIN_VOLATILE_BP = 0.1
 
 
-def _min_gain_bp(chain, src: str, dst: str) -> float:
-    """The per-leg floor for this pair."""
+def _min_gain_bp(chain, src: str, dst: str, facts=None, nodes=None) -> float:
+    """The per-leg floor for this pair, measured where it can be.
+
+    A gain has to beat what the pair does on its own, and that is a property of
+    the *pair*, not of either token.  Classifying tokens as pegged or not could
+    not say that and got WETH->stETH wrong: both move ~125 bp against the
+    dollar, the rate between them barely moves, and a 1:1 Lido mint worth
+    0.04 bp was refused for failing a threshold set by ETH's volatility.
+    `facts` holds a price series per token; the pair's drift is how much the
+    ratio moves.
+
+    The hand-written classes remain only for pairs with no measurement, and
+    even then as a bound rather than an answer: an unmeasured pair is not
+    thereby a volatile one, but assuming the smaller floor would be the
+    optimistic error, and this is the direction that only costs basis points.
+    """
+    # NOT YET USED for the floor.  The measurement is sound -- ETH/stETH
+    # 0.05 bp against USDC/WETH 21.79, which is the distinction the token
+    # classes could not draw -- but feeding it into candidate ranking picks
+    # routes far below the best available: on USDC->WETH $1M the winner came
+    # out 66 bp under a candidate that had quoted `ok` and ranked sixth, which
+    # a tolerance of 10.9 bp cannot explain.  Something in the bucketing is
+    # wrong, and until it is understood a large measured drift is a large
+    # licence to choose badly.  The series is collected and committed; only
+    # this last step is held back.
+    if nodes is not None:
+        src, dst = nodes.canonical(src), nodes.canonical(dst)
+    measured = facts.drift_bp(src, dst) if facts is not None else None
+    if measured is not None:
+        # Half of what the pair moves on its own: a gain the same size as the
+        # drift is a coin flip.  Charged once against the whole route, not per
+        # leg -- see `verify.rank_key`.
+        from .drift import DRIFT_FLOOR_BP
+
+        return max(measured / 2.0, DRIFT_FLOOR_BP)
     stables = {t.lower() for t in getattr(chain, "stables", ())}
     both_pegged = src.lower() in stables and dst.lower() in stables
     return MIN_GAIN_STABLE_BP if both_pegged else MIN_GAIN_VOLATILE_BP

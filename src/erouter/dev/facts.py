@@ -46,6 +46,9 @@ class FactsCache:
     kinds: dict[int, int] = field(default_factory=dict)
     #: address -> registry class, so the aggregates survive a reload.
     class_of: dict[str, str] = field(default_factory=dict)
+    #: "tokenIn|tokenOut" -> that rate at spaced blocks.  The pair's own rate,
+    #: not two prices divided; see `drift.series_drift_bp`.
+    prices: dict[str, list[float]] = field(default_factory=dict)
     #: "address:kind:i>j" -> why it reverted.  Quotes fine, cannot be traded.
     broken: dict[str, str] = field(default_factory=dict)
     #: wrapper address -> {"mint": bool, "redeem": bool, "note": str}
@@ -68,6 +71,7 @@ class FactsCache:
         cache.classes = {k: int(v) for k, v in raw.get("classes", {}).items()}
         cache.kinds = {int(k): int(v) for k, v in raw.get("kinds", {}).items()}
         cache.class_of = dict(raw.get("class_of", {}))
+        cache.prices = {k: list(v) for k, v in raw.get("prices", {}).items()}
         cache.broken = dict(raw.get("broken", {}))
         cache.wrappers = dict(raw.get("wrappers", {}))
         cache.block = int(raw.get("block", 0))
@@ -85,6 +89,8 @@ class FactsCache:
             "classes": dict(sorted(self.classes.items())),
             "kinds": {str(k): v for k, v in sorted(self.kinds.items())},
             "class_of": dict(sorted(self.class_of.items())),
+            "prices": {k: [round(x, 12) for x in v]
+                       for k, v in sorted(self.prices.items())},
             "broken": dict(sorted(self.broken.items())),
             "wrappers": dict(sorted(self.wrappers.items())),
         }
@@ -141,6 +147,40 @@ class FactsCache:
                 by_class.setdefault(f"{name}:{kind}", []).append(gas)
         self.kinds = {k: int(median(v)) for k, v in by_kind.items()}
         self.classes = {k: int(median(v)) for k, v in by_class.items()}
+
+    def learn_prices(self, series: dict) -> int:
+        """Record one price series per token, for pair drift."""
+        changed = 0
+        for token, entry in series.items():
+            prices = list(getattr(entry, "prices", entry))
+            if self.prices.get(token.lower()) != prices:
+                self.prices[token.lower()] = prices
+                changed += 1
+        if changed:
+            self.dirty = True
+        return changed
+
+    def drift_bp(self, src: str, dst: str) -> float | None:
+        """How much this pair's rate moves on its own, or None if unmeasured.
+
+        Either direction of the same pool answers the same question, so both
+        keys are tried.  `None` means no pool holds both -- unknown, which the
+        caller must not read as "does not move".
+        """
+        from .drift import series_drift_bp
+
+        # The largest across every pool that holds the pair, not the deepest
+        # one's.  A quiet pool has a rate that does not move, which says the
+        # pool saw no trades -- not that the pair holds still.  WETH/WBTC read
+        # 0.0000 bp that way, and a zero floor is the one answer that lets a
+        # volatile pair take unlimited legs.
+        worst = None
+        for direction in (f"{src.lower()}|{dst.lower()}", f"{dst.lower()}|{src.lower()}"):
+            for key, rates in self.prices.items():
+                if key == direction or key.startswith(direction + "@"):
+                    got = series_drift_bp(rates)
+                    worst = got if worst is None else max(worst, got)
+        return worst
 
     def table(self, pools=None) -> GasTable:
         """The pure-core view, which is all the router itself ever sees.

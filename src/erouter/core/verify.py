@@ -189,22 +189,23 @@ def verify(
     # legs at $1M.  The waste is the tail -- steps worth 0.017 to 0.13 bp --
     # and a floor per leg removes exactly that while leaving the rest.
     per_leg = leg_gas(ArcKind.SWAP_STABLE) * gas_price_wei / 1e18 * dst_wei_per_eth
-    if min_gain_bp > 0:
-        per_leg = max(per_leg, abs(best_score) * min_gain_bp / 1e4)
-    def charged(candidate: Candidate) -> float:
-        """Output, less gas, less what each leg must earn to justify itself."""
-        return score(candidate) - per_leg * legs(candidate)
-
-    best_charged = max(charged(c) for c in usable)
-    tie = abs(best_score) * TIE_FLOOR
+    # `min_gain_bp` is charged once, not per leg.  A route executes as a single
+    # transaction, so the price moving between the quote and inclusion hits all
+    # of it together -- the risk does not scale with how many pools are
+    # touched.  Charging it per leg billed a 12-leg route on a pair drifting
+    # 21 bp some 131 bp, drove it to 2 legs, and threw away a 71 bp advantage
+    # that was really there.  What extra legs do add is gas, which `score` has
+    # already subtracted, and revert surface, which is not a price.
+    #
+    # So this is a threshold on the *gain*: an advantage smaller than what the
+    # pair moves on its own is not an advantage, however many legs bought it.
+    # Below it, the shorter route wins on the tie-break.
+    tolerance = max(per_leg, abs(best_score) * min_gain_bp / 1e4,
+                    abs(best_score) * TIE_FLOOR)
 
     def rank_key(candidate: Candidate) -> tuple:
-        # Charging every leg is what makes the floor *per leg*: two extra legs
-        # have to earn twice as much as one.  A flat tolerance could not say
-        # that -- it treated a 2-leg and a 25-leg route the same distance from
-        # the winner as equally tied.
-        value = charged(candidate)
-        bucket = 0 if best_charged - value <= tie else 1
+        value = score(candidate)
+        bucket = 0 if best_score - value <= tolerance else 1
         return (bucket, legs(candidate) if bucket == 0 else 0, -value)
 
     ranked = sorted(usable, key=rank_key)
