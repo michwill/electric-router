@@ -139,35 +139,46 @@ def create2_address(salt: bytes, initcode: bytes, proxy: str = CREATE2_PROXY) ->
     return "0x" + keccak256(body)[12:].hex()
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chain", default="ethereum")
-    parser.add_argument("--account", default="babe", help="brownie keystore name")
-    parser.add_argument(
-        "--broadcast", action="store_true",
-        help="send the transaction. Without it, this deploys on a fork and "
-             "throws the result away, which is the safe way to rehearse",
-    )
-    parser.add_argument("--verify", action="store_true", help="submit to Etherscan")
-    parser.add_argument(
-        "--create2", action="store_true",
-        help="deploy through the deterministic proxy, so the quoter lands on "
-             "the same address on every chain and costs one whitelist entry "
-             "instead of fifteen",
-    )
-    parser.add_argument(
-        "--salt", default=SALT_PHRASE.decode(),
-        help="salt phrase for --create2; changing it changes the address",
-    )
-    args = parser.parse_args()
+#: Chains not worth the gas, and why.  Printed rather than silently skipped:
+#: a chain missing from a deployment sweep should say so.
+UNSUPPORTED = {
+    "etherlink": "rejects state overrides and access lists, and its tracer "
+                 "output cannot be decoded -- a quoter there would still be "
+                 "wire-only",
+}
 
+
+def funding_estimate(url: str, chain_id: int, payload: bytes, sender: str | None):
+    """(gas, gas price, native cost) for this deployment, from the chain itself.
+
+    Printed before anything is sent, because the question when deploying across
+    fourteen chains is not "did it work" but "how much does each one need in
+    the deployer".
+    """
+    from erouter.dev.rpc import JsonRpcTransport
+
+    rpc = JsonRpcTransport(url, chain_id=chain_id)
+    tx = {"to": CREATE2_PROXY, "data": "0x" + payload.hex()}
+    if sender:
+        tx["from"] = sender
+    try:
+        gas = int(rpc.fetch("eth_estimateGas", [tx]), 16)
+    except Exception:
+        # What the EVM charges to store code, plus the transaction itself.
+        # Only used when the node will not estimate for an unfunded sender.
+        gas = 21_000 + 200 * len(payload)
+    price = rpc.gas_price()
+    return gas, price, gas * price / 1e18
+
+
+def deploy_one(name: str, args, account=None) -> int:
     import boa
 
     from erouter.dev import chains as chain_table
     from erouter.dev import config
     from erouter.dev.boa_host import runtime_bytecode
 
-    chain = chain_table.get(args.chain)
+    chain = chain_table.get(name)
     url = config.rpc_url(chain.rpc_attr)
     expected = runtime_bytecode()
     print(f"{chain.name} (chain {chain.chain_id})")
@@ -176,12 +187,24 @@ def main() -> int:
 
     if args.broadcast:
         boa.set_network_env(url)
-        deployer = account_load(args.account)
-        boa.env.add_account(deployer)
+        boa.env.add_account(account)
+        deployer = account
         print(f"  deployer  {deployer.address}")
     else:
-        boa.fork(url)
+        # `allow_dirty` because a sweep forks once per chain and the previous
+        # fork still holds the contract it just rehearsed deploying; boa
+        # refuses to move on otherwise, and every chain after the first fails
+        # with "Cannot fork with dirty state".  Nothing is carried over -- each
+        # fork starts from that chain's own head.
+        # Pinned to a real block rather than boa's default `safe` tag, which
+        # polygon's endpoint does not serve ("-32000: safe block not found")
+        # and which would otherwise drop that chain out of the sweep.
+        from erouter.dev.rpc import JsonRpcTransport
+
+        head = JsonRpcTransport(url, chain_id=chain.chain_id).pin.block
+        boa.fork(url, block_identifier=head - 5, allow_dirty=True)
         boa.env.eoa = boa.env.generate_address()
+        deployer = None
         print(f"  deployer  {boa.env.eoa} (fork)")
 
     if args.create2:
@@ -203,6 +226,11 @@ def main() -> int:
             # through the sweep.
             print(f"  already deployed ({len(existing):,} bytes) -- nothing to send")
         else:
+            gas, price, cost = funding_estimate(
+                url, chain.chain_id, salt + initcode,
+                deployer.address if deployer else None)
+            print(f"  cost      {gas:,} gas at {price / 1e9:,.3f} gwei "
+                  f"= {cost:.6f} {chain.native_symbol}")
             boa.env.execute_code(CREATE2_PROXY, data=salt + initcode, is_modifying=True)
             print(f"  sent {len(salt) + len(initcode):,} bytes through the proxy")
     else:
@@ -254,24 +282,35 @@ def main() -> int:
         # deployment is missing does not fail loudly: it answers REVERTED, and
         # the router treats that as "this leg cannot be traded" and silently
         # takes a worse route.
+        #
+        # cDAI is a mainnet address, so this is a mainnet test.  Running it
+        # everywhere would fail every other chain *after* broadcasting, which
+        # reads as a broken deployment when it is a missing token.
         lend = [Probe(SANITY_CDAI, ArcKind.LEND_REDEEM, 0, 0, 0, SANITY_CDAI_DX)]
-        got = QuoterClient(rpc, address).probe(lend)[0]
-        want = override_client(rpc).probe(lend)[0]
-        print("\n  sanity 100,000 cDAI -> DAI (LEND_REDEEM)")
-        print(f"    deployed   {got.value:,} ({got.status.name})")
-        print(f"    override   {want.value:,} ({want.status.name})")
-        if got.value != want.value or not got.ok:
-            print("  ! the deployed quoter cannot price LEND_REDEEM -- lending")
-            print("    arcs would be built and then silently routed around")
-            return 1
-        print("    agree")
+        if chain.name != "ethereum":
+            lend = []
+        if lend:
+            got = QuoterClient(rpc, address).probe(lend)[0]
+            want = override_client(rpc).probe(lend)[0]
+            print("\n  sanity 100,000 cDAI -> DAI (LEND_REDEEM)")
+            print(f"    deployed   {got.value:,} ({got.status.name})")
+            print(f"    override   {want.value:,} ({want.status.name})")
+            if got.value != want.value or not got.ok:
+                print("  ! the deployed quoter cannot price LEND_REDEEM -- lending")
+                print("    arcs would be built and then silently routed around")
+                return 1
+            print("    agree")
 
         if args.verify:
             from boa.explorer import Etherscan
 
             key = getattr(config.networks(), "ETHERSCAN_API_KEY", None)
             if key:
-                verify_with_retries(quoter, Etherscan(api_key=key))
+                # CREATE2 leaves no deployer object to verify, so bind one to
+                # the address the proxy put the code at.
+                deployed_at = (boa.load_partial(str(CONTRACT)).at(address)
+                               if args.create2 else quoter)
+                verify_with_retries(deployed_at, Etherscan(api_key=key))
             else:
                 print("  ! no ETHERSCAN_API_KEY in networks.py; skipping verification")
 
@@ -287,6 +326,62 @@ def main() -> int:
         print("\n  fork rehearsal only -- nothing was broadcast.")
         print("  re-run with --broadcast (and --verify) when you want it on chain.")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--chain", default="ethereum",
+        help="a chain name, or 'all' for every chain that can be served",
+    )
+    parser.add_argument("--account", default="babe", help="brownie keystore name")
+    parser.add_argument(
+        "--broadcast", action="store_true",
+        help="send the transaction. Without it, this deploys on a fork and "
+             "throws the result away, which is the safe way to rehearse",
+    )
+    parser.add_argument("--verify", action="store_true", help="submit to Etherscan")
+    parser.add_argument(
+        "--create2", action="store_true",
+        help="deploy through the deterministic proxy, so the quoter lands on "
+             "the same address on every chain and costs one whitelist entry "
+             "instead of fifteen",
+    )
+    parser.add_argument(
+        "--salt", default=SALT_PHRASE.decode(),
+        help="salt phrase for --create2; changing it changes the address",
+    )
+    args = parser.parse_args()
+
+    from erouter.dev import chains as chain_table
+
+    if args.chain == "all":
+        wanted = [n for n in chain_table.CHAINS if n not in UNSUPPORTED]
+        for name, why in UNSUPPORTED.items():
+            print(f"  skipping {name}: {why}\n")
+    else:
+        wanted = [args.chain]
+
+    # Once, not once per chain: a fourteen-chain sweep should ask for the
+    # passphrase a single time.
+    account = account_load(args.account) if args.broadcast else None
+
+    results: dict[str, int] = {}
+    for name in wanted:
+        try:
+            results[name] = deploy_one(name, args, account)
+        except Exception as exc:
+            print(f"  ! {name} failed: {str(exc)[:100]}")
+            results[name] = 1
+        print()
+
+    if len(wanted) > 1:
+        done = [n for n, code in results.items() if code == 0]
+        print(f"  {len(done)}/{len(wanted)} chains carry the quoter")
+        for name, code in results.items():
+            if code != 0:
+                print(f"    ! {name}")
+    return 0 if all(code == 0 for code in results.values()) else 1
 
 
 if __name__ == "__main__":
