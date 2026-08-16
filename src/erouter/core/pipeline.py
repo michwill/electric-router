@@ -340,6 +340,18 @@ def calibrate_arcs(
     return arcs, dropped
 
 
+def _client_block(client) -> int:
+    """The block a client is pinned to, or 0 if it will not say.
+
+    `Transport` exposes it; a stub in a test may not.  Zero means "unknown",
+    which reuses a preparation as before rather than rebuilding on every quote.
+    """
+    try:
+        return int(getattr(getattr(client, "transport", None), "block", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def prepare(
     pools: list[PoolSpec],
     nodes: NodeMap,
@@ -434,6 +446,7 @@ def prepare(
         arcs=arcs, ladders=ladders, nu=nu, src_node=src_node, dst_node=dst_node,
         pool_names={a.pool.lower(): a.note for a in arcs},
         counters=dict(scratch.counters), warnings=list(scratch.warnings),
+        block=_client_block(client),
     )
 
 
@@ -461,10 +474,15 @@ class Prepared:
     src_node: int
     dst_node: int
     pool_names: dict[str, str] = field(default_factory=dict)
-    warm: np.ndarray | None = None
     counters: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     quotes: int = 0
+    #: The block every number in here was measured at.  A preparation is a
+    #: function of (universe, block) and of nothing else, so reusing one across
+    #: a block change would mix derivatives fitted at two different states --
+    #: `route` rebuilds instead, which is what "re-fit when the block moves"
+    #: means in code.  Zero means "not recorded", which reuses as before.
+    block: int = 0
 
 
 def route(
@@ -509,7 +527,16 @@ def route(
             "node after merging; convert directly rather than routing"
         )
 
-    if prepared is None:
+    # A preparation is a function of (universe, block).  Reusing one whose
+    # block has moved would price this quote from derivatives fitted against a
+    # different chain state -- every probe, every `a`, every `B` -- so the
+    # block change is what triggers the re-fit, and nothing else does.
+    now = _client_block(client)
+    stale = (prepared is not None and prepared.block and now
+             and prepared.block != now)
+    if prepared is None or stale:
+        if stale:
+            result.counters["preparation_refit_at_new_block"] = now
         with clock("prepare"):
             prepared = prepare(
                 pools, nodes, client, src_token=src_token, dst_token=dst_token,
@@ -645,24 +672,32 @@ def _quote(
         # every one of those pivots factorises a matrix the size of the whole
         # connected component.  Starting from one path only ever adds arcs, so
         # the matrix stays the size of the active set.
-        warm_start = None
-        if prepared is not None and prepared.warm is not None:
-            # A previous size's support, carried by arc *id*: the dust floor is
-            # a function of Psi, so a different size can drop different arcs and
-            # index-based reuse would silently point at the wrong pools.
-            #
-            # Worth carrying because within one active set the KKT system is
-            # affine in Psi -- L u = Psi (e_src - e_dst) + B_A (G_A eps_A) -- so
-            # the set of conducting arcs is piecewise constant in size, and a
-            # nearby amount usually lands in the same piece with nothing to do.
-            wanted = set(prepared.warm.tolist()) if hasattr(prepared.warm, "tolist") else set(prepared.warm)
-            reuse = [k for k, arc in enumerate(arcs) if arc.id in wanted]
-            if reuse:
-                warm_start = np.array(reuse, dtype=np.int64)
-                result.counters["warm_start_arcs"] = len(reuse)
-        if warm_start is None:
-            best_path = k_shortest_paths(g, src_node, dst_node, k=1)
-            warm_start = np.array(best_path[0]) if best_path else None
+        # The start is a function of *this* quote and nothing else.
+        #
+        # A previous size's support used to be carried forward here, on the
+        # argument that the KKT system is affine in Psi within one active set,
+        # so a nearby amount lands in the same piece with nothing to do.  That
+        # is true of the base solve, which column-generates against all m arcs
+        # and certifies.  It is not true of everything downstream: column
+        # generation is capped at `max_rounds`, and the candidate re-solves run
+        # truncated (`CANDIDATE_PIVOTS`, `partial_ok`).  So the basis it starts
+        # from can decide which candidates exist, and a quote's answer became a
+        # function of what had been quoted before it.
+        #
+        # Measured on crvUSD -> sDOLA at block 25,770,648, gas pinned: the same
+        # $2M quote returned 1,415,273.115793 alone and 1,419,036.382808 after
+        # a $100k quote in the same session -- 26.5 bp apart, both verified on
+        # chain, so both real and one of them needlessly worse.  Which one won
+        # also moved with the state cache, which is how it looked like a
+        # regression rather than a dependency.
+        #
+        # A session may reuse the probes, the calibration and the price fit --
+        # those are functions of (universe, block) and `Prepared` is defined as
+        # exactly that.  It may not reuse anything that is a function of a
+        # previous *query*.  The solve costs a few milliseconds against a
+        # route's hundreds; buying determinism with them is the right trade.
+        best_path = k_shortest_paths(g, src_node, dst_node, k=1)
+        warm_start = np.array(best_path[0]) if best_path else None
     with clock("solve"):
         report = solve(
             g, src_node, dst_node, Psi_scaled, seed=seed,
@@ -761,14 +796,10 @@ def _quote(
             f"pool poorly and the modelled loss understates the real one (§12.1)"
         )
 
-    # Carry the *support* to the next size, not the whole final basis.  `A`
-    # ends column generation holding every arc that ever priced in -- 199 of
-    # them here against 34 carrying flow -- and handing that back as a start
-    # set makes the next solve evict the difference one pivot at a time
-    # (measured: 18 pivots per quote against 2).  `candidates.py` warm-starts
-    # from the circulation-free support for exactly this reason.
+    # Nothing about this quote is written back onto the preparation -- see the
+    # warm-start note above.  The count is the one exception, and it is a
+    # counter rather than an input to anything.
     if prepared is not None:
-        prepared.warm = np.array([arcs[k].id for k in active], dtype=object)
         prepared.quotes += 1
 
     # §12.4: KCL must hold on the flow we are about to execute.  This is the
