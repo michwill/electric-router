@@ -84,6 +84,11 @@ class PoolSpec:
     is_meta: bool = False
     base_pool: str = ""
     lp_token: str = ""
+    # The LP token's decimals and supply, read on chain alongside it.  Supply
+    # is what sizes a withdrawal probe: a withdrawal's "reserve" is the whole
+    # token, not any one coin's balance.
+    lp_decimals: int = 18
+    lp_supply: int = 0
     # Resolved by probe; None until then.  Persisted, because it is a property
     # of the deployed contract rather than of the block.
     dialect: Dialect | None = None

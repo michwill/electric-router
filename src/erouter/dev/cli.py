@@ -572,6 +572,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         load_pools,
         read_balances,
         resolve_dialects,
+        resolve_lp_tokens,
     )
     from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
 
@@ -602,6 +603,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     resolve_dialects(load.pools, client, chain, use_cache=not args.refresh)
     decimals_fixed: list[str] = []
     read_balances(load.pools, client, decimals_fixed)
+    resolve_lp_tokens(load.pools, client)
     for warning in decimals_fixed:
         print(f"{WARN} {warning}")
     for warning in check_reserves_are_real(load.pools, client, rpc):

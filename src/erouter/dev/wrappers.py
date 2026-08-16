@@ -116,6 +116,14 @@ def build_node_map(
         for coin in pool.coins:
             nodes.add_token(coin.address, coin.symbol, coin.decimals)
 
+    # LP tokens are nodes too, or a deposit would have nowhere to arrive.
+    # Most are already here -- a base pool's LP is a coin of its metapools --
+    # but a pool nobody builds on has one that appears nowhere else, and that
+    # is exactly the pool whose liquidity would otherwise be unreachable.
+    for pool in pools:
+        if pool.lp_token and not nodes.has(pool.lp_token):
+            nodes.add_token(pool.lp_token, f"{pool.name[:18]} LP", pool.lp_decimals)
+
     # --- native wrapper: 1:1, no probing needed --------------------------
     wrapped = chain.wrapped.lower()
     sentinel = NATIVE_SENTINEL.lower()

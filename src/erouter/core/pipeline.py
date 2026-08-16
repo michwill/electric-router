@@ -142,44 +142,88 @@ class RoutingError(RuntimeError):
     pass
 
 
+def arc_tokens(pool: PoolSpec, kind: ArcKind, i: int, j: int) -> tuple[str, str]:
+    """What an arc of this kind on this pool trades, in and out.
+
+    A swap moves between two coins; a deposit moves a coin into the LP token;
+    a withdrawal moves the LP token into a coin.  Which index is meaningful
+    differs -- `i` for a deposit, `j` for a withdrawal -- because that is what
+    the calldata uses, and the quoter's leg encoding reads the same fields.
+    """
+    if kind.is_deposit:
+        return pool.coins[i].address, pool.lp_token
+    if kind.is_withdraw:
+        return pool.lp_token, pool.coins[j].address
+    return pool.coins[i].address, pool.coins[j].address
+
+
 def build_arcs(
     pools: list[PoolSpec], nodes: NodeMap
 ) -> tuple[list[ArcRef], list[tuple[PoolSpec, int, int]]]:
-    """Every quotable swap direction, with its probe target and metadata."""
+    """Every quotable interaction, with its probe target and metadata.
+
+    Three kinds, not one.  Swaps between coins, and -- where the pool's LP
+    token is known and is a node -- single-sided deposits and withdrawals,
+    which make the LP token routable rather than a dead end.  Without them 51
+    mainnet tokens have no path at all (they sit only in metapools whose other
+    coin is a base-pool LP), and on gnosis XDAI cannot reach the deeper EURe,
+    whose only liquidity is against 3pool's LP.
+
+    Proportional `remove_liquidity` is deliberately absent: it takes one token
+    and returns *all* the coins at once, which is a hyperedge rather than an
+    arc, and the flow formulation (§3.3) has no way to tie the resulting flows
+    to fixed ratios.  Multi-coin `add_liquidity` is the same shape reversed.
+    Both are real and both are cheaper than what is built here; see the note in
+    `docs/quadratic-flow-router.md`.
+    """
     refs: list[ArcRef] = []
     meta: list[tuple[PoolSpec, int, int]] = []
+
+    def offer(kind: ArcKind, i: int, j: int, reserve: int, dec_in: int, dec_out: int):
+        token_in, token_out = arc_tokens(pool, kind, i, j)
+        if not (token_in and token_out):
+            return
+        if not (nodes.has(token_in) and nodes.has(token_out)):
+            return
+        if nodes.node(token_in) == nodes.node(token_out):
+            return  # self-loop after merging; see the note in route()
+        refs.append(
+            ArcRef(pool=pool.address, kind=kind, i=i, j=j, n_coins=pool.n_coins,
+                   reserve_in=reserve, decimals_in=dec_in, decimals_out=dec_out)
+        )
+        meta.append((pool, i, j))
+
     for pool in pools:
-        kind = pool.swap_kind
-        if kind is None or not pool.balances:
+        if not pool.balances:
             continue
-        for i, j in pool.swap_pairs():
-            if i >= len(pool.balances) or pool.balances[i] <= 0:
+        kind = pool.swap_kind
+        if kind is not None:
+            for i, j in pool.swap_pairs():
+                if i >= len(pool.balances) or pool.balances[i] <= 0:
+                    continue
+                offer(kind, i, j, pool.balances[i],
+                      pool.coins[i].decimals, pool.coins[j].decimals)
+
+        # An LP token with no supply cannot be withdrawn from and cannot be
+        # priced into: `calc_withdraw_one_coin` divides by it.
+        if not pool.lp_token or pool.lp_supply <= 0:
+            continue
+        deposit, withdraw = pool.deposit_kind, pool.withdraw_kind
+        for k in range(pool.n_coins):
+            if k >= len(pool.balances) or pool.balances[k] <= 0:
                 continue
-            token_in, token_out = pool.coins[i].address, pool.coins[j].address
-            if not (nodes.has(token_in) and nodes.has(token_out)):
-                continue
-            if nodes.node(token_in) == nodes.node(token_out):
-                continue  # self-loop after merging; see the note in route()
-            refs.append(
-                ArcRef(
-                    pool=pool.address,
-                    kind=kind,
-                    i=i,
-                    j=j,
-                    n_coins=pool.n_coins,
-                    reserve_in=pool.balances[i],
-                    decimals_in=pool.coins[i].decimals,
-                    decimals_out=pool.coins[j].decimals,
-                )
-            )
-            meta.append((pool, i, j))
+            offer(deposit, k, 0, pool.balances[k],
+                  pool.coins[k].decimals, pool.lp_decimals)
+            if withdraw is not None:
+                offer(withdraw, 0, k, pool.lp_supply,
+                      pool.lp_decimals, pool.coins[k].decimals)
     return refs, meta
 
 
 def _to_arc(
     pool: PoolSpec, i: int, j: int, ref: ArcRef, fit: Calibration, nodes: NodeMap
 ) -> PoolArc:
-    token_in, token_out = pool.coins[i].address, pool.coins[j].address
+    token_in, token_out = arc_tokens(pool, ref.kind, i, j)
     a, B = rescale(fit.a, fit.B, nodes.rate(token_in), nodes.rate(token_out))
     cap = fit.cap
     if math.isfinite(cap):
@@ -187,7 +231,9 @@ def _to_arc(
     return PoolArc(
         id=ref.id,
         pool=pool.address,
-        kind=ArcKind(pool.swap_kind),
+        # The *arc's* kind, not the pool's: one pool now yields swaps,
+        # deposits and withdrawals, and they execute differently.
+        kind=ArcKind(ref.kind),
         i=i,
         j=j,
         n_coins=pool.n_coins,

@@ -280,6 +280,85 @@ class DialectAudit:
         return self.resolved + len(self.unresolved)
 
 
+def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient) -> int:
+    """Find each pool's LP token, so deposits and withdrawals can be arcs.
+
+    The API reports `lp_token_address` for none of them -- 0 of 385 on mainnet
+    -- so it is read, in one batch, from four questions asked of every pool:
+
+        token()        50 mainnet pools, the older crypto ones
+        lp_token()     12, the older stable ones
+        totalSupply()  309, the factory-ng pools, which *are* their own LP
+        base_pool      the rest, by inference (below)
+
+    The fourth is the interesting one.  Fourteen mainnet pools expose no getter
+    at all, and they include 3pool at $159M -- whose LP token connects 25
+    meta-tokens to everything else.  But a base pool's LP *is* a coin of every
+    metapool built on it, and the API does report `base_pool`, so a metapool
+    naming this pool hands over the address as its own `coins[1]`.
+
+    Curve's MetaRegistry would answer all of them, and is not used: it exists
+    on ethereum and polygon and on none of the other thirteen chains, so it
+    could not be the mechanism anywhere else.  What is left unresolved after
+    this is twelve old mainnet metapools holding $1M between them, which keep
+    their swap arcs and simply get no LP arcs.
+    """
+    from ..core.codec import encode_call
+    from ..core.transport import Call
+
+    calls: list[Call] = []
+    for pool in pools:
+        calls += [
+            Call(pool.address, encode_call("token()")),
+            Call(pool.address, encode_call("lp_token()")),
+            Call(pool.address, encode_call("totalSupply()")),
+        ]
+    answers = client.raw(calls)
+
+    # A metapool's second coin is its base pool's LP token.
+    from_base: dict[str, tuple[str, int]] = {}
+    for pool in pools:
+        if pool.base_pool and len(pool.coins) > 1:
+            from_base[pool.base_pool.lower()] = (
+                pool.coins[1].address, pool.coins[1].decimals
+            )
+
+    resolved = 0
+    for k, pool in enumerate(pools):
+        token, lp_token, supply = answers[3 * k : 3 * k + 3]
+        address, decimals = "", 18
+        for answer in (token, lp_token):
+            if answer.status is Status.VALUE and answer.uint():
+                address = "0x" + f"{answer.uint():040x}"
+                break
+        if not address and supply.status is Status.VALUE and supply.uint() > 0:
+            address = pool.address  # the pool is its own ERC20
+        if not address:
+            address, decimals = from_base.get(pool.address.lower(), ("", 18))
+        if not address:
+            continue
+        pool.lp_token = address.lower()
+        pool.lp_decimals = decimals
+        pool.lp_supply = supply.uint() if supply.status is Status.VALUE else 0
+        resolved += 1
+
+    # Supply for an LP token that lives at its own address, which the batch
+    # above asked of the *pool* -- the same account for factory-ng pools and a
+    # different one for the rest.
+    separate = [p for p in pools
+                if p.lp_token and p.lp_token != p.address.lower() and not p.lp_supply]
+    if separate:
+        extra = client.raw([Call(p.lp_token, encode_call("totalSupply()")) for p in separate]
+                           + [Call(p.lp_token, encode_call("decimals()")) for p in separate])
+        for idx, pool in enumerate(separate):
+            supply, digits = extra[idx], extra[len(separate) + idx]
+            if supply.status is Status.VALUE:
+                pool.lp_supply = supply.uint()
+            if digits.status is Status.VALUE and 0 <= digits.uint() <= 36:
+                pool.lp_decimals = digits.uint()
+    return resolved
+
+
 def resolve_dialects(
     pools: list[PoolSpec],
     client: QuoterClient,
