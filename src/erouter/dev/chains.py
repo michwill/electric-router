@@ -226,9 +226,19 @@ CHAINS: dict[str, Chain] = {
     ),
     # --- Curve Lite deployments ------------------------------------------
     #
-    # Small enough that the mainnet $10,000 pool floor would empty them: all
-    # of fantom's 321 pools come to $0.9M.  `lite.LITE_MIN_TVL` is what the
-    # loader uses for these instead.
+    # Small enough that the mainnet $10,000 pool floor would empty them, so
+    # `lite.LITE_MIN_TVL` is what the loader uses for these instead.
+    #
+    # Every wrapped native below was derived from the chain's own pool data --
+    # the coin whose symbol is W + the native symbol the API reports -- and
+    # then confirmed by asking the token for its own `symbol()`.  Guessing
+    # these fails silently: a wrong address breaks the native/ERC20 merge and
+    # the router simply never finds routes through it.
+    #
+    # Two Lite deployments are deliberately absent.  **fantom** is in
+    # wind-down: 164 of its 321 pools answer neither ABI spelling and probing
+    # them takes 19 minutes.  **kava** resolves a dialect for none of its 19
+    # pools, so it yields zero arcs -- there is nothing there to route.
     "avalanche": Chain(
         name="avalanche",
         chain_id=43114,
@@ -238,14 +248,79 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX
         lite=True,
     ),
-    "fantom": Chain(
-        name="fantom",
-        chain_id=250,
-        api_name="fantom",
-        rpc_attr="FANTOM",
-        native_symbol="FTM",
-        wrapped="0x21be370D5312f44cB42ce377BC9b8a0cEF1A4C83",  # WFTM
-        lite=True,
+    "etherlink": Chain(
+        name="etherlink",
+        chain_id=42793,
+        api_name="etherlink",
+        rpc_attr="ETHERLINK",
+        native_symbol="XTZ",
+        wrapped="0xc9B53AB2679f573e480d01e0f49e2B5CFB7a3EAb",
+        lite=True,   # ~$9.1M
+    ),
+    "monad": Chain(
+        name="monad",
+        chain_id=143,
+        api_name="monad",
+        rpc_attr="MONAD",
+        native_symbol="MON",
+        wrapped="0x3bD359c1119Da7dA1d913d1C4d2B7c461115433A",
+        lite=True,   # ~$7.5M
+    ),
+    "plasma": Chain(
+        name="plasma",
+        chain_id=9745,
+        api_name="plasma",
+        rpc_attr="PLASMA",
+        native_symbol="XPL",
+        wrapped="0x6100E367285b01F48D07953803A2d8dCA5D19873",
+        lite=True,   # ~$3.8M
+    ),
+    "xlayer": Chain(
+        name="xlayer",
+        chain_id=196,
+        api_name="xlayer",
+        rpc_attr="XLAYER",
+        native_symbol="OKB",
+        wrapped="0xe538905cf8410324e03A5A23C1c177a474D59b2b",
+        lite=True,   # ~$3.6M
+    ),
+    "unichain": Chain(
+        name="unichain",
+        chain_id=130,
+        api_name="unichain",
+        rpc_attr="UNICHAIN",
+        native_symbol="ETH",
+        wrapped="0x4200000000000000000000000000000000000006",
+        lite=True,   # ~$572k
+    ),
+    "robinhood": Chain(
+        name="robinhood",
+        chain_id=4663,
+        api_name="robinhood",
+        rpc_attr="ROBINHOOD",
+        native_symbol="ETH",
+        wrapped="0x0bD7d308f8e1639fAb988df18a8011f41EacaD73",
+        lite=True,   # ~$414k
+    ),
+    "celo": Chain(
+        name="celo",
+        chain_id=42220,
+        api_name="celo",
+        rpc_attr="CELO",
+        native_symbol="CELO",
+        # CELO is natively an ERC20 at this address -- there is no
+        # separate wrapped token, so the merge is the identity.
+        wrapped="0x471EcE3750Da237f93B8E339c536989b8978a438",
+        lite=True,   # ~$259k
+    ),
+    "tac": Chain(
+        name="tac",
+        chain_id=239,
+        api_name="tac",
+        rpc_attr="TAC",
+        native_symbol="TAC",
+        wrapped="0xB63B9f0eb4A6E6f191529D71d4D88cc8900Df2C9",
+        lite=True,   # ~$171k
     ),
     "sonic": Chain(
         name="sonic",
