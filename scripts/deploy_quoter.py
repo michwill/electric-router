@@ -78,6 +78,33 @@ def verify_with_retries(contract, etherscan, attempts: int = 6, pause: int = 10)
     print("  ! not verified -- the deployment is still good, verify by hand")
 
 
+def _sanity_probe(chain):
+    """A pool on *this* chain that the deployment can be checked against.
+
+    Mainnet's 3pool was hardcoded, which is no test at all anywhere else: the
+    address has no code, the quote returns zero, and a deployment that works
+    would look broken.  The deepest pool in the chain's own universe is the
+    honest choice -- it is the one a first route is most likely to touch.
+    """
+    from erouter.core.types import ArcKind, Probe
+    from erouter.dev.universe import load_pools
+
+    if chain.name == "ethereum":
+        return ([Probe(SANITY_POOL, ArcKind.SWAP_STABLE, 1, 2, 3, SANITY_DX)],
+                "1,000 USDC -> USDT on 3pool")
+    load = load_pools(chain, min_tvl=1_000.0)
+    for pool in sorted(load.pools, key=lambda p: -p.tvl_usd):
+        if pool.swap_kind is None or not pool.balances:
+            continue
+        for i, j in pool.swap_pairs():
+            if i < len(pool.balances) and pool.balances[i] > 0:
+                dx = max(int(pool.balances[i] * 1e-4), 1)
+                return ([Probe(pool.address, pool.swap_kind, i, j,
+                               pool.n_coins, dx)],
+                        f"{pool.name[:28]} {i}>{j} at 1e-4 of reserve")
+    raise SystemExit(f"no quotable pool on {chain.name} to sanity-check against")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chain", default="ethereum")
@@ -132,18 +159,30 @@ def main() -> int:
     from erouter.dev.boa_host import override_client
     from erouter.dev.rpc import JsonRpcTransport
 
-    probe = [Probe(SANITY_POOL, ArcKind.SWAP_STABLE, 1, 2, 3, SANITY_DX)]
+    probe, label = _sanity_probe(chain)
     if args.broadcast:
         rpc = JsonRpcTransport(url)
         deployed = QuoterClient(rpc, address).probe(probe)[0]
-        overridden = override_client(rpc).probe(probe)[0]
-        print("\n  sanity 1,000 USDC -> USDT on 3pool")
+        print(f"\n  sanity {label}")
         print(f"    deployed   {deployed.value:,} ({deployed.status.name})")
-        print(f"    override   {overridden.value:,} ({overridden.status.name})")
-        if deployed.value != overridden.value or not deployed.ok:
-            print("  ! the deployed quoter disagrees with the override; not usable")
+        if not deployed.ok or deployed.value <= 0:
+            print("  ! the deployed quoter cannot price a pool on this chain")
             return 1
-        print("    agree")
+        # The override is the reference *where one can be had*.  The chains
+        # this deployment is for are exactly the ones that reject state
+        # overrides -- tac and etherlink answer HTTP 400 -- so on those there
+        # is nothing to compare against and a positive quote is the whole test.
+        try:
+            overridden = override_client(rpc).probe(probe)[0]
+        except Exception as exc:
+            print(f"    override   unavailable on this chain ({str(exc)[:40]})")
+            overridden = None
+        if overridden is not None and overridden.ok:
+            print(f"    override   {overridden.value:,} ({overridden.status.name})")
+            if deployed.value != overridden.value:
+                print("  ! the deployed quoter disagrees with the override; not usable")
+                return 1
+            print("    agree")
 
         # Every kind, not just the one that has always worked.  A kind the
         # deployment is missing does not fail loudly: it answers REVERTED, and
