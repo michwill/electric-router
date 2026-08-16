@@ -661,7 +661,8 @@ def _quote(
                 warm_start = np.array(reuse, dtype=np.int64)
                 result.counters["warm_start_arcs"] = len(reuse)
         if warm_start is None:
-            best_path = k_shortest_paths(g, src_node, dst_node, k=1)
+            best_path = k_shortest_paths(g, src_node, dst_node, k=1,
+                                         flow=Psi_scaled)
             warm_start = np.array(best_path[0]) if best_path else None
     with clock("solve"):
         report = solve(
@@ -696,15 +697,27 @@ def _quote(
     # --- §12.1 size check -------------------------------------------------
     thetas = _realised_theta(arcs, psi, nu, nodes, active)
     result.counters["max_theta"] = max(thetas.values(), default=0.0)
-    # Only the band where a secant still means something.  Re-probing an arc
-    # at 3.4x the pool's own reserve does not measure it -- the quotes come
-    # back saturated, `_recalibrate` reads that as a wall, and the allocation
-    # collapses: measured on crvUSD -> sDOLA at $5M, 3,379,277 sDOLA became
+    # Everything the model is loading past what it measured, with no ceiling.
+    #
+    # There used to be one at THETA_ESCALATE, because re-probing an arc at 3.4x
+    # the pool's own reserve does not measure it: the quotes come back
+    # saturated, `_recalibrate` reads that as a wall, and the allocation
+    # collapses -- crvUSD -> sDOLA at $5M went from 3,379,277 sDOLA to
     # 1,935,692, 43% worse, from "fixing" the very arc the model had wrong.
-    # Above the ceiling §12.1 hands over to §11.3, which wants a different
-    # model rather than a better fit, so here it only says so.
-    over = {k: v for k, v in thetas.items()
-            if THETA_RECALIBRATE < v <= THETA_ESCALATE}
+    # That failure was the ladder asking for more than the pool holds, which
+    # the `reserve_in` clamp below now forbids outright, so the ceiling was
+    # left excluding exactly the arcs whose `B` is least trustworthy: USDC ->
+    # crvUSD at $5M runs legs at theta 1.03 and 2.00, and past 10% the code
+    # warned and re-fitted nothing.
+    #
+    # Removing it is worth no output.  A/B at block 25,769,383 over
+    # USDC->crvUSD, crvUSD->sDOLA, USDC->USDT and USDC->WETH from $10k to $20M:
+    # every route identical to within 0.0002 bp, sDOLA included -- so the clamp
+    # does hold and the collapse does not come back, and equally the blind spot
+    # was not costing anything on these pairs.  It is kept because an arc the
+    # model cannot describe should be re-measured rather than warned about, not
+    # because it was measured to pay.
+    over = {k: v for k, v in thetas.items() if v > THETA_RECALIBRATE}
     if over and refit_rounds > 0:
         with clock("size_check"):
             sizes = {}
