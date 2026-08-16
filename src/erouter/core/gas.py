@@ -180,6 +180,44 @@ def value_per_gas(gas_price_wei: int, value_units_per_eth: float) -> float:
     return gas_price_wei / 1e18 * value_units_per_eth
 
 
+def shape_cost(
+    legs,
+    is_conversion,
+    *,
+    value: float,
+    leg_cost_bp: float,
+    per_gas: float,
+    table: GasTable | None = None,
+) -> float:
+    """What a route's shape costs to prefer, in the output token.
+
+    Two charges answer the same question, so only the larger is levied.  Gas is
+    what a leg costs to execute; `leg_cost_bp` is what it costs in branching
+    risk -- one more pool between signing and landing, one more way to revert --
+    and that risk does scale with the trade, which is why the premium is
+    proportional.  Charging both double-counted at both ends: at $10k the gas
+    dominates and the premium is noise on top of it, at $5M the premium
+    dominates and the gas is noise on top of that.
+
+    The fixed part of a plan -- the transaction itself, plus the overhead of
+    splitting at all -- is gas with no branching counterpart, so it is charged
+    whole.  Conversions carry gas but no premium: a wrap is a leg to the
+    executor and not a choice the router is making (§11.1).
+
+    With no gas price to work from, `per_gas` is zero and this reduces to the
+    premium alone, which is what it was before gas could be valued.
+    """
+    table = table or STATIC
+    legs = list(legs)
+    per_leg = [table.gas(x.kind, x.target, x.i, x.j) for x in legs]
+    fixed = plan_gas(legs, table) - sum(per_leg)
+    premium = value * leg_cost_bp / 1e4
+    return fixed * per_gas + sum(
+        max(0.0 if conversion else premium, gas * per_gas)
+        for gas, conversion in zip(per_leg, is_conversion, strict=True)
+    )
+
+
 def min_useful_flow(
     gas_price_wei: int,
     value_units_per_eth: float,

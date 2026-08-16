@@ -22,7 +22,7 @@ import numpy as np
 
 from .calibrate import Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
-from .gas import GasTable, min_useful_flow, plan_gas
+from .gas import GasTable, min_useful_flow, plan_gas, shape_cost, value_per_gas
 from .graph import MAX_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
@@ -1090,11 +1090,14 @@ def _scout_wider(
     # ranking was never wrong; it was overruled.  Same failure the refit had
     # (see `_refit_winner`), one stage further on.
     def net(value: float, index: int, legs) -> float:
-        hops = sum(1 for rl in entrants[index].route.legs if not rl.is_conversion)
-        out = value - value * hops * leg_cost_bp / 1e4
-        if gas_price_wei > 0 and dst_wei_per_eth > 0:
-            out -= plan_gas(legs, gas_table) * gas_price_wei / 1e18 * dst_wei_per_eth
-        return out
+        # `scout_splits` only reweights an entrant's legs, so the two lists are
+        # the same legs in the same order and `strict=True` is a real check.
+        realized = entrants[index].route.legs
+        return value - shape_cost(
+            legs, [rl.is_conversion for rl in realized],
+            value=value, leg_cost_bp=leg_cost_bp,
+            per_gas=value_per_gas(gas_price_wei, dst_wei_per_eth),
+            table=gas_table)
 
     incumbent_legs = [rl.leg for rl in result.route.legs]
     best_value = net(incumbent, 0, incumbent_legs) if entrants else incumbent

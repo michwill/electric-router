@@ -26,7 +26,7 @@ from __future__ import annotations
 import numpy as np
 
 from .candidates import Candidate, CandidateSet
-from .gas import GasTable, leg_gas, plan_gas
+from .gas import GasTable, leg_gas, plan_gas, shape_cost, value_per_gas
 from .nodes import NodeMap
 from .quoter import MAX_LEGS, MAX_SLOTS, QuoterClient
 from .realize import RealizationError, check_one_arc_per_pool, realize
@@ -202,17 +202,17 @@ def verify(
 
     def score(candidate: Candidate) -> float:
         value = float(candidate.verified_out or 0)
-        if leg_cost_bp and candidate.route:
-            # Conversions are exempt: a wrap is a leg to the executor but not a
-            # decision the router is choosing between, and charging it would
-            # penalise the ETH/WETH boundary rather than complexity.
-            hops = sum(1 for leg in candidate.route.legs if not leg.is_conversion)
-            value -= value * hops * leg_cost_bp / 1e4
         gas_cost = 0.0
-        if gas_price_wei > 0 and dst_wei_per_eth > 0 and candidate.route:
-            gas = plan_gas((leg.leg for leg in candidate.route.legs), gas_table)
-            candidate.gas = gas
-            gas_cost = gas * gas_price_wei / 1e18 * dst_wei_per_eth
+        if candidate.route:
+            legs = [leg.leg for leg in candidate.route.legs]
+            candidate.gas = plan_gas(legs, gas_table)
+            # The greater of the two shape charges, never their sum -- see
+            # `gas.shape_cost`.
+            gas_cost = shape_cost(
+                legs, [leg.is_conversion for leg in candidate.route.legs],
+                value=value, leg_cost_bp=leg_cost_bp,
+                per_gas=value_per_gas(gas_price_wei, dst_wei_per_eth),
+                table=gas_table)
         if risk_table is None or not candidate.route:
             return value - gas_cost
         # Every leg carries a minimum-out at a fraction of its pool's fee, so

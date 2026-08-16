@@ -38,7 +38,10 @@ sys.path.insert(0, str(REPO / "src"))
 #: The hosted deployment, one host per chain.
 HOSTED = "https://{chain}.router.curve.finance/quote"
 SUPPORTED = ("ethereum", "arbitrum", "gnosis", "base", "optimism")
-DEFAULT_SIZES = (10_000, 100_000)
+#: Small, medium, large.  The large end is where it matters: the model's
+#: error grows with how much of a pool a leg takes, so a pair that ties at
+#: $10k can still diverge at $1M.
+DEFAULT_SIZES = (10_000, 100_000, 1_000_000)
 #: Sizes are in units of the source token, which is always a stable here, so
 #: they read as dollars.  A chain thinner than this simply reports the loss.
 TIMEOUT_S = 180
@@ -193,12 +196,14 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chain", default="all")
+    parser.add_argument("--chain", default="all",
+                        help="'all', one chain, or a comma-separated list")
     parser.add_argument("--sizes", default=",".join(str(s) for s in DEFAULT_SIZES))
     args = parser.parse_args()
 
     sizes = tuple(int(s) for s in args.sizes.split(","))
-    wanted = SUPPORTED if args.chain == "all" else (args.chain,)
+    wanted = (SUPPORTED if args.chain == "all"
+              else tuple(c.strip() for c in args.chain.split(",") if c.strip()))
     rows: list[dict] = []
     for name in wanted:
         try:
