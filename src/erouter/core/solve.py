@@ -204,11 +204,31 @@ def active_set_solve(
     bland = False
     cycles = 0
 
+    reseeded = False
     for _ in range(maxit):
         idx = np.flatnonzero(A)
 
         comp = component_of(dst, g.tau[idx], g.sig[idx], n)
         if not comp[src] and Psi != 0:
+            # The *active set* being disconnected is not the graph being
+            # disconnected.  An arc that saturates moves to `U`, and if it was
+            # the one joining src to dst the set left behind joins nothing --
+            # which is a starting point, not a verdict.  §5.4 admits every
+            # arc at initialisation for exactly this reason; doing it again
+            # here is the same step, taken when a pivot rather than the caller
+            # emptied the set.
+            #
+            # Two ways in, both measured.  A stale warm start: an interactive
+            # session quotes $100 on mainnet crvUSD -> sDOLA, keeps the single
+            # arc that carried it, and the next quote at $2,000,000 caps that
+            # arc out and reports "src not connected to dst" for a pair the
+            # same process had just routed.  And from cold: a cheap capped arc
+            # in parallel with a dearer open one strands itself the moment the
+            # cheap one fills.
+            candidates = ~forbidden & ~U
+            if not reseeded and candidates.any() and not np.array_equal(candidates, A):
+                A, reseeded = candidates.copy(), True
+                continue
             return Solution(
                 np.zeros(m), np.zeros(n), A, U, psi_upper, np.zeros(m), pivots,
                 feasible=False, reason=_why_unreachable(g, src, dst, Psi),
@@ -467,6 +487,7 @@ def solve(
     report_solution: Solution | None = None
     rounds = 0
     widened = False
+    restarted = False
     warm = A0
     screen = min_flow
     for rounds in range(1, max_rounds + 4):
@@ -504,6 +525,24 @@ def solve(
         if report_solution.feasible:
             warm = np.flatnonzero(report_solution.A)
         if not report_solution.feasible:
+            # A warm start is an optimisation and must never decide the answer.
+            #
+            # `A0` is the previous size's support, which is why an interactive
+            # session can quote $100 and then fail outright on $2,000,000: the
+            # small quote's support is one arc, that arc hits its cap at the
+            # larger size, it moves to the upper-bounded set, and the active
+            # set is left with nothing joining src to dst.  The widening below
+            # cannot help -- it widens the *column* set, which was never the
+            # restriction -- so the solve returned "src not connected to dst"
+            # for a pair it had just routed.  Reproduced deterministically, and
+            # sticky: every later size failed too.
+            #
+            # Starting cold is what `A0=None` already means to
+            # `active_set_solve`, so this costs pivots on a path that was
+            # about to fail anyway.
+            if warm is not None and not restarted:
+                warm, restarted = None, True
+                continue
             # "Seed quality only affects the number of column-generation rounds,
             # never correctness" (§5.3).  A seed that fails to connect src to
             # dst must therefore widen, not fail: pricing-out cannot rescue it,

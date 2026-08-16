@@ -347,3 +347,32 @@ def test_kcl_tolerance_does_not_tighten_without_limit_as_the_trade_shrinks():
     # Large trades keep a tight absolute bound rather than inheriting a loose
     # one: g_scale is a property of the graph, not of the trade.
     assert _kcl_tolerance(1e5, g_scale) < 1e-7
+
+
+def test_a_stale_warm_start_cannot_decide_feasibility():
+    """A previous size's support must not make a larger size unroutable.
+
+    An interactive session prepares once and quotes many sizes through the
+    same `Prepared`, carrying each solve's support into the next as `A0`.
+    Reproduced on mainnet crvUSD -> sDOLA: $100 routes, its support is a
+    single arc, and $2,000,000 through that same `Prepared` then failed with
+    "src not connected to dst through the active set" -- a pair the very same
+    process had just routed.  The arc caps out at the larger size, moves to the
+    upper-bounded set, and leaves the active set with nothing joining src to
+    dst.  Column generation's widening cannot rescue it: that widens the column
+    set, which was never the restriction.
+
+    Here: a cheap arc capped well below the trade, and a dearer uncapped one.
+    Warm-started from the cheap arc alone, the solve has to reach the other.
+    """
+    tau, sig = [0, 0], [1, 1]
+    g = make(tau, sig, a=[1.0, 0.98], B=[1e-6, 1e-6],
+             cap=np.array([0.05, np.inf]), Psi=1.0)
+
+    cold = solve(g, 0, 1, 1.0)
+    warm = solve(g, 0, 1, 1.0, A0=np.array([0], dtype=np.int64))
+
+    assert cold.solution.feasible
+    assert warm.solution.feasible, warm.reason
+    assert warm.solution.psi.sum() == pytest.approx(cold.solution.psi.sum(), rel=1e-9)
+    assert warm.solution.objective(g) == pytest.approx(cold.solution.objective(g), rel=1e-6)
