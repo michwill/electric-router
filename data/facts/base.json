@@ -1,0 +1,47 @@
+{
+ "block": 50026282,
+ "breach": {},
+ "broken": {},
+ "chain_id": 8453,
+ "class_of": {
+  "0x09bf787b9ab2d52d7836272a41e9809481795ab0": "stableswapng",
+  "0x11c1fbd4b3de66bc0565779b35171a6cf3e71f59": "factory-crypto",
+  "0x1c53971800c111a32b7889177c56e3488cfe0be0": "twocryptong",
+  "0x302a94e3c28c290eaf2a4605fc52e11eb915f378": "stableswapng",
+  "0x33885a2851f68b02863cda6a7622d26fb1172884": "stableswapng",
+  "0x5ab01ee6208596f2204b85bdfa39d34c2add98f6": "stableswapng",
+  "0x6771bb9ec8da900eeba738599c3cc4f8fc07aea7": "twocryptong",
+  "0x6e53131f68a034873b6bfa15502af094ef0c5854": "factory-tricrypto",
+  "0x773fde6f33522d7a92775f2375ac76a6e6f279b7": "factory-tricrypto",
+  "0xa9d6867c347b8b5f395b8421fb31710b8fb21a16": "stableswapng",
+  "0xba0c274085a078d19c46f2d902698a841cbfb289": "twocryptong",
+  "0xbedd35f23ea055c6af039f9c6a6fc8bdee4d7a13": "stableswapng",
+  "0xd6c283655b42fa0eb2685f7ab819784f071459dc": "stableswapng",
+  "0xde37e221442fa15c35dc19fbae11ed106ba52fb2": "factory-crypto",
+  "0xe635eedcad9ddbff0f01c10e873f263c3a486f65": "stableswapng",
+  "0xf6c5f01c7f3148891ad0e19df78743d31e390d1f": "factory",
+  "0xfac15a759d0f887bc7f5ab874491258cf6ec8ace": "stableswapng"
+ },
+ "classes": {
+  "factory-tricrypto:1": 177096,
+  "factory:0": 123701
+ },
+ "kinds": {
+  "0": 123701,
+  "1": 177096
+ },
+ "legs": {
+  "0x6e53131f68a034873b6bfa15502af094ef0c5854:1:0>2": 177096,
+  "0xf6c5f01c7f3148891ad0e19df78743d31e390d1f:0:0>3": 123701
+ },
+ "prices": {},
+ "version": 1,
+ "wide_bounds": {},
+ "wrappers": {
+  "0xca72827a3d211cfd8f6b00ac98824872b72cab49": {
+   "mint": false,
+   "note": "reverted",
+   "redeem": false
+  }
+ }
+}

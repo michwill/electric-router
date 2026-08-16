@@ -1690,14 +1690,22 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
         return 0
 
     started = _time.perf_counter()
-    try:
-        prepare(load.pools, nodes, setup,
-                src_token=_resolve_token(nodes, args.src, load.pools),
-                dst_token=_resolve_token(nodes, args.dst, load.pools),
-                extra_arcs=stake)
-    except Exception as exc:
-        print(f"{BAD} could not probe the universe: {exc}")
-        return 4
+    # Only the quoter path needs a route to record.  Off mainnet the recorded
+    # calls are discarded anyway (see below), and running `prepare` for them
+    # meant demanding a src and dst pair that most chains do not have: of 17,
+    # thirteen failed here on "no token with symbol 'WETH'" or "no path from
+    # USDC to WETH" -- gnosis, polygon, bsc, sonic, avalanche, etherlink,
+    # monad, plasma, xlayer, robinhood, celo, tac, fraxtal.  The universe is
+    # what is being cached, not a route through it.
+    if chain.quoter:
+        try:
+            prepare(load.pools, nodes, setup,
+                    src_token=_resolve_token(nodes, args.src, load.pools),
+                    dst_token=_resolve_token(nodes, args.dst, load.pools),
+                    extra_arcs=stake)
+        except Exception as exc:
+            print(f"{BAD} could not probe the universe: {exc}")
+            return 4
     probing = (_time.perf_counter() - started) * 1000
     print(f"  probed in {probing:,.0f} ms, {len(recorder.calls)} distinct quoter calls")
 
