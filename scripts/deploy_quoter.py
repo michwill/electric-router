@@ -185,21 +185,6 @@ def funding_estimate(url: str, chain_id: int, payload: bytes, sender: str | None
     return gas, price, gas * price / 1e18
 
 
-def _balance(rpc, address: str) -> float:
-    """Native balance, with an empty answer confirmed before it is believed.
-
-    `lb.drpc.live` is a load balancer, and one backend answered
-    `eth_getBalance` with zero for an account holding 5.109 XPL -- which read
-    as "plasma needs funding" and would have sent someone to a bridge for a
-    chain that was already funded.  A zero is the only reading this report
-    acts on, so it is the one worth asking twice.
-    """
-    seen = int(rpc.fetch("eth_getBalance", [address, "latest"]), 16) / 1e18
-    if seen == 0:
-        seen = max(seen, int(rpc.fetch("eth_getBalance", [address, "latest"]), 16) / 1e18)
-    return seen
-
-
 def funding_report(names: list[str], deployer: str, salt_phrase: str) -> int:
     """Balance against deployment cost, per chain.  Sends nothing, asks nothing.
 
@@ -227,7 +212,7 @@ def funding_report(names: list[str], deployer: str, salt_phrase: str) -> int:
         chain = chain_table.get(name)
         try:
             rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), chain_id=chain.chain_id)
-            balance = _balance(rpc, deployer)
+            balance = int(rpc.fetch("eth_getBalance", [deployer, "latest"]), 16) / 1e18
             if bytes.fromhex(
                 (rpc.fetch("eth_getCode", [address, "latest"]) or "0x")[2:]
             ):
