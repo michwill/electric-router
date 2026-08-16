@@ -15,7 +15,7 @@ from ..core.quoter import QuoterClient
 from ..core.transport import Status
 from ..core.types import ArcKind, Dialect, Probe
 from . import lite
-from .cache import DialectCache, UniverseCache
+from .cache import DialectCache, TokenFactsCache, UniverseCache
 from .chains import Chain
 from .curve_api import DEFAULT_MIN_TVL, CurveApi, CurveApiError
 
@@ -280,7 +280,8 @@ class DialectAudit:
         return self.resolved + len(self.unresolved)
 
 
-def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient) -> int:
+def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient,
+                      chain_id: int | None = None) -> int:
     """Find each pool's LP token, so deposits and withdrawals can be arcs.
 
     The API reports `lp_token_address` for none of them -- 0 of 385 on mainnet
@@ -306,14 +307,30 @@ def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient) -> int:
     from ..core.codec import encode_call
     from ..core.transport import Call
 
+    # A pool's LP token cannot change, so it is read once per chain.  Supply
+    # does change, and is read every time -- it sizes withdrawal probes.
+    facts = TokenFactsCache()
+    known = facts.load(chain_id) if chain_id is not None else {}
+    learned: dict[str, dict] = {}
+
+    ask = [p for p in pools if "lp_token" not in known.get(p.address.lower(), {})]
     calls: list[Call] = []
-    for pool in pools:
+    for pool in ask:
         calls += [
             Call(pool.address, encode_call("token()")),
             Call(pool.address, encode_call("lp_token()")),
             Call(pool.address, encode_call("totalSupply()")),
         ]
     answers = client.raw(calls)
+    found: dict[str, tuple[str, int]] = {}
+    for k, pool in enumerate(ask):
+        token, lp_token, _ = answers[3 * k : 3 * k + 3]
+        address = ""
+        for answer in (token, lp_token):
+            if answer.status is Status.VALUE and answer.uint():
+                address = "0x" + f"{answer.uint():040x}"
+                break
+        found[pool.address.lower()] = (address, 18)
 
     # A metapool's second coin is its base pool's LP token.
     from_base: dict[str, tuple[str, int]] = {}
@@ -323,20 +340,25 @@ def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient) -> int:
                 pool.coins[1].address, pool.coins[1].decimals
             )
 
+    # Supply, for every pool: the batch above only covered the ones whose LP
+    # token was unknown.
+    supplies = client.raw([Call(p.address, encode_call("totalSupply()")) for p in pools])
+
     resolved = 0
     for k, pool in enumerate(pools):
-        token, lp_token, supply = answers[3 * k : 3 * k + 3]
-        address, decimals = "", 18
-        for answer in (token, lp_token):
-            if answer.status is Status.VALUE and answer.uint():
-                address = "0x" + f"{answer.uint():040x}"
-                break
+        supply = supplies[k]
+        cached = known.get(pool.address.lower(), {})
+        address = cached.get("lp_token", "")
+        decimals = int(cached.get("lp_decimals", 18))
+        if not address and pool.address.lower() in found:
+            address, decimals = found[pool.address.lower()]
         if not address and supply.status is Status.VALUE and supply.uint() > 0:
             address = pool.address  # the pool is its own ERC20
         if not address:
             address, decimals = from_base.get(pool.address.lower(), ("", 18))
         if not address:
             continue
+        learned.setdefault(pool.address.lower(), {})["lp_token"] = address.lower()
         pool.lp_token = address.lower()
         pool.lp_decimals = decimals
         pool.lp_supply = supply.uint() if supply.status is Status.VALUE else 0
@@ -356,6 +378,11 @@ def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient) -> int:
                 pool.lp_supply = supply.uint()
             if digits.status is Status.VALUE and 0 <= digits.uint() <= 36:
                 pool.lp_decimals = digits.uint()
+    for pool in pools:
+        if pool.lp_token:
+            learned.setdefault(pool.address.lower(), {})["lp_decimals"] = pool.lp_decimals
+    if chain_id is not None and learned:
+        facts.save(chain_id, learned)
     return resolved
 
 
@@ -443,7 +470,8 @@ def count_swap_arcs(pools: list[PoolSpec]) -> int:
 
 
 def read_balances(pools: list[PoolSpec], client: QuoterClient,
-                  report: list[str] | None = None) -> int:
+                  report: list[str] | None = None,
+                  chain_id: int | None = None) -> int:
     """Fill in each pool's reserves, in one batched call.
 
     Curve has two spellings of the same getter and the registry does not say
@@ -469,6 +497,10 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
     # spellings, and what the coin says it holds.  The third rides the same
     # batch, so knowing whether a pool's accounting is real costs no extra
     # round trip -- measured, it was 3,653 ms as a separate pass.
+    facts = TokenFactsCache()
+    known = facts.load(chain_id) if chain_id is not None else {}
+    learned: dict[str, dict] = {}
+
     calls: list[Call] = []
     spans: list[tuple[int, int]] = []
     for pool in pools:
@@ -479,7 +511,11 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
             coin = pool.coins[k] if k < len(pool.coins) else None
             target = coin.address if coin else pool.address
             calls.append(Call(target, encode_call("balanceOf(address)", pool.address)))
-            calls.append(Call(target, encode_call("decimals()")))
+            # Only for a coin whose decimals nobody has read yet.  A placeholder
+            # keeps the stride at four so the unpacking below stays simple.
+            unknown = coin is not None and coin.address.lower() not in known
+            calls.append(Call(target, encode_call("decimals()")) if unknown
+                         else Call(target, b""))
         spans.append((start, len(calls)))
 
     answers = client.raw(calls)
@@ -499,21 +535,30 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
             held.append(owns.uint() if owns.status is Status.VALUE else -1)
             # A token that will not answer keeps whatever the API claimed;
             # one that answers is the authority on its own decimals.
-            if k < len(coins) and digits.status is Status.VALUE:
-                said = digits.uint()
-                if 0 <= said <= 36 and said != coins[k].decimals:
-                    if report is not None:
-                        report.append(
-                            f"{coins[k].symbol} ({coins[k].address}) has "
-                            f"{said} decimals, not the {coins[k].decimals} the "
-                            f"API reports; using {said}"
-                        )
-                    coins[k] = replace(coins[k], decimals=said)
+            said = None
+            if k < len(coins):
+                cached = known.get(coins[k].address.lower())
+                if cached is not None and "decimals" in cached:
+                    said = int(cached["decimals"])
+                elif digits.status is Status.VALUE:
+                    said = digits.uint()
+                    if 0 <= said <= 36:
+                        learned[coins[k].address.lower()] = {"decimals": said}
+            if said is not None and 0 <= said <= 36 and said != coins[k].decimals:
+                if report is not None:
+                    report.append(
+                        f"{coins[k].symbol} ({coins[k].address}) has "
+                        f"{said} decimals, not the {coins[k].decimals} the "
+                        f"API reports; using {said}"
+                    )
+                coins[k] = replace(coins[k], decimals=said)
         pool.coins = tuple(coins)
         pool.balances = tuple(balances)
         pool.held = tuple(held)
         if any(balances):
             filled += 1
+    if chain_id is not None and learned:
+        facts.save(chain_id, learned)
     return filled
 
 

@@ -107,3 +107,29 @@ class DialectCache:
     def save(self, chain_id: int, resolved: dict[str, str]) -> None:
         merged = self.load(chain_id) | resolved
         self.cache.write(merged, *self._parts(chain_id))
+
+
+class TokenFactsCache:
+    """Immutable per-address facts: a token's decimals, a pool's LP token.
+
+    Neither can change -- ERC20 decimals are fixed at deployment and a pool's
+    LP token with it -- so reading them once per chain is enough.  Asking every
+    time cost two extra round trips through the quoter on a universe of 385
+    pools and ~900 coins, measured at ~7s of a 13.5s mainnet route, all of it
+    outside the routing stages, which were unchanged to within a few ms.
+
+    Same shape as `DialectCache`, and stored beside it.
+    """
+
+    def __init__(self, cache: Cache | None = None) -> None:
+        self.cache = cache or Cache()
+
+    def _parts(self, chain_id: int) -> tuple[str, ...]:
+        return (str(chain_id), "token_facts.json")
+
+    def load(self, chain_id: int) -> dict[str, dict]:
+        return self.cache.read(*self._parts(chain_id)) or {}
+
+    def save(self, chain_id: int, facts: dict[str, dict]) -> None:
+        merged = self.load(chain_id) | facts
+        self.cache.write(merged, *self._parts(chain_id))

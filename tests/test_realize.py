@@ -21,6 +21,7 @@ CRVUSD = "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e"
 SCRVUSD = "0x0655977feb2f289a4ab78af67bab0d17aab84367"
 
 POOL_A = "0x" + "a1" * 20
+LP_TOKEN = "0x" + "1b" * 20
 POOL_B = "0x" + "b2" * 20
 POOL_C = "0x" + "c3" * 20
 
@@ -305,6 +306,30 @@ def test_one_arc_per_pool_violation_is_detected():
         arcs, np.array([1000.0, 1000.0]), nu, nodes,
         src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
     )
+    assert check_one_arc_per_pool(route) == [POOL_A.lower()]
+
+
+def test_a_deposit_and_a_swap_on_one_pool_conflict():
+    """A deposit mutates the pool too, so decision 3 has to cover it.
+
+    `add_liquidity` and `remove_liquidity_one_coin` change the balances every
+    later quote is computed from, exactly as `exchange` does -- and a view-only
+    chained quote cannot see its own earlier leg either way.  The rule keys on
+    the pool, and an LP leg targets the pool contract, so this holds without a
+    special case; the test is here because "without a special case" is the part
+    that could quietly stop being true.
+    """
+    nodes = base_nodes()
+    nodes.add_token(LP_TOKEN, "poolLP", 18)
+    swap = arc(POOL_A, USDC, CRVUSD, nodes, a=1.0, i=0, j=1)
+    deposit = arc(POOL_A, CRVUSD, LP_TOKEN, nodes, a=1.0, i=1, j=0)
+    deposit.kind = ArcKind.DEPOSIT_FIXED
+    nu = np.ones(nodes.n_nodes)
+    route = realize(
+        [swap, deposit], np.array([1000.0, 1000.0]), nu, nodes,
+        src_token=USDC, dst_token=LP_TOKEN, amount_in=1000 * 10**6,
+    )
+
     assert check_one_arc_per_pool(route) == [POOL_A.lower()]
 
 
