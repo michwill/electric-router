@@ -64,6 +64,20 @@ SANITY_CDAI = "0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643"
 SANITY_CDAI_DX = 100_000 * 10**8
 
 
+def account_address(name: str) -> str:
+    """The keystore's address, without decoding anything.
+
+    A brownie keystore holds its address in clear next to the encrypted key,
+    so asking "where does the deployer need funding" costs no passphrase --
+    which matters, because the answer decides whether it is worth typing one.
+    """
+    path = os.path.expanduser(os.path.join("~", ".brownie", "accounts", name + ".json"))
+    if not os.path.exists(path):
+        raise SystemExit(f"no keystore at {path}")
+    with open(path) as handle:
+        return "0x" + json.load(handle)["address"].lower().removeprefix("0x")
+
+
 def account_load(name: str):
     """A brownie keystore, decoded at the prompt.  Never a plaintext key."""
     from eth_account import account
@@ -169,6 +183,63 @@ def funding_estimate(url: str, chain_id: int, payload: bytes, sender: str | None
         gas = 21_000 + 200 * len(payload)
     price = rpc.gas_price()
     return gas, price, gas * price / 1e18
+
+
+def funding_report(names: list[str], deployer: str, salt_phrase: str) -> int:
+    """Balance against deployment cost, per chain.  Sends nothing, asks nothing.
+
+    The deployment sweep needs the deployer funded on every chain at once, and
+    a chain discovered to be short *during* the sweep is the expensive way to
+    find out -- the passphrase is already typed and half the chains are done.
+    """
+    import boa
+
+    from erouter.core.keccak import keccak256
+    from erouter.dev import chains as chain_table
+    from erouter.dev import config
+    from erouter.dev.rpc import JsonRpcTransport
+
+    initcode = boa.load_partial(str(CONTRACT)).compiler_data.bytecode
+    salt = keccak256(salt_phrase.encode())
+    address = create2_address(salt, initcode)
+    print(f"  deployer  {deployer}")
+    print(f"  quoter    {address} (once deployed)\n")
+    print(f"  {'chain':<11} {'native':<8} {'balance':>14} {'needs':>12} {'short by':>12}")
+    print("  " + "-" * 62)
+
+    short: list[str] = []
+    for name in names:
+        chain = chain_table.get(name)
+        try:
+            rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), chain_id=chain.chain_id)
+            balance = int(rpc.fetch("eth_getBalance", [deployer, "latest"]), 16) / 1e18
+            if bytes.fromhex(
+                (rpc.fetch("eth_getCode", [address, "latest"]) or "0x")[2:]
+            ):
+                print(f"  {name:<11} {chain.native_symbol:<8} {'-':>14} "
+                      f"{'deployed':>12} {'':>12}")
+                continue
+            _, _, cost = funding_estimate(
+                config.rpc_url(chain.rpc_attr), chain.chain_id, salt + initcode, deployer)
+        except Exception as exc:
+            print(f"  {name:<11} {'':<8} {'':>14} {'':>12}   ! {str(exc)[:28]}")
+            short.append(name)
+            continue
+        # Twice the estimate: gas prices move between reading one and sending
+        # a transaction, and a sweep that dies half way through is worse than
+        # one that asks for a little more up front.
+        want = cost * 2
+        gap = max(0.0, want - balance)
+        print(f"  {name:<11} {chain.native_symbol:<8} {balance:>14.6f} {want:>12.6f} "
+              f"{(f'{gap:.6f}' if gap else '-'):>12}")
+        if gap:
+            short.append(name)
+
+    if short:
+        print(f"\n  {len(short)} chain(s) need funding: {', '.join(short)}")
+    else:
+        print("\n  every chain is funded; deploy with --chain all --create2 --broadcast")
+    return 0 if not short else 1
 
 
 def deploy_one(name: str, args, account=None) -> int:
@@ -351,6 +422,11 @@ def main() -> int:
         "--salt", default=SALT_PHRASE.decode(),
         help="salt phrase for --create2; changing it changes the address",
     )
+    parser.add_argument(
+        "--funding", action="store_true",
+        help="report the deployer's balance against what each chain's "
+             "deployment costs, and stop. Needs no passphrase",
+    )
     args = parser.parse_args()
 
     from erouter.dev import chains as chain_table
@@ -361,6 +437,9 @@ def main() -> int:
             print(f"  skipping {name}: {why}\n")
     else:
         wanted = [args.chain]
+
+    if args.funding:
+        return funding_report(wanted, account_address(args.account), args.salt)
 
     # Once, not once per chain: a fourteen-chain sweep should ask for the
     # passphrase a single time.
