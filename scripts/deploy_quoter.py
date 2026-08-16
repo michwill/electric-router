@@ -242,6 +242,54 @@ def funding_report(names: list[str], deployer: str, salt_phrase: str) -> int:
     return 0 if not short else 1
 
 
+def send_create2(url: str, chain, account, payload: bytes, gas: int) -> str:
+    """Sign the proxy call and send it, without boa in the way.
+
+    `NetworkEnv.execute_code` re-forks at `latest` before every send so it can
+    simulate first, then reads account state at that block.  Monad produces
+    blocks faster than a load balancer converges, so the backend answering the
+    state read had not seen the block the head came from, and the deployment
+    died with "26: Unknown block" -- having simulated nothing and sent nothing.
+
+    None of that machinery is needed here.  The contract has no constructor,
+    the rehearsal on a fork has already proved it deploys, and the gas limit
+    comes from the chain's own estimate: what is left is one signed
+    transaction.  Sending it directly also drops boa's `safe`-block assumption,
+    which polygon's endpoint does not serve either.
+    """
+    from erouter.dev.rpc import JsonRpcTransport
+
+    rpc = JsonRpcTransport(url, chain_id=chain.chain_id)
+    nonce = int(rpc.fetch("eth_getTransactionCount", [account.address, "pending"]), 16)
+    block = rpc.fetch("eth_getBlockByNumber", ["latest", False])
+    tx = {"chainId": chain.chain_id, "nonce": nonce, "to": CREATE2_PROXY,
+          "value": 0, "data": "0x" + payload.hex(), "gas": gas}
+    base_fee = block.get("baseFeePerGas") if isinstance(block, dict) else None
+    if base_fee is not None:
+        tip = int(rpc.fetch("eth_maxPriorityFeePerGas", []), 16)
+        tx |= {"type": 2, "maxPriorityFeePerGas": tip,
+               "maxFeePerGas": 2 * int(base_fee, 16) + tip}
+    else:  # a chain that never adopted EIP-1559
+        tx["gasPrice"] = rpc.gas_price()
+    signed = account.sign_transaction(tx)
+    raw = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+    tx_hash = rpc.fetch("eth_sendRawTransaction", ["0x" + bytes(raw).hex()])
+    print(f"  tx        {tx_hash}")
+
+    for _ in range(60):
+        sleep(2)
+        receipt = rpc.fetch("eth_getTransactionReceipt", [tx_hash])
+        if receipt:
+            ok = int(receipt.get("status", "0x0"), 16) == 1
+            used = int(receipt.get("gasUsed", "0x0"), 16)
+            print(f"  receipt   block {int(receipt['blockNumber'], 16):,}  "
+                  f"gas used {used:,}  {'ok' if ok else 'REVERTED'}")
+            if not ok:
+                raise SystemExit("  ! the deployment transaction reverted")
+            return tx_hash
+    raise SystemExit(f"  ! no receipt for {tx_hash} after two minutes")
+
+
 def deploy_one(name: str, args, account=None) -> int:
     import boa
 
@@ -313,10 +361,14 @@ def deploy_one(name: str, args, account=None) -> int:
             #
             # A quarter over the estimate: enough for a pool that shifts
             # between estimating and mining, far below any block limit.
-            boa.env.execute_code(CREATE2_PROXY, data=salt + initcode,
-                                 gas=int(gas * 1.25), is_modifying=True)
-            print(f"  sent {len(salt) + len(initcode):,} bytes through the proxy "
-                  f"with a {int(gas * 1.25):,} gas limit")
+            limit = int(gas * 1.25)
+            print(f"  sending {len(salt) + len(initcode):,} bytes through the proxy "
+                  f"with a {limit:,} gas limit")
+            if args.broadcast:
+                send_create2(url, chain, deployer, salt + initcode, limit)
+            else:
+                boa.env.execute_code(CREATE2_PROXY, data=salt + initcode,
+                                     gas=limit, is_modifying=True)
     else:
         quoter = boa.load(str(CONTRACT))
         address = str(quoter.address)
@@ -324,7 +376,18 @@ def deploy_one(name: str, args, account=None) -> int:
 
     # Same bytes we have been overriding with?  A mismatch means the deployed
     # contract is not the one every measurement in this repo was taken against.
-    on_chain = boa.env.get_code(address)
+    #
+    # Read from the chain when broadcasting: the send goes out over the wire,
+    # so boa's env never learns about it and would report the code it last
+    # forked -- which is nothing.
+    if args.broadcast:
+        from erouter.dev.rpc import JsonRpcTransport
+
+        answer = JsonRpcTransport(url, chain_id=chain.chain_id).fetch(
+            "eth_getCode", [address, "latest"]) or "0x"
+        on_chain = bytes.fromhex(answer[2:])
+    else:
+        on_chain = boa.env.get_code(address)
     if bytes(on_chain) != bytes(expected):
         print(f"  ! runtime differs: {len(on_chain):,} on chain vs {len(expected):,} compiled")
         return 1
