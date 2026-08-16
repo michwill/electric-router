@@ -1470,7 +1470,9 @@ def cmd_gascal(args: argparse.Namespace) -> int:
                 deepest[key] = (key, pool.address, int(kind), i, j, pool.n_coins,
                                 dx, pool.tvl_usd)
         arcs = [entry[:-1] for entry in deepest.values()]
-        rates = sample_rates(rpc, quoter_client(rpc, chain).address, arcs)
+        _quoter = quoter_client(rpc, chain)
+        _overrides = getattr(_quoter, "overrides", None)
+        rates = sample_rates(rpc, _quoter.address, arcs, overrides=_overrides)
         moved = cache.learn_prices(rates)
         print(f"  drift: {len(rates)} pair rate(s) sampled at {len(SAMPLE_BLOCKS)} "
               f"blocks ({moved} changed)")
@@ -1494,7 +1496,8 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
         client = quoter_client(rpc, chain)
         fees = read_fees(client, load.pools)
-        fine = sample_rates(rpc, client.address, arcs, blocks=FINE_BLOCKS)
+        fine = sample_rates(rpc, client.address, arcs, blocks=FINE_BLOCKS,
+                            overrides=getattr(client, "overrides", None))
         # Scored twice against the same samples.  The first pass puts every
         # pool on its fee-derived bound, which is the evidence for whether that
         # bound is survivable; the list is drawn from it and from the pair

@@ -75,12 +75,19 @@ def series_drift_bp(rates: list[float]) -> float:
     return max(steps) * 1e4 if steps else 0.0
 
 
-def sample_rates(rpc, quoter: str, arcs, blocks=SAMPLE_BLOCKS) -> dict[str, PriceSeries]:
+def sample_rates(rpc, quoter: str, arcs, blocks=SAMPLE_BLOCKS,
+                 overrides=None) -> dict[str, PriceSeries]:
     """One rate series per arc, keyed "tokenIn|tokenOut".
 
     `arcs` is `(key, pool, kind, i, j, n_coins, dx)` -- chosen by the caller,
     which knows the universe.  Every arc goes out in one `probe_batch` per
     block, so the whole sweep is one request per block regardless of size.
+
+    `overrides` carries the quoter's runtime bytecode on chains where it is not
+    deployed.  Without it this asks an address with no code and gets nothing
+    back for every block: measured on base, "0 pair rate(s) sampled" and "no
+    pool answered fee() with a usable series", which reads as a quiet chain
+    rather than a missing contract.
     """
     head = rpc.block
     series: dict[str, PriceSeries] = {
@@ -96,7 +103,10 @@ def sample_rates(rpc, quoter: str, arcs, blocks=SAMPLE_BLOCKS) -> dict[str, Pric
             data = "0x" + encode_call(
                 SIG_PROBE_BATCH, [p.as_tuple() for p in probes]).hex()
             try:
-                raw = rpc.fetch("eth_call", [{"to": quoter, "data": data}, hex(block)])
+                params = [{"to": quoter, "data": data}, hex(block)]
+                if overrides:
+                    params.append(overrides)
+                raw = rpc.fetch("eth_call", params)
             except Exception:
                 continue
             blob = bytes.fromhex(raw[2:])
