@@ -120,6 +120,20 @@ STUSDS = "0x99cD4EC3F88a45940936f469E4Bb72a2a701EeB9"
 PUFETH = "0xD9A442856C234a39a81a089C06451EBAa4306a72"
 CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 
+#: RouteQuoter, at the same address on every chain.
+#
+# Deployed through the canonical CREATE2 proxy with salt
+# keccak("erouter.RouteQuoter.v1"), so the address is a function of the
+# initcode alone -- see `scripts/deploy_quoter.py --create2`.  One address is
+# not a tidiness argument: a scoped RPC key gates `eth_call` by target address
+# and holds ten of them, against fifteen chains, so per-chain addresses cannot
+# all be whitelisted at once.
+#
+# Changing RouteQuoter.vy moves this address.  The salt carries the version so
+# that move is deliberate rather than a whitelist entry quietly describing
+# something that is no longer deployed.
+QUOTER = "0xd0f20bd005df7657b6192873ca7e2b84f7d11e49"
+
 CHAINS: dict[str, Chain] = {
     "ethereum": Chain(
         name="ethereum",
@@ -129,7 +143,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="ETH",
         wrapped="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         erc4626_allowlist=(SCRVUSD, SDOLA, SDAI, SUSDS, SFRXETH, SGHO, STUSDS),
-        quoter="0x977ACB8f30412278B33fA7457dcd667613f6CB93",
+        quoter=QUOTER,
         public_rpc=(
             "https://lb.drpc.live/ethereum/"
             "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
@@ -179,6 +193,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="ARBITRUM",
         native_symbol="ETH",
         wrapped="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        quoter=QUOTER,
     ),
     "optimism": Chain(
         name="optimism",
@@ -187,6 +202,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="OPTIMISM",
         native_symbol="ETH",
         wrapped="0x4200000000000000000000000000000000000006",
+        quoter=QUOTER,
     ),
     "base": Chain(
         name="base",
@@ -195,6 +211,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="BASE",
         native_symbol="ETH",
         wrapped="0x4200000000000000000000000000000000000006",
+        quoter=QUOTER,
     ),
     "gnosis": Chain(
         name="gnosis",
@@ -203,6 +220,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="GNOSIS",
         native_symbol="XDAI",
         wrapped="0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d",  # WXDAI
+        quoter=QUOTER,
     ),
     "polygon": Chain(
         name="polygon",
@@ -211,6 +229,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="POLYGON",
         native_symbol="POL",
         wrapped="0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",  # WPOL (ex-WMATIC)
+        quoter=QUOTER,
     ),
     "fraxtal": Chain(
         name="fraxtal",
@@ -219,6 +238,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="FRAXTAL",
         native_symbol="frxETH",
         wrapped="0xFC00000000000000000000000000000000000006",  # wfrxETH
+        quoter=QUOTER,
     ),
     "bsc": Chain(
         name="bsc",
@@ -227,6 +247,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="BSC",
         native_symbol="BNB",
         wrapped="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
+        quoter=QUOTER,
     ),
     # --- Curve Lite deployments ------------------------------------------
     #
@@ -270,6 +291,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="AVAX",
         wrapped="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX
         lite=True,
+        quoter=QUOTER,
     ),
     "monad": Chain(
         name="monad",
@@ -288,6 +310,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="XPL",
         wrapped="0x6100E367285b01F48D07953803A2d8dCA5D19873",
         lite=True,   # ~$3.8M
+        quoter=QUOTER,
     ),
     "xlayer": Chain(
         name="xlayer",
@@ -297,6 +320,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="OKB",
         wrapped="0xe538905cf8410324e03A5A23C1c177a474D59b2b",
         lite=True,   # ~$3.6M
+        quoter=QUOTER,
     ),
     "celo": Chain(
         name="celo",
@@ -308,6 +332,7 @@ CHAINS: dict[str, Chain] = {
         # separate wrapped token, so the merge is the identity.
         wrapped="0x471EcE3750Da237f93B8E339c536989b8978a438",
         lite=True,   # ~$259k
+        quoter=QUOTER,
     ),
     # Needs `RouteQuoter` deployed before anything here can read it; see
     # `needs_quoter`.  Its `debug_traceCall` works, so once the quoter exists
@@ -322,7 +347,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xB63B9f0eb4A6E6f191529D71d4D88cc8900Df2C9",  # WTAC, verified
         lite=True,
         needs_quoter=True,
-        quoter="0x06Ce8086965234400FDecAb190B115C2C0717047",
+        quoter=QUOTER,
     ),
     # Also needs the quoter -- and even then stays wire-only: HTTP 500 from
     # `eth_createAccessList` in every shape and `debug_traceCall` output that
@@ -345,6 +370,7 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="SONIC",
         native_symbol="S",
         wrapped="0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS
+        quoter=QUOTER,
     ),
 }
 
