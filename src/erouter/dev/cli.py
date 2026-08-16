@@ -1702,8 +1702,27 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     print(f"  probed in {probing:,.0f} ms, {len(recorder.calls)} distinct quoter calls")
 
     evm = LocalEvm(rpc, cache=cache)
-    stats = evm.warm(list(recorder.calls))
-    cache.learn_pools(p.address for p in load.pools)
+    if chain.quoter:
+        stats = evm.warm(list(recorder.calls))
+    else:
+        # The recorded calls all target the quoter, and off mainnet the quoter
+        # is not deployed -- it rides along as an `eth_call` state override,
+        # which `eth_createAccessList` cannot accept.  Those requests execute
+        # against an address with no code and return an empty list: measured
+        # on arbitrum, 34 pools yielded 1 account and 0 slots.  Ask the pools
+        # for their own `get_dy` instead; it reads the same storage.
+        from ..core.pipeline import build_arcs as _build_arcs
+
+        refs, _ = _build_arcs(load.pools, nodes)
+        stats = evm.warm_arcs(refs, "")
+    learned = cache.stats().slots
+    if not learned:
+        # Recording the pools as known would make the next run skip them, so a
+        # warm that learned nothing would cache its own failure -- which is
+        # exactly what happened here before the direct path existed.
+        print(f"  {WARN} learned no slots; not marking these pools as known")
+    else:
+        cache.learn_pools(p.address for p in load.pools)
     cache.save()
     after = cache.stats()
     size = cache.path.stat().st_size if cache.path.exists() else 0

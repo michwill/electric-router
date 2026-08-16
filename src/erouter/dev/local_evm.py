@@ -58,10 +58,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..core.transport import Answer, Call, Status
+from ..core.types import ArcKind
 from .rpc import DEFAULT_STREAMS
 
 # A caller that is nobody, funded so `msg.sender` balance checks never bind.
 CALLER = "0x" + "11" * 20
+
+#: One `get_dy` spelling per swap kind, for warming a chain with no deployed
+#: quoter -- see `LocalEvm.warm_arcs`.
+DIRECT_SIGS = {
+    ArcKind.SWAP_STABLE: "get_dy(int128,int128,uint256)",
+    ArcKind.SWAP_CRYPTO: "get_dy(uint256,uint256,uint256)",
+}
 # Erigon refuses a JSON-RPC batch larger than this by default ("batch limit 100
 # exceeded"), and it refuses the *whole* batch -- so a route's worth of proofs
 # has to be split or none of it arrives.
@@ -593,6 +601,7 @@ class LocalEvm:
         return True
 
 
+
     def warm_arcs(self, refs, quoter: str, grid=None, per_call: int = 200) -> WarmStats:
         """Discover state for specific arcs -- the ones the cache has not seen.
 
@@ -600,18 +609,46 @@ class LocalEvm:
         arcs, so keeping up with a moving universe is proportional to what
         moved.  The batch is the same shape the router itself sends, which is
         what makes one list cover every size that arc will ever be quoted at.
+
+        **Without a deployed quoter, that shape is useless.**  The batch is a
+        call to the quoter's address, and off mainnet the quoter is not
+        deployed -- it rides along as an `eth_call` state override, which
+        `eth_createAccessList` has no way to accept.  So the request executes
+        against an address with no code, returns an empty list, and the cache
+        learns nothing: measured on arbitrum, 34 pools produced 1 account and
+        0 slots where mainnet produces 688 and 4,199.
+
+        So where there is no quoter, ask the pools directly.  One `get_dy` per
+        arc rather than a batch, which costs more requests and reads exactly
+        the same state -- the pool's own storage is what the quoter would have
+        touched anyway, and the access list does not vary with trade size
+        (measured over four decades, see the module docstring).
         """
         from ..core.codec import encode_call
         from ..core.probe import COARSE_GRID, plan_grid
         from ..core.quoter import SIG_PROBE_BATCH
 
         plan = plan_grid(list(refs), grid or COARSE_GRID)
-        calls = [
-            Call(quoter, encode_call(
-                SIG_PROBE_BATCH,
-                [p.as_tuple() for p in plan.probes[lo:lo + per_call]]))
-            for lo in range(0, len(plan.probes), per_call)
-        ]
+        if quoter:
+            calls = [
+                Call(quoter, encode_call(
+                    SIG_PROBE_BATCH,
+                    [p.as_tuple() for p in plan.probes[lo:lo + per_call]]))
+                for lo in range(0, len(plan.probes), per_call)
+            ]
+        else:
+            seen: set[str] = set()
+            calls = []
+            for probe in plan.probes:
+                sig = DIRECT_SIGS.get(ArcKind(probe.kind))
+                if sig is None:
+                    continue  # deposits and withdrawals are not get_dy
+                key = f"{probe.pool.lower()}:{probe.i}>{probe.j}"
+                if key in seen:
+                    continue  # one size per arc is enough; the list is the same
+                seen.add(key)
+                calls.append(Call(probe.pool,
+                                  encode_call(sig, probe.i, probe.j, probe.dx)))
         return self.warm(calls) if calls else self.stats
 
     def _dump(self, wanted: dict, flat) -> list[int | None] | None:
