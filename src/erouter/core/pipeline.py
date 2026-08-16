@@ -78,6 +78,27 @@ from .verify import (
 # is worth +5.35 bp below ~4 gwei and a loss above it.
 DEFAULT_MAX_LEGS = 32
 
+# §12.1's size check.  `theta_p = delta_p / y_p` on the *realised* flow: how
+# much of the pool's own input reserve this arc is about to take.
+#
+# The refine pass already probes at fractions of the whole trade, but it does
+# that before the solve, when nobody knows which arcs will carry what.  An arc
+# the relaxation loads far past anything it was measured at is exactly the one
+# whose `B` is least trustworthy, and that is the case the spec singles out:
+# recalibrate by secant *at the realised size* and re-pivot.
+#
+# Measured on mainnet crvUSD -> sDOLA at $5M, where the model promised 3.66M
+# and the chain paid 1.97M -- an 86% overstatement -- while the same pair at
+# $2M was honest to 1.2%.
+THETA_RECALIBRATE = 0.03
+# Past this the arc is being asked for a fifth of the pool and no secant fit
+# is going to describe it; §11.3's remedy is a different model, not a better
+# number, so this only warns.
+THETA_ESCALATE = 0.10
+# Where to sample when recalibrating: a secant needs the realised size and
+# something below it, and the origin is free.
+THETA_LADDER: tuple[float, ...] = (0.25, 0.5, 1.0)
+
 # §12.4's flow-conservation gate, in two terms -- see `_kcl_tolerance`.
 KCL_RELATIVE = 1e-8
 KCL_ABSOLUTE = 1e-9
@@ -223,6 +244,29 @@ def build_arcs(
                       pool.lp_decimals, pool.coins[k].decimals,
                       reserve_out=pool.balances[k])
     return refs, meta
+
+
+def _realised_delta(arc: PoolArc, psi_value: float, nu, nodes: NodeMap) -> float:
+    """This arc's realised input, in its own token's raw units."""
+    price = float(nu[arc.tau])
+    rate = nodes.rate(arc.token_in)
+    if price <= 0 or rate <= 0 or psi_value <= 0:
+        return 0.0
+    return psi_value / price / rate * 10**arc.decimals_in
+
+
+def _realised_theta(arcs: list[PoolArc], psi, nu, nodes: NodeMap,
+                    active) -> dict[int, float]:
+    """§12.1's `theta_p` for every arc carrying flow."""
+    out: dict[int, float] = {}
+    for k in active:
+        arc = arcs[int(k)]
+        if arc.reserve_in <= 0:
+            continue
+        delta = _realised_delta(arc, float(psi[int(k)]), nu, nodes)
+        if delta > 0:
+            out[int(k)] = delta / arc.reserve_in
+    return out
 
 
 def _to_arc(
@@ -648,6 +692,62 @@ def _quote(
     active = np.flatnonzero(psi > 0)
     if active.size == 0:
         raise RoutingError("the optimal flow is empty")
+
+    # --- §12.1 size check -------------------------------------------------
+    thetas = _realised_theta(arcs, psi, nu, nodes, active)
+    result.counters["max_theta"] = max(thetas.values(), default=0.0)
+    # Only the band where a secant still means something.  Re-probing an arc
+    # at 3.4x the pool's own reserve does not measure it -- the quotes come
+    # back saturated, `_recalibrate` reads that as a wall, and the allocation
+    # collapses: measured on crvUSD -> sDOLA at $5M, 3,379,277 sDOLA became
+    # 1,935,692, 43% worse, from "fixing" the very arc the model had wrong.
+    # Above the ceiling §12.1 hands over to §11.3, which wants a different
+    # model rather than a better fit, so here it only says so.
+    over = {k: v for k, v in thetas.items()
+            if THETA_RECALIBRATE < v <= THETA_ESCALATE}
+    if over and refit_rounds > 0:
+        with clock("size_check"):
+            sizes = {}
+            for k in over:
+                delta = _realised_delta(arcs[k], float(psi[k]), nu, nodes)
+                # Never ask a pool for more than it holds: past that the answer
+                # is a wall rather than a curve.
+                delta = min(delta, float(arcs[k].reserve_in))
+                if delta > 0:
+                    sizes[arcs[k].id] = [int(delta * f) for f in THETA_LADDER]
+            extra = plan_sized(ladders, sizes)
+            result.counters["probes_size_check"] = len(extra)
+            if extra.probes:
+                merge(ladders, collect(extra, client.probe(extra.probes)))
+                refitted = _recalibrate(arcs, ladders, nodes)
+                result.counters["arcs_size_checked"] = refitted
+                if refitted:
+                    arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result)
+                    g, Psi_scaled = scale(g, Psi)
+                    seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
+                    report = solve(g, src_node, dst_node, Psi_scaled, seed=seed,
+                                   max_rounds=max_rounds)
+                    if report.solution.feasible:
+                        result.report = report
+                        psi = report.solution.psi * g.g_scale
+                        psi, _ = cancel_cycles(g.tau, g.sig, psi)
+                        # Against the graph that produced *this* flow (see above).
+                        fee, impact = report.solution.loss_split(g)
+                        result.fee_bp = fee * g.g_scale / Psi * 10_000
+                        result.impact_bp = impact * g.g_scale / Psi * 10_000
+                        result.arcs, result.graph = arcs, g
+                        active = np.flatnonzero(psi > 0)
+                        if active.size == 0:
+                            raise RoutingError("the optimal flow is empty")
+                        thetas = _realised_theta(arcs, psi, nu, nodes, active)
+                        result.counters["max_theta"] = max(thetas.values(), default=0.0)
+    if result.counters.get("max_theta", 0.0) > THETA_ESCALATE:
+        worst = max(thetas.items(), key=lambda kv: kv[1])
+        result.warnings.append(
+            f"{arcs[worst[0]].note[:24]} is taking {worst[1]:.1%} of its own "
+            f"reserve: past ~{THETA_ESCALATE:.0%} a secant fit describes the "
+            f"pool poorly and the modelled loss understates the real one (§12.1)"
+        )
 
     # Carry the *support* to the next size, not the whole final basis.  `A`
     # ends column generation holding every arc that ever priced in -- 199 of
