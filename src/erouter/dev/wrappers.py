@@ -116,13 +116,15 @@ def build_node_map(
         for coin in pool.coins:
             nodes.add_token(coin.address, coin.symbol, coin.decimals)
 
-    # LP tokens are nodes too, or a deposit would have nowhere to arrive.
-    # Most are already here -- a base pool's LP is a coin of its metapools --
-    # but a pool nobody builds on has one that appears nowhere else, and that
-    # is exactly the pool whose liquidity would otherwise be unreachable.
-    for pool in pools:
-        if pool.lp_token and not nodes.has(pool.lp_token):
-            nodes.add_token(pool.lp_token, f"{pool.name[:18]} LP", pool.lp_decimals)
+    # LP tokens are deliberately *not* registered here.  A pool's LP is a node
+    # only when some other pool trades it -- 3Crv, crvFRAX, sbtcCrv, gnosis's
+    # x3CRV -- and `build_arcs` then finds it already present.
+    #
+    # Registering all of them instead makes an arc pair per coin for every pool
+    # on the chain, mostly to tokens nothing else trades: 759 arcs became 2,020
+    # on mainnet, and crvUSD -> sDOLA at $2M went from 1,419,819 sDOLA to
+    # 1,136,396 in 2.2x the time.  A dead-end node cannot improve a route, but
+    # it can and did drag the reference-price fit and the solver with it.
 
     # --- native wrapper: 1:1, no probing needed --------------------------
     wrapped = chain.wrapped.lower()
