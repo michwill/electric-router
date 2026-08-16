@@ -40,6 +40,28 @@ from erouter.dev.universe import load_pools
 SIZE_OF_RESERVE = 0.001
 TIMEOUT_S = 600
 
+#: Named cases, on top of the pair discovered per chain.
+#
+# The discovered pair is one hop through the deepest pool at a thousandth of
+# its reserve, which is a liveness check and nothing more.  It cannot catch a
+# regression in *routing*, and did not: enumerating LP arcs for every pool cost
+# crvUSD -> sDOLA at $2M twenty per cent of its output while every row here
+# stayed green, because none of them was big enough to need more than one pool.
+#
+# So each entry names a trade whose answer depends on the router choosing well.
+# Keyed by chain; a symbol that does not resolve on the day is skipped rather
+# than failing the sweep, since the universes move.
+NAMED_CASES: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "ethereum": (
+        ("crvUSD", "sDOLA", "2000000"),    # multi-hop, and the regression above
+        ("USDC", "WETH", "1000000"),       # the deepest pair on the chain
+        ("USDC", "GUSD", "10000"),         # 2-decimal output, via a 3Crv deposit
+    ),
+    "gnosis": (
+        ("XDAI", "EURe", "1000"),          # native in, LP deposit mid-route
+    ),
+}
+
 
 def reserves(rpc, chain, pool) -> list[int]:
     """What each coin contract says the pool holds, asked through the quoter.
@@ -116,6 +138,35 @@ def route(name: str, chain, floor: float, rpc) -> dict:
     return row
 
 
+def named(name: str, chain, floor: float, src: str, dst: str, amount: str) -> dict:
+    """One case from `NAMED_CASES`, run through the CLI like any other."""
+    out = Path(tempfile.mkdtemp()) / "route.json"
+    cmd = ["uv", "run", "erouter", "route", "--chain", name,
+           "--from", src, "--to", dst, "--amount", amount,
+           "--min-tvl", str(floor), "--json", str(out)]
+    started = time.perf_counter()
+    try:
+        done = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {"chain": name, "status": "timeout", "pair": f"{src}->{dst}"}
+    row = {"chain": name, "pair": f"{src}->{dst} {amount}",
+           "ms": (time.perf_counter() - started) * 1000, "exit": done.returncode}
+    if not out.exists():
+        tail = [ln for ln in done.stdout.splitlines() + done.stderr.splitlines() if ln.strip()]
+        row.update(status="failed", note=tail[-1][:70] if tail else "no output")
+        return row
+    result = json.loads(out.read_text())
+    res = result.get("result", {})
+    impact = res.get("price_impact") or {}
+    row.update(status="ok" if res.get("amount_out") else "no output",
+               out=res.get("amount_out_human") or res.get("amount_out"),
+               verified=bool(res.get("verified")),
+               certificate=bool(res.get("certificate")),
+               legs=len(result.get("legs") or []),
+               impact_bp=impact.get("bp"))
+    return row
+
+
 def main(argv: list[str]) -> int:
     wanted = argv or list(chain_table.CHAINS)
     rows = []
@@ -129,17 +180,24 @@ def main(argv: list[str]) -> int:
         except Exception as exc:  # a chain that cannot even list its pools
             row = {"chain": name, "status": "error", "note": str(exc)[:70]}
         rows.append(row)
-        print(f"  {row['chain']:<11} {row.get('status','?'):<9} "
-              f"{row.get('pair','')[:26]:<26} {row.get('ms', 0):>7.0f} ms  "
-              f"{row.get('note','')}", flush=True)
+        for src, dst, amount in NAMED_CASES.get(name, ()):
+            try:
+                rows.append(named(name, chain, floor, src, dst, amount))
+            except Exception as exc:
+                rows.append({"chain": name, "status": "error",
+                             "pair": f"{src}->{dst}", "note": str(exc)[:70]})
+        for shown in rows[-1 - len(NAMED_CASES.get(name, ())):]:
+            print(f"  {shown['chain']:<11} {shown.get('status','?'):<9} "
+                  f"{shown.get('pair','')[:30]:<30} {shown.get('ms', 0):>7.0f} ms  "
+                  f"{shown.get('note','')}", flush=True)
 
-    print(f"\n{'chain':<11} {'status':<9} {'pair':<26} {'legs':>4} {'pools':>6} "
+    print(f"\n{'chain':<11} {'status':<9} {'pair':<30} {'legs':>4} {'pools':>6} "
           f"{'ver':>4} {'cert':>5} {'impact':>7} {'ms':>7}")
     print("-" * 92)
     for row in rows:
         impact = row.get("impact_bp")
         shown = f"{impact:.2f}" if impact is not None else "-"
-        print(f"{row['chain']:<11} {row.get('status','?'):<9} {row.get('pair','')[:26]:<26} "
+        print(f"{row['chain']:<11} {row.get('status','?'):<9} {row.get('pair','')[:30]:<30} "
               f"{row.get('legs', 0):>4} {row.get('pools') or 0:>6} "
               f"{'y' if row.get('verified') else '-':>4} "
               f"{'y' if row.get('certificate') else '-':>5} {shown:>7} "
