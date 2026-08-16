@@ -37,6 +37,22 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 CONTRACT = REPO / "contracts" / "RouteQuoter.vy"
+# The canonical deterministic-deployment proxy: CREATE2 with `salt` as the
+# first 32 bytes of calldata and the initcode as the rest.  Checked on every
+# chain in the table and present on all sixteen.
+#
+# This is what makes production affordable.  A scoped drpc endpoint gates
+# `eth_call` by target address -- measured, a non-whitelisted target answers
+# HTTP 403 "address 0x..." -- so every chain needs its quoter whitelisted, and
+# a key holds at most ten addresses against fifteen chains.  CREATE2 fixes the
+# address from (proxy, salt, initcode) alone, so one deployment recipe puts the
+# quoter at the *same* address everywhere and one whitelist entry covers the
+# lot.
+CREATE2_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C"
+# The salt carries the version, so changing the contract is a deliberate new
+# address rather than a silent collision with a whitelist entry that no longer
+# describes what is deployed.
+SALT_PHRASE = b"erouter.RouteQuoter.v1"
 # A pool and a swap that every mainnet fork can answer, used to prove the
 # deployed contract behaves identically to the one we have been overriding.
 SANITY_POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"  # 3pool
@@ -115,6 +131,14 @@ def _sanity_probe(chain):
     raise SystemExit(f"no quotable pool on {chain.name} to sanity-check against")
 
 
+def create2_address(salt: bytes, initcode: bytes, proxy: str = CREATE2_PROXY) -> str:
+    """Where CREATE2 through `proxy` puts this initcode -- on any chain."""
+    from erouter.core.keccak import keccak256
+
+    body = b"\xff" + bytes.fromhex(proxy[2:]) + salt + keccak256(initcode)
+    return "0x" + keccak256(body)[12:].hex()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--chain", default="ethereum")
@@ -125,6 +149,16 @@ def main() -> int:
              "throws the result away, which is the safe way to rehearse",
     )
     parser.add_argument("--verify", action="store_true", help="submit to Etherscan")
+    parser.add_argument(
+        "--create2", action="store_true",
+        help="deploy through the deterministic proxy, so the quoter lands on "
+             "the same address on every chain and costs one whitelist entry "
+             "instead of fifteen",
+    )
+    parser.add_argument(
+        "--salt", default=SALT_PHRASE.decode(),
+        help="salt phrase for --create2; changing it changes the address",
+    )
     args = parser.parse_args()
 
     import boa
@@ -150,13 +184,35 @@ def main() -> int:
         boa.env.eoa = boa.env.generate_address()
         print(f"  deployer  {boa.env.eoa} (fork)")
 
-    quoter = boa.load(str(CONTRACT))
-    address = str(quoter.address)
-    print(f"\n  deployed at {address}")
+    if args.create2:
+        from erouter.core.keccak import keccak256
+
+        initcode = boa.load_partial(str(CONTRACT)).compiler_data.bytecode
+        salt = keccak256(args.salt.encode())
+        address = create2_address(salt, initcode)
+        print(f"  salt      {args.salt!r} -> 0x{salt.hex()}")
+        print(f"  proxy     {CREATE2_PROXY}")
+        print(f"\n  deterministic address {address}")
+        if not bytes(boa.env.get_code(CREATE2_PROXY)):
+            print("  ! the deterministic proxy is not deployed on this chain")
+            return 1
+        existing = bytes(boa.env.get_code(address))
+        if existing:
+            # Re-running across fourteen chains must be safe: a chain that is
+            # already done should say so and cost nothing, not revert half way
+            # through the sweep.
+            print(f"  already deployed ({len(existing):,} bytes) -- nothing to send")
+        else:
+            boa.env.execute_code(CREATE2_PROXY, data=salt + initcode, is_modifying=True)
+            print(f"  sent {len(salt) + len(initcode):,} bytes through the proxy")
+    else:
+        quoter = boa.load(str(CONTRACT))
+        address = str(quoter.address)
+        print(f"\n  deployed at {address}")
 
     # Same bytes we have been overriding with?  A mismatch means the deployed
     # contract is not the one every measurement in this repo was taken against.
-    on_chain = boa.env.get_code(quoter.address)
+    on_chain = boa.env.get_code(address)
     if bytes(on_chain) != bytes(expected):
         print(f"  ! runtime differs: {len(on_chain):,} on chain vs {len(expected):,} compiled")
         return 1
