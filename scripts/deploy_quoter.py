@@ -302,8 +302,21 @@ def deploy_one(name: str, args, account=None) -> int:
                 deployer.address if deployer else None)
             print(f"  cost      {gas:,} gas at {price / 1e9:,.3f} gwei "
                   f"= {cost:.6f} {chain.native_symbol}")
-            boa.env.execute_code(CREATE2_PROXY, data=salt + initcode, is_modifying=True)
-            print(f"  sent {len(salt) + len(initcode):,} bytes through the proxy")
+            # Send the gas limit rather than letting it be inferred.  A node
+            # that will not estimate leaves the block gas limit as the
+            # fallback, and the sender must hold `limit * max_fee` up front
+            # whatever the transaction actually burns.  On monad that is
+            # 150,000,000 * 202 gwei = 30.3 MON against a 1.0 MON deployer, so
+            # it failed with "Insufficient funds for gas * price + value" while
+            # the real cost was 0.364 MON.  base survives the same fallback
+            # only because 400M gas at 0.01 gwei is 0.004 ETH.
+            #
+            # A quarter over the estimate: enough for a pool that shifts
+            # between estimating and mining, far below any block limit.
+            boa.env.execute_code(CREATE2_PROXY, data=salt + initcode,
+                                 gas=int(gas * 1.25), is_modifying=True)
+            print(f"  sent {len(salt) + len(initcode):,} bytes through the proxy "
+                  f"with a {int(gas * 1.25):,} gas limit")
     else:
         quoter = boa.load(str(CONTRACT))
         address = str(quoter.address)
@@ -450,7 +463,14 @@ def main() -> int:
         try:
             results[name] = deploy_one(name, args, account)
         except Exception as exc:
-            print(f"  ! {name} failed: {str(exc)[:100]}")
+            # In full, with the traceback.  This was truncated to 100
+            # characters, which is how monad failed the sweep without leaving
+            # any evidence of why -- a deployment script that swallows the one
+            # message worth having is worse than one that crashes.
+            import traceback
+
+            print(f"  ! {name} failed: {type(exc).__name__}: {exc}")
+            traceback.print_exc()
             results[name] = 1
         print()
 
