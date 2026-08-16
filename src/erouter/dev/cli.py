@@ -583,7 +583,10 @@ def cmd_route(args: argparse.Namespace) -> int:
                            chain_id=chain.chain_id)
     client = quoter_client(rpc, chain)
     resolve_dialects(load.pools, client, chain, use_cache=not args.refresh)
-    read_balances(load.pools, client)
+    decimals_fixed: list[str] = []
+    read_balances(load.pools, client, decimals_fixed)
+    for warning in decimals_fixed:
+        print(f"{WARN} {warning}")
     for warning in check_reserves_are_real(load.pools, client, rpc):
         print(f"{WARN} {warning}")
     if not args.no_cache:

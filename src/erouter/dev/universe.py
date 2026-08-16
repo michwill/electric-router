@@ -8,7 +8,7 @@ therefore degrades to a slightly stale pool list, never to a wrong route.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..core.pools import Coin, PoolSpec, dialect_from_probes, parse_universe
 from ..core.quoter import QuoterClient
@@ -363,12 +363,21 @@ def count_swap_arcs(pools: list[PoolSpec]) -> int:
     return sum(p.swap_arc_count() for p in pools if p.swap_kind is not None)
 
 
-def read_balances(pools: list[PoolSpec], client: QuoterClient) -> int:
+def read_balances(pools: list[PoolSpec], client: QuoterClient,
+                  report: list[str] | None = None) -> int:
     """Fill in each pool's reserves, in one batched call.
 
     Curve has two spellings of the same getter and the registry does not say
     which a pool implements, so both go out for every coin and the first that
     *answers* wins -- "answers" meaning 32 bytes back, not merely no revert.
+
+    **The coin's own `decimals()` rides along, and it wins.**  The API is a
+    directory, not an oracle: it reports gnosis USDC.e as 18 decimals where the
+    token says 6, and a decimals error is not a small error -- every amount
+    through that pool is out by 1e12, which either poisons the reference-price
+    fit or gets the arc thrown away by a conditioning guard.  It costs one more
+    call per coin in a batch that is already going out, and `decimals` never
+    changes, so this is the cheapest possible place to catch it.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
@@ -391,15 +400,16 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient) -> int:
             coin = pool.coins[k] if k < len(pool.coins) else None
             target = coin.address if coin else pool.address
             calls.append(Call(target, encode_call("balanceOf(address)", pool.address)))
+            calls.append(Call(target, encode_call("decimals()")))
         spans.append((start, len(calls)))
 
     answers = client.raw(calls)
     filled = 0
     for pool, (lo, hi) in zip(pools, spans, strict=True):
         chunk = answers[lo:hi]
-        balances, held = [], []
+        balances, held, coins = [], [], list(pool.coins)
         for k in range(pool.n_coins):
-            as_uint, as_int, owns = chunk[3 * k], chunk[3 * k + 1], chunk[3 * k + 2]
+            as_uint, as_int, owns, digits = chunk[4 * k : 4 * k + 4]
             if as_uint.status is Status.VALUE:
                 balances.append(as_uint.uint())
             elif as_int.status is Status.VALUE:
@@ -408,6 +418,19 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient) -> int:
                 balances.append(0)
             # -1 means the coin would not say, which is not evidence of anything.
             held.append(owns.uint() if owns.status is Status.VALUE else -1)
+            # A token that will not answer keeps whatever the API claimed;
+            # one that answers is the authority on its own decimals.
+            if k < len(coins) and digits.status is Status.VALUE:
+                said = digits.uint()
+                if 0 <= said <= 36 and said != coins[k].decimals:
+                    if report is not None:
+                        report.append(
+                            f"{coins[k].symbol} ({coins[k].address}) has "
+                            f"{said} decimals, not the {coins[k].decimals} the "
+                            f"API reports; using {said}"
+                        )
+                    coins[k] = replace(coins[k], decimals=said)
+        pool.coins = tuple(coins)
         pool.balances = tuple(balances)
         pool.held = tuple(held)
         if any(balances):

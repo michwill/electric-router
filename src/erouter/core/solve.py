@@ -99,6 +99,46 @@ class Solution:
         return float(np.sum(g.eps * self.psi)), float(np.sum(impact))
 
 
+def _why_unreachable(g, src: int, dst: int, Psi: float) -> str:
+    """Why no flow reaches `dst`, in terms of what the pools can actually do.
+
+    "src not connected to dst through the active set" is true and useless.  It
+    is what a user sees when the pools *are* there and simply cannot carry the
+    trade -- measured twice: a tac pool whose ladder carried a duplicate node
+    and got capped at a tenth of the size, and a gnosis EURe/EURC pool holding
+    0.0026 EURC.e against an API reporting $333,401 of liquidity.  Both read as
+    "no route", which sends someone hunting for a missing pool rather than
+    looking at the empty one in front of them.
+
+    Two cuts are worth naming because they are the ones a user can act on: what
+    leaves the source, and what enters the destination.  The gnosis case is the
+    second -- EURe has a healthy outlet into 3Crv, and the drained pool is the
+    only way *in* to EURC.e -- so checking the source alone reported nothing.
+    Anything subtler is a real cut somewhere in the middle, and saying "not
+    connected" is then honest.
+
+    Capacity belongs to the whole graph rather than the active set, so caps are
+    summed over every arc across the cut, including ones already set aside.
+    """
+    import numpy as _np
+
+    for side, arcs, phrase in (
+        ("source", _np.flatnonzero(g.tau == src), "out of the source"),
+        ("destination", _np.flatnonzero(g.sig == dst), "into the destination"),
+    ):
+        if arcs.size == 0:
+            return f"no pool trades the {side} token"
+        caps = g.cap[arcs]
+        if _np.isinf(caps).any():
+            continue
+        room = float(caps.sum())
+        if room < Psi:
+            share = room / Psi if Psi else 0.0
+            return (f"the pools {phrase} can carry {share:.3%} of this size "
+                    f"-- their quotes stop rising beyond that")
+    return "src not connected to dst through the active set"
+
+
 def active_set_solve(
     g: ArcArrays,
     src: int,
@@ -171,7 +211,7 @@ def active_set_solve(
         if not comp[src] and Psi != 0:
             return Solution(
                 np.zeros(m), np.zeros(n), A, U, psi_upper, np.zeros(m), pivots,
-                feasible=False, reason="src not connected to dst through the active set",
+                feasible=False, reason=_why_unreachable(g, src, dst, Psi),
             )
         u_idx = np.flatnonzero(comp)
         keep = u_idx[u_idx != dst]
