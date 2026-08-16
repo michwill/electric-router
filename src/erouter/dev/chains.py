@@ -301,6 +301,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="MON",
         wrapped="0x3bD359c1119Da7dA1d913d1C4d2B7c461115433A",
         lite=True,   # ~$7.5M
+        quoter=QUOTER,
     ),
     "plasma": Chain(
         name="plasma",
