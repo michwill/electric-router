@@ -22,7 +22,7 @@ import numpy as np
 
 from .calibrate import Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
-from .gas import GasTable, min_useful_flow
+from .gas import GasTable, min_useful_flow, plan_gas
 from .graph import MAX_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
@@ -955,7 +955,10 @@ def _quote(
             if optimise_split and result.route is not None:
                 with clock("scout"):
                     _scout_wider(result, pool_set, nodes, client,
-                                 amount_in=amount_in)
+                                 amount_in=amount_in,
+                                 gas_price_wei=gas_price_wei,
+                                 dst_wei_per_eth=dst_wei_per_eth,
+                                 gas_table=gas_table, leg_cost_bp=leg_cost_bp)
 
             # --- §7: let the chain choose the split, not the model -----------
             #
@@ -1012,6 +1015,8 @@ SCOUT_MARGIN_BP = 0.5
 def _scout_wider(
     result: RouteResult, pool_set: CandidateSet, nodes: NodeMap,
     client: QuoterClient, *, amount_in: int,
+    gas_price_wei: int = 0, dst_wei_per_eth: float = 0.0,
+    gas_table: GasTable | None = None, leg_cost_bp: float = LEG_COST_BP,
 ) -> None:
     """Re-split the widest candidates against one shared probe batch, and adopt
     one only if the chain agrees it is better.
@@ -1076,15 +1081,36 @@ def _scout_wider(
     result.counters["scout_predicted_bp"] = round(
         (challenger.predicted / max(incumbent, 1.0) - 1) * 1e4, 2)
 
-    best_value, best_found = incumbent, None
+    # Net of what the route costs to execute, exactly as `verify.score` ranks.
+    #
+    # Comparing gross here undid the gas-aware selection made moments earlier:
+    # ranking put a 1-leg route first at 200 gwei -- correctly, its 198,651 gas
+    # against a 25-leg route's 2.2M -- and this adopted the wide one anyway for
+    # 2 bp of gross gain, which at that price is $2 bought for $855.  The
+    # ranking was never wrong; it was overruled.  Same failure the refit had
+    # (see `_refit_winner`), one stage further on.
+    def net(value: float, index: int, legs) -> float:
+        hops = sum(1 for rl in entrants[index].route.legs if not rl.is_conversion)
+        out = value - value * hops * leg_cost_bp / 1e4
+        if gas_price_wei > 0 and dst_wei_per_eth > 0:
+            out -= plan_gas(legs, gas_table) * gas_price_wei / 1e18 * dst_wei_per_eth
+        return out
+
+    incumbent_legs = [rl.leg for rl in result.route.legs]
+    best_value = net(incumbent, 0, incumbent_legs) if entrants else incumbent
+    best_found, best_gross = None, incumbent
     for (found, bar), value in zip(proposals, quoted, strict=True):
         value = float(value)
-        if value > max(best_value, bar):
-            best_value, best_found = value, found
+        if value <= bar:
+            continue  # still has to clear the topology margin, on gross
+        scored = net(value, found.index, found.legs)
+        if scored > best_value:
+            best_value, best_found, best_gross = scored, found, value
     if best_found is None:
         return
 
     candidate = entrants[best_found.index]
+    best_value = best_gross
     for realized, leg in zip(candidate.route.legs, best_found.legs, strict=True):
         realized.leg = leg
     candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)

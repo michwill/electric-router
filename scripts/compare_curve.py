@@ -170,8 +170,12 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
             prepare(load.pools, nodes, client, src_token=src, dst_token=dst,
                     extra_arcs=stake)
             started = time.perf_counter()
+            # At the chain's own gas price, which the solver reports.  Quoting
+            # with gas free is not a like-for-like comparison: it lets our side
+            # spend legs it would never spend in production.
             result = route(load.pools, nodes, client, src_token=src, dst_token=dst,
-                           amount_in=wei, extra_arcs=stake)
+                           amount_in=wei, extra_arcs=stake,
+                           gas_price_wei=int(float(theirs.get("gas_price_gwei") or 0) * 1e9))
         except RoutingError as exc:
             rows.append(row | {"note": f"ours: {str(exc)[:38]}"})
             continue
