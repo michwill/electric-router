@@ -154,7 +154,17 @@ class JsonRpcTransport:
         # method list may not serve `eth_chainId` at all -- asking is a
         # courtesy check, not a requirement.
         if chain_id is None:
-            chain_id = int(self.fetch("eth_chainId", []), 16)
+            try:
+                chain_id = int(self.fetch("eth_chainId", []), 16)
+            except Exception as exc:
+                # Say which question was refused.  The scoped endpoint does not
+                # serve `eth_chainId`, so every caller that omitted it -- the
+                # route sweep among them -- failed at construction with a bare
+                # "HTTP Error 500" naming neither the method nor the fix.
+                raise RpcError(
+                    f"{url.rsplit('/', 1)[0]}/... will not answer eth_chainId "
+                    f"({str(exc)[:60]}); pass chain_id= from the chain table"
+                ) from exc
         resolved = (
             int(self.fetch("eth_blockNumber", []), 16) if block == "latest" else int(block)
         )

@@ -402,7 +402,7 @@ def deploy_one(name: str, args, account=None) -> int:
 
     probe, label = _sanity_probe(chain)
     if args.broadcast:
-        rpc = JsonRpcTransport(url)
+        rpc = JsonRpcTransport(url, chain_id=chain.chain_id)
         deployed = QuoterClient(rpc, address).probe(probe)[0]
         print(f"\n  sanity {label}")
         print(f"    deployed   {deployed.value:,} ({deployed.status.name})")

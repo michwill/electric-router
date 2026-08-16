@@ -26,7 +26,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from erouter.core.codec import selector
+from erouter.core.codec import encode_call
+from erouter.core.quoter import QuoterClient
+from erouter.core.transport import Call
 from erouter.dev import chains as chain_table
 from erouter.dev.cli import _rpc_url
 from erouter.dev.lite import LITE_MIN_TVL
@@ -39,27 +41,24 @@ SIZE_OF_RESERVE = 0.001
 TIMEOUT_S = 600
 
 
-def reserves(rpc, pool) -> list[int]:
-    """What each coin contract says the pool holds.
+def reserves(rpc, chain, pool) -> list[int]:
+    """What each coin contract says the pool holds, asked through the quoter.
 
     `PoolSpec.balances` is empty at load time -- it is filled by the probe
     stage, which is exactly the machinery this script is trying not to build --
     and sizing every chain at "0.001 token" instead would be dust in one pool
-    and the whole reserve in another.  A plain `balanceOf` per coin needs only
-    the transport, and reads the ETH sentinel as zero, which ranks it out.
+    and the whole reserve in another.
+
+    These went out as direct `eth_call`s until the scoped endpoint became the
+    default and answered every one of them HTTP 403, which is what it is for.
+    Routing them through the quoter's `raw_batch` is what the router itself
+    does, so the harness now needs exactly the rights production needs -- and
+    would catch it if that stopped being true.
     """
-    calls = [("eth_call", [{"to": coin.address,
-                            "data": "0x" + selector("balanceOf(address)").hex()
-                                    + pool.address[2:].rjust(64, "0")},
-                           rpc.pin.hex_block])
+    calls = [Call(coin.address, encode_call("balanceOf(address)", pool.address))
              for coin in pool.coins]
-    out = []
-    for answer in rpc.fetch_multi(calls):
-        try:
-            out.append(int(answer, 16) if isinstance(answer, str) and len(answer) > 2 else 0)
-        except (TypeError, ValueError):
-            out.append(0)
-    return out
+    answers = QuoterClient(rpc, chain.quoter).raw(calls)
+    return [answer.uint_or(0) or 0 for answer in answers]
 
 
 def pick_pair(chain, floor: float, rpc):
@@ -68,7 +67,7 @@ def pick_pair(chain, floor: float, rpc):
     for pool in sorted(load.pools, key=lambda p: -p.tvl_usd)[:5]:
         if len(pool.coins) < 2:
             continue
-        held = pool.balances or reserves(rpc, pool)
+        held = pool.balances or reserves(rpc, chain, pool)
         ranked = sorted(
             ((bal, coin) for bal, coin in zip(held, pool.coins, strict=False) if bal > 0),
             key=lambda pair: -(pair[0] / 10 ** pair[1].decimals),
@@ -124,7 +123,8 @@ def main(argv: list[str]) -> int:
         chain = chain_table.CHAINS[name]
         floor = LITE_MIN_TVL if chain.lite else 10_000.0
         try:
-            rpc = JsonRpcTransport(_rpc_url(chain, argparse.Namespace(rpc=None)))
+            rpc = JsonRpcTransport(_rpc_url(chain, argparse.Namespace(rpc=None)),
+                                   chain_id=chain.chain_id)
             row = route(name, chain, floor, rpc)
         except Exception as exc:  # a chain that cannot even list its pools
             row = {"chain": name, "status": "error", "note": str(exc)[:70]}

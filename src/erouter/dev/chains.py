@@ -134,6 +134,29 @@ CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 # something that is no longer deployed.
 QUOTER = "0xd0f20bd005df7657b6192873ca7e2b84f7d11e49"
 
+#: The scoped drpc key, committed on purpose.
+#
+# It cannot do anything a public node could not: reads, plus `eth_call`
+# restricted to `QUOTER` above -- a stateless view contract that can move
+# nothing.  Measured on every chain: a direct `eth_call` to a pool answers
+# HTTP 403 "address 0x...", while the same call through the quoter returns a
+# quote.  `eth_sendRawTransaction` is not served at all, which is why
+# deployments still go through `networks.py`.
+#
+# Committing it is the point.  A checkout with no `networks.py` routes on
+# fifteen chains, and the browser build ships this URL rather than asking the
+# user for one.
+SCOPED_KEY = "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
+
+
+def scoped_rpc(network: str) -> str:
+    """The scoped endpoint for a drpc network name.
+
+    drpc puts the network in the path, so one key serves them all; the segment
+    is the chain's own name on every chain we carry.
+    """
+    return f"https://lb.drpc.live/{network}/{SCOPED_KEY}"
+
 CHAINS: dict[str, Chain] = {
     "ethereum": Chain(
         name="ethereum",
@@ -144,10 +167,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
         erc4626_allowlist=(SCRVUSD, SDOLA, SDAI, SUSDS, SFRXETH, SGHO, STUSDS),
         quoter=QUOTER,
-        public_rpc=(
-            "https://lb.drpc.live/ethereum/"
-            "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
-        ),
+        public_rpc=scoped_rpc("ethereum"),
         stables=(
             "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",   # USDC
             "0xdAC17F958D2ee523a2206206994597C13D831ec7",   # USDT
@@ -194,6 +214,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="ETH",
         wrapped="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
         quoter=QUOTER,
+        public_rpc=scoped_rpc("arbitrum"),
     ),
     "optimism": Chain(
         name="optimism",
@@ -203,6 +224,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="ETH",
         wrapped="0x4200000000000000000000000000000000000006",
         quoter=QUOTER,
+        public_rpc=scoped_rpc("optimism"),
     ),
     "base": Chain(
         name="base",
@@ -212,6 +234,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="ETH",
         wrapped="0x4200000000000000000000000000000000000006",
         quoter=QUOTER,
+        public_rpc=scoped_rpc("base"),
     ),
     "gnosis": Chain(
         name="gnosis",
@@ -221,6 +244,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="XDAI",
         wrapped="0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d",  # WXDAI
         quoter=QUOTER,
+        public_rpc=scoped_rpc("gnosis"),
     ),
     "polygon": Chain(
         name="polygon",
@@ -230,6 +254,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="POL",
         wrapped="0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",  # WPOL (ex-WMATIC)
         quoter=QUOTER,
+        public_rpc=scoped_rpc("polygon"),
     ),
     "fraxtal": Chain(
         name="fraxtal",
@@ -239,6 +264,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="frxETH",
         wrapped="0xFC00000000000000000000000000000000000006",  # wfrxETH
         quoter=QUOTER,
+        public_rpc=scoped_rpc("fraxtal"),
     ),
     "bsc": Chain(
         name="bsc",
@@ -248,6 +274,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="BNB",
         wrapped="0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",  # WBNB
         quoter=QUOTER,
+        public_rpc=scoped_rpc("bsc"),
     ),
     # --- Curve Lite deployments ------------------------------------------
     #
@@ -292,6 +319,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX
         lite=True,
         quoter=QUOTER,
+        public_rpc=scoped_rpc("avalanche"),
     ),
     "monad": Chain(
         name="monad",
@@ -302,6 +330,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0x3bD359c1119Da7dA1d913d1C4d2B7c461115433A",
         lite=True,   # ~$7.5M
         quoter=QUOTER,
+        public_rpc=scoped_rpc("monad"),
     ),
     "plasma": Chain(
         name="plasma",
@@ -312,6 +341,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0x6100E367285b01F48D07953803A2d8dCA5D19873",
         lite=True,   # ~$3.8M
         quoter=QUOTER,
+        public_rpc=scoped_rpc("plasma"),
     ),
     "xlayer": Chain(
         name="xlayer",
@@ -322,6 +352,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xe538905cf8410324e03A5A23C1c177a474D59b2b",
         lite=True,   # ~$3.6M
         quoter=QUOTER,
+        public_rpc=scoped_rpc("xlayer"),
     ),
     "celo": Chain(
         name="celo",
@@ -334,6 +365,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0x471EcE3750Da237f93B8E339c536989b8978a438",
         lite=True,   # ~$259k
         quoter=QUOTER,
+        public_rpc=scoped_rpc("celo"),
     ),
     # Needs `RouteQuoter` deployed before anything here can read it; see
     # `needs_quoter`.  Its `debug_traceCall` works, so once the quoter exists
@@ -349,6 +381,7 @@ CHAINS: dict[str, Chain] = {
         lite=True,
         needs_quoter=True,
         quoter=QUOTER,
+        public_rpc=scoped_rpc("tac"),
     ),
     # Also needs the quoter -- and even then stays wire-only: HTTP 500 from
     # `eth_createAccessList` in every shape and `debug_traceCall` output that
@@ -363,6 +396,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xc9B53AB2679f573e480d01e0f49e2B5CFB7a3EAb",  # WXTZ, verified
         lite=True,
         needs_quoter=True,
+        public_rpc=scoped_rpc("etherlink"),
     ),
     "sonic": Chain(
         name="sonic",
@@ -372,6 +406,7 @@ CHAINS: dict[str, Chain] = {
         native_symbol="S",
         wrapped="0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS
         quoter=QUOTER,
+        public_rpc=scoped_rpc("sonic"),
     ),
 }
 

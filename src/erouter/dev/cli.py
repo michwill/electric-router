@@ -56,21 +56,26 @@ def _mark(value: bool) -> str:
 
 
 def _rpc_url(chain, args) -> str:
-    """Where to reach the chain: the flag, then `networks.py`, then the table.
+    """Where to reach the chain: the flag, then the table, then `networks.py`.
 
-    `--rpc-url` wins so an endpoint can be tried without editing the gitignored
-    `networks.py` that holds real keys.  The table's `public_rpc` is last, and
-    exists so a fresh checkout with no `networks.py` still routes.
+    **The committed scoped endpoint is the default**, so what runs here is what
+    production runs.  It is enough: measured on all fifteen chains, a direct
+    `eth_call` to a pool answers HTTP 403 while the same quote through the
+    deployed quoter succeeds, and the storage reads the local EVM needs are
+    served.  Developing against a wider key than production gets is how a
+    dependency on that width goes unnoticed until it ships.
+
+    `--private` takes the `networks.py` endpoint instead -- a local node is far
+    faster for bulk work like `gascal` or a cold `warmcache`, and deployments
+    need it, since the scoped key does not serve `eth_sendRawTransaction`.
+    `--rpc-url` still wins over both.
     """
     override = getattr(args, "rpc_url", None)
     if override:
         return override
-    try:
+    if getattr(args, "private", False) or not chain.public_rpc:
         return config.rpc_url(chain.rpc_attr)
-    except (KeyError, FileNotFoundError, ImportError):
-        if chain.public_rpc:
-            return chain.public_rpc
-        raise
+    return chain.public_rpc
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -1954,6 +1959,15 @@ def build_parser() -> argparse.ArgumentParser:
              "(default 1.0): gas plus whatever the price did while the user "
              "resubmitted. Raise it to buy safety with price")
     route_cmd.set_defaults(func=cmd_route)
+
+    # Every subcommand takes it, so it is added in one place rather than
+    # fifteen -- and no subcommand can be added later that quietly lacks it.
+    for command in sub.choices.values():
+        command.add_argument(
+            "--private", action="store_true",
+            help="use the networks.py endpoint instead of the committed scoped "
+                 "one. Faster for bulk work against a local node, and required "
+                 "for anything that sends a transaction")
 
     return parser
 
