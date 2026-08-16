@@ -56,6 +56,7 @@ prefetch is actually complete rather than merely load-bearing.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..core.transport import Answer, Call, Status
 from ..core.types import ArcKind
@@ -74,6 +75,43 @@ DIRECT_SIGS = {
 # exceeded"), and it refuses the *whole* batch -- so a route's worth of proofs
 # has to be split or none of it arrives.
 BATCH_LIMIT = 100
+
+def _access_list_error(answer: Any) -> str:
+    """Why an `eth_createAccessList` answer is unusable, or `""` if it is fine.
+
+    Three failure modes, and only one of them is a JSON-RPC error.  Geth
+    reports a *failed simulation* inside a successful result -- `{"accessList":
+    [], "error": "..."}` -- and tac's endpoint does not even report that much:
+
+        {}                              header not found
+        {gas: 2M}                       {'accessList': [], 'gasUsed': '0xf4240'}
+        {gas: 2M, gasPrice: 0}          failed to apply transaction
+        {gasPrice: 0}                   header not found
+
+    The second row is a `get_dy` that supposedly burned a million gas and
+    touched no storage.  It is not true, and nothing in the answer says so.
+
+    So an **empty list is treated as a failure**, not as a call that touched
+    nothing.  A genuine no-storage call loses one tracer message, once, since
+    the result is cached per call; believing this one cost the whole chain --
+    three pools were loaded with their code and none of their state, the EVM
+    read them as holding zero, and calibration dropped every arc on tac.
+    """
+    if isinstance(answer, Exception):
+        return str(answer)
+    if not isinstance(answer, dict):
+        return f"not an object: {answer!r}"
+    if answer.get("error"):
+        return str(answer["error"])
+    if not answer.get("accessList"):
+        return "empty access list"
+    return ""
+
+
+def _access_list_failed(answer: Any) -> bool:
+    return bool(_access_list_error(answer))
+
+
 # The storage sweep is a few thousand tiny independent reads, which is a very
 # different shape from the probe batches the transport's default is tuned for.
 # Measured on 4,136 slots: 4,513 ms on one stream, 1,238 on four, 521 on
@@ -541,10 +579,8 @@ class LocalEvm:
         # -- it is slots the local EVM will read as zero, which is a wrong
         # quote rather than a missing one.
         for shape in self.ACCESS_LIST_SHAPES[1:]:
-            failed = [one for one, answer in pending
-                      if isinstance(answer, Exception) or not isinstance(answer, dict)]
-            ok = [pair for pair in pending
-                  if not (isinstance(pair[1], Exception) or not isinstance(pair[1], dict))]
+            failed = [one for one, answer in pending if _access_list_failed(answer)]
+            ok = [pair for pair in pending if not _access_list_failed(pair[1])]
             if not failed:
                 break
             retry = self._batched([
@@ -558,10 +594,13 @@ class LocalEvm:
             pending = ok + list(zip(failed, retry, strict=True))
 
         for one, answer in pending:
-            touched.setdefault(one.to.lower(), set())
-            if isinstance(answer, Exception) or not isinstance(answer, dict):
-                self.stats.errors.append(f"accessList: {str(answer)[:100]}")
+            if _access_list_failed(answer):
+                self.stats.errors.append(f"accessList: {_access_list_error(answer)[:100]}")
                 continue
+            # Only a call that was actually simulated registers its target.
+            # Doing this for failed calls too loaded the pool's code with an
+            # empty slot set, which the EVM then reads as a pool holding zero.
+            touched.setdefault(one.to.lower(), set())
             served = True
             for entry in answer.get("accessList", []):
                 touched.setdefault(entry["address"].lower(), set()).update(

@@ -216,7 +216,7 @@ def cmd_pools(args: argparse.Namespace) -> int:
             if args.type and chain_table and args.type.lower() not in pool.pool_type.lower():
                 continue
             symbols = [c.symbol for c in pool.coins]
-            if args.token and args.token.upper() not in [s.upper() for s in symbols]:
+            if args.token and _fold(args.token) not in [_fold(s) for s in symbols]:
                 continue
             print(
                 f"  {pool.address}  {pool.name[:30]:<30} {pool.pool_type:<18} "
@@ -380,15 +380,33 @@ def _ledger(result, nodes, dst, in_human, out_human) -> dict:
     return ledger
 
 
+#: Symbol glyphs nobody types, folded to the letter they stand for.
+#
+# Tether's ticker is spelled with U+20AE TETHER SIGN on several chains -- tac
+# calls it `USD₮` and xlayer `USD₮0` -- and `--from USDT` there fails with "no
+# token with symbol 'USDT' in the universe" while the pool it wants is right
+# there and named `USDT/WTAC`.  NFKC does not fold this codepoint, so the map is
+# explicit.  A chain carrying both spellings is not a problem: they resolve to
+# one symbol and the existing TVL ranking picks between them out loud.
+GLYPH_FOLD = {"₮": "T"}
+
+
+def _fold(symbol: str) -> str:
+    """A symbol as the user would have typed it: upper case, ASCII tickers."""
+    for glyph, letter in GLYPH_FOLD.items():
+        symbol = symbol.replace(glyph, letter)
+    return symbol.upper()
+
+
 def _resolve_token(nodes, symbol_or_address: str, pools) -> str:
     """Address, or the highest-TVL token with that symbol."""
     if symbol_or_address.startswith("0x") and len(symbol_or_address) == 42:
         return symbol_or_address.lower()
-    wanted = symbol_or_address.upper()
+    wanted = _fold(symbol_or_address)
     tvl: dict[str, float] = {}
     for pool in pools:
         for coin in pool.coins:
-            if coin.symbol.upper() == wanted:
+            if _fold(coin.symbol) == wanted:
                 key = coin.address.lower()
                 tvl[key] = tvl.get(key, 0.0) + pool.tvl_usd
     if not tvl:
@@ -1700,20 +1718,33 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     # USDC to WETH" -- gnosis, polygon, bsc, sonic, avalanche, etherlink,
     # monad, plasma, xlayer, robinhood, celo, tac, fraxtal.  The universe is
     # what is being cached, not a route through it.
+    # Record a real route where one can be had.  It covers call shapes
+    # `warm_arcs` does not -- ERC4626 reads, wrappers, stake arcs -- so it is
+    # worth having, but it is not worth *requiring*: the pair is hardcoded to
+    # USDC/WETH and most chains have neither.  Deploying tac's quoter put it
+    # back on this path and it failed with "no token with symbol 'USDC'", which
+    # is a caching command refusing to cache over a token it was never asked
+    # about.
+    recorded = False
     if chain.quoter:
         try:
-            prepare(load.pools, nodes, setup,
-                    src_token=_resolve_token(nodes, args.src, load.pools),
-                    dst_token=_resolve_token(nodes, args.dst, load.pools),
-                    extra_arcs=stake)
+            src_token = _resolve_token(nodes, args.src, load.pools)
+            dst_token = _resolve_token(nodes, args.dst, load.pools)
         except Exception as exc:
-            print(f"{BAD} could not probe the universe: {exc}")
-            return 4
+            print(f"  {WARN} {str(exc)[:60]}; caching the universe instead of a route")
+        else:
+            try:
+                prepare(load.pools, nodes, setup, src_token=src_token,
+                        dst_token=dst_token, extra_arcs=stake)
+                recorded = True
+            except Exception as exc:
+                print(f"  {WARN} could not probe {args.src}->{args.dst} ({str(exc)[:40]}); "
+                      f"caching the universe instead")
     probing = (_time.perf_counter() - started) * 1000
     print(f"  probed in {probing:,.0f} ms, {len(recorder.calls)} distinct quoter calls")
 
     evm = LocalEvm(rpc, cache=cache)
-    if chain.quoter:
+    if recorded:
         stats = evm.warm(list(recorder.calls))
     else:
         # The recorded calls all target the quoter, and off mainnet the quoter

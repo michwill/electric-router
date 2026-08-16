@@ -322,6 +322,7 @@ CHAINS: dict[str, Chain] = {
         wrapped="0xB63B9f0eb4A6E6f191529D71d4D88cc8900Df2C9",  # WTAC, verified
         lite=True,
         needs_quoter=True,
+        quoter="0x06Ce8086965234400FDecAb190B115C2C0717047",
     ),
     # Also needs the quoter -- and even then stays wire-only: HTTP 500 from
     # `eth_createAccessList` in every shape and `debug_traceCall` output that
