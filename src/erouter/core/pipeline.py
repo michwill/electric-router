@@ -179,7 +179,8 @@ def build_arcs(
     refs: list[ArcRef] = []
     meta: list[tuple[PoolSpec, int, int]] = []
 
-    def offer(kind: ArcKind, i: int, j: int, reserve: int, dec_in: int, dec_out: int):
+    def offer(kind: ArcKind, i: int, j: int, reserve: int, dec_in: int, dec_out: int,
+              reserve_out: int = 0):
         token_in, token_out = arc_tokens(pool, kind, i, j)
         if not (token_in and token_out):
             return
@@ -189,7 +190,8 @@ def build_arcs(
             return  # self-loop after merging; see the note in route()
         refs.append(
             ArcRef(pool=pool.address, kind=kind, i=i, j=j, n_coins=pool.n_coins,
-                   reserve_in=reserve, decimals_in=dec_in, decimals_out=dec_out)
+                   reserve_in=reserve, decimals_in=dec_in, decimals_out=dec_out,
+                   reserve_out=reserve_out)
         )
         meta.append((pool, i, j))
 
@@ -202,7 +204,8 @@ def build_arcs(
                 if i >= len(pool.balances) or pool.balances[i] <= 0:
                     continue
                 offer(kind, i, j, pool.balances[i],
-                      pool.coins[i].decimals, pool.coins[j].decimals)
+                      pool.coins[i].decimals, pool.coins[j].decimals,
+                      reserve_out=pool.balances[j] if j < len(pool.balances) else 0)
 
         # An LP token with no supply cannot be withdrawn from and cannot be
         # priced into: `calc_withdraw_one_coin` divides by it.
@@ -213,10 +216,12 @@ def build_arcs(
             if k >= len(pool.balances) or pool.balances[k] <= 0:
                 continue
             offer(deposit, k, 0, pool.balances[k],
-                  pool.coins[k].decimals, pool.lp_decimals)
+                  pool.coins[k].decimals, pool.lp_decimals,
+                  reserve_out=pool.lp_supply)
             if withdraw is not None:
                 offer(withdraw, 0, k, pool.lp_supply,
-                      pool.lp_decimals, pool.coins[k].decimals)
+                      pool.lp_decimals, pool.coins[k].decimals,
+                      reserve_out=pool.balances[k])
     return refs, meta
 
 
@@ -258,6 +263,15 @@ def _to_arc(
     )
 
 
+def _quantum(decimals_out: int) -> float:
+    """One unit of the output token, in the human units calibration fits in.
+
+    Curve quotes integers, so this is the resolution of every measurement the
+    ladder makes: 1e-18 for DAI, 1e-6 for USDT, 0.01 for GUSD.
+    """
+    return 10.0 ** -int(decimals_out)
+
+
 def calibrate_arcs(
     refs: list[ArcRef],
     meta: list[tuple[PoolSpec, int, int]],
@@ -274,7 +288,7 @@ def calibrate_arcs(
             continue
         deltas, quotes = ladder.as_float()
         try:
-            fit = calibrate(deltas, quotes)
+            fit = calibrate(deltas, quotes, quantum=_quantum(ref.decimals_out))
         except CalibrationError as exc:
             dropped.append(f"{ref.id}: {exc}")
             continue
@@ -1422,7 +1436,8 @@ def _recalibrate(arcs: list[PoolArc], ladders, nodes: NodeMap) -> int:
             continue
         deltas, quotes = ladder.as_float()
         try:
-            fit = calibrate(deltas, quotes)
+            fit = calibrate(deltas, quotes,
+                            quantum=_quantum(ladder.arc.decimals_out))
         except CalibrationError:
             continue
         a, B = rescale(fit.a, fit.B, nodes.rate(arc.token_in), nodes.rate(arc.token_out))

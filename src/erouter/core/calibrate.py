@@ -129,6 +129,7 @@ def calibrate(
     drift_tol: float = DRIFT_TOL,
     cap: float | None = None,
     f_at_cap: float | None = None,
+    quantum: float = 0.0,
 ) -> Calibration:
     """Fit one arc from its probe ladder.
 
@@ -193,6 +194,34 @@ def calibrate(
     f_bar = float(np.interp(d_bar, x, y))
     B = 2.0 * (a * d_bar - f_bar) / d_bar**2
 
+    # --- what the output token's own resolution can fake ------------------
+    #
+    # `quotes` are integers of the output token, so every one is rounded down
+    # by up to one unit.  For an 18-decimal token that is nothing; for GUSD's
+    # *two* it is 0.01, and the ladder's small node carries it into `a`:
+    #
+    #     a  = y0 / x0                    error  quantum / x0
+    #     B  = 2 (a d - f(d)) / d^2       error  2 (quantum/x0) / d + 2 quantum / d^2
+    #
+    # Measured on mainnet 3Crv -> GUSD, where the fitted curvature is -2.9e-8
+    # against a noise floor of 4.8e-8: the pool is a healthy stableswap holding
+    # 393,473 GUSD, and the entire "increasing returns" it appeared to show was
+    # the rounding.  Clamping on that evidence capped the arc at the largest
+    # size probed and made a $10,000 trade unroutable.
+    #
+    # Below the floor the sign of the curvature is simply unknown.  Taking the
+    # floor itself as `B` is the flattest reading the data supports, which is
+    # the same direction §2.3 clamps in -- optimistic, bounded, and finite, so
+    # the arc keeps a conductance instead of needing a cap.  The refine pass
+    # then probes it properly, because an arc that can carry flow is an arc the
+    # solver puts in the active set.
+    noise = 0.0
+    if quantum > 0:
+        noise = 2.0 * (quantum / float(x[0])) / d_bar + 2.0 * quantum / d_bar**2
+    quantised = B < 0.0 and -B <= noise
+    if quantised:
+        B = noise
+
     # Two node sets, for two different jobs.
     #
     # Flag detection uses *every* probe, so a convex patch anywhere on the
@@ -223,6 +252,8 @@ def calibrate(
             eta = 3.0 * a * D3 / (2.0 * D_local[1] ** 2)
 
     note = "SATURATED" if saturated_at is not None else ""
+    if quantised:
+        note = "QUANTISED"
     # A wall is a cap even when the fitted curvature is healthy: without it the
     # solver sizes the arc from `B` alone and posts flow the venue cannot fill.
     clamped = B <= 0.0 or saturated_at is not None

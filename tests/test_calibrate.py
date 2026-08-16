@@ -394,3 +394,48 @@ def test_a_ladder_of_one_repeated_size_is_rejected():
     """Nothing can be fitted through a single size, however many times probed."""
     with pytest.raises(CalibrationError, match="distinct sizes"):
         calibrate([100.0, 100.0000001], [1.0, 1.0])
+
+
+def test_output_rounding_is_not_increasing_returns():
+    """A coarse output token must not make a healthy pool look convex.
+
+    Mainnet 3Crv -> GUSD, verbatim from the coarse pass.  GUSD has *two*
+    decimals, so each quote is rounded down by up to 0.01, and at the small
+    node that is 1.5e-4 of the rate -- which propagates into `a` and fakes a
+    curvature of -2.9e-8 against a noise floor of 4.8e-8.  Clamping on that
+    evidence capped the arc at the largest size probed and made $10,000 of a
+    pool holding 393,473 GUSD unroutable.
+    """
+    deltas = [64.823756, 6482.375563]
+    quotes = [67.330000, 6733.620000]
+
+    fit = calibrate(deltas, quotes, quantum=0.01)
+
+    assert fit.note == "QUANTISED"
+    assert not fit.clamped, "the curvature is unmeasured, not negative"
+    assert fit.B > 0, "a usable arc needs a finite conductance"
+    assert not math.isfinite(fit.cap) or fit.cap >= deltas[-1]
+
+
+def test_a_real_convexity_still_clamps_through_the_noise():
+    """The floor must not swallow curvature a coarse token *can* resolve."""
+    # The same shape, an order of magnitude more convex than rounding explains.
+    deltas = [64.823756, 6482.375563]
+    quotes = [67.330000, 6740.000000]
+
+    fit = calibrate(deltas, quotes, quantum=0.01)
+
+    assert fit.clamped and math.isfinite(fit.cap)
+    assert fit.note != "QUANTISED"
+
+
+def test_eighteen_decimals_are_unaffected():
+    """The floor is nothing on a token that quotes to the wei."""
+    deltas = [1.0, 100.0, 1000.0]
+    quotes = [1.0, 99.9, 998.0]
+
+    fine = calibrate(deltas, quotes, quantum=1e-18)
+    none = calibrate(deltas, quotes)
+
+    assert fine.B == none.B and fine.a == none.a
+    assert fine.note == none.note

@@ -66,21 +66,51 @@ class ArcRef:
     reserve_in: int
     decimals_in: int = 18
     decimals_out: int = 18
+    # What stands on the other side, used to keep the smallest probe above the
+    # output token's own resolution; see `plan_deltas`.
+    reserve_out: int = 0
 
     @property
     def id(self) -> str:
         return f"{self.pool.lower()}:{int(self.kind)}:{self.i}>{self.j}"
 
 
+#: The fewest units of the output token a probe's answer may consist of.
+#
+# Quotes come back as integers, so an answer of `n` units carries a rounding
+# error of `1/n`.  The curvature a ladder is trying to measure is often 1e-4 or
+# smaller, so an answer of a few thousand units is *all* rounding: measured on
+# mainnet 3Crv -> GUSD, whose two decimals made a healthy stableswap look like
+# it had increasing returns, which clamped the arc and made $10,000 of a pool
+# holding 393,473 GUSD unroutable.
+#
+# Ten thousand units puts the rounding at 1e-4 and below most real curvature.
+# It costs nothing on an 18-decimal token, where any probe worth sending
+# already clears it by fourteen orders of magnitude; it moves the small end of
+# the ladder outward exactly where the token is coarse.
+MIN_OUT_QUANTA = 10_000
+
+
 def plan_deltas(
-    reserve_in: int, decimals_in: int = 18, grid: tuple[float, ...] = GRID
+    reserve_in: int,
+    decimals_in: int = 18,
+    grid: tuple[float, ...] = GRID,
+    reserve_out: int = 0,
 ) -> list[int]:
     """Integer probe sizes, floored and strictly increasing.
 
     A node that would round onto its predecessor is dropped rather than sent:
     two identical deltas produce a zero denominator in the divided differences.
+
+    The floor is whichever is larger: a size the *input* token can express, or
+    a size whose answer the *output* token can express.  The second needs the
+    far reserve, since a probe returns roughly `delta * reserve_out /
+    reserve_in` -- first order, which is all a floor needs.
     """
     floor = max(1, 10 ** max(0, decimals_in - 6))
+    if reserve_out > 0:
+        # Rounded up: flooring here lands one unit short of the target.
+        floor = max(floor, -(-MIN_OUT_QUANTA * reserve_in // reserve_out))
     out: list[int] = []
     for fraction in grid:
         delta = max(int(reserve_in * fraction), floor)
@@ -105,7 +135,7 @@ def plan_grid(arcs: list[ArcRef], grid: tuple[float, ...] = GRID) -> ProbePlan:
     """One batch covering every arc's whole ladder."""
     plan = ProbePlan()
     for arc in arcs:
-        deltas = plan_deltas(arc.reserve_in, arc.decimals_in, grid)
+        deltas = plan_deltas(arc.reserve_in, arc.decimals_in, grid, arc.reserve_out)
         if len(deltas) < 2:  # too little room to fit even a curvature estimate
             continue
         start = len(plan.probes)
