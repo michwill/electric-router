@@ -497,6 +497,20 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
             print(f"  {WARN} local EVM warm failed ({str(exc)[:70]}); quoting over the wire")
         return None
 
+    # Degrade on an *incomplete* warm too, not only on a raised one.  Every
+    # slot the sweep could not read is a zero the EVM will happily quote
+    # against, so an incomplete local EVM does not fail -- it answers, and
+    # answers differently from the chain.  That is what made a pinned block
+    # non-reproducible across processes: identical code at 25,769,788 returned
+    # 5,001,179.88 over 7 legs and 5,002,399.84 over 24, depending on whether
+    # the storage sweep had happened to succeed.  The wire path is slower and
+    # right, which is the correct way round for a tie-break.
+    if not stats.complete:
+        if not quiet:
+            print(f"  {WARN} local EVM incomplete ({stats.unreadable} slot(s) "
+                  f"unreadable: {'; '.join(stats.errors[:2])}); quoting over the wire")
+        return None
+
     if not quiet:
         extra = f", {len(fresh)} new pool(s)" if fresh else ""
         extra += f", {learned} stale slot(s) recovered" if learned else ""

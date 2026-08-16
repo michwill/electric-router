@@ -206,6 +206,15 @@ class WarmStats:
     code_ms: float = 0.0
     storage_ms: float = 0.0
     errors: list[str] = field(default_factory=list)
+    #: Slots and balances the node would not give up, after a retry.  Each one
+    #: is a value the EVM will read as **zero** -- see `_read_values` -- so this
+    #: is not a diagnostic, it is a statement that the state is wrong and the
+    #: caller must not quote from it.
+    unreadable: int = 0
+
+    @property
+    def complete(self) -> bool:
+        return self.unreadable == 0
 
 
 @dataclass(slots=True)
@@ -362,9 +371,33 @@ class LocalEvm:
                           else int(v, 16) for v in values]
             self.stats.storage_ms += (_t.perf_counter() - _mark) * 1000
             self.stats.fetch_calls += len(values)
+            # A slot that did not come back is not a slot we can skip.  py-evm
+            # reads an uninserted slot as zero, and a zero fee, rate or balance
+            # is a *plausible* number: the quote succeeds and is wrong, the arc
+            # is mis-calibrated or silently dropped, and the route changes with
+            # no error anywhere.  Measured across a flaky connection: identical
+            # code at block 25,769,788 returned 5,001,179.88 over 7 legs on one
+            # run and 5,002,399.84 over 24 on the next, a 2.4 bp swing, because
+            # some of this sweep had failed and nothing said so.
+            #
+            # Retry once -- a dropped batch is usually transient -- and count
+            # whatever is still missing so `complete` can refuse the EVM.
+            missing = [k for k, value in enumerate(values) if value is None]
+            if missing:
+                self.stats.retried += len(missing)
+                again = self._batched(
+                    [("eth_getStorageAt", [flat[k][0], f"0x{flat[k][1]:064x}", block])
+                     for k in missing])
+                for k, value in zip(missing, again, strict=True):
+                    if isinstance(value, str):
+                        try:
+                            values[k] = int(value, 16)
+                        except ValueError:
+                            pass
             for (address, slot), value in zip(flat, values, strict=True):
                 if value is None:
                     self.stats.errors.append(f"slot {address[:10]}:{slot} unreadable")
+                    self.stats.unreadable += 1
                     continue
                 self._evm.insert_account_storage(address, slot, value)
                 self._slots.setdefault(address, set()).add(slot)
@@ -378,8 +411,15 @@ class LocalEvm:
             got = self._batched([("eth_getBalance", [a, block]) for a in holders])
             self.stats.code_ms += (_t.perf_counter() - _mark) * 1000
             for address, balance in zip(holders, got, strict=True):
-                if not isinstance(balance, Exception) and balance:
+                if isinstance(balance, str) and balance:
                     self._evm.set_balance(address, int(balance, 16))
+                else:
+                    # `holders` is exactly the set the cache knows holds ETH, so
+                    # a failed read here is a zero balance on a pool that has
+                    # one -- and the ETH/stETH pool answers `get_dy` with zero
+                    # when its balance is zero (E11).
+                    self.stats.errors.append(f"balance {address[:10]} unreadable")
+                    self.stats.unreadable += 1
 
     def warm(self, calls: list[Call]) -> WarmStats:
         """Load every account and slot these calls touch.
@@ -596,6 +636,20 @@ class LocalEvm:
         for one, answer in pending:
             if _access_list_failed(answer):
                 self.stats.errors.append(f"accessList: {_access_list_error(answer)[:100]}")
+                if isinstance(answer, Exception):
+                    # A transport failure, not a reverting probe -- and every
+                    # shape above has already been tried, so this is the node
+                    # refusing rather than the call failing.  The slots this
+                    # request would have named are slots the EVM now reads as
+                    # zero, so it counts against `complete` exactly as an
+                    # unreadable slot does.
+                    #
+                    # A revert is *not* counted: it arrives as a result with an
+                    # error inside it, never as an exception, and a probe that
+                    # reverts because the size is past what the pool holds is a
+                    # real answer.  Conflating the two would refuse the local
+                    # EVM on every route that probes a small pool.
+                    self.stats.unreadable += 1
                 continue
             # Only a call that was actually simulated registers its target.
             # Doing this for failed calls too loaded the pool's code with an
