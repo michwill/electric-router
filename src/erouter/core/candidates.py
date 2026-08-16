@@ -125,6 +125,43 @@ def _pool_of(arcs: list[PoolArc]) -> np.ndarray:
     return np.array([a.pool.lower() for a in arcs], dtype=object)
 
 
+def _by_new_pools(paths: list[list[int]], pools: np.ndarray) -> list[list[int]]:
+    """Re-order paths so each one brings pools the earlier ones did not.
+
+    The cheapest path stays first -- it is `C_*` and it is what a caller with
+    no appetite for splitting gets.  After that, greedily take whichever
+    remaining path adds the most unseen pools, breaking ties toward the
+    cheaper one, so the cumulative unions grow in *venues* rather than in
+    count.  Ordering only; nothing is dropped.
+    """
+    if len(paths) < 3:
+        return paths
+    pool_sets = [{pools[int(a)] for a in path} for path in paths]
+    order = [0]
+    seen = set(pool_sets[0])
+    remaining = list(range(1, len(paths)))
+    while remaining:
+        pick = max(remaining, key=lambda i: (len(pool_sets[i] - seen), -i))
+        remaining.remove(pick)
+        order.append(pick)
+        seen |= pool_sets[pick]
+    return [paths[i] for i in order]
+
+
+def _spread(top_k: tuple[int, ...], budget: int) -> set[int]:
+    """The `k` levels to spend `budget` candidates on, across the whole ladder.
+
+    Taking `top_k` in order spends everything on its dense low end -- with
+    `(1, 2, 3, 4, 6, 8, 12)` and room for four, the widest union ever built is
+    four paths.  Sampling evenly keeps `1` and reaches `12`.
+    """
+    levels = sorted(set(top_k))
+    if budget >= len(levels) or budget <= 1:
+        return set(levels)
+    step = (len(levels) - 1) / (budget - 1)
+    return {levels[int(round(i * step))] for i in range(budget)}
+
+
 def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray) -> dict[str, list[int]]:
     """Pools carrying flow on more than one arc (decision 3)."""
     groups: dict[str, list[int]] = {}
@@ -281,10 +318,28 @@ def generate(
     #    it is also the only family that reliably fits the quoter.
     made_paths = 0
     paths = k_shortest_paths(g, src, dst, k=max(top_k) if top_k else 6)
+    # Yen's returns *near-duplicates*: the same route with one hop swapped, in
+    # eps order.  Taking them in that order makes each union differ from the
+    # last by a single arc, so a budget of four buys four nested sets covering
+    # the same handful of pools -- and the loop stops long before the ladder's
+    # wide end.  Measured on mainnet USDC -> crvUSD at $5M: `TOP_K` opens
+    # (1, 2, 3, 4, ...), all four succeeded, the loop broke at k=4 with a union
+    # of 7 arcs, and the 9th path -- the one through 3pool that Curve's own
+    # router takes and that this model prices at 73% of the trade -- was never
+    # on the ballot.  Whether it made the top four moved with the block, so the
+    # router won or lost that pair by luck.
+    #
+    # Two changes, both about spending a fixed budget on distinguishable
+    # candidates.  Order the paths so each brings pools the earlier ones did
+    # not, and spread the budget across the whole ladder instead of consuming
+    # it at the dense low end.  `k = 1` stays first either way: it is §6.2's
+    # `C_*`, and it is the candidate that reliably fits the quoter.
+    paths = _by_new_pools(paths, pools)
+    levels = _spread(top_k, path_budget)
     union: set[int] = set()
     for k, path in enumerate(paths, start=1):
         union.update(int(a) for a in path)
-        if k not in top_k and k != 1:
+        if k not in levels:
             continue
         forbidden = np.ones(g.m, bool)
         for index in union:
