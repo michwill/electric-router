@@ -661,8 +661,7 @@ def _quote(
                 warm_start = np.array(reuse, dtype=np.int64)
                 result.counters["warm_start_arcs"] = len(reuse)
         if warm_start is None:
-            best_path = k_shortest_paths(g, src_node, dst_node, k=1,
-                                         flow=Psi_scaled)
+            best_path = k_shortest_paths(g, src_node, dst_node, k=1)
             warm_start = np.array(best_path[0]) if best_path else None
     with clock("solve"):
         report = solve(
