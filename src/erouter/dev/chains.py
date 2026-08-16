@@ -235,12 +235,22 @@ CHAINS: dict[str, Chain] = {
     # these fails silently: a wrong address breaks the native/ERC20 merge and
     # the router simply never finds routes through it.
     #
-    # Four Lite deployments are deliberately absent, each measured:
+    # Six Lite deployments are deliberately absent, each measured:
     #
     # * **fantom** is in wind-down -- 164 of its 321 pools answer neither ABI
     #   spelling and probing them takes 19 minutes.
     # * **kava** resolves a dialect for none of its 19 pools, so it yields zero
     #   arcs.  There is nothing there to route.
+    # * **unichain** and **robinhood** are almost entirely scam and dust pools.
+    #   Unichain has one real venue -- Lido's wstETH secondary market -- and
+    #   everything else is sub-$100 or fake; robinhood's are worse, being built
+    #   to move a price oracle, so quoting them would either revert or rug the
+    #   caller.  Their universes trip the §9.7 conditioning guard, and that is
+    #   the guard working: `fly` pairs a token with 1.1e17 units against SUSHI,
+    #   so `a` spans 1e24 within one pool and no value coordinates can hold
+    #   both.  Nothing here needed fixing -- the answer to a universe of scams
+    #   is not to route it.  Curve is expected to drop robinhood's from the API,
+    #   at which point it can come back.
     # * **etherlink** and **tac** reject `eth_call` state overrides outright
     #   (HTTP 400).  Every batched read goes through the quoter, which off
     #   mainnet rides along as an override -- so balances come back as zeros and
@@ -283,24 +293,6 @@ CHAINS: dict[str, Chain] = {
         native_symbol="OKB",
         wrapped="0xe538905cf8410324e03A5A23C1c177a474D59b2b",
         lite=True,   # ~$3.6M
-    ),
-    "unichain": Chain(
-        name="unichain",
-        chain_id=130,
-        api_name="unichain",
-        rpc_attr="UNICHAIN",
-        native_symbol="ETH",
-        wrapped="0x4200000000000000000000000000000000000006",
-        lite=True,   # ~$572k
-    ),
-    "robinhood": Chain(
-        name="robinhood",
-        chain_id=4663,
-        api_name="robinhood",
-        rpc_attr="ROBINHOOD",
-        native_symbol="ETH",
-        wrapped="0x0bD7d308f8e1639fAb988df18a8011f41EacaD73",
-        lite=True,   # ~$414k
     ),
     "celo": Chain(
         name="celo",
