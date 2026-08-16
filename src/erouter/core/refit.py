@@ -33,12 +33,60 @@ from .types import PoolArc, Probe
 
 SLOPE_STEP = 0.01  # §7 rule 3's 1.01 * delta
 CONVERGED = 1e-4  # §8's stopping rule on max|d psi| / Psi
+#: How much of `a * delta` the secant's numerator must be before it is a
+#: measurement rather than rounding.
+#
+# `B = 2(a d - f(d)) / d^2` differences two numbers that agree to within a few
+# basis points, then divides by `d^2`.  `a` is a *fitted* tangent, not an exact
+# quantity, so the numerator carries an error of order `sigma_a * d` and the
+# error in `B` falls only as `1/d`.  Below some size the numerator is entirely
+# that error -- including its sign.
+#
+# Measured on mainnet USDC -> crvUSD at $5M, block 25,769,383, on the
+# crvUSD/USDC pool whose true `B` is about 5e-10:
+#
+#     delta (USDC)        a*d - f(d)            B
+#                3        -3.251e-07   -7.2252e-08   <- sign is rounding
+#               30        -2.994e-06   -6.6536e-09   <- still wrong
+#            3,000        +2.528e-03   +5.6170e-10
+#           34,434       +3.692e-01   +6.2275e-10
+#        1,000,000       +2.493e+02   +4.9865e-10
+#
+# The arc's realised delta was 3 USDC against a `calib_delta` of 1,000,000, so
+# the refit replaced a fit made at a million with one made at three, got
+# `B < 0`, and took the zero-curvature branch below -- clamping the best pool
+# for the pair to a cap of 3 USDC.  It was then unusable, and the router paid
+# 1.2 bp for it.
+#
+# `a` is good to something like 1e-7 relative; this asks an order of magnitude
+# of headroom on top.  Failing the test is not an error: it means this probe
+# knows less than the ladder fit already in hand, so the ladder's fit stands.
+SECANT_REL_FLOOR = 1e-6
+#: How far below the size an arc was last calibrated at the refit may re-anchor.
+#
+# The floor above catches a numerator lost in `a`'s own error.  It does not
+# catch the other end of the same problem: at dust sizes the *pool's* integer
+# arithmetic stops being meaningful, and then the numerator is large in
+# relative terms while being nonsense.  Measured on crvUSD/USDT at block
+# 25,769,383 -- a $45M pool, ladder-fitted `B = 4.4e-11` at a delta of 3.9M --
+# a realised delta of 0.4 USDT quoted an output well below `a * delta`, and the
+# secant read `B = 1.73`, an implied depth of about half a dollar.
+#
+# §8 exists to re-anchor a guessed size onto the realised one.  Three orders
+# below the existing fit is not re-anchoring, it is extrapolating outside the
+# measured range with an error term that has grown a thousandfold; the fit
+# already on the arc is strictly better evidence.  Checked before the probes
+# are planned, so it costs nothing rather than an RPC round trip.
+REFIT_MIN_FRACTION = 1e-3
 
 
 @dataclass(slots=True)
 class RefitRound:
     quoted: int = 0
     reflagged: int = 0
+    #: Arcs whose realised size was too small for the secant to resolve their
+    #: curvature; they keep the ladder's fit.  See `SECANT_REL_FLOOR`.
+    unresolved: int = 0
     max_delta_psi: float = float("inf")
     max_b_change: float = 0.0
     converged: bool = False
@@ -73,18 +121,21 @@ def refit_arcs(
     *,
     rate_in,
     rate_out,
-) -> tuple[int, int]:
-    """Re-anchor `B` for every arc carrying flow.  Returns (quoted, reflagged).
+) -> tuple[int, int, int]:
+    """Re-anchor `B` for every arc carrying flow.
+
+    Returns `(quoted, reflagged, unresolved)`.
 
     `rate_in`/`rate_out` map an arc to its node-merge scaling, so the fit is
     done in the same canonical units the solver works in.
     """
     active = np.flatnonzero(psi > 0)
     if active.size == 0:
-        return 0, 0
+        return 0, 0, 0
 
     probes: list[Probe] = []
     plan: list[tuple[int, int, float]] = []  # (arc index, probe offset, delta canonical)
+    unresolved = 0
     for k in active:
         arc = arcs[int(k)]
         delta_canonical = float(psi[k]) / float(nu[arc.tau])
@@ -92,11 +143,18 @@ def refit_arcs(
         delta_raw = int(delta_token * 10**arc.decimals_in)
         if delta_raw <= 0:
             continue
+        if (arc.calib_delta > 0
+                and delta_canonical < REFIT_MIN_FRACTION * arc.calib_delta):
+            # Outside the range this arc was measured over -- see
+            # `REFIT_MIN_FRACTION`.  Keep the fit it already has, and do not
+            # spend the two probes finding that out.
+            unresolved += 1
+            continue
         plan.append((int(k), len(probes), delta_canonical))
         probes.extend(_probe_pair(arc, delta_raw))
 
     if not probes:
-        return 0, 0
+        return 0, 0, unresolved
     answers = client.probe(probes)
 
     quoted = 0
@@ -110,7 +168,15 @@ def refit_arcs(
         scale_out = 10**arc.decimals_out
         f_delta = at_delta.value / scale_out * rate_out(arc)
         # (M2) at the realised size: match the true curve at 0 and at delta.
-        B = 2.0 * (arc.a * delta_canonical - f_delta) / delta_canonical**2
+        signal = arc.a * delta_canonical - f_delta
+        if abs(signal) <= SECANT_REL_FLOOR * arc.a * delta_canonical:
+            # Below what this secant can resolve -- see `SECANT_REL_FLOOR`.
+            # The ladder fit already on the arc was made at a size where the
+            # curvature was measurable, so leave it alone rather than replacing
+            # a measurement with its own rounding error.
+            unresolved += 1
+            continue
+        B = 2.0 * signal / delta_canonical**2
         quoted += 1
 
         if at_bumped.ok and at_bumped.value > at_delta.value:
@@ -119,7 +185,12 @@ def refit_arcs(
             # The marginal rate must fall with size.  If it rises here, the arc
             # has increasing returns exactly where the route wants to use it --
             # inadmissible in a convex program, so clamp and flag (§11.2).
-            if slope > arc.a * (1 + 1e-9):
+            #
+            # Compared against the same floor: `a` is fitted, so a slope above
+            # it by less than `a`'s own accuracy is not increasing returns.  A
+            # 1e-9 tolerance here was two orders tighter than `a` is true, and
+            # every arc that tripped it was clamped on the strength of it.
+            if slope > arc.a * (1 + SECANT_REL_FLOOR):
                 B = 0.0
                 if not arc.convex_flag:
                     reflagged += 1
@@ -135,7 +206,7 @@ def refit_arcs(
             arc.B = B
             arc.clamped = False
         arc.calib_delta = delta_canonical
-    return quoted, reflagged
+    return quoted, reflagged, unresolved
 
 
 def rebuild(g: ArcArrays, arcs: list[PoolArc], nu: np.ndarray) -> ArcArrays:
@@ -179,11 +250,14 @@ def refit(
     for _ in range(rounds):
         entry = RefitRound()
         before = np.array([arc.B for arc in arcs])
-        entry.quoted, entry.reflagged = refit_arcs(
+        entry.quoted, entry.reflagged, entry.unresolved = refit_arcs(
             g, arcs, current, nu, client, rate_in=rate_in, rate_out=rate_out
         )
         if entry.quoted == 0:
-            report.note = "no arc could be re-quoted at its realised size"
+            report.note = (
+                f"no arc could be re-quoted at its realised size"
+                f"{f' ({entry.unresolved} below the secant floor)' if entry.unresolved else ''}"
+            )
             report.rounds.append(entry)
             break
 
