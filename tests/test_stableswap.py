@@ -1,0 +1,103 @@
+"""`core.stableswap` against the contracts, to the wei (§11.3).
+
+The module exists to agree with the chain exactly, so the test is the
+difference against it.  These vectors were read from mainnet at block
+25,770,648 -- balances, `A`, fee, `offpeg_fee_multiplier`, `stored_rates`, and
+what `get_dy` returned for each -- so the check needs no node.
+
+Both dialects and both fee conventions are represented, because the difference
+is not cosmetic: 3pool takes its fee after converting back to token units and
+is off by a wei the other way round, and two of these pools charge a *dynamic*
+fee that rises as the trade pushes them off peg -- the term that matters most
+at exactly the sizes the quadratic model handles worst.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from erouter.core.stableswap import StableSwap, StableSwapError
+
+VECTORS = {
+    'threepool': dict(
+        balances=(25450000660957548614289897, 24879539770247, 109145012346349), rates=(1000000000000000000, 1000000000000000000000000000000, 1000000000000000000000000000000),
+        amp=4000, fee=1500000, offpeg_fee_multiplier=0,
+        a_precision=1, fee_on_xp=False,
+        quotes=[(0, 1, 1000000000000000000000, 999823974), (0, 1, 1000000000000000000000000, 999778303007), (0, 1, 5000000000000000000000000, 4997923644929), (1, 0, 1000000000, 999875935372046094331), (1, 0, 1000000000000, 999830424812050963192325), (1, 0, 5000000000000, 4998205092222291097529518)]),
+    'crvusd_usdt': dict(
+        balances=(22751800499951, 23119668623353096970379594), rates=(1000000000000000000000000000000, 1000000000000000000),
+        amp=200000, fee=1000000, offpeg_fee_multiplier=0,
+        a_precision=100, fee_on_xp=True,
+        quotes=[(0, 1, 1000000000, 999907993998223469328), (0, 1, 1000000000000, 999886209681718173199129), (0, 1, 5000000000000, 4998972175915511306548738), (1, 0, 1000000000000000000000, 999891962), (1, 0, 1000000000000000000000000, 999870117611), (1, 0, 5000000000000000000000000, 4998883843804)]),
+    'strategic_usd': dict(
+        balances=(759122283993, 5733213545533), rates=(1000000000000000000000000000000, 1000000000000000000000000000000),
+        amp=1000000, fee=100000, offpeg_fee_multiplier=200000000000,
+        a_precision=100, fee_on_xp=True,
+        quotes=[(0, 1, 1000000000, 1000874136), (0, 1, 1000000000000, 1000359491230), (0, 1, 5000000000000, 4999925919513), (1, 0, 1000000000, 999079048), (1, 0, 1000000000000, 757008912892), (1, 0, 5000000000000, 759011037462)]),
+    'crvusd_frxusd': dict(
+        balances=(3294706639764884934677896, 9793190462986415930077796), rates=(1000000000000000000, 1000000000000000000),
+        amp=200000, fee=1000000, offpeg_fee_multiplier=50000000000,
+        a_precision=100, fee_on_xp=True,
+        quotes=[(0, 1, 1000000000000000000000, 1000749040280441566013), (0, 1, 1000000000000000000000000, 1000515347728170852411748), (0, 1, 5000000000000000000000000, 5000312180335154695652134), (1, 0, 1000000000000000000000, 999001965394135667289), (1, 0, 1000000000000000000000000, 998553375772730931210750), (1, 0, 5000000000000000000000000, 3288569555708714101718864)]),
+}
+
+
+def pool_from(spec) -> StableSwap:
+    return StableSwap(**{k: v for k, v in spec.items() if k != "quotes"})
+
+
+@pytest.mark.parametrize("name", sorted(VECTORS))
+def test_get_dy_matches_the_chain_to_the_wei(name):
+    spec = VECTORS[name]
+    pool = pool_from(spec)
+    for i, j, dx, expected in spec["quotes"]:
+        assert pool.get_dy(i, j, dx) == expected, (
+            f"{name} {i}->{j} at {dx}: {pool.get_dy(i, j, dx)} != {expected}")
+
+
+@pytest.mark.parametrize("name", sorted(VECTORS))
+def test_the_invariant_is_stable_under_a_round_trip(name):
+    """`D` must not move when a trade is undone -- it is the conserved thing."""
+    spec = VECTORS[name]
+    pool = pool_from(spec)
+    xp = pool.xp()
+    before = pool.d(xp)
+    i, j = 0, 1
+    x = xp[i] + xp[i] // 100
+    y = pool.y(i, j, x, xp, before)
+    after = pool.d([x if k == i else (y if k == j else v) for k, v in enumerate(xp)])
+    assert abs(after - before) <= 2, (after, before)
+
+
+def test_the_dynamic_fee_rises_off_peg():
+    """A pool pushed off peg charges more, and at peg charges exactly `fee`."""
+    spec = VECTORS["strategic_usd"]
+    pool = pool_from(spec)
+    assert pool.offpeg_fee_multiplier > 10**10
+    at_peg = pool.dynamic_fee(1_000_000, 1_000_000)
+    off_peg = pool.dynamic_fee(200_000, 1_800_000)
+    assert at_peg == pool.fee
+    assert off_peg > at_peg
+
+
+def test_a_static_fee_pool_ignores_the_multiplier():
+    spec = VECTORS["crvusd_usdt"]
+    pool = pool_from(spec)
+    assert pool.offpeg_fee_multiplier == 0
+    assert pool.dynamic_fee(100, 900) == pool.fee
+
+
+def test_a_nonsense_trade_is_refused_rather_than_guessed():
+    spec = VECTORS["crvusd_usdt"]
+    pool = pool_from(spec)
+    assert pool.get_dy(0, 1, 0) == 0
+    assert pool.get_dy(0, 1, -5) == 0
+    with pytest.raises(StableSwapError):
+        pool.y(0, 0, 1)
+
+
+def test_an_empty_pool_is_an_error_not_a_zero():
+    empty = StableSwap(balances=(0, 10**18), rates=(10**18, 10**18),
+                       amp=20000, fee=1000000)
+    with pytest.raises(StableSwapError):
+        empty.d()
