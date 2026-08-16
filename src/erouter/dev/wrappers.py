@@ -335,6 +335,66 @@ def discover_vaults(
     return found
 
 
+#: Whose deposit room to ask about.  `maxDeposit` is per-owner, so it needs
+#: *someone*; nobody in particular is the honest choice, and a vault that gates
+#: by allowlist then reads as closed, which for routing purposes it is.
+DEPOSITOR = "0x" + "11" * 20
+
+
+def mintable_vaults(nodes: NodeMap, client: QuoterClient,
+                    chain_id: int | None = None) -> list[str]:
+    """Every token in the graph that mints itself from another token in it.
+
+    Minting is not the same claim as merging, and only the second one needs a
+    human.  A merge asserts the exit is open and unbounded, which is why R5
+    keeps it on an allowlist -- pufETH is perfectly linear and redeems through
+    a queue.  A *deposit* arc asserts only what the vault will do on request:
+    take the asset, hand back shares, at a rate the quoter reads and the
+    on-chain verification adjudicates.  So this one can be discovered.
+
+    Which matters, because the hand-written list is short and the universes are
+    not.  Measured on mainnet: nine vaults modelled, sixteen ignored, eleven of
+    those mintable from an asset already in the graph -- ynUSDx, ynRWAx and
+    srRoyUSDC from USDC, ynETHx from WETH, and so on.  Fraxtal's sdUSD was the
+    whole of that chain's vault coverage, missing.  A token nothing mints can
+    only be reached by buying it in a pool, which is how crvUSD -> sDOLA at $5M
+    lost 16% to a route that minted instead of bought.
+
+    A vault already merged with its asset falls out downstream rather than
+    here: the two share a node, and the caller skips an arc whose ends are the
+    same node.
+
+    `asset()` cannot change, so the answer is cached per chain and a warm
+    universe costs nothing.
+    """
+    from .cache import TokenFactsCache
+
+    facts = TokenFactsCache()
+    known = facts.load(chain_id) if chain_id is not None else {}
+    tokens = [t.lower() for t in nodes.node_of]
+    ask = [t for t in tokens if "asset" not in known.get(t, {})]
+
+    learned: dict[str, dict] = {}
+    if ask:
+        answers = client.raw([Call(t, encode_call("asset()")) for t in ask])
+        for token, answer in zip(ask, answers, strict=True):
+            asset = ""
+            if answer.status is Status.VALUE and len(answer.data) >= 32:
+                word = answer.data[-20:].hex()
+                if int(word, 16):
+                    asset = "0x" + word
+            learned[token] = {"asset": asset}
+        if chain_id is not None:
+            facts.save(chain_id, learned)
+
+    out = []
+    for token in tokens:
+        asset = (learned.get(token) or known.get(token) or {}).get("asset") or ""
+        if asset and nodes.has(asset):
+            out.append(token)
+    return out
+
+
 def build_stake_arcs(
     nodes: NodeMap, chain: Chain, client: QuoterClient
 ) -> list[PoolArc]:
@@ -371,13 +431,17 @@ def build_stake_arcs(
         native.append((token_in.lower(), token_out.lower(), kind, target.lower(), cap_sig))
         calls.append(Call(target, encode_call(cap_sig)))
 
-    vaults = [v.lower() for v in chain.oneway_vaults if nodes.has(v.lower())]
+    vaults = sorted(
+        {v.lower() for v in chain.oneway_vaults if nodes.has(v.lower())}
+        | set(mintable_vaults(nodes, client, chain.chain_id))
+    )
     for vault in vaults:
         unit = 10 ** nodes.decimals(vault)
         calls.extend([
             Call(vault, encode_call("asset()")),
             Call(vault, encode_call("convertToAssets(uint256)", unit)),
             Call(vault, encode_call("totalAssets()")),
+            Call(vault, encode_call("maxDeposit(address)", DEPOSITOR)),
         ])
 
     if not calls:
@@ -407,14 +471,20 @@ def build_stake_arcs(
 
     base = len(native)
     for k, vault in enumerate(vaults):
-        asset_ans, rate_ans, total_ans = answers[base + 3 * k : base + 3 * k + 3]
+        asset_ans, rate_ans, total_ans, room_ans = answers[base + 4 * k : base + 4 * k + 4]
         if asset_ans.status is not Status.VALUE or rate_ans.status is not Status.VALUE:
             continue
         asset = "0x" + asset_ans.data[-20:].hex()
         if not nodes.has(asset):
             continue
-        unit = 10 ** nodes.decimals(vault)
-        rate = rate_ans.uint() / unit  # assets per share
+        # `convertToAssets` was handed one whole share, so its answer is one
+        # share's worth of *asset*, in the asset's decimals -- not the vault's.
+        # Dividing by the vault's unit is only right when the two agree, which
+        # every hand-listed vault happened to do and no discovered one need:
+        # ynUSDx is 18-decimal shares over 6-decimal USDC, and read that way it
+        # priced at 917,882,555,091 shares per USDC, which the solver reads as
+        # free money.
+        rate = rate_ans.uint() / 10 ** nodes.decimals(asset)  # assets per share
         if rate <= 0:
             continue
         tau, sigma = nodes.node(asset), nodes.node(vault)
@@ -426,6 +496,13 @@ def build_stake_arcs(
         total = total_ans.uint() if total_ans.status is Status.VALUE else 0
         if total == 0:
             continue
+        # A vault that will not take a deposit right now is not an arc.
+        # Discovery finds those -- USD3 answers `maxDeposit` with zero -- where
+        # a hand-written list would simply not have named them.
+        room = room_ans.uint() if room_ans.status is Status.VALUE else 0
+        if room == 0:
+            continue
+        total = min(total, room)
         arcs.append(PoolArc(
             id=f"mint:{vault}:{asset[:10]}>{vault[:10]}",
             pool=vault, kind=ArcKind.ERC4626_DEPOSIT, i=0, j=0, n_coins=0,
