@@ -40,6 +40,10 @@ class Chain:
     # both lists is sonic, where Prices wins because it has the whole
     # deployment and Lite reports a fraction of it.
     lite: bool = False
+    #: This chain cannot be read at all until `RouteQuoter` is deployed on it,
+    #: because it rejects `eth_call` state overrides.  Distinct from an empty
+    #: `quoter`, which merely means quoting pays to ship the bytecode.
+    needs_quoter: bool = False
     quoter: str = ""
     # Pools that quote fine and cannot be traded, so no probe should be spent
     # on them and no route should reach them.  Not the same as the reserve
@@ -251,13 +255,13 @@ CHAINS: dict[str, Chain] = {
     #   both.  Nothing here needed fixing -- the answer to a universe of scams
     #   is not to route it.  Curve is expected to drop robinhood's from the API,
     #   at which point it can come back.
-    # * **etherlink** and **tac** reject `eth_call` state overrides outright
-    #   (HTTP 400).  Every batched read goes through the quoter, which off
-    #   mainnet rides along as an override -- so balances come back as zeros and
-    #   the universe is empty in a way that looks like a quiet chain.  These two
-    #   need the quoter *deployed*; no code change reaches them.  Etherlink also
-    #   answers HTTP 500 to `eth_createAccessList` and returns undecodable
-    #   `debug_traceCall` output, so it has no route to state at all.
+    # **etherlink** and **tac** are present but carry `needs_quoter`: they
+    # reject `eth_call` state overrides outright (HTTP 400), and every batched
+    # read goes through the quoter, which off mainnet rides along as an
+    # override.  So balances come back as zeros and the universe looks like a
+    # quiet chain rather than an unreadable one.  They are listed because
+    # `deploy_quoter.py` has to be able to name them -- deploying is the fix --
+    # and flagged so nothing else pretends they work first.
     "avalanche": Chain(
         name="avalanche",
         chain_id=43114,
@@ -304,6 +308,34 @@ CHAINS: dict[str, Chain] = {
         # separate wrapped token, so the merge is the identity.
         wrapped="0x471EcE3750Da237f93B8E339c536989b8978a438",
         lite=True,   # ~$259k
+    ),
+    # Needs `RouteQuoter` deployed before anything here can read it; see
+    # `needs_quoter`.  Its `debug_traceCall` works, so once the quoter exists
+    # the local EVM can still be warmed by the tracer and tac should behave
+    # like any other chain.
+    "tac": Chain(
+        name="tac",
+        chain_id=239,
+        api_name="tac",
+        rpc_attr="TAC",
+        native_symbol="TAC",
+        wrapped="0xB63B9f0eb4A6E6f191529D71d4D88cc8900Df2C9",  # WTAC, verified
+        lite=True,
+        needs_quoter=True,
+    ),
+    # Also needs the quoter -- and even then stays wire-only: HTTP 500 from
+    # `eth_createAccessList` in every shape and `debug_traceCall` output that
+    # does not decode (`Json_encoding.Cannot_destruct`; it is a Tezos EVM), so
+    # there is no path to a local state cache at all.
+    "etherlink": Chain(
+        name="etherlink",
+        chain_id=42793,
+        api_name="etherlink",
+        rpc_attr="ETHERLINK",
+        native_symbol="XTZ",
+        wrapped="0xc9B53AB2679f573e480d01e0f49e2B5CFB7a3EAb",  # WXTZ, verified
+        lite=True,
+        needs_quoter=True,
     ),
     "sonic": Chain(
         name="sonic",

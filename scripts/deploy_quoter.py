@@ -94,14 +94,24 @@ def _sanity_probe(chain):
                 "1,000 USDC -> USDT on 3pool")
     load = load_pools(chain, min_tvl=1_000.0)
     for pool in sorted(load.pools, key=lambda p: -p.tvl_usd):
-        if pool.swap_kind is None or not pool.balances:
+        if pool.swap_kind is None:
             continue
         for i, j in pool.swap_pairs():
+            # Size from reserves where they are known, and from decimals where
+            # they are not.  On the chains this script exists for, reserves are
+            # exactly what cannot be read yet -- they come back as zeros, since
+            # reading them needs the quoter being deployed here.  A thousandth
+            # of a token is small enough that any pool above $1,000 can serve
+            # it and large enough not to round to nothing.
             if i < len(pool.balances) and pool.balances[i] > 0:
                 dx = max(int(pool.balances[i] * 1e-4), 1)
-                return ([Probe(pool.address, pool.swap_kind, i, j,
-                               pool.n_coins, dx)],
-                        f"{pool.name[:28]} {i}>{j} at 1e-4 of reserve")
+                note = "1e-4 of reserve"
+            else:
+                dx = max(10 ** max(pool.coins[i].decimals - 3, 0), 1)
+                note = "0.001 token"
+            return ([Probe(pool.address, pool.swap_kind, i, j,
+                           pool.n_coins, dx)],
+                    f"{pool.name[:28]} {i}>{j} at {note}")
     raise SystemExit(f"no quotable pool on {chain.name} to sanity-check against")
 
 
