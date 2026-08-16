@@ -403,10 +403,22 @@ def _fold(symbol: str) -> str:
     return symbol.upper()
 
 
-def _resolve_token(nodes, symbol_or_address: str, pools) -> str:
-    """Address, or the highest-TVL token with that symbol."""
+def _resolve_token(nodes, symbol_or_address: str, pools, chain=None) -> str:
+    """Address, or the highest-TVL token with that symbol.
+
+    The **native token resolves to its wrapper**, which the node map has
+    already merged into one node (§3.1), so asking for one is asking for the
+    other.  Mainnet hides this: pools hold native ETH under the sentinel
+    address, so `--from ETH` finds a coin and works.  Gnosis has no such pool
+    -- every pool holds WXDAI -- so `--from XDAI` reported the chain's own gas
+    token as "not in the universe", which is both wrong and the first thing
+    somebody tries.
+    """
     if symbol_or_address.startswith("0x") and len(symbol_or_address) == 42:
-        return symbol_or_address.lower()
+        address = symbol_or_address.lower()
+        if chain and address == chain_table.NATIVE_SENTINEL.lower() and chain.wrapped:
+            return chain.wrapped.lower()
+        return address
     wanted = _fold(symbol_or_address)
     tvl: dict[str, float] = {}
     for pool in pools:
@@ -414,6 +426,11 @@ def _resolve_token(nodes, symbol_or_address: str, pools) -> str:
             if _fold(coin.symbol) == wanted:
                 key = coin.address.lower()
                 tvl[key] = tvl.get(key, 0.0) + pool.tvl_usd
+    # Only after the universe has been asked: a chain whose pools *do* carry
+    # the sentinel should keep resolving to it.
+    native = (_fold(chain.native_symbol), _fold("W" + chain.native_symbol)) if chain else ()
+    if not tvl and chain and chain.wrapped and wanted in native:
+        return chain.wrapped.lower()
     if not tvl:
         raise KeyError(f"no token with symbol {symbol_or_address!r} in the universe")
     ranked = sorted(tvl.items(), key=lambda kv: -kv[1])
@@ -596,8 +613,8 @@ def cmd_route(args: argparse.Namespace) -> int:
         client = CachedQuoterClient(client, chain.chain_id, rpc.block)
 
     try:
-        src = _resolve_token(None, args.src, load.pools)
-        dst = _resolve_token(None, args.dst, load.pools)
+        src = _resolve_token(None, args.src, load.pools, chain)
+        dst = _resolve_token(None, args.dst, load.pools, chain)
     except KeyError as exc:
         print(f"{BAD} {exc}")
         return 2
@@ -983,8 +1000,8 @@ def cmd_bench(args: argparse.Namespace) -> int:
         nodes, chain, cached, FactsCache.load(chain.chain_id, chain.name.lower()))
 
     try:
-        src = _resolve_token(None, args.src, load.pools)
-        dst = _resolve_token(None, args.dst, load.pools)
+        src = _resolve_token(None, args.src, load.pools, chain)
+        dst = _resolve_token(None, args.dst, load.pools, chain)
     except KeyError as exc:
         print(f"{BAD} {exc}")
         return 2
@@ -1736,8 +1753,8 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     recorded = False
     if chain.quoter:
         try:
-            src_token = _resolve_token(nodes, args.src, load.pools)
-            dst_token = _resolve_token(nodes, args.dst, load.pools)
+            src_token = _resolve_token(nodes, args.src, load.pools, chain)
+            dst_token = _resolve_token(nodes, args.dst, load.pools, chain)
         except Exception as exc:
             print(f"  {WARN} {str(exc)[:60]}; caching the universe instead of a route")
         else:
