@@ -101,7 +101,11 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
         resolve_dialects,
         resolve_lp_tokens,
     )
-    from erouter.dev.wrappers import build_node_map, build_stake_arcs
+    from erouter.dev.wrappers import (
+        build_node_map,
+        build_stake_arcs,
+        build_transmuter_arcs,
+    )
 
     api = HOSTED.format(chain=name)
     chain = chain_table.CHAINS[name]
@@ -136,7 +140,8 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
         read_balances(load.pools, client, None, chain.chain_id)
         resolve_lp_tokens(load.pools, client, chain.chain_id)
         nodes, _ = build_node_map(load.pools, chain, client, facts=facts)
-        stake = build_stake_arcs(nodes, chain, client)
+        stake = (build_stake_arcs(nodes, chain, client)
+                 + build_transmuter_arcs(nodes, chain, client))
         local = _local_quoter(rpc, chain, load, nodes, quiet=True)
         bound.update(block=block, client=local or client, nodes=nodes, stake=stake)
         return bound

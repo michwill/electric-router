@@ -574,7 +574,12 @@ def cmd_route(args: argparse.Namespace) -> int:
         resolve_dialects,
         resolve_lp_tokens,
     )
-    from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
+    from .wrappers import (
+        build_lending_arcs,
+        build_node_map,
+        build_stake_arcs,
+        build_transmuter_arcs,
+    )
 
     chain = chain_table.get(args.chain)
     started = time.monotonic()
@@ -625,6 +630,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         load.pools, chain, client,
         facts=FactsCache.load(chain.chain_id, chain.name.lower()))
     stake_arcs = build_stake_arcs(nodes, chain, client)
+    stake_arcs = stake_arcs + build_transmuter_arcs(nodes, chain, client)
     # Leaving a lending wrapper, where `data/facts` says the protocol still
     # allows it.  Rides with the stake arcs: same shape, same treatment.
     stake_arcs = stake_arcs + build_lending_arcs(
@@ -958,7 +964,11 @@ def cmd_bench(args: argparse.Namespace) -> int:
     from .probe_cache import CachedQuoterClient
     from .rpc import JsonRpcTransport
     from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
+    from .wrappers import (
+        build_lending_arcs,
+        build_node_map,
+        build_stake_arcs,
+    )
 
     chain = chain_table.get(args.chain)
     try:
@@ -1177,7 +1187,11 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     from .rpc import JsonRpcTransport
     from .state_cache import StateCache
     from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
+    from .wrappers import (
+        build_lending_arcs,
+        build_node_map,
+        build_stake_arcs,
+    )
 
     chain = chain_table.get(args.chain)
     try:
@@ -1680,7 +1694,11 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     from .rpc import JsonRpcTransport
     from .state_cache import StateCache
     from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import build_lending_arcs, build_node_map, build_stake_arcs
+    from .wrappers import (
+        build_lending_arcs,
+        build_node_map,
+        build_stake_arcs,
+    )
 
     chain = chain_table.get(args.chain)
     try:

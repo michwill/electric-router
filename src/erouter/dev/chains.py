@@ -63,6 +63,16 @@ class Chain:
     # tested on every `facts` build.  What survives becomes an arc; see
     # `wrappers.build_lending_arcs`.
     wrappers: tuple[tuple[str, str, str], ...] = ()
+    # (token_a, token_b, adapter) -- a contract that converts between two
+    # tokens 1:1 in both directions, holding a reserve of one and minting the
+    # other.  Not a merge: the redeem side is bounded by what the adapter
+    # actually holds, and a merge asserts there is no bound.
+    #
+    # Gnosis's USDC transmuter is the case: `USDC.e -> USDC` at exactly 1:1 for
+    # as long as its 10.04M USDC lasts.  Our router priced that hop through
+    # pools at 99,448 per 100,000 -- 55 bp -- while curve_solver, which
+    # configures the adapter, returned 100,000.000000.
+    transmuters: tuple[tuple[str, str, str], ...] = ()
     # Tokens that hold a peg.  Used only to decide how much a routing gain has
     # to be worth before another leg is taken: a pair of these moves 0.17 bp
     # over a thousand blocks, where ETH moves 125, so a gain worth chasing on
@@ -242,7 +252,13 @@ CHAINS: dict[str, Chain] = {
         api_name="xdai",  # NB: the API does not call this "gnosis"
         rpc_attr="GNOSIS",
         native_symbol="XDAI",
-        wrapped="0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d",  # WXDAI
+        wrapped="0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d",
+        transmuters=(
+            # USDC (native) <-> USDC.e (bridged), 1:1 both ways.
+            ("0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83",
+             "0x2a22f9c3b484c3629090FeED35F17Ff8F88f76F0",
+             "0x0392A2F5Ac47388945D8c84212469F545fAE52B2"),
+        ),  # WXDAI
         quoter=QUOTER,
         public_rpc=scoped_rpc("gnosis"),
     ),

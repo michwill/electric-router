@@ -39,6 +39,16 @@ class ConversionKind(StrEnum):
     # convertToAssets.  curve_solver's generic equivalent is AmountCall*; if a
     # second token of this shape appears, that is the generalisation to make.
     WSTETH = "WSTETH"  # wstETH <-> stETH at getStETHByWstETH
+    # Two addresses over *one* balance, not two assets that convert.  Gnosis
+    # EURe is the case: v1 and v2 report identical `totalSupply` and identical
+    # `balanceOf` for every holder, to the wei -- holding one *is* holding the
+    # other.  Modelled as separate nodes they split a single market in half,
+    # which is what left EURe liquidity looking like 74k here and 172k there.
+    #
+    # It merges like any other conversion and realises like none of them: the
+    # rate is exactly 1 and no leg is emitted, because there is nothing to
+    # call.  `to_canonical` is the identity by construction.
+    ALIAS = "ALIAS"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +73,11 @@ class Conversion:
 
     def from_canonical(self, amount: int) -> int:
         return amount * self.rate_den // self.rate_num
+
+    @property
+    def is_alias(self) -> bool:
+        """Nothing to execute: the two addresses share a balance."""
+        return self.kind is ConversionKind.ALIAS
 
     @property
     def forward_kind(self) -> ArcKind:

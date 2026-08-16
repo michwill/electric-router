@@ -42,6 +42,8 @@ class VaultReport:
 class WrapperReport:
     native_merged: list[tuple[str, str]] = field(default_factory=list)
     vaults: list[VaultReport] = field(default_factory=list)
+    #: (folded, canonical) pairs found to share a balance; see `discover_aliases`.
+    aliases: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def merged_vaults(self) -> list[VaultReport]:
@@ -115,6 +117,22 @@ def build_node_map(
     for pool in pools:
         for coin in pool.coins:
             nodes.add_token(coin.address, coin.symbol, coin.decimals)
+
+    # Aliases first: two addresses over one balance are one node, and merging
+    # them before anything else means every later step -- wrappers, vaults,
+    # arcs -- sees the consolidated market rather than two halves of it.
+    for left, right in discover_aliases(pools, nodes, client):
+        # The deeper side is canonical, so the token most pools already hold
+        # stays the one legs are denominated in.
+        weight = {left: 0.0, right: 0.0}
+        for pool in pools:
+            for coin in pool.coins:
+                if coin.address.lower() in weight:
+                    weight[coin.address.lower()] += pool.tvl_usd
+        canonical, other = (left, right) if weight[left] >= weight[right] else (right, left)
+        nodes.merge(Conversion(kind=ConversionKind.ALIAS, token=other,
+                               canonical=canonical, target=""))
+        report.aliases.append((other, canonical))
 
     # LP tokens are deliberately *not* registered here.  A pool's LP is a node
     # only when some other pool trades it -- 3Crv, crvFRAX, sbtcCrv, gnosis's
@@ -341,6 +359,76 @@ def discover_vaults(
 DEPOSITOR = "0x" + "11" * 20
 
 
+#: Holders to compare a suspected alias pair against, beyond `totalSupply`.
+#: Two contracts can agree on a supply by coincidence; agreeing on several
+#: unrelated accounts' balances, to the wei, is not a coincidence.
+ALIAS_PROBES = 3
+
+
+def discover_aliases(pools: list[PoolSpec], nodes: NodeMap,
+                     client: QuoterClient) -> list[tuple[str, str]]:
+    """Token pairs that are two addresses over one balance.
+
+    Gnosis EURe is the case this exists for.  Its two contracts report the same
+    `totalSupply` to the wei and the same `balanceOf` for every holder tried --
+    holding one *is* holding the other -- so treating them as separate nodes
+    splits a single market: 74k of EURe in one pool and 172k in another looked
+    like two thin markets near par instead of one 247k market.  It is also why
+    `--to EURe` had to pick a side and why USDC.e could not reach it.
+
+    Candidates are pairs sharing a symbol, because that is what an alias looks
+    like from outside and it keeps this to a handful of calls.  Evidence is
+    equal decimals, equal supply, and equal balances at several independent
+    holders -- the pools themselves, which are exactly the accounts whose
+    balances the router is about to reason about.
+    """
+    from ..core.codec import encode_call
+    from ..core.transport import Call
+
+    by_symbol: dict[str, list[tuple[str, int]]] = {}
+    holders: list[str] = []
+    for pool in pools:
+        holders.append(pool.address)
+        for coin in pool.coins:
+            key = coin.symbol.upper().replace("\u20ae", "T")
+            entry = (coin.address.lower(), coin.decimals)
+            if entry not in by_symbol.setdefault(key, []):
+                by_symbol[key].append(entry)
+
+    pairs: list[tuple[str, str]] = []
+    for entries in by_symbol.values():
+        if len(entries) < 2:
+            continue
+        for k, (left, left_dec) in enumerate(entries):
+            for right, right_dec in entries[k + 1:]:
+                if left_dec == right_dec:
+                    pairs.append((left, right))
+    if not pairs:
+        return []
+
+    probes = holders[:ALIAS_PROBES]
+    calls: list[Call] = []
+    for left, right in pairs:
+        for token in (left, right):
+            calls.append(Call(token, encode_call("totalSupply()")))
+            calls += [Call(token, encode_call("balanceOf(address)", h)) for h in probes]
+    answers = client.raw(calls)
+
+    stride = 1 + len(probes)
+    found: list[tuple[str, str]] = []
+    for k, (left, right) in enumerate(pairs):
+        base = 2 * stride * k
+        one = answers[base : base + stride]
+        two = answers[base + stride : base + 2 * stride]
+        if any(a.status is not Status.VALUE for a in one + two):
+            continue
+        if one[0].uint() == 0:
+            continue  # a supply of nothing agrees with everything
+        if all(a.uint() == b.uint() for a, b in zip(one, two, strict=True)):
+            found.append((left, right))
+    return found
+
+
 def mintable_vaults(nodes: NodeMap, client: QuoterClient,
                     chain_id: int | None = None) -> list[str]:
     """Every token in the graph that mints itself from another token in it.
@@ -393,6 +481,83 @@ def mintable_vaults(nodes: NodeMap, client: QuoterClient,
         if asset and nodes.has(asset):
             out.append(token)
     return out
+
+
+def build_transmuter_arcs(
+    nodes: NodeMap, chain: Chain, client: QuoterClient
+) -> list[PoolArc]:
+    """1:1 adapters, as capped linear arcs in both directions.
+
+    A transmuter holds a reserve of one token and mints the other, so it is a
+    wrapper with a real floor under it -- gnosis converts USDC.e to USDC at
+    exactly 1:1 for as long as its 10.04M USDC lasts.  Routing that hop through
+    pools instead cost 55 bp on a $100,000 trade, which is the whole of our gap
+    to curve_solver on that pair.
+
+    Not a merge, for the same reason a vault is not: a merge asserts the exit
+    is open and unbounded, and this one is bounded by a balance anyone can
+    read.  So: `a = 1`, `B = 0`, and a cap from the adapter's own holdings.
+
+    **Quoted as a wrap, which is exactly right and not yet executable.**  The
+    deployed quoter answers `WRAP_NATIVE` and `UNWRAP_NATIVE` with `dx`
+    unchanged and no call, which is what a 1:1 conversion *is*, so the verified
+    number is correct today.  An executor would need a kind of its own --
+    the adapter takes `deposit(uint256)`, not WETH's payable `deposit()` --
+    and that is a contract change, so the adapter address rides on the leg's
+    target and note until there is one.
+    """
+    from ..core.codec import encode_call
+    from ..core.transport import Call
+
+    entries = [
+        (a.lower(), b.lower(), adapter.lower())
+        for a, b, adapter in getattr(chain, "transmuters", ())
+        if nodes.has(a.lower()) and nodes.has(b.lower())
+    ]
+    if not entries:
+        return []
+
+    # What the adapter can actually pay out, per side.
+    calls = []
+    for token_a, token_b, adapter in entries:
+        calls += [Call(token_a, encode_call("balanceOf(address)", adapter)),
+                  Call(token_b, encode_call("balanceOf(address)", adapter))]
+    answers = client.raw(calls)
+
+    arcs: list[PoolArc] = []
+    for k, (token_a, token_b, adapter) in enumerate(entries):
+        held_a, held_b = answers[2 * k], answers[2 * k + 1]
+        if nodes.node(token_a) == nodes.node(token_b):
+            continue  # already one node by some other route
+        for token_in, token_out, held, kind in (
+            (token_a, token_b, held_b, ArcKind.WRAP_NATIVE),
+            (token_b, token_a, held_a, ArcKind.UNWRAP_NATIVE),
+        ):
+            # A side the adapter mints holds nothing of the output, and the
+            # other side's reserve is the only on-chain measure of the
+            # machine's scale.  Conservative in the direction that matters:
+            # too small a cap costs a better route, too large invents one.
+            reserve = held.uint() if held.status is Status.VALUE else 0
+            if reserve == 0:
+                other = held_a if held is held_b else held_b
+                reserve = other.uint() if other.status is Status.VALUE else 0
+            if reserve == 0:
+                continue
+            arcs.append(PoolArc(
+                id=f"transmute:{adapter}:{token_in[:10]}>{token_out[:10]}",
+                pool=adapter, kind=kind, i=0, j=0, n_coins=0,
+                token_in=token_in, token_out=token_out,
+                tau=nodes.node(token_in), sigma=nodes.node(token_out),
+                a=1.0, B=0.0,
+                cap=reserve / 10 ** nodes.decimals(token_in),
+                clamped=True, convex_flag=False,
+                decimals_in=nodes.decimals(token_in),
+                decimals_out=nodes.decimals(token_out),
+                reserve_in=reserve,
+                tvl_usd=0.0,  # as with mints: the price comes from markets
+                note=f"transmute {nodes.symbol(token_out)}",
+            ))
+    return arcs
 
 
 def build_stake_arcs(

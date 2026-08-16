@@ -395,8 +395,8 @@ def realize(
                 conversion, forward = nodes.conversion.get(hub), False
             else:
                 conversion, forward = nodes.conversion.get(token), True
-            if conversion is None:
-                continue
+            if conversion is None or conversion.is_alias:
+                continue  # an alias is already the same balance; see nodes.py
             route.legs.append(
                 _conversion_leg(
                     nodes, conversion, forward=forward,
