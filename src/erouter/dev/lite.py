@@ -14,11 +14,12 @@ the first one does not have, not a migration.
 
 Two differences that matter to the router:
 
-* **The floor has to come down.**  A whole Lite deployment is smaller than the
-  $10,000 pool floor mainnet uses -- fantom's 321 pools come to $0.9M between
-  them, with one pool over $10k, and sonic's Lite side to $0.2M.  Applying the
-  usual floor would return an empty universe, which reads as "chain not
-  supported" rather than "chain is small".
+* **The floor comes down, but not to zero.**  A whole Lite deployment is
+  smaller than the $10,000 pool floor mainnet uses, so that cut would return an
+  empty universe -- which reads as "chain not supported" rather than "chain is
+  small".  But these deployments are also mostly scam and dust, so no floor at
+  all admits far more junk than liquidity.  $1,000 is the knee; see
+  `LITE_MIN_TVL`.
 * **No paging.**  The whole chain arrives in one response, which is why there
   is no `min_tvl` in the request: it is filtered here.
 
@@ -35,9 +36,29 @@ from .curve_api import CurveApiError, _get
 
 LITE_API = "https://api2.curve.finance"
 
-#: The list floor for a Lite chain.  Zero, where the main chains use $10,000:
-#: see the module docstring -- the same cut would empty the universe.
-LITE_MIN_TVL = 0.0
+#: The list floor for a Lite chain: $1,000, where the main chains use $10,000.
+#
+# Zero was wrong in the other direction.  These deployments are mostly scam and
+# dust -- plasma lists 56 pools and has 4 real ones, monad 37 and 7, xlayer 39
+# and 4, celo 55 and 2 -- and admitting the rest costs a probe each, feeds the
+# reference-price fit tokens it cannot anchor, and on unichain produced a
+# universe whose curvature spanned 1e21 and tripped the §9.7 guard.
+#
+# Measured, TVL separates them cleanly and the gap is not subtle.  Celo's two
+# real pools hold $151,393 and $107,243; the third is $35.  Counting pools over
+# each floor against the deployments' real pool counts:
+#
+#     chain      all  >$0  >$1k  >$10k  >$100k   real
+#     plasma      56   16     4      4       4      4
+#     monad       37   18     6      6       5      7
+#     xlayer      39    8     4      4       4      4
+#     celo        55   13     2      2       2      2
+#     avalanche  175   55    11      6       5      -
+#
+# $1,000 is the knee.  It misses one of monad's seven, which sits below it --
+# and a pool with under $1,000 of liquidity cannot serve a trade worth routing
+# anyway, so that is the right side to err on.
+LITE_MIN_TVL = 1_000.0
 
 #: Deployments that are not real chains.  `get_platforms` mixes testnets and
 #: devnets in with the rest, and a router that offers to quote on `bsc_testnet`
