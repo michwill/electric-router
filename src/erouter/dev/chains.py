@@ -235,10 +235,19 @@ CHAINS: dict[str, Chain] = {
     # these fails silently: a wrong address breaks the native/ERC20 merge and
     # the router simply never finds routes through it.
     #
-    # Two Lite deployments are deliberately absent.  **fantom** is in
-    # wind-down: 164 of its 321 pools answer neither ABI spelling and probing
-    # them takes 19 minutes.  **kava** resolves a dialect for none of its 19
-    # pools, so it yields zero arcs -- there is nothing there to route.
+    # Four Lite deployments are deliberately absent, each measured:
+    #
+    # * **fantom** is in wind-down -- 164 of its 321 pools answer neither ABI
+    #   spelling and probing them takes 19 minutes.
+    # * **kava** resolves a dialect for none of its 19 pools, so it yields zero
+    #   arcs.  There is nothing there to route.
+    # * **etherlink** and **tac** reject `eth_call` state overrides outright
+    #   (HTTP 400).  Every batched read goes through the quoter, which off
+    #   mainnet rides along as an override -- so balances come back as zeros and
+    #   the universe is empty in a way that looks like a quiet chain.  These two
+    #   need the quoter *deployed*; no code change reaches them.  Etherlink also
+    #   answers HTTP 500 to `eth_createAccessList` and returns undecodable
+    #   `debug_traceCall` output, so it has no route to state at all.
     "avalanche": Chain(
         name="avalanche",
         chain_id=43114,
@@ -247,15 +256,6 @@ CHAINS: dict[str, Chain] = {
         native_symbol="AVAX",
         wrapped="0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",  # WAVAX
         lite=True,
-    ),
-    "etherlink": Chain(
-        name="etherlink",
-        chain_id=42793,
-        api_name="etherlink",
-        rpc_attr="ETHERLINK",
-        native_symbol="XTZ",
-        wrapped="0xc9B53AB2679f573e480d01e0f49e2B5CFB7a3EAb",
-        lite=True,   # ~$9.1M
     ),
     "monad": Chain(
         name="monad",
@@ -312,15 +312,6 @@ CHAINS: dict[str, Chain] = {
         # separate wrapped token, so the merge is the identity.
         wrapped="0x471EcE3750Da237f93B8E339c536989b8978a438",
         lite=True,   # ~$259k
-    ),
-    "tac": Chain(
-        name="tac",
-        chain_id=239,
-        api_name="tac",
-        rpc_attr="TAC",
-        native_symbol="TAC",
-        wrapped="0xB63B9f0eb4A6E6f191529D71d4D88cc8900Df2C9",
-        lite=True,   # ~$171k
     ),
     "sonic": Chain(
         name="sonic",

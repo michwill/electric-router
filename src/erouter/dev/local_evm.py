@@ -467,8 +467,19 @@ class LocalEvm:
         return True
 
     def _install_prestate(self, state: dict) -> None:
+        """Load traced state into the EVM **and** into the disk cache.
+
+        The cache writes matter as much as the EVM ones, and only the access
+        list path used to do them: state arriving by tracer landed in this
+        process and nowhere else, so `warmcache` on a chain that cannot serve
+        access lists ran to completion, reported success, and wrote an empty
+        file.  Measured on robinhood -- 39 accounts and 1,033 slots in memory,
+        0 KiB on disk -- which is worse than failing, because the next run
+        finds a cache and believes it.
+        """
         from pyrevm import AccountInfo
 
+        touched: dict[str, set[int]] = {}
         for raw_address, entry in state.items():
             address = raw_address.lower()
             if not isinstance(entry, dict):
@@ -481,10 +492,15 @@ class LocalEvm:
                                          code=blob or None))
                 self._evm.set_balance(address, int(entry.get("balance", "0x0") or "0x0", 16))
                 self._loaded.add(address)
+                if self.cache is not None and blob:
+                    self.cache.learn_code(address, blob)
             for key, value in (entry.get("storage") or {}).items():
                 self._evm.insert_account_storage(address, int(key, 16), int(value, 16))
                 self._slots.setdefault(address, set()).add(int(key, 16))
+                touched.setdefault(address, set()).add(int(key, 16))
                 self.stats.slots += 1
+        if self.cache is not None and touched:
+            self.cache.learn_slots(touched)
 
     def _warm_by_proof(self, calls: list[Call]) -> bool:
         """accessList names the slots; getStorageAt fetches their values.

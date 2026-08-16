@@ -17,7 +17,7 @@ from ..core.types import ArcKind, Dialect, Probe
 from . import lite
 from .cache import DialectCache, UniverseCache
 from .chains import Chain
-from .curve_api import CurveApi, CurveApiError
+from .curve_api import DEFAULT_MIN_TVL, CurveApi, CurveApiError
 
 
 @dataclass(slots=True)
@@ -37,7 +37,13 @@ def _list_pools(chain: Chain, api: CurveApi, min_tvl: float) -> list[dict]:
     floor comes down with them: see `lite.LITE_MIN_TVL`.
     """
     if chain.lite:
-        return lite.list_pools(chain.chain_id, min_tvl=min(min_tvl, lite.LITE_MIN_TVL))
+        # The Lite floor is a *default*, not a ceiling on what the caller may
+        # ask for.  Taking `min()` of the two made `--min-tvl` unable to raise
+        # it at all, which hid a real problem: unichain's universe spans 20
+        # orders of magnitude in curvature and trips the §9.7 conditioning
+        # guard, and no floor the caller passed could thin it out.
+        floor = lite.LITE_MIN_TVL if min_tvl == DEFAULT_MIN_TVL else min_tvl
+        return lite.list_pools(chain.chain_id, min_tvl=floor)
     return api.list_pools(chain.chain_id, min_tvl=min_tvl)
 
 
