@@ -350,3 +350,47 @@ def test_a_healthy_curve_is_not_mistaken_for_a_wall():
 
     assert not math.isfinite(fit.cap) or fit.cap >= deltas[-1]
     assert fit.note != "SATURATED"
+
+
+def test_a_repeated_ladder_node_is_not_a_wall():
+    """The same probe twice is one probe, not evidence of saturation.
+
+    `merge` drops duplicate ladder nodes, but it keys on exact integer wei
+    while the refine pass computes its sizes as floats -- so a refined node
+    landing on a grid node arrives a few wei off and survives.  The wall test
+    then compares two quotes for the same size, sees no increase, and clamps.
+
+    Measured on tac, WTAC->USDT, where the ladder carried 3,026.306608 twice:
+    the arc was capped at a tenth of the trade, the only path out of WTAC could
+    no longer carry it, and the CLI reported "src not connected to dst" for a
+    swap the pool quotes happily.
+    """
+    # 3,026.306608... twice, a few wei apart, exactly as the ladder built it.
+    deltas = [1513.153304, 3026.306608, 3026.3066080001, 6052.613217, 302630.660842]
+    quotes = [4.156231, 8.312002, 8.312002, 16.622160, 822.014609]
+
+    fit = calibrate(deltas, quotes)
+
+    assert fit.note != "SATURATED", "a repeated node is not a capacity wall"
+    assert not fit.clamped
+    assert not math.isfinite(fit.cap), "a healthy concave arc needs no cap"
+    assert fit.B > 0
+    # The rate is still the small-node tangent, unchanged by the duplicate.
+    assert fit.a == pytest.approx(4.156231 / 1513.153304, rel=1e-9)
+
+
+def test_a_wall_is_still_a_wall_when_the_ladder_repeats_a_node():
+    """Collapsing duplicates must not blind the wall test to a real wall."""
+    deltas = [0.000387, 0.038737, 0.0387370001, 0.387368, 3.873677]
+    quotes = [0.508730, 11.472806, 11.472806, 11.472806, 11.472806]
+
+    fit = calibrate(deltas, quotes)
+
+    assert fit.clamped and math.isfinite(fit.cap)
+    assert fit.cap == pytest.approx(0.038737), fit.cap
+
+
+def test_a_ladder_of_one_repeated_size_is_rejected():
+    """Nothing can be fitted through a single size, however many times probed."""
+    with pytest.raises(CalibrationError, match="distinct sizes"):
+        calibrate([100.0, 100.0000001], [1.0, 1.0])

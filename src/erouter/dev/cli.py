@@ -1946,7 +1946,7 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd.add_argument(
         "--no-impact", action="store_true",
         help="skip the price-impact measurement, which re-quotes the finished "
-             "route at 5% of the size -- 3 ms against a local EVM, one more "
+             "route at 5%% of the size -- 3 ms against a local EVM, one more "
              "round trip over the wire")
     route_cmd.add_argument(
         "--revert-cost-bp", type=float, default=None,

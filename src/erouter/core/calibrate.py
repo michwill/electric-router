@@ -39,6 +39,23 @@ DRIFT_TOL = 0.25
 # reads the marginal price as 296 crvUSD/WETH when it is nearer 1,900, and in
 # §4's log-price fit that one arc drags the whole frame.
 SATURATION_TOL = 1e-9
+# How far apart two ladder nodes must be to count as two probes at all.
+#
+# The wall test asks whether a bigger probe bought more, which two probes at
+# the *same* size cannot answer: they return the same quote, and "bought
+# nothing more" then clamps a perfectly healthy arc.  `merge` already drops
+# duplicates, but it keys on exact integer wei, and the refine pass computes
+# its sizes in floats -- so a ladder node landing on a grid node arrives a few
+# wei off and survives as a near-duplicate.
+#
+# Measured on tac, WTAC->USD$T, where the ladder carried 3,026.306608 twice:
+# the second copy read as saturation, capped the arc at a tenth of the trade,
+# and the only path out of WTAC could no longer carry it -- reported as "src
+# not connected to dst", on a chain whose pool quotes the swap happily.
+#
+# A millionth is far below any deliberate spacing (the grid is decades apart,
+# the ladder doubles) and far above the wei-level noise this exists to absorb.
+DUPLICATE_TOL = 1e-6
 # A local `B` that jumps by more than this between grid nodes is a liquidity
 # cliff -- for stableswap, the edge of the peg (§2.5).
 PEG_JUMP = 4.0
@@ -131,6 +148,20 @@ def calibrate(
         raise CalibrationError("deltas must be strictly increasing")
     if not np.all(y > 0):
         raise CalibrationError("all quotes must be positive; drop failed probes first")
+
+    # Two nodes at the same size are one probe, and the wall test below cannot
+    # read them as anything but saturation.  Collapse them first; see
+    # `DUPLICATE_TOL`.
+    if x.size > 1:
+        distinct = np.ones(x.size, bool)
+        distinct[1:] = np.diff(x) > x[:-1] * DUPLICATE_TOL
+        if not distinct.all():
+            x, y = x[distinct], y[distinct]
+            if x.size < 2:
+                raise CalibrationError(
+                    "need at least 2 probes at distinct sizes, got 1 after "
+                    "collapsing duplicates"
+                )
 
     tangent_delta = float(x[0])
     a = float(y[0] / x[0])
