@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 
 from ..core.quoter import Quote
 from ..core.stableswap import StableSwapError
+from ..core.tricrypto import TricryptoError
 from ..core.twocrypto import TwocryptoError
 from ..core.transport import Status
 from ..core.types import ArcKind
@@ -43,9 +44,12 @@ class ExactStats:
 class ExactQuoterClient:
     """Wraps a `QuoterClient`, answering what it can from arithmetic."""
 
-    def __init__(self, client, exact, twocrypto=None, *, enabled: bool = True):
+    def __init__(self, client, exact, twocrypto=None, tricrypto=None, *,
+                 enabled: bool = True):
         self.client = client
         self.exact = exact
+        #: Three-coin crypto pools, whose maths is its own module again.
+        self.tricrypto = tricrypto
         #: Twocrypto-ng pools whose invariant reproduces their own `get_dy`
         #: -- today the FX Swaps, whose maths is stableswap's.
         self.twocrypto = twocrypto
@@ -80,7 +84,8 @@ class ExactQuoterClient:
                 continue
             try:
                 value = model.get_dy(probe.i, probe.j, probe.dx)
-            except (StableSwapError, TwocryptoError, ZeroDivisionError, ValueError):
+            except (StableSwapError, TwocryptoError, TricryptoError,
+                    ZeroDivisionError, ValueError):
                 # A size the invariant cannot serve is a real answer -- the
                 # pool would revert too -- but a *failure to converge* is not
                 # something to guess at, so both go to the wire.
@@ -108,16 +113,26 @@ class ExactQuoterClient:
             return False
         if self.exact.get(pool) is not None:
             return True
+        if self.tricrypto is not None and self.tricrypto.get(pool) is not None:
+            return True
         return self.twocrypto is not None and self.twocrypto.get(pool) is not None
 
     def _model_for(self, probe):
         if probe.dx <= 0:
             return None
         if probe.kind is ArcKind.SWAP_CRYPTO:
+            if probe.i == probe.j:
+                return None
+            if self.tricrypto is not None:
+                model = self.tricrypto.get(probe.pool)
+                if model is not None:
+                    if not (0 <= probe.i < 3 and 0 <= probe.j < 3):
+                        return None
+                    return model
             if self.twocrypto is None:
                 return None
             model = self.twocrypto.get(probe.pool)
-            if model is None or probe.i == probe.j:
+            if model is None:
                 return None
             if not (0 <= probe.i < 2 and 0 <= probe.j < 2):
                 return None
