@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .cryptoswap import CryptoSwapError, get_y as crypto_get_y
 from .stableswap import StableSwapError, solve_y
 
 PRECISION = 10**18
@@ -71,21 +72,44 @@ class Twocrypto:
     fee_gamma: int
     #: True for an FX Swap (stableswap invariant), False for cryptoswap.
     stable: bool = True
+    #: Which deployed math a cryptoswap pool uses.  The arithmetic is the same
+    #: in both; only the gamma ceiling and the `K0_i` window differ.
+    v21: bool = True
+    #: Which `_fee` the *pool* implements.  Two are deployed and they are not
+    #: algebraically equal -- see `fee`.
+    legacy_fee: bool = False
 
     # ------------------------------------------------------------------ fee
 
     def fee(self, xp: list[int]) -> int:
-        """`Twocrypto._fee`, on the balances *after* the trade.
+        """`_fee`, on the balances *after* the trade.
 
-        `B` is a balance indicator: 1e18 at perfect balance, falling toward 0
-        as the pool skews, so the fee slides from `mid_fee` to `out_fee`.
-        `fee_gamma` regulates how fast.
+        Two versions are deployed and they are **not** algebraically equal, so
+        which one a pool implements has to be established rather than assumed:
+
+            legacy   f = fee_gamma * 1e18 / (fee_gamma + 1e18 - K)
+            current  f = fee_gamma * K    / (fee_gamma * K / 1e18 + 1e18 - K)
+
+        with `K = 1e18 * N**N * x0/S * x1/S`, the balance indicator: 1e18 at
+        perfect balance, falling toward 0 as the pool skews, so the fee slides
+        from `mid_fee` toward `out_fee`.  The legacy one also does not clamp.
+
+        The difference is around a part in ten million of the output -- small
+        enough to look like a rounding bug and far too large to be one.  It
+        was found by reading the deployed source rather than a repository
+        copy, which had only the current form.
         """
         total = xp[0] + xp[1]
         if total <= 0:
             raise TwocryptoError("empty pool")
-        b = PRECISION * N_COINS**N_COINS * xp[0] // total * xp[1] // total
-        b = self.fee_gamma * b // (self.fee_gamma * b // PRECISION + PRECISION - b)
+        k = PRECISION * N_COINS**N_COINS * xp[0] // total * xp[1] // total
+        if self.legacy_fee:
+            denominator = self.fee_gamma + PRECISION - k
+            if denominator <= 0:
+                raise TwocryptoError("fee denominator collapsed")
+            f = self.fee_gamma * PRECISION // denominator
+            return (self.mid_fee * f + self.out_fee * (PRECISION - f)) // PRECISION
+        b = self.fee_gamma * k // (self.fee_gamma * k // PRECISION + PRECISION - k)
         fee = (self.mid_fee * b + self.out_fee * (PRECISION - b)) // PRECISION
         return min(MAX_FEE, max(MIN_FEE, fee))
 
@@ -122,7 +146,12 @@ class Twocrypto:
 
     def _y(self, xp: list[int], j: int) -> int:
         if not self.stable:
-            raise TwocryptoError("cryptoswap get_y is not implemented")
+            # `ANN` is `A * N**N`, which is what `A()` already returns.
+            try:
+                return crypto_get_y(self.amp, self.gamma, xp, self.d, j,
+                                    v21=self.v21)[0]
+            except CryptoSwapError as exc:
+                raise TwocryptoError(str(exc)) from exc
         # `StableswapMath.get_y`: the stableswap iteration at A_MULTIPLIER.
         # `i` and `j` are the other way round from `solve_y`'s signature --
         # there, `i` is the coin whose balance is known.

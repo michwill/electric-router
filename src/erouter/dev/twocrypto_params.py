@@ -26,6 +26,7 @@ check cannot see them:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import product
 
 from ..core.codec import decode, encode_call
 from ..core.transport import Call
@@ -122,18 +123,29 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
             out.rejected.append((pool.address, "A/gamma ramp in progress"))
             continue
         blob = packed.uint()
-        built.append((pool, Twocrypto(
-            balances=(int(pool.balances[0]), int(pool.balances[1])),
-            precisions=precisions[key],
-            price_scale=scale.uint(),
-            d=d.uint(),
-            amp=amp.uint(),
-            gamma=gamma.uint_or(0) or 0,
-            mid_fee=(blob >> 128) & UINT64,
-            out_fee=(blob >> 64) & UINT64,
-            fee_gamma=blob & UINT64,
-            stable=True,
-        )))
+        # Every combination, and the wei-exact check decides which this pool
+        # is: the invariant (FX Swap or cryptoswap), which of the two deployed
+        # `_fee` formulas the pool implements, and which math version bounds
+        # it.  An address list would work today and rot the day a new
+        # implementation is deployed, or on a chain nobody has surveyed.
+        for stable, legacy_fee, v21 in product((True, False), (False, True),
+                                               (True, False)):
+            if stable and not v21:
+                continue  # `v21` only selects cryptoswap bounds
+            built.append((pool, Twocrypto(
+                balances=(int(pool.balances[0]), int(pool.balances[1])),
+                precisions=precisions[key],
+                price_scale=scale.uint(),
+                d=d.uint(),
+                amp=amp.uint(),
+                gamma=gamma.uint_or(0) or 0,
+                mid_fee=(blob >> 128) & UINT64,
+                out_fee=(blob >> 64) & UINT64,
+                fee_gamma=blob & UINT64,
+                stable=stable,
+                legacy_fee=legacy_fee,
+                v21=v21,
+            )))
 
     if not built:
         return out
@@ -166,24 +178,29 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
         if not points:
             out.rejected.append((pool.address, "pool would not quote the check"))
             continue
-        failed = ""
-        for probe, quote in points:
-            try:
-                mine = model_for(built, key).get_dy(probe.i, probe.j, probe.dx)
-            except (TwocryptoError, ZeroDivisionError) as exc:
-                failed = str(exc)[:40]
+        best = ""
+        for candidate, model in built:
+            if candidate.address.lower() != key:
+                continue
+            failed = ""
+            for probe, quote in points:
+                try:
+                    mine = model.get_dy(probe.i, probe.j, probe.dx)
+                except (TwocryptoError, ZeroDivisionError) as exc:
+                    failed = str(exc)[:40]
+                    break
+                if mine != quote.value:
+                    # Usually "this is a cryptoswap pool, not an FX Swap", or
+                    # the other `_fee`.  One point would not separate them:
+                    # two invariants can agree at a single size by coincidence.
+                    failed = f"{mine} != {quote.value} at {probe.dx}"
+                    break
+            if not failed:
+                out.by_pool[key] = model
                 break
-            if mine != quote.value:
-                # Almost always "this is a cryptoswap pool, not an FX Swap",
-                # which is the intended way to tell them apart -- and why one
-                # point would not do it: the two invariants can agree at a
-                # single size by coincidence.
-                failed = f"{mine} != {quote.value} at {probe.dx}"
-                break
-        if failed:
-            out.rejected.append((pool.address, failed))
+            best = best or failed
         else:
-            out.by_pool[key] = model_for(built, key)
+            out.rejected.append((pool.address, best or "no variant matched"))
 
     if not quiet:
         print(f"  exact twocrypto: {len(out)} of {out.checked} pools reproduce "

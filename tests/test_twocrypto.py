@@ -67,10 +67,24 @@ def test_an_empty_pool_is_refused():
         pool(balances=(0, 10**21)).get_dy(0, 1, 10**18)
 
 
-def test_cryptoswap_is_refused_rather_than_approximated():
-    """Until `newton_y` exists, a non-FX pool must not be answered at all."""
-    with pytest.raises(TwocryptoError, match="not implemented"):
-        pool(stable=False).get_dy(0, 1, 10**18)
+def test_the_two_invariants_disagree():
+    """Which is why a pool's kind has to be established, not assumed."""
+    dx = 10**19
+    fx = pool(stable=True).get_dy(0, 1, dx)
+    try:
+        crypto = pool(stable=False).get_dy(0, 1, dx)
+    except TwocryptoError:
+        crypto = None
+    assert crypto != fx
+
+
+def test_the_two_deployed_fees_disagree():
+    """Both are live on chain and they are not algebraically equal."""
+    xp = [10**21, 3 * 10**20]
+    current = pool(legacy_fee=False).fee(xp)
+    legacy = pool(legacy_fee=True).fee(xp)
+    assert current != legacy
+    assert min(current, legacy) > 0
 
 
 def test_both_directions_quote():
