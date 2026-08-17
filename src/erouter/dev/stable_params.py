@@ -92,13 +92,30 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
             Call(pool.address, encode_call("A()")),
             Call(pool.address, encode_call("fee()")),
             Call(pool.address, encode_call("offpeg_fee_multiplier()")),
-            Call(pool.address, encode_call("stored_rates()")),
         ]
     answers = client.raw(calls)
 
+    # `stored_rates()` cannot come through the quoter.  Its `Res` struct holds
+    # one `uint256`, so `raw_batch` hands back 32 bytes -- and a rates *array*
+    # is 128, of which the first word is the ABI offset.  The truncation is
+    # silent and reads as a valid answer, so every rate-bearing ng pool fell
+    # back to decimals-only rates and modelled sUSDe as worth exactly one
+    # DOLA: 3.434e23 against the chain's 2.764e23, a ratio of 1.2424, which is
+    # the sUSDe rate itself.  That was all 77 of the ng rejections.
+    #
+    # The transport returns whole returndata, so ask it directly.  One batched
+    # round trip, same block, and nothing about the quoter has to change.
+    transport = getattr(client, "transport", None)
+    rate_data: dict[str, bytes] = {}
+    if transport is not None and hasattr(transport, "call_many"):
+        wire_calls = [Call(p.address, encode_call("stored_rates()")) for p in wanted]
+        for pool, answer in zip(wanted, transport.call_many(wire_calls), strict=True):
+            if answer.ok and len(answer.data) >= 96:
+                rate_data[pool.address.lower()] = answer.data
+
     built: list[tuple[object, StableSwap]] = []
     for k, pool in enumerate(wanted):
-        precise, plain, fee, offpeg, rates_raw = answers[5 * k : 5 * k + 5]
+        precise, plain, fee, offpeg = answers[4 * k : 4 * k + 4]
         if precise.ok and precise.uint():
             amp, a_precision, fee_on_xp = precise.uint(), 100, True
         elif plain.ok and plain.uint():
@@ -109,9 +126,10 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
             continue
 
         reported: tuple[int, ...] = ()
-        if rates_raw.ok and rates_raw.data:
+        blob = rate_data.get(pool.address.lower())
+        if blob:
             try:
-                reported = tuple(decode(["uint256[]"], rates_raw.data)[0])
+                reported = tuple(decode(["uint256[]"], blob)[0])
             except Exception:  # noqa: BLE001 -- a pool without the getter
                 reported = ()
 
