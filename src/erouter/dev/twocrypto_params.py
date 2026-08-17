@@ -88,6 +88,13 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
             Call(pool.address, encode_call("POLICY()")),
             Call(pool.address, encode_call("future_A_gamma_time()")),
             Call(pool.address, encode_call("last_timestamp()")),
+            # The pre-factory generation keeps these unpacked, as three public
+            # variables.  Reading them costs three calls in a batch that is
+            # already going out; requiring `packed_fee_params()` silently
+            # dropped all 43 of those pools.
+            Call(pool.address, encode_call("mid_fee()")),
+            Call(pool.address, encode_call("out_fee()")),
+            Call(pool.address, encode_call("fee_gamma()")),
         ]
     answers = client.raw(calls)
 
@@ -106,32 +113,58 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
                 except Exception:  # noqa: BLE001
                     continue
                 precisions[pool.address.lower()] = (int(got[0]), int(got[1]))
+    # The pre-factory generation keeps its precisions internal, so there is no
+    # getter to read -- they are just the decimal corrections, and skipping
+    # those pools for want of a getter silently dropped all 43 of them.
+    for pool in wanted:
+        precisions.setdefault(
+            pool.address.lower(),
+            tuple(10 ** (18 - coin.decimals) for coin in pool.coins[:2]),
+        )
 
     built: list[tuple[object, Twocrypto]] = []
     for k, pool in enumerate(wanted):
-        (scale, d, amp, gamma, packed, policy,
-         ramp_until, last) = answers[8 * k : 8 * k + 8]
+        (scale, d, amp, gamma, packed, policy, ramp_until, last,
+         mid_raw, out_raw, gamma_raw) = answers[11 * k : 11 * k + 11]
         key = pool.address.lower()
         if key not in precisions:
             continue
-        if not (scale.ok and d.ok and amp.ok and packed.ok):
+        unpacked = mid_raw.ok and out_raw.ok and gamma_raw.ok
+        if not (scale.ok and d.ok and amp.ok and (packed.ok or unpacked)):
             continue
         if policy.ok and policy.uint():
             out.rejected.append((pool.address, "has a POLICY contract"))
             continue
-        if ramp_until.ok and last.ok and ramp_until.uint() > last.uint():
+        # The factory generation recomputes `D` whenever `future_A_gamma_time`
+        # is set at all -- `> 0`, not `> last_timestamp` -- so a pool that has
+        # ever ramped needs `newton_D`, which is not implemented here.  The
+        # newer pools only recompute while actually ramping.
+        ramping = ramp_until.uint_or(0) or 0
+        legacy_possible = ramping == 0
+        if ramp_until.ok and last.ok and ramping > last.uint():
             out.rejected.append((pool.address, "A/gamma ramp in progress"))
             continue
-        blob = packed.uint()
+        if packed.ok:
+            blob = packed.uint()
+            mid_fee = (blob >> 128) & UINT64
+            out_fee = (blob >> 64) & UINT64
+            fee_gamma = blob & UINT64
+        else:
+            mid_fee, out_fee = mid_raw.uint(), out_raw.uint()
+            fee_gamma = gamma_raw.uint()
         # Every combination, and the wei-exact check decides which this pool
         # is: the invariant (FX Swap or cryptoswap), which of the two deployed
         # `_fee` formulas the pool implements, and which math version bounds
         # it.  An address list would work today and rot the day a new
         # implementation is deployed, or on a chain nobody has surveyed.
-        for stable, legacy_fee, v21 in product((True, False), (False, True),
-                                               (True, False)):
+        for stable, legacy_fee, v21, legacy_pool in product(
+                (True, False), (False, True), (True, False), (False, True)):
             if stable and not v21:
                 continue  # `v21` only selects cryptoswap bounds
+            if legacy_pool and (stable or not legacy_fee or not v21):
+                continue  # the old generation is Newton with the old fee
+            if legacy_pool and not legacy_possible:
+                continue
             built.append((pool, Twocrypto(
                 balances=(int(pool.balances[0]), int(pool.balances[1])),
                 precisions=precisions[key],
@@ -139,12 +172,13 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
                 d=d.uint(),
                 amp=amp.uint(),
                 gamma=gamma.uint_or(0) or 0,
-                mid_fee=(blob >> 128) & UINT64,
-                out_fee=(blob >> 64) & UINT64,
-                fee_gamma=blob & UINT64,
+                mid_fee=mid_fee,
+                out_fee=out_fee,
+                fee_gamma=fee_gamma,
                 stable=stable,
                 legacy_fee=legacy_fee,
                 v21=v21,
+                legacy_pool=legacy_pool,
             )))
 
     if not built:

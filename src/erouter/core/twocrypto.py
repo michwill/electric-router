@@ -35,7 +35,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .cryptoswap import CryptoSwapError, get_y as crypto_get_y
+from .cryptoswap import CryptoSwapError, _newton_y
+from .cryptoswap import get_y as crypto_get_y
 from .stableswap import StableSwapError, solve_y
 
 PRECISION = 10**18
@@ -78,6 +79,13 @@ class Twocrypto:
     #: Which `_fee` the *pool* implements.  Two are deployed and they are not
     #: algebraically equal -- see `fee`.
     legacy_fee: bool = False
+    #: The pre-factory generation, whose maths is inlined in the pool rather
+    #: than in a `MATH` contract: Newton's `y`, and a different rounding order
+    #: on the way out.  `price_scale` there already carries `precisions[1]`,
+    #: so `dy` is divided by the product in one step for `j > 0` and by
+    #: `precisions[0]` alone for `j == 0` -- not by both in sequence.  Same
+    #: value in exact arithmetic, different wei in integer arithmetic.
+    legacy_pool: bool = False
 
     # ------------------------------------------------------------------ fee
 
@@ -124,11 +132,14 @@ class Twocrypto:
         if not all(self.balances) or self.d <= 0:
             raise TwocryptoError("empty pool")
 
+        scale = (self.price_scale * self.precisions[1] if self.legacy_pool
+                 else self.price_scale)
         xp = [self.balances[0], self.balances[1]]
         xp[i] += dx
         xp = [
             xp[0] * self.precisions[0],
-            xp[1] * self.price_scale * self.precisions[1] // PRECISION,
+            (xp[1] * scale // PRECISION if self.legacy_pool
+             else xp[1] * self.price_scale * self.precisions[1] // PRECISION),
         ]
 
         y = self._y(xp, j)
@@ -136,15 +147,29 @@ class Twocrypto:
             raise TwocryptoError("unsafe value for y")
         dy = xp[j] - y - 1
         xp[j] = y
-        if j > 0:
-            dy = dy * PRECISION // self.price_scale
-        dy //= self.precisions[j]
+        if self.legacy_pool:
+            if j > 0:
+                dy = dy * PRECISION // scale
+            else:
+                dy //= self.precisions[0]
+        else:
+            if j > 0:
+                dy = dy * PRECISION // self.price_scale
+            dy //= self.precisions[j]
 
         # The fee reads the post-trade balances, which is why `xp[j]` is
         # assigned above rather than after this line.
         return dy - self.fee(xp) * dy // FEE_PRECISION
 
     def _y(self, xp: list[int], j: int) -> int:
+        if self.legacy_pool:
+            # The generation before the optimized math: Newton, inlined in the
+            # pool itself.  `lim_mul` is the fixed 100e18 of that era.
+            try:
+                return _newton_y(self.amp, self.gamma, xp, self.d, j,
+                                 100 * PRECISION)
+            except CryptoSwapError as exc:
+                raise TwocryptoError(str(exc)) from exc
         if not self.stable:
             # `ANN` is `A * N**N`, which is what `A()` already returns.
             try:
