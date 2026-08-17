@@ -666,11 +666,18 @@ def cmd_route(args: argparse.Namespace) -> int:
         from .exact_probe import ExactQuoterClient
         from .stable_params import build_exact_pools
 
+        from .twocrypto_params import build_exact_twocrypto
+
         exact = build_exact_pools(load.pools, client)
-        if exact:
-            client = ExactQuoterClient(client, exact)
-            print(f"  exact stableswap: {len(exact)} of {exact.checked} pools "
-                  f"computed from A, fee and balances rather than probed")
+        # Twocrypto-ng's FX Swaps: a stableswap invariant inside cryptoswap's
+        # machinery, told apart from cryptoswap proper by whether the maths
+        # reproduces the pool's own quote -- never by a list of addresses.
+        two = build_exact_twocrypto(load.pools, client)
+        if exact or two:
+            client = ExactQuoterClient(client, exact, two)
+            print(f"  exact: {len(exact)} of {exact.checked} stableswap and "
+                  f"{len(two)} of {two.checked} twocrypto pools computed "
+                  f"rather than probed")
     # Gas is priced by default.  Leaving it at zero made every route look free
     # to branch, which is exactly backwards for the small trades where an extra
     # leg costs more than it saves.

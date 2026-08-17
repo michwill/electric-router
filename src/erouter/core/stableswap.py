@@ -58,6 +58,44 @@ class StableSwapError(ArithmeticError):
     """The invariant did not converge, or the pool cannot serve the trade."""
 
 
+def solve_y(amp: int, a_precision: int, xp: list[int], d: int,
+            i: int, j: int, x: int) -> int:
+    """The `j` balance restoring the invariant when `i` holds `x`.
+
+    Module level because two different pool families run exactly this
+    iteration.  `CurveStableSwapNG` is the obvious one; the other is
+    twocrypto-ng's `StableswapMath`, which the same factory deploys as an "FX
+    Swap" -- cryptoswap machinery (price scale, dynamic fee, EMA oracle) around
+    a stableswap invariant.  Its only difference is `A_MULTIPLIER = 10000`
+    where stableswap-ng uses `A_PRECISION = 100`, which is what `a_precision`
+    already parameterises, so the two share this rather than a copy of it.
+    """
+    n = len(xp)
+    ann = amp * n
+    c = d
+    s = 0
+    for k in range(n):
+        if k == i:
+            below = x
+        elif k != j:
+            below = xp[k]
+        else:
+            continue
+        if below <= 0:
+            raise StableSwapError("empty balance")
+        s += below
+        c = c * d // (below * n)
+    c = c * d * a_precision // (ann * n)
+    b = s + d * a_precision // ann
+    y = d
+    for _ in range(MAX_ITER):
+        prev = y
+        y = (y * y + c) // (2 * y + b - d)
+        if abs(y - prev) <= 1:
+            return y
+    raise StableSwapError("y did not converge")
+
+
 @dataclass(frozen=True, slots=True)
 class StableSwap:
     """One pool's state, enough to evaluate `get_dy` exactly.
@@ -126,29 +164,8 @@ class StableSwap:
         if i == j:
             raise StableSwapError("i and j must differ")
         xp = self.xp() if xp is None else xp
-        d = self.d(xp) if d is None else d
-        n = self.n
-        ann = self.amp * n
-        c = d
-        s = 0
-        for k in range(n):
-            if k == i:
-                below = x
-            elif k != j:
-                below = xp[k]
-            else:
-                continue
-            s += below
-            c = c * d // (below * n)
-        c = c * d * self.a_precision // (ann * n)
-        b = s + d * self.a_precision // ann
-        y = d
-        for _ in range(MAX_ITER):
-            prev = y
-            y = (y * y + c) // (2 * y + b - d)
-            if abs(y - prev) <= 1:
-                return y
-        raise StableSwapError("y did not converge")
+        return solve_y(self.amp, self.a_precision, xp,
+                       self.d(xp) if d is None else d, i, j, x)
 
     # ----------------------------------------------------------------- fees
 
