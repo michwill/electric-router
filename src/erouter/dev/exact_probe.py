@@ -93,6 +93,15 @@ class ExactQuoterClient:
                 out[k] = quote
         return [q for q in out if q is not None]
 
+    def computes(self, pool: str) -> bool:
+        """Whether a probe on this pool costs arithmetic rather than a request.
+
+        `pipeline` asks so it can re-fit *every* such arc at the trade's own
+        size instead of only the ones on its shortlist -- the shortlist is a
+        budget for round trips, and these have none.
+        """
+        return bool(self.enabled) and self.exact.get(pool) is not None
+
     def _model_for(self, probe):
         if probe.kind is not ArcKind.SWAP_STABLE or probe.dx <= 0:
             return None

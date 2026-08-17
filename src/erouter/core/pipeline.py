@@ -633,6 +633,26 @@ def _quote(
     with clock("refine"):
         wanted = {arcs[k].id for k in np.flatnonzero(seed)}
         wanted |= {a.id for a in arcs if a.tau in (src_node, dst_node) or a.sigma in (src_node, dst_node)}
+        # And every arc the client can *compute* rather than probe.
+        #
+        # The shortlist exists because a probe costs a round trip, so only the
+        # arcs likely to carry flow were worth re-measuring at the trade's own
+        # size; everything else kept the coarse fit made at a fraction of its
+        # reserves.  That is the asymmetry behind the whole class of bug here:
+        # a derivative fitted near zero describes a different curve than the
+        # one a $2M trade rides, so which arcs happened to be on the shortlist
+        # decided the answer.
+        #
+        # Where the pool's own invariant can be evaluated (see
+        # `dev/exact_probe.py`), that cost is 15 us and no round trip, so there
+        # is no reason to be selective: re-fit all of them at this trade's
+        # size, every quote.  The rest keep the shortlist, because for them the
+        # round trip is real.
+        computes = getattr(client, "computes", None)
+        if computes is not None:
+            free = {a.id for a in arcs if computes(a.pool)}
+            result.counters["arcs_refined_free"] = len(free - wanted)
+            wanted |= free
         # Sample where the flow will land, not near zero.  `Psi / nu[tau]` is
         # the amount of this arc's input token worth the whole trade, so the
         # fractions read directly as "5%, 10%, 20% of the swap" in whatever
