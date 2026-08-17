@@ -23,10 +23,25 @@ from .curve_api import DEFAULT_MIN_TVL, CurveApi, CurveApiError
 @dataclass(slots=True)
 class UniverseLoad:
     pools: list[PoolSpec]
-    source: str  # "api" | "cache" | "stale"
+    source: str  # "api" | "cache" | "stale" | "pinned"
     age: float = 0.0
     warnings: list[str] = field(default_factory=list)
     filtered: int = 0
+
+    @property
+    def fingerprint(self) -> str:
+        """Which pool set this is, in eight characters.
+
+        The pool list comes from an API on a five-minute TTL, so it is the one
+        input to a quote that `--block` does not pin.  Two runs that disagree
+        are only comparable if this matches, and a quote is only reproducible
+        if it is recorded -- measured: a refetch that moved one pool's TVL
+        moved the answer, and one that did not, did not.
+        """
+        import hashlib
+
+        joined = "".join(sorted(p.address.lower() for p in self.pools))
+        return hashlib.sha256(joined.encode()).hexdigest()[:8]
 
 
 def _list_pools(chain: Chain, api: CurveApi, min_tvl: float) -> list[dict]:
@@ -56,10 +71,27 @@ def load_pools(
     refresh: bool = False,
     pool_filters: bool = False,
     llamma: bool = False,
+    pin: bool = False,
 ) -> UniverseLoad:
     api = api or CurveApi()
     cache = cache or UniverseCache()
     warnings: list[str] = []
+
+    if pin:
+        # Whatever is on disk, however old, and never a request.  A pinned
+        # block with an unpinned pool list is not a pinned quote: the list is
+        # what decides which pools exist and what the price fit is weighted by.
+        held = cache.get(chain.chain_id, min_tvl, allow_stale=True)
+        if held is not None:
+            pools, dropped = _apply_filters(
+                parse_universe(held), chain, api, warnings, enabled=pool_filters
+            )
+            pools += _llamma(chain, api, min_tvl, warnings) if llamma else []
+            load = UniverseLoad(pools, "pinned",
+                                cache.age(chain.chain_id, min_tvl), warnings)
+            load.filtered = dropped
+            return load
+        warnings.append("no cached universe to pin to; fetching one")
 
     if not refresh:
         fresh = cache.get(chain.chain_id, min_tvl)

@@ -425,22 +425,66 @@ def prepare(
     # --- reference prices (§4) -------------------------------------------
     with clock("prices"):
         a_vec = np.array([a.a for a in arcs])
-        # Both directions are already present as separate arcs, so half weight
-        # keeps a pool's influence from being counted twice.
-        weights = np.array([max(a.tvl_usd, 1.0) / 2 for a in arcs])
         tau_vec = np.array([a.tau for a in arcs], dtype=np.int64)
         sig_vec = np.array([a.sigma for a in arcs], dtype=np.int64)
+        keys = [(arc.pool.lower(), arc.i, arc.j) for arc in arcs]
         # An arc whose reverse direction contradicts it is not reporting a
         # price and must not vote in the fit, however routable it is.
-        weights = price_fit_weights(
-            [(arc.pool.lower(), arc.i, arc.j) for arc in arcs], a_vec, weights
-        )
-        muted = int(np.count_nonzero(weights <= MUTED_WEIGHT))
-        if muted:
-            scratch.counters["arcs_muted_in_price_fit"] = muted
+        #
+        # Both directions are already present as separate arcs, so half weight
+        # keeps a pool's influence from being counted twice.
+        listed = np.array([max(a.tvl_usd, 1.0) / 2 for a in arcs])
+        weights = price_fit_weights(keys, a_vec, listed)
         nu = reference_prices(
             tau_vec, sig_vec, a_vec, weights, nodes.n_nodes, dst_node,
         )
+        # Second pass, weighted by what each pool *holds at this block* rather
+        # than by what an API said it was worth.
+        #
+        # `tvl_usd` arrives with the pool list, which is on a five-minute TTL
+        # and is the one input `--block` does not pin.  Measured at a fixed
+        # block: eight quotes over thirteen minutes, identical across two
+        # five-minute plateaus and different between them, changing exactly at
+        # the refetch where a pool's TVL moved and not at the one where it did
+        # not.  A quote pinned to a block should not depend on when it was
+        # asked, and the balances are already in hand -- they were read on
+        # chain at that block to plan the probes.
+        #
+        # Whole-pool value, halved per arc, which is what the listed weight
+        # was: an arc's own input reserve is a different quantity, and using it
+        # weights the two directions of an imbalanced pool unequally.  Measured
+        # on USDC->WETH $1M, that cost 58.8 bp.  The first pass is what values
+        # the balances, since depth has to be in one currency to compare across
+        # pairs; one extra Laplacian solve, ~2 ms against a route's hundreds.
+        held: dict[str, float] = {}
+        for pool in pools:
+            if not pool.balances or len(pool.balances) != len(pool.coins):
+                continue
+            total = 0.0
+            for balance, coin in zip(pool.balances, pool.coins, strict=True):
+                if not nodes.has(coin.address):
+                    continue
+                node = nodes.node(coin.address)
+                total += (balance / 10**coin.decimals * nodes.rate(coin.address)
+                          * float(nu[node]))
+            if total > 0:
+                held[pool.address.lower()] = total
+        block_value = np.array([held.get(arc.pool.lower(), 0.0) for arc in arcs])
+        priced = np.isfinite(block_value) & (block_value > 0)
+        scratch.counters["arcs_weighted_from_block"] = int(np.count_nonzero(priced))
+        if priced.any():
+            # A pool we could not value keeps the listed weight rather than
+            # dropping to zero: the fit needs every weight strictly positive,
+            # and a wrapper that reports nothing is not evidence of no depth.
+            weights = price_fit_weights(
+                keys, a_vec, np.where(priced, block_value / 2, listed)
+            )
+            nu = reference_prices(
+                tau_vec, sig_vec, a_vec, weights, nodes.n_nodes, dst_node,
+            )
+        muted = int(np.count_nonzero(weights <= MUTED_WEIGHT))
+        if muted:
+            scratch.counters["arcs_muted_in_price_fit"] = muted
 
     return Prepared(
         arcs=arcs, ladders=ladders, nu=nu, src_node=src_node, dst_node=dst_node,

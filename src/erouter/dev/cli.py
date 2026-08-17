@@ -600,7 +600,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     try:
         load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
                           pool_filters=getattr(args, "pool_filters", False),
-                          llamma=getattr(args, "llamma", False))
+                          llamma=getattr(args, "llamma", False),
+                          pin=getattr(args, "pin_universe", False))
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
@@ -678,6 +679,11 @@ def cmd_route(args: argparse.Namespace) -> int:
         else rpc.gas_price()
     )
     args.gas_price_wei = gas_price_wei
+    # The pool list is the input `--block` does not pin, so say which one this
+    # quote used.  Two runs whose answers differ are only worth comparing when
+    # these match; a run whose fingerprint moved was handed a different market.
+    print(f"  universe {load.fingerprint} · {len(load.pools)} pools · "
+          f"{load.source} {load.age:.0f}s old")
     if not nodes.has(src) or not nodes.has(dst):
         print(f"{BAD} token not routable in this universe")
         return 2
@@ -1959,6 +1965,12 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd.add_argument("--block", default="latest")
     route_cmd.add_argument("--min-tvl", type=float, default=10_000.0)
     route_cmd.add_argument("--refresh", action="store_true")
+    route_cmd.add_argument(
+        "--pin-universe", dest="pin_universe", action="store_true",
+        help="use the cached pool list whatever its age and never re-fetch. "
+             "The list is on a 5-minute TTL and its TVL feeds the price fit, "
+             "so it is the input `--block` does not pin: two runs are only "
+             "comparable when the universe fingerprint in the header matches")
     route_cmd.add_argument("--json", help="write JSON here, or '-' for stdout")
     route_cmd.add_argument("--ascii", action="store_true", help="no box-drawing characters")
     route_cmd.add_argument("--no-color", action="store_true")
