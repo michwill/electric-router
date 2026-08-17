@@ -14,8 +14,20 @@ and free, which matters twice over:
 
 Everything else -- CryptoSwap, LLAMMA, wrappers, any pool whose parameters did
 not reproduce its own quote -- goes to the wire exactly as before.  This is a
-front for `QuoterClient`, not a replacement: `quote_routes` is deliberately
-*not* intercepted, because the final answer must come from the chain (§7).
+front for `QuoterClient`, not a replacement.
+
+`quote_routes` is intercepted too, but only for a route whose *every* leg is a
+pool the gate admitted.  That is a narrower claim than it looks: the gate's
+whole job is to establish that this arithmetic and the pool's own `get_dy`
+return the same integer, so executing such a route is a round trip spent
+confirming what is already known.  §7's "the final answer must come from the
+chain" is satisfied where it binds -- the transaction carries a minimum-out and
+the chain adjudicates it at submission, which is the only verification that
+survives contact with a moving block anyway.
+
+A route with one leg this cannot serve goes to the chain whole.  Half an answer
+from a model and half from execution would be worse than either, because
+nothing downstream could tell which half it was reading.
 """
 
 from __future__ import annotations
@@ -28,6 +40,7 @@ from ..core.tricrypto import TricryptoError
 from ..core.twocrypto import TwocryptoError
 from ..core.transport import Status
 from ..core.types import ArcKind
+from ..core.walk import LegUnquotable, walk_route
 
 
 @dataclass(slots=True)
@@ -35,6 +48,9 @@ class ExactStats:
     computed: int = 0
     delegated: int = 0
     failed: int = 0
+    #: Candidate routes verified by walking the models rather than the chain.
+    walked: int = 0
+    sent_routes: int = 0
 
     @property
     def total(self) -> int:
@@ -145,29 +161,85 @@ class ExactQuoterClient:
     def _model_for(self, probe):
         if probe.dx <= 0:
             return None
-        if probe.kind is ArcKind.SWAP_CRYPTO:
-            if probe.i == probe.j:
+        return self._model(probe.pool, probe.kind, probe.i, probe.j)
+
+    def _model(self, pool: str, kind, i: int, j: int):
+        """The model that can answer for this pool and direction, if any."""
+        if kind is ArcKind.SWAP_CRYPTO:
+            if i == j:
                 return None
             if self.tricrypto is not None:
-                model = self.tricrypto.get(probe.pool)
+                model = self.tricrypto.get(pool)
                 if model is not None:
-                    if not (0 <= probe.i < 3 and 0 <= probe.j < 3):
+                    if not (0 <= i < 3 and 0 <= j < 3):
                         return None
                     return model
             if self.twocrypto is None:
                 return None
-            model = self.twocrypto.get(probe.pool)
+            model = self.twocrypto.get(pool)
             if model is None:
                 return None
-            if not (0 <= probe.i < 2 and 0 <= probe.j < 2):
+            if not (0 <= i < 2 and 0 <= j < 2):
                 return None
             return model
-        if probe.kind is not ArcKind.SWAP_STABLE:
+        if kind is not ArcKind.SWAP_STABLE:
             return None
-        model = self.exact.get(probe.pool)
+        model = self.exact.get(pool)
         if model is None:
             return None
         n = model.n
-        if not (0 <= probe.i < n and 0 <= probe.j < n) or probe.i == probe.j:
+        if not (0 <= i < n and 0 <= j < n) or i == j:
             return None
         return model
+
+    # -- verification, where every leg is a pool we can evaluate --------------
+
+    def quote_routes(self, routes, amounts_in, dst_slots):
+        """Walk the routes we can evaluate; send the rest to the chain.
+
+        Verifying a route used to mean executing it, which is why the local EVM
+        warms storage for every pool in the universe.  For a pool admitted by
+        the wei-exact gate that is a round trip to be told what the arithmetic
+        here already knows, so those routes are walked with `core/walk.py` --
+        the same accumulator the contract runs, so the two agree by
+        construction rather than by luck.
+
+        A route with a single leg this cannot serve -- a wrapper, an LP
+        deposit, a pool still being probed -- goes to the chain whole.  Mixing
+        the two inside one route would be worse than either: half the answer
+        would come from a model and half from execution, and nothing downstream
+        could tell which.
+        """
+        if not self.enabled:
+            return self.client.quote_routes(routes, amounts_in, dst_slots)
+
+        out: list[int | None] = [None] * len(routes)
+        holes: list[int] = []
+        for k, (legs, amount, dst) in enumerate(
+                zip(routes, amounts_in, dst_slots, strict=True)):
+            try:
+                out[k] = walk_route(legs, amount, dst, self._quote_leg)
+            except LegUnquotable:
+                holes.append(k)
+            except (StableSwapError, TwocryptoError, TricryptoError,
+                    ZeroDivisionError, ValueError):
+                # The invariant refusing a size is a real answer -- the pool
+                # would revert too -- but this is the number the winner is
+                # chosen on, so it goes to the chain rather than being guessed.
+                holes.append(k)
+        self.stats.walked += len(routes) - len(holes)
+
+        if holes:
+            self.stats.sent_routes += len(holes)
+            served = self.client.quote_routes(
+                [routes[k] for k in holes], [amounts_in[k] for k in holes],
+                [dst_slots[k] for k in holes])
+            for k, value in zip(holes, served, strict=True):
+                out[k] = value
+        return [0 if v is None else v for v in out]
+
+    def _quote_leg(self, leg, dx: int) -> int:
+        model = self._model(leg.target, leg.kind, leg.i, leg.j)
+        if model is None:
+            raise LegUnquotable(leg.target)
+        return model.get_dy(leg.i, leg.j, dx)
