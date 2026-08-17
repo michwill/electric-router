@@ -63,6 +63,28 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
     if not wanted:
         return out
 
+    # A metapool is the same invariant with the base pool's LP valued at its
+    # `virtual_price` rather than at 1 -- so it is a *rates* problem, not a
+    # solver problem, and `StableSwap` already takes rates as an argument.
+    # `stored_rates()` reports this on the ng pools that have it; the older
+    # ones do not, and their LP coin then reads as a plain 18-decimal token,
+    # which is wrong by exactly the accrued yield.
+    issuer = {p.lp_token.lower(): p.address for p in pools if p.lp_token}
+    lp_coins = {
+        pool.address.lower(): [
+            issuer[coin.address.lower()] for coin in pool.coins
+            if coin.address.lower() in issuer
+        ]
+        for pool in wanted
+    }
+    bases = sorted({a for v in lp_coins.values() for a in v})
+    virtual: dict[str, int] = {}
+    if bases:
+        answers = client.raw([Call(a, encode_call("get_virtual_price()")) for a in bases])
+        for address, answer in zip(bases, answers, strict=True):
+            if answer.ok and answer.uint():
+                virtual[address.lower()] = answer.uint()
+
     calls: list[Call] = []
     for pool in wanted:
         calls += [
@@ -86,53 +108,88 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
         if not fee.ok:
             continue
 
-        rates: tuple[int, ...] = ()
+        reported: tuple[int, ...] = ()
         if rates_raw.ok and rates_raw.data:
             try:
-                rates = tuple(decode(["uint256[]"], rates_raw.data)[0])
+                reported = tuple(decode(["uint256[]"], rates_raw.data)[0])
             except Exception:  # noqa: BLE001 -- a pool without the getter
-                rates = ()
-        if len(rates) != len(pool.coins):
-            # The legacy shape: the rate is only the decimal correction.
-            rates = tuple(10 ** (36 - c.decimals) for c in pool.coins)
+                reported = ()
 
-        model = StableSwap(
-            balances=tuple(int(b) for b in pool.balances),
-            rates=rates, amp=amp, fee=fee.uint(),
-            offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
-            a_precision=a_precision, fee_on_xp=fee_on_xp,
+        # The legacy shape: the rate is only the decimal correction -- except
+        # for a base-pool LP, which is worth its virtual price.
+        plain = tuple(10 ** (36 - c.decimals) for c in pool.coins)
+        meta = tuple(
+            virtual.get(issuer.get(c.address.lower(), "").lower(), 0)
+            or 10 ** (36 - c.decimals)
+            for c in pool.coins
         )
-        built.append((pool, model))
+        candidates = []
+        if len(reported) == len(pool.coins):
+            candidates.append(reported)
+        candidates.append(plain)
+        if meta != plain:
+            candidates.append(meta)
+
+        # Which convention this pool follows is asked, not assumed: the
+        # variants are cheap to evaluate and only one of them can reproduce
+        # the chain to the wei.
+        for rates in candidates:
+            for on_xp in (fee_on_xp, not fee_on_xp):
+                built.append((pool, StableSwap(
+                    balances=tuple(int(b) for b in pool.balances),
+                    rates=rates, amp=amp, fee=fee.uint(),
+                    offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
+                    a_precision=a_precision, fee_on_xp=on_xp,
+                )))
 
     if not built:
         return out
 
     # --- and now make each one prove itself -------------------------------
-    probes: list[Probe] = []
-    for pool, model in built:
-        dx = max(1, int(pool.balances[0] * CHECK_FRACTION))
-        probes.append(Probe(pool.address, ArcKind.SWAP_STABLE, 0, 1,
-                            len(pool.coins), dx))
+    # One probe per pool, however many variants it produced: the quote is the
+    # same question, and the variants are decided in Python against it.
+    order: list[object] = []
+    seen_pools: set[str] = set()
+    for pool, _ in built:
+        if pool.address.lower() not in seen_pools:
+            seen_pools.add(pool.address.lower())
+            order.append(pool)
+    probes = [
+        Probe(pool.address, ArcKind.SWAP_STABLE, 0, 1, len(pool.coins),
+              max(1, int(pool.balances[0] * CHECK_FRACTION)))
+        for pool in order
+    ]
     quotes = client.probe(probes)
+    truth = {
+        pool.address.lower(): (probe.dx, quote)
+        for pool, probe, quote in zip(order, probes, quotes, strict=True)
+    }
 
-    for (pool, model), quote, probe in zip(built, quotes, probes, strict=True):
+    for pool in order:
         out.checked += 1
+        key = pool.address.lower()
+        dx, quote = truth[key]
         if not quote.ok or quote.value <= 0:
             out.rejected.append((pool.address, "pool would not quote the check"))
             continue
-        try:
-            mine = model.get_dy(0, 1, probe.dx)
-        except StableSwapError as exc:
-            out.rejected.append((pool.address, str(exc)[:40]))
-            continue
-        if mine != quote.value:
-            # Not a tolerance.  Agreeing to the wei is the evidence that every
-            # parameter was read correctly; anything less means one of them was
-            # not, and the error will be somewhere else at another size.
-            out.rejected.append(
-                (pool.address, f"{mine} != {quote.value} at {probe.dx}"))
-            continue
-        out.by_pool[pool.address.lower()] = model
+        best: str = ""
+        for candidate_pool, model in built:
+            if candidate_pool.address.lower() != key:
+                continue
+            try:
+                mine = model.get_dy(0, 1, dx)
+            except StableSwapError as exc:
+                best = best or str(exc)[:40]
+                continue
+            if mine == quote.value:
+                # Not a tolerance.  Agreeing to the wei is the evidence that
+                # every parameter was read correctly; anything less means one
+                # was not, and the error will surface at another size.
+                out.by_pool[key] = model
+                break
+            best = best or f"{mine} != {quote.value} at {dx}"
+        else:
+            out.rejected.append((pool.address, best or "no variant matched"))
 
     if not quiet:
         print(f"  exact stableswap: {len(out)} of {out.checked} pools reproduce "
