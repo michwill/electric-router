@@ -322,7 +322,7 @@ class LocalEvm:
 
     # ----------------------------------------------------------------- warm
 
-    def prime(self, pools=()) -> WarmStats:
+    def prime(self, pools=(), skip=()) -> WarmStats:
         """Load everything the disk cache already knows, then read values.
 
         No access lists and no `eth_getCode` for a pool that is already in the
@@ -332,6 +332,15 @@ class LocalEvm:
 
         Returns without touching the network for any pool it does not know;
         `warm` discovers those.
+
+        `skip` names accounts not to load at all -- pools that will be computed
+        from their own parameters rather than executed here, which is most of
+        the universe and two thirds of the slots.  Dropping an account is safe
+        because it is not final: whatever the arcs that *are* still executed
+        touch, including a modelled pool read as somebody's base pool, is named
+        by their access list and loaded in full by `warm_arcs` afterwards.  The
+        disk cache keeps every account either way, so skipping one here does
+        not forget it.
         """
         import time as _t
 
@@ -339,7 +348,9 @@ class LocalEvm:
             return self.stats
         started = _t.perf_counter()
         block = self.rpc.pin.hex_block
-        wanted = self.cache.slots()
+        skipped = {a.lower() for a in skip}
+        wanted = {a: s for a, s in self.cache.slots().items()
+                  if a.lower() not in skipped}
         if pools:
             reachable = self.cache.unknown(pools)
             self.stats.errors.extend(f"uncached pool {p[:10]}" for p in reachable[:3])

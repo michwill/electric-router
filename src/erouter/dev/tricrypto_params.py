@@ -16,6 +16,7 @@ from ..core.codec import decode, encode_call
 from ..core.transport import Call
 from ..core.tricrypto import Tricrypto, TricryptoError
 from ..core.types import ArcKind, Probe
+from .exact_cache import trust as _trust_verdict
 
 CHECK_FRACTIONS = (0.001, 0.01, 0.1)
 #: Every ordered pair touching all three coins -- a two-coin ladder would leave
@@ -28,6 +29,8 @@ UINT64 = 2**64 - 1
 class ExactTricrypto:
     by_pool: dict[str, Tricrypto] = field(default_factory=dict)
     checked: int = 0
+    #: Admitted on a remembered verdict, without re-gating.
+    trusted: int = 0
     rejected: list[tuple[str, str]] = field(default_factory=list)
 
     def __len__(self) -> int:
@@ -37,12 +40,14 @@ class ExactTricrypto:
         return self.by_pool.get(pool.lower())
 
 
-def build_exact_tricrypto(pools, client, *, quiet: bool = True) -> ExactTricrypto:
+def build_exact_tricrypto(pools, client, *, quiet: bool = True,
+                          cache=None, resample=(), only=None) -> ExactTricrypto:
     """Model every three-coin crypto pool that reproduces its own `get_dy`."""
     out = ExactTricrypto()
     wanted = [
         p for p in pools
         if len(p.coins) == 3 and p.balances and all(p.balances)
+        and (only is None or p.address.lower() in only)
         and getattr(p, "swap_kind", None) is ArcKind.SWAP_CRYPTO
     ]
     if not wanted:
@@ -81,7 +86,7 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True) -> ExactTricrypt
             tuple(10 ** (18 - coin.decimals) for coin in pool.coins[:3]),
         )
 
-    built: list[tuple[object, Tricrypto]] = []
+    built: list[tuple[object, Tricrypto, dict]] = []
     for k, pool in enumerate(wanted):
         d, amp, gamma, packed, ramp_until, last, ps0, ps1 = answers[8 * k : 8 * k + 8]
         if not (d.ok and amp.ok and packed.ok and ps0.ok and ps1.ok):
@@ -100,13 +105,21 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True) -> ExactTricrypt
             mid_fee=(blob >> 128) & UINT64,
             out_fee=(blob >> 64) & UINT64,
             fee_gamma=blob & UINT64,
-        )))
+        ), {"family": "tricrypto"}))
 
     if not built:
         return out
 
+    # Already proved itself: admitted on the verdict.  There is only one
+    # variant here, so what the cache saves is the six-point gate rather than a
+    # search -- and, more to the point, it says so *before* anything is warmed.
+    gate = {pool.address.lower() for pool, _, _ in built
+            if not _trust_verdict(out, cache, resample, built,
+                                  pool.address.lower())}
+    order = [pool for pool, _, _ in built if pool.address.lower() in gate]
+
     probes, at = [], []
-    for pool, _ in built:
+    for pool in order:
         for i, j in CHECK_PAIRS:
             for frac in CHECK_FRACTIONS:
                 probes.append(Probe(pool.address, ArcKind.SWAP_CRYPTO, i, j, 3,
@@ -117,7 +130,9 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True) -> ExactTricrypt
     for address, probe, quote in zip(at, probes, quotes, strict=True):
         truth.setdefault(address, []).append((probe, quote))
 
-    for pool, model in built:
+    for pool, model, variant in built:
+        if pool.address.lower() not in gate:
+            continue
         out.checked += 1
         key = pool.address.lower()
         points = [(pr, q) for pr, q in truth.get(key, []) if q.ok and q.value > 0]
@@ -136,8 +151,12 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True) -> ExactTricrypt
                 break
         if failed:
             out.rejected.append((pool.address, failed))
+            if cache is not None:
+                cache.refuse(key, failed)
         else:
             out.by_pool[key] = model
+            if cache is not None:
+                cache.record(key, variant)
 
     if not quiet:
         print(f"  exact tricrypto: {len(out)} of {out.checked} pools reproduce "

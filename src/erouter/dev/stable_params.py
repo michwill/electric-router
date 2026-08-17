@@ -29,6 +29,7 @@ from ..core.codec import decode, encode_call
 from ..core.stableswap import StableSwap, StableSwapError
 from ..core.transport import Call
 from ..core.types import ArcKind, Probe
+from .exact_cache import trust as _trust_verdict
 
 #: Sizes to check at, as fractions of the input balance, in both directions.
 #
@@ -49,6 +50,8 @@ class ExactPools:
 
     by_pool: dict[str, StableSwap] = field(default_factory=dict)
     checked: int = 0
+    #: Admitted on a remembered verdict, without re-gating.
+    trusted: int = 0
     rejected: list[tuple[str, str]] = field(default_factory=list)
 
     def __len__(self) -> int:
@@ -64,10 +67,12 @@ def _stable(pool) -> bool:
     return kind in (ArcKind.SWAP_STABLE, None) and len(pool.coins) in (2, 3, 4)
 
 
-def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
+def build_exact_pools(pools, client, *, quiet: bool = True,
+                      cache=None, resample=(), only=None) -> ExactPools:
     """Model every stableswap whose parameters reproduce its own `get_dy`."""
     out = ExactPools()
-    wanted = [p for p in pools if _stable(p) and p.balances and all(p.balances)]
+    wanted = [p for p in pools if _stable(p) and p.balances and all(p.balances)
+              and (only is None or p.address.lower() in only)]
     if not wanted:
         return out
 
@@ -121,7 +126,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
             if answer.ok and len(answer.data) >= 96:
                 rate_data[pool.address.lower()] = answer.data
 
-    built: list[tuple[object, StableSwap]] = []
+    built: list[tuple[object, StableSwap, dict]] = []
     for k, pool in enumerate(wanted):
         precise, plain, fee, offpeg = answers[4 * k : 4 * k + 4]
         if precise.ok and precise.uint():
@@ -151,22 +156,25 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
         )
         candidates = []
         if len(reported) == len(pool.coins):
-            candidates.append(reported)
-        candidates.append(plain)
+            candidates.append(("reported", reported))
+        candidates.append(("plain", plain))
         if meta != plain:
-            candidates.append(meta)
+            candidates.append(("meta", meta))
 
         # Which convention this pool follows is asked, not assumed: the
         # variants are cheap to evaluate and only one of them can reproduce
-        # the chain to the wei.
-        for rates in candidates:
+        # the chain to the wei.  They are built whether or not a verdict says
+        # which one will win -- construction is arithmetic, and building them
+        # all is what lets a stale verdict fall back to the gate instead of
+        # silently dropping the pool.
+        for label, rates in candidates:
             for on_xp in (fee_on_xp, not fee_on_xp):
                 built.append((pool, StableSwap(
                     balances=tuple(int(b) for b in pool.balances),
                     rates=rates, amp=amp, fee=fee.uint(),
                     offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
                     a_precision=a_precision, fee_on_xp=on_xp,
-                )))
+                ), {"family": "stable", "rates": label, "fee_on_xp": on_xp}))
 
     if not built:
         return out
@@ -176,10 +184,20 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
     # same question, and the variants are decided in Python against it.
     order: list[object] = []
     seen_pools: set[str] = set()
-    for pool, _ in built:
+    for pool, _, _ in built:
         if pool.address.lower() not in seen_pools:
             seen_pools.add(pool.address.lower())
             order.append(pool)
+
+    # A pool the cache has already seen prove itself does not prove itself
+    # again: the gate establishes that a pool's *code* implements this
+    # invariant, and Curve pools are not upgradeable.  Everything the numbers
+    # depend on -- `A`, the fee terms, the ramp, the balances -- was read fresh
+    # above and is not cached, so what is being trusted is only "this variant,
+    # not one of the other five".
+    order = [p for p in order
+             if not _trust_verdict(out, cache, resample, built, p.address.lower())]
+
     probes, where = [], []
     for pool in order:
         for i, j in ((0, 1), (1, 0)):
@@ -201,7 +219,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
             out.rejected.append((pool.address, "pool would not quote the check"))
             continue
         best: str = ""
-        for candidate_pool, model in built:
+        for candidate_pool, model, variant in built:
             if candidate_pool.address.lower() != key:
                 continue
             failed = ""
@@ -219,10 +237,15 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
                     break
             if not failed:
                 out.by_pool[key] = model
+                if cache is not None:
+                    cache.record(key, variant)
                 break
             best = best or failed
         else:
-            out.rejected.append((pool.address, best or "no variant matched"))
+            why = best or "no variant matched"
+            out.rejected.append((pool.address, why))
+            if cache is not None:
+                cache.refuse(key, why)
 
     if not quiet:
         print(f"  exact stableswap: {len(out)} of {out.checked} pools reproduce "

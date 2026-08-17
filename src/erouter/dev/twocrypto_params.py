@@ -32,6 +32,7 @@ from ..core.codec import decode, encode_call
 from ..core.transport import Call
 from ..core.twocrypto import Twocrypto, TwocryptoError
 from ..core.types import ArcKind, Probe
+from .exact_cache import trust as _trust_verdict
 
 #: Sizes to check at, in both directions -- see `stable_params` for why one
 #: point is not enough.  Here it is load-bearing rather than prudent: telling
@@ -45,6 +46,8 @@ UINT64 = 2**64 - 1
 class ExactTwocrypto:
     by_pool: dict[str, Twocrypto] = field(default_factory=dict)
     checked: int = 0
+    #: Admitted on a remembered verdict, without re-gating.
+    trusted: int = 0
     rejected: list[tuple[str, str]] = field(default_factory=list)
 
     def __len__(self) -> int:
@@ -70,10 +73,12 @@ def model_for(built, key):
     raise KeyError(key)
 
 
-def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypto:
+def build_exact_twocrypto(pools, client, *, quiet: bool = True,
+                          cache=None, resample=(), only=None) -> ExactTwocrypto:
     """Model every twocrypto pool that reproduces its own `get_dy`."""
     out = ExactTwocrypto()
-    wanted = list(_candidates(pools))
+    wanted = [p for p in _candidates(pools)
+              if only is None or p.address.lower() in only]
     if not wanted:
         return out
 
@@ -122,7 +127,7 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
             tuple(10 ** (18 - coin.decimals) for coin in pool.coins[:2]),
         )
 
-    built: list[tuple[object, Twocrypto]] = []
+    built: list[tuple[object, Twocrypto, dict]] = []
     for k, pool in enumerate(wanted):
         (scale, d, amp, gamma, packed, policy, ramp_until, last,
          mid_raw, out_raw, gamma_raw) = answers[11 * k : 11 * k + 11]
@@ -179,19 +184,26 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
                 legacy_fee=legacy_fee,
                 v21=v21,
                 legacy_pool=legacy_pool,
-            )))
+            ), {"family": "twocrypto", "stable": stable,
+                "legacy_fee": legacy_fee, "v21": v21,
+                "legacy_pool": legacy_pool}))
 
     if not built:
         return out
 
-    probes, where = [], []
-    for pool, _ in built:
-        if pool.address.lower() in where:
-            continue
-        where.append(pool.address.lower())
-    order = [p for p, _ in built if p.address.lower() in where]
+    order: list[object] = []
     seen: set[str] = set()
-    order = [p for p in order if not (p.address.lower() in seen or seen.add(p.address.lower()))]
+    for pool, _, _ in built:
+        key = pool.address.lower()
+        if key not in seen:
+            seen.add(key)
+            order.append(pool)
+    # A pool that has already proved itself is admitted on the verdict.  What
+    # is trusted is only which of the sixteen variants it is -- the invariant,
+    # the fee formula, the bounds -- never a number: `D`, `A`, `gamma`, the fee
+    # terms, `POLICY` and the ramp are all read fresh above.
+    order = [p for p in order
+             if not _trust_verdict(out, cache, resample, built, p.address.lower())]
 
     probes, at = [], []
     for pool in order:
@@ -213,7 +225,7 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
             out.rejected.append((pool.address, "pool would not quote the check"))
             continue
         best = ""
-        for candidate, model in built:
+        for candidate, model, variant in built:
             if candidate.address.lower() != key:
                 continue
             failed = ""
@@ -231,10 +243,15 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
                     break
             if not failed:
                 out.by_pool[key] = model
+                if cache is not None:
+                    cache.record(key, variant)
                 break
             best = best or failed
         else:
-            out.rejected.append((pool.address, best or "no variant matched"))
+            why = best or "no variant matched"
+            out.rejected.append((pool.address, why))
+            if cache is not None:
+                cache.refuse(key, why)
 
     if not quiet:
         print(f"  exact twocrypto: {len(out)} of {out.checked} pools reproduce "
