@@ -647,6 +647,33 @@ def check_reserves_are_real(
             pool.held = tuple(found.get(id(pool), []))
 
     warnings: list[str] = []
+
+    # A pool that holds nothing cannot trade, whatever an index says it is
+    # worth.  The check below only looks at pools reporting *more* than they
+    # hold, so one reporting zero is never short and never flagged -- it is
+    # simply empty, and it stays in the universe on the strength of a TVL
+    # figure that came from an API rather than from the chain.
+    #
+    # Measured: `WETH/USDC Curve StableNG`
+    # (0x68A67937620aF5DbF4093D0022B79CC1e92060f2) is listed by
+    # prices.curve.finance/v2 at $37,798.92, which clears the $10k floor, while
+    # both `balances()` are zero, `totalSupply()` is zero and
+    # `get_virtual_price()` reverts.  The legacy api.curve.finance reports the
+    # same pool as `usdTotal: 0`, so the two endpoints disagree and only the
+    # one the universe is built from is wrong.
+    #
+    # It could not have produced a quote -- the invariant needs every balance
+    # positive -- so this costs no output.  What it costs is arcs enumerated,
+    # probes planned and sent, and a pool in every count.  Balances are read at
+    # the pinned block; membership should follow them.
+    for pool in pools:
+        if not pool.balances or any(b > 0 for b in pool.balances):
+            continue
+        warnings.append(
+            f"{pool.name or pool.address} holds nothing at this block "
+            f"(listed at ${pool.tvl_usd:,.0f}): no arcs built from it"
+        )
+
     short: dict[str, list[tuple[int, int, int]]] = {}
     for pool in pools:
         for k, coin in enumerate(pool.coins[: min(len(pool.balances), len(pool.held))]):
