@@ -655,6 +655,21 @@ def cmd_route(args: argparse.Namespace) -> int:
                               fresh_quoter=getattr(args, 'fresh_quoter', False))
         if local is not None:
             client, evm = local, getattr(local, "transport", None)
+    # Stableswap is computed rather than probed where its own parameters
+    # reproduce its own `get_dy` to the wei -- exact at any size, where the
+    # fitted quadratic is not, and it is the sizes near a pool's reserves that
+    # the quadratic gets wrong by orders of magnitude.  Everything else keeps
+    # being measured.  See `dev/stable_params.py` for why each pool has to
+    # prove itself before it is believed.
+    if getattr(args, "exact", True):
+        from .exact_probe import ExactQuoterClient
+        from .stable_params import build_exact_pools
+
+        exact = build_exact_pools(load.pools, client)
+        if exact:
+            client = ExactQuoterClient(client, exact)
+            print(f"  exact stableswap: {len(exact)} of {exact.checked} pools "
+                  f"computed from A, fee and balances rather than probed")
     # Gas is priced by default.  Leaving it at zero made every route look free
     # to branch, which is exactly backwards for the small trades where an extra
     # leg costs more than it saves.
@@ -1956,6 +1971,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="gwei; defaults to the node's live price. 0 disables gas costing",
     )
     route_cmd.add_argument("--no-cache", action="store_true", help="re-probe every arc")
+    route_cmd.add_argument(
+        "--no-exact", dest="exact", action="store_false",
+        help="probe stableswap pools instead of evaluating their invariant "
+             "directly (the default computes them, which is exact at any size "
+             "and sends no probe at all)")
+    route_cmd.set_defaults(exact=True)
     route_cmd.add_argument("--refit", type=int, default=2, help="§8 refit rounds (0 = off)")
     route_cmd.add_argument(
         "--max-legs", type=int, default=32,
