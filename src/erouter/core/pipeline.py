@@ -48,6 +48,7 @@ from .quoter import MAX_LEGS, QuoterClient
 from .realize import (
     RealizedRoute,
     _forward_simulate,
+    conversion_route,
     cancel_cycles,
     check_one_arc_per_pool,
     prune_dust,
@@ -144,13 +145,20 @@ class RouteResult:
     warnings: list[str] = field(default_factory=list)
     pool_names: dict[str, str] = field(default_factory=dict)
 
+    #: Set when the answer is a node's own conversion rather than a solve.
+    sole_route: bool = False
+
     @property
     def ok(self) -> bool:
         return self.route is not None
 
     @property
     def certificate(self) -> bool:
-        return bool(self.report and self.report.certificate)
+        # A conversion between two tokens of one node is not the optimum of a
+        # relaxation, it is the only way to get from one to the other.  There
+        # is nothing to price out and nothing to certify against, so saying
+        # "no certificate" would report a doubt that does not exist.
+        return self.sole_route or bool(self.report and self.report.certificate)
 
     @property
     def certificate_reason(self) -> str | None:
@@ -494,6 +502,37 @@ def prepare(
     )
 
 
+def _conversion_only(
+    result: RouteResult, clock, nodes: NodeMap, client: QuoterClient, *,
+    src_token: str, dst_token: str, amount_in: int, verify_on_chain: bool,
+) -> RouteResult:
+    """Quote a pair that shares a node -- the merge itself is the route."""
+    with clock("realize"):
+        route = conversion_route(nodes, src_token=src_token, dst_token=dst_token,
+                                 amount_in=amount_in)
+    result.route = route
+    result.sole_route = True
+    result.counters["conversion_only"] = 1
+    if not route.legs:
+        # An ALIAS pair: two addresses over one balance, so there is nothing to
+        # call and nothing to verify.  The output is the input, exactly.
+        result.verified_out = amount_in
+        return result
+    if verify_on_chain:
+        with clock("verify"):
+            quoted = client.quote_routes([route.wire_legs], [amount_in],
+                                         [route.dst_slot])
+        got = int(quoted[0]) if quoted else 0
+        if got <= 0:
+            raise RoutingError(
+                f"{nodes.symbol(src_token)} converts to {nodes.symbol(dst_token)}, "
+                "but the conversion did not quote -- it may be paused or capped")
+        result.verified_out = got
+    else:
+        result.verified_out = route.modelled_out
+    return result
+
+
 @dataclass(slots=True)
 class Prepared:
     """Everything about a (universe, src, dst) that does not depend on size.
@@ -566,9 +605,18 @@ def route(
         raise RoutingError("source or destination token is not in the universe")
     src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
     if src_node == dst_node:
-        raise RoutingError(
-            f"{nodes.symbol(src_token)} and {nodes.symbol(dst_token)} are the same "
-            "node after merging; convert directly rather than routing"
+        if src_token.lower() == dst_token.lower():
+            raise RoutingError(
+                f"{nodes.symbol(src_token)} to itself is not a trade")
+        # Same node, different tokens: the answer is the conversion, not an
+        # error.  There is no arc between them *because* they are merged, so
+        # the graph has nothing to find -- but a deposit into scrvUSD is a
+        # trade a user can ask for, and telling them to "convert directly"
+        # while refusing to say what that converts to is not an answer.
+        return _conversion_only(
+            result, clock, nodes, client, src_token=src_token,
+            dst_token=dst_token, amount_in=amount_in,
+            verify_on_chain=verify_on_chain,
         )
 
     # A preparation is a function of (universe, block).  Reusing one whose

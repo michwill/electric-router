@@ -546,6 +546,57 @@ def _conversion_leg(
     )
 
 
+def conversion_route(
+    nodes: NodeMap, *, src_token: str, dst_token: str, amount_in: int
+) -> RealizedRoute:
+    """The route between two tokens of the *same* node: the conversion itself.
+
+    Merging is what lets the solve treat crvUSD and scrvUSD, or ETH and WETH,
+    as one place -- and it also means there is no arc between them and nothing
+    for the graph to find.  Asking for one used to be an error, which is right
+    about the model and wrong about the question: crvUSD -> scrvUSD is a real
+    trade a user can make, it just happens to be a deposit rather than a swap.
+
+    Every conversion is defined against the node's canonical token, so the
+    general answer is at most two legs -- in to the canonical, out to the
+    target -- and often one, because one side usually *is* the canonical.  An
+    ALIAS pair emits none: holding one is holding the other (Gnosis EURe), so
+    the route is empty and the output is the input.
+    """
+    src, dst = src_token.lower(), dst_token.lower()
+    canonical = nodes.canonical(src)
+    legs: list[RealizedLeg] = []
+    slot = 0
+    token = src
+
+    for target, forward in ((canonical, True), (dst, False)):
+        if token == target:
+            continue
+        conversion = nodes.conversion.get(token if forward else target)
+        if conversion is None or conversion.is_alias:
+            token = target
+            continue
+        legs.append(
+            _conversion_leg(nodes, conversion, forward=forward,
+                            src=slot, dst=slot + 1, bps=0)
+        )
+        slot += 1
+        token = target
+
+    # Both tokens are the same node by construction; the renderer labels each
+    # bus from this, and without it every slot reads as node 0 -- which drew
+    # "crvUSD = DAI/sDAI" over a crvUSD -> scrvUSD deposit.
+    node = nodes.node(src)
+    route = RealizedRoute(
+        legs=legs, dst_slot=slot, src_token=src, dst_token=dst,
+        amount_in=amount_in,
+        slots={src: 0} if not legs else {src: 0, dst: slot},
+        node_of_slot={index: node for index in range(slot + 1)},
+    )
+    route.modelled_out = _forward_simulate(route, nodes) if legs else amount_in
+    return route
+
+
 def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
     """Replay the legs the way the quoter will, to fill in modelled amounts.
 
