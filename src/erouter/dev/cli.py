@@ -669,14 +669,32 @@ def cmd_route(args: argparse.Namespace) -> int:
         from .tricrypto_params import build_exact_tricrypto
         from .twocrypto_params import build_exact_twocrypto
 
-        exact = build_exact_pools(load.pools, client)
-        # Twocrypto-ng's FX Swaps: a stableswap invariant inside cryptoswap's
-        # machinery, told apart from cryptoswap proper by whether the maths
-        # reproduces the pool's own quote -- never by a list of addresses.
-        two = build_exact_twocrypto(load.pools, client)
-        tri = build_exact_tricrypto(load.pools, client)
+        # Read through the *unwrapped* quoter, and keep it for rebuilds.  The
+        # gate that admits a pool works by disagreeing with it, so running it
+        # through the wrapper would ask the stale models to check themselves
+        # and they would pass.
+        measured = client
+
+        def _build_models(block: int = 0):
+            """Every model set, from storage as it stands at this block."""
+            if block:
+                # Balances are frozen into each model, so a rebuild that kept
+                # the old ones would produce something self-consistent and
+                # wrong -- the failure this whole hook exists to prevent.
+                read_balances(load.pools, measured, None, chain.chain_id)
+            return (build_exact_pools(load.pools, measured),
+                    # Twocrypto-ng's FX Swaps: a stableswap invariant inside
+                    # cryptoswap's machinery, told apart from cryptoswap proper
+                    # by whether the maths reproduces the pool's own quote --
+                    # never by a list of addresses.
+                    build_exact_twocrypto(load.pools, measured),
+                    build_exact_tricrypto(load.pools, measured))
+
+        exact, two, tri = _build_models()
         if exact or two or tri:
-            client = ExactQuoterClient(client, exact, two, tri)
+            client = ExactQuoterClient(client, exact, two, tri,
+                                       models_block=rpc.block,
+                                       rebuild=_build_models)
             print(f"  exact: {len(exact)}/{exact.checked} stableswap, "
                   f"{len(two)}/{two.checked} twocrypto, {len(tri)}/{tri.checked} "
                   f"tricrypto computed rather than probed")

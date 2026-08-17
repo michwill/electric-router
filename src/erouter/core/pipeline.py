@@ -624,6 +624,18 @@ def route(
     # different chain state -- every probe, every `a`, every `B` -- so the
     # block change is what triggers the re-fit, and nothing else does.
     now = _client_block(client)
+    # The preparation is not the only thing a block invalidates.  A client that
+    # answers from a pool's own arithmetic built that model out of storage read
+    # once -- balances, `D`, the fee parameters -- so on a moving block it goes
+    # on quoting the previous block's pool, silently, and precisely on the pools
+    # it is most confident about.  Re-fitting the preparation against it would
+    # then fit stale numbers very carefully.  Ask it to catch up first; a client
+    # with nothing to refresh does not have the hook.
+    refresh = getattr(client, "refresh_at", None)
+    if refresh is not None and now:
+        rebuilt = refresh(now)
+        if rebuilt:
+            result.counters["exact_models_rebuilt"] = rebuilt
     stale = (prepared is not None and prepared.block and now
              and prepared.block != now)
     if prepared is None or stale:

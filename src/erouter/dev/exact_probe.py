@@ -45,7 +45,7 @@ class ExactQuoterClient:
     """Wraps a `QuoterClient`, answering what it can from arithmetic."""
 
     def __init__(self, client, exact, twocrypto=None, tricrypto=None, *,
-                 enabled: bool = True):
+                 enabled: bool = True, models_block: int = 0, rebuild=None):
         self.client = client
         self.exact = exact
         #: Three-coin crypto pools, whose maths is its own module again.
@@ -55,6 +55,31 @@ class ExactQuoterClient:
         self.twocrypto = twocrypto
         self.enabled = enabled
         self.stats = ExactStats()
+        #: The block these models were read at.  Not named `block`: this class
+        #: forwards unknown attributes to the quoter, and shadowing one it may
+        #: itself define would answer a question nobody asked here.
+        self.models_block = models_block
+        self._rebuild = rebuild
+
+    def refresh_at(self, block: int) -> int:
+        """Rebuild the models if the chain moved out from under them.
+
+        Every model freezes the storage it was built from, so it is only valid
+        at that block -- correct today because the transport pins one block for
+        the life of a process, and wrong the moment a live provider is handed
+        in instead.  `pipeline.route` calls this whenever it sees the block
+        move; it is a no-op when nothing has.
+
+        A rebuild that raises leaves the previous models in place and says so
+        by re-raising: quoting the wrong block is worse than not quoting.
+        """
+        if not block or block == self.models_block or self._rebuild is None:
+            return 0
+        exact, twocrypto, tricrypto = self._rebuild(block)
+        self.exact, self.twocrypto, self.tricrypto = exact, twocrypto, tricrypto
+        self.models_block = block
+        self.stats = ExactStats()
+        return len(exact) + len(twocrypto or ()) + len(tricrypto or ())
 
     # -- pass-through -------------------------------------------------------
 
