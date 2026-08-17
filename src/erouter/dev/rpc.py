@@ -193,14 +193,31 @@ class JsonRpcTransport:
             params.append(overrides)
         return _to_bytes(self.fetch("eth_call", params))
 
+    #: JSON-RPC batch ceiling.  Erigon rejects the *whole* batch when it is
+    #: over the limit rather than truncating it, so an unchunked call returns
+    #: nothing at all -- and `_answer` turns "nothing" into a failed answer,
+    #: which every caller is entitled to read as "this contract does not
+    #: implement that method".
+    #
+    # Measured against this node on 378 `stored_rates()` calls: 378 in one
+    # batch yielded 0 usable answers, 200 yielded 0, 100 yielded 61, and the
+    # same 378 chunked by 50 yielded the correct 197.  It is also *flaky* --
+    # the same 378-call batch answered on one run and not the next -- so the
+    # symptom was rate-bearing stableswap pools silently falling back to
+    # decimals-only rates and being rejected as if their maths were wrong.
+    BATCH_LIMIT = 50
+
     def call_many(self, calls: list[Call], *, overrides: dict | None = None) -> list[Answer]:
-        payloads = []
-        for c in calls:
-            params: list[Any] = [self._tx(c.to, c.data), self.pin.hex_block]
-            if overrides:
-                params.append(overrides)
-            payloads.append(("eth_call", params))
-        return [_answer(r) for r in self.fetch_multi(payloads)]
+        out: list[Answer] = []
+        for lo in range(0, len(calls), self.BATCH_LIMIT):
+            payloads = []
+            for c in calls[lo : lo + self.BATCH_LIMIT]:
+                params: list[Any] = [self._tx(c.to, c.data), self.pin.hex_block]
+                if overrides:
+                    params.append(overrides)
+                payloads.append(("eth_call", params))
+            out.extend(_answer(r) for r in self.fetch_multi(payloads))
+        return out
 
     def call_batch(
         self, requests: list[bytes], *, to: str, overrides: dict | None = None
