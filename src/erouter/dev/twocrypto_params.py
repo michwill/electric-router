@@ -32,8 +32,11 @@ from ..core.transport import Call
 from ..core.twocrypto import Twocrypto, TwocryptoError
 from ..core.types import ArcKind, Probe
 
-#: One `get_dy` per pool, at a size big enough to separate the two invariants.
-CHECK_FRACTION = 0.01
+#: Sizes to check at, in both directions -- see `stable_params` for why one
+#: point is not enough.  Here it is load-bearing rather than prudent: telling
+#: an FX Swap from a cryptoswap pool *is* the check, and the two invariants can
+#: agree at a single size by coincidence.
+CHECK_FRACTIONS = (0.001, 0.01, 0.1)
 UINT64 = 2**64 - 1
 
 
@@ -57,6 +60,13 @@ def _candidates(pools):
         if getattr(pool, "swap_kind", None) is not ArcKind.SWAP_CRYPTO:
             continue
         yield pool
+
+
+def model_for(built, key):
+    for pool, model in built:
+        if pool.address.lower() == key:
+            return model
+    raise KeyError(key)
 
 
 def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypto:
@@ -128,30 +138,52 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True) -> ExactTwocrypt
     if not built:
         return out
 
-    probes = [
-        Probe(pool.address, ArcKind.SWAP_CRYPTO, 0, 1, 2,
-              max(1, int(pool.balances[0] * CHECK_FRACTION)))
-        for pool, _ in built
-    ]
-    quotes = client.probe(probes)
+    probes, where = [], []
+    for pool, _ in built:
+        if pool.address.lower() in where:
+            continue
+        where.append(pool.address.lower())
+    order = [p for p, _ in built if p.address.lower() in where]
+    seen: set[str] = set()
+    order = [p for p in order if not (p.address.lower() in seen or seen.add(p.address.lower()))]
 
-    for (pool, model), probe, quote in zip(built, probes, quotes, strict=True):
+    probes, at = [], []
+    for pool in order:
+        for i, j in ((0, 1), (1, 0)):
+            for frac in CHECK_FRACTIONS:
+                probes.append(Probe(pool.address, ArcKind.SWAP_CRYPTO, i, j, 2,
+                                    max(1, int(pool.balances[i] * frac))))
+                at.append(pool.address.lower())
+    quotes = client.probe(probes)
+    truth: dict[str, list] = {}
+    for address, probe, quote in zip(at, probes, quotes, strict=True):
+        truth.setdefault(address, []).append((probe, quote))
+
+    for pool in order:
         out.checked += 1
-        if not quote.ok or quote.value <= 0:
+        key = pool.address.lower()
+        points = [(pr, q) for pr, q in truth.get(key, []) if q.ok and q.value > 0]
+        if not points:
             out.rejected.append((pool.address, "pool would not quote the check"))
             continue
-        try:
-            mine = model.get_dy(0, 1, probe.dx)
-        except (TwocryptoError, ZeroDivisionError) as exc:
-            out.rejected.append((pool.address, str(exc)[:40]))
-            continue
-        if mine != quote.value:
-            # Almost always "this is a cryptoswap pool, not an FX Swap", which
-            # is the intended way to tell them apart.
-            out.rejected.append(
-                (pool.address, f"{mine} != {quote.value} at {probe.dx}"))
-            continue
-        out.by_pool[pool.address.lower()] = model
+        failed = ""
+        for probe, quote in points:
+            try:
+                mine = model_for(built, key).get_dy(probe.i, probe.j, probe.dx)
+            except (TwocryptoError, ZeroDivisionError) as exc:
+                failed = str(exc)[:40]
+                break
+            if mine != quote.value:
+                # Almost always "this is a cryptoswap pool, not an FX Swap",
+                # which is the intended way to tell them apart -- and why one
+                # point would not do it: the two invariants can agree at a
+                # single size by coincidence.
+                failed = f"{mine} != {quote.value} at {probe.dx}"
+                break
+        if failed:
+            out.rejected.append((pool.address, failed))
+        else:
+            out.by_pool[key] = model_for(built, key)
 
     if not quiet:
         print(f"  exact twocrypto: {len(out)} of {out.checked} pools reproduce "

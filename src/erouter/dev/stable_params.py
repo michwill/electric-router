@@ -30,9 +30,17 @@ from ..core.stableswap import StableSwap, StableSwapError
 from ..core.transport import Call
 from ..core.types import ArcKind, Probe
 
-#: One `get_dy` per pool, at a size big enough that a wrong `A` shows up.  A
-#: dust probe agrees with almost any parameters; a real one does not.
-CHECK_FRACTION = 0.01
+#: Sizes to check at, as fractions of the input balance, in both directions.
+#
+# One point is not enough, and that is measured rather than cautious: a
+# cryptoswap model built from the wrong invariant reproduced a pool at 1% of
+# balance and disagreed with it at five of the six other points tried.  A
+# model that matches where it was checked and diverges elsewhere is worse than
+# no model, because nothing downstream will ever ask again.
+#
+# A dust probe also agrees with almost any `A`, so the ladder spans three
+# decades rather than clustering.
+CHECK_FRACTIONS = (0.001, 0.01, 0.1)
 
 
 @dataclass(slots=True)
@@ -172,40 +180,47 @@ def build_exact_pools(pools, client, *, quiet: bool = True) -> ExactPools:
         if pool.address.lower() not in seen_pools:
             seen_pools.add(pool.address.lower())
             order.append(pool)
-    probes = [
-        Probe(pool.address, ArcKind.SWAP_STABLE, 0, 1, len(pool.coins),
-              max(1, int(pool.balances[0] * CHECK_FRACTION)))
-        for pool in order
-    ]
+    probes, where = [], []
+    for pool in order:
+        for i, j in ((0, 1), (1, 0)):
+            for frac in CHECK_FRACTIONS:
+                probes.append(Probe(pool.address, ArcKind.SWAP_STABLE, i, j,
+                                    len(pool.coins),
+                                    max(1, int(pool.balances[i] * frac))))
+                where.append(pool.address.lower())
     quotes = client.probe(probes)
-    truth = {
-        pool.address.lower(): (probe.dx, quote)
-        for pool, probe, quote in zip(order, probes, quotes, strict=True)
-    }
+    truth: dict[str, list] = {}
+    for address, probe, quote in zip(where, probes, quotes, strict=True):
+        truth.setdefault(address, []).append((probe, quote))
 
     for pool in order:
         out.checked += 1
         key = pool.address.lower()
-        dx, quote = truth[key]
-        if not quote.ok or quote.value <= 0:
+        points = [(pr, q) for pr, q in truth.get(key, []) if q.ok and q.value > 0]
+        if not points:
             out.rejected.append((pool.address, "pool would not quote the check"))
             continue
         best: str = ""
         for candidate_pool, model in built:
             if candidate_pool.address.lower() != key:
                 continue
-            try:
-                mine = model.get_dy(0, 1, dx)
-            except StableSwapError as exc:
-                best = best or str(exc)[:40]
-                continue
-            if mine == quote.value:
-                # Not a tolerance.  Agreeing to the wei is the evidence that
-                # every parameter was read correctly; anything less means one
-                # was not, and the error will surface at another size.
+            failed = ""
+            for probe, quote in points:
+                try:
+                    mine = model.get_dy(probe.i, probe.j, probe.dx)
+                except StableSwapError as exc:
+                    failed = str(exc)[:40]
+                    break
+                # Not a tolerance.  Agreeing to the wei at *every* point is
+                # the evidence that every parameter was read correctly;
+                # agreeing at one is evidence of very little.
+                if mine != quote.value:
+                    failed = f"{mine} != {quote.value} at {probe.dx}"
+                    break
+            if not failed:
                 out.by_pool[key] = model
                 break
-            best = best or f"{mine} != {quote.value} at {dx}"
+            best = best or failed
         else:
             out.rejected.append((pool.address, best or "no variant matched"))
 
