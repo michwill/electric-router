@@ -127,6 +127,38 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
             tuple(10 ** (18 - coin.decimals) for coin in pool.coins[:2]),
         )
 
+    # A pool with a `POLICY` is only unmodellable if the policy actually
+    # charges.  `_fee` asks it first and falls back to the pool's own mid/out
+    # curve when the answer is zero -- which is what the Yield Basis policy
+    # does, and it says so: "get_fee returns 0 so the pool keeps its native
+    # dynamic fee".  That policy steers the *price scale*, not the fee.
+    #
+    # Asked at two balance vectors a decade apart, because the risk the blanket
+    # rejection was guarding against is a fee that varies with size: one that
+    # answers zero at both is not that.  The wei-exact gate then checks the
+    # whole model at three more sizes anyway.
+    policy_charges: dict[str, bool] = {}
+    with_policy = [(pool, answers[11 * k + 5]) for k, pool in enumerate(wanted)]
+    probes: list[Call] = []
+    asked: list[str] = []
+    for pool, policy in with_policy:
+        if not (policy.ok and policy.uint()):
+            continue
+        where = "0x%040x" % policy.uint()
+        xp = [int(b) for b in pool.balances[:2]]
+        for scale_by in (1, 10):
+            probes.append(Call(where, encode_call(
+                "get_fee(uint256[2])", [v * scale_by for v in xp])))
+            asked.append(pool.address.lower())
+    if probes:
+        for address, answer in zip(asked, client.raw(probes), strict=True):
+            if not answer.ok:
+                policy_charges[address] = True          # unreadable: assume it charges
+            elif answer.uint() != 0:
+                policy_charges[address] = True
+            else:
+                policy_charges.setdefault(address, False)
+
     built: list[tuple[object, Twocrypto, dict]] = []
     for k, pool in enumerate(wanted):
         (scale, d, amp, gamma, packed, policy, ramp_until, last,
@@ -138,8 +170,12 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
         if not (scale.ok and d.ok and amp.ok and (packed.ok or unpacked)):
             continue
         if policy.ok and policy.uint():
-            out.rejected.append((pool.address, "has a POLICY contract"))
-            continue
+            charging = policy_charges.get(key)
+            if charging is not False:
+                out.rejected.append((
+                    pool.address,
+                    "POLICY charges a fee" if charging else "POLICY would not answer"))
+                continue
         # The factory generation recomputes `D` whenever `future_A_gamma_time`
         # is set at all -- `> 0`, not `> last_timestamp` -- so a pool that has
         # ever ramped needs `newton_D`, which is not implemented here.  The

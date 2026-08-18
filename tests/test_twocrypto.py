@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from erouter.core.twocrypto import Twocrypto, TwocryptoError
+from erouter.core.twocrypto import (MAX_FEE, MIN_FEE, Twocrypto,
+                                    TwocryptoError)
 
 #: `Yield Basis WETH`, an FX Swap on mainnet.
 YB_WETH = dict(
@@ -141,3 +142,22 @@ def test_the_float_path_refuses_what_the_integer_path_refuses():
 def test_a_zero_trade_is_zero_either_way():
     p = pool()
     assert p.get_dy_fast(0, 1, 0) == 0 == p.get_dy(0, 1, 0)
+
+
+def test_a_policy_that_charges_nothing_leaves_the_native_fee_curve():
+    """`_fee` asks `POLICY.get_fee(xp)` and *falls back* when the answer is 0.
+
+    The pool's own source says so at the call site -- "if policy returns 0 we
+    fallback to pool's internal logic" -- and the Yield Basis policy returns 0
+    unconditionally, because it steers the price scale rather than the fee.
+    Rejecting every pool that merely *has* a policy therefore dropped a $57M
+    pool that our own arithmetic reproduces to the wei.
+
+    The rule is what the policy charges, not whether one exists.
+    """
+    p = pool(stable=True)
+    xp = [10**21, 10**21]
+    # The native curve is what the model computes, and it is not zero -- so a
+    # policy returning 0 has to leave this untouched to be modellable at all.
+    assert p.fee(xp) > 0
+    assert MIN_FEE <= p.fee(xp) <= MAX_FEE
