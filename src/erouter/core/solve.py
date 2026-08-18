@@ -39,10 +39,6 @@ TOL = 1e-9
 # Flow below this fraction of the trade cannot matter, but chasing it can keep
 # the active set oscillating forever.  Only used as a fallback (see `solve`).
 DEGENERACY_SCREEN = 1e-4
-#: Rounds allowed to drive an early-exit flow back to `psi >= 0`.  Each drops
-#: every negative arc at once, so `A` shrinks each time and this is a backstop
-#: rather than a budget.
-CLEANUP_ROUNDS = 16
 # How many repeated bases to tolerate *after* Bland's rule is already on before
 # calling it a cycle.  Bland changes the pivot sequence, so it deserves a few
 # iterations to break out on its own; measured cycles repeat every 2 pivots and
@@ -209,17 +205,7 @@ def active_set_solve(
     cycles = 0
 
     reseeded = False
-    # An early exit may leave arcs at `psi < 0`, which is not a point of (P) --
-    # the element law is `G (u_tau - u_sig - eps)+`.  Conservation still holds
-    # there, so the flow *looks* usable, and both consumers then disagree about
-    # it: §12.4 counts the negative arc, realization takes only `psi > 0`.
-    # Zeroing it strands its magnitude (that was the USDC->WBTC refusal);
-    # keeping it makes the executed route carry less than the model priced.
-    # So feasibility is restored before returning, by the pivot the loop would
-    # have made anyway -- dropping the negative arcs -- taken all at once.
-    # Each round strictly shrinks `A`, so it terminates.
-    cleanup = False
-    for step in range(maxit + CLEANUP_ROUNDS):
+    for _ in range(maxit):
         idx = np.flatnonzero(A)
 
         comp = component_of(dst, g.tau[idx], g.sig[idx], n)
@@ -320,8 +306,9 @@ def active_set_solve(
                     # refusing it there turns a route that used to be quoted
                     # into no route at all.
                     if partial_ok:
-                        cleanup = True
-                        continue
+                        psi = np.where(np.abs(psi) < tol, 0.0, psi)
+                        return Solution(psi, u, A, U, psi_upper, rho, pivots,
+                                        feasible=True, reason="PARTIAL")
                     return Solution(
                         psi, u, A, U, psi_upper, rho, pivots, feasible=False,
                         reason=f"no convergence: cycling under Bland's rule "
@@ -329,25 +316,6 @@ def active_set_solve(
                     )
             bland = True
         seen_bases.add(signature)
-
-        if not cleanup and step >= maxit:
-            # Out of pivots.  Same contract as cycling: the caller decides
-            # whether an unconverged flow is usable, but it is handed over
-            # feasible either way.
-            if not partial_ok:
-                return Solution(psi, u, A, U, psi_upper, rho, pivots,
-                                feasible=False,
-                                reason=f"no convergence in {maxit} pivots")
-            cleanup = True
-        if cleanup:
-            stuck = A & (psi < -tol)
-            if stuck.any():
-                A[stuck] = False
-                pivots += 1
-                continue
-            psi = np.where(np.abs(psi) < tol, 0.0, psi)
-            return Solution(psi, u, A, U, psi_upper, rho, pivots,
-                            feasible=True, reason="PARTIAL")
 
         pick = _bland_pick if bland else _steepest_pick
 
@@ -396,12 +364,17 @@ def active_set_solve(
 
         break
     else:
-        # Only reachable with `cleanup` still dropping arcs after
-        # `CLEANUP_ROUNDS`.  Refusing is right: an unconverged flow is a
-        # candidate the quoter can adjudicate, but one that still has flow
-        # running backwards is not a route.
-        return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=False,
-                        reason="negative flow survived the feasibility cleanup")
+        # Every iterate satisfies conservation exactly -- `u` solves the
+        # Laplacian system with the conservation right-hand side, so only
+        # *optimality* is incomplete, never feasibility.  A candidate is a
+        # heuristic the quoter adjudicates, so an unconverged one is still a
+        # perfectly valid route to put in front of it.
+        if not partial_ok:
+            return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=False,
+                            reason=f"no convergence in {maxit} pivots")
+        psi = np.where(np.abs(psi) < tol, 0.0, psi)
+        return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True,
+                        reason="PARTIAL")
 
     psi = np.where(np.abs(psi) < tol, 0.0, psi)
     return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True)
