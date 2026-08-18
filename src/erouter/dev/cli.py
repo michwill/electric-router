@@ -934,7 +934,10 @@ def _stage_line(result, elapsed: float) -> str:
     from ..core import accel
     from ..core.solve import _ACCEL_ON
 
-    stages = dict(result.timings or {})   # already milliseconds
+    # Already milliseconds.  `prepare` is dropped because it is a *parent*:
+    # it wraps `prepare()`, whose own stages land in the same sink, so
+    # counting it would charge that work twice and make `rest` negative.
+    stages = {k: v for k, v in (result.timings or {}).items() if k != "prepare"}
     named = sum(stages.values())
     ranked = sorted(stages.items(), key=lambda kv: -kv[1])[:6]
     parts = [f"{name} {ms:,.0f}" for name, ms in ranked if ms >= 1.0]

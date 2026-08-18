@@ -1950,5 +1950,12 @@ class _Span:
         return self
 
     def __exit__(self, *exc):
-        self.sink[self.name] = (time.monotonic() - self.started) * 1000
+        # Accumulate.  A stage that runs twice -- `seed` runs once for the
+        # scout and once for the solve, `refit` once per round -- used to
+        # report only its last visit, and the difference silently became
+        # whatever was left over when the stages were subtracted from the
+        # total.
+        self.sink[self.name] = (
+            self.sink.get(self.name, 0.0) + (time.monotonic() - self.started) * 1000
+        )
         return False
