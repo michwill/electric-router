@@ -1,6 +1,6 @@
 {
  "chain_id": 42161,
- "fingerprint": "7b9e54f16380ab80",
+ "fingerprint": "430aea16eba7b049",
  "verdicts": {
   "0x1446999b0b0e4f7ada6ee73f2ae12a2cfdc5d9e7": {
    "family": "stable",
