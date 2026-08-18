@@ -204,3 +204,114 @@ class StableSwap:
             return (raw - raw * fee // FEE_DENOMINATOR) * PRECISION // self.rates[j]
         out = raw * PRECISION // self.rates[j]
         return out - out * self.fee // FEE_DENOMINATOR
+
+
+# --------------------------------------------------------------- LP arcs
+
+def solve_y_d(amp: int, a_precision: int, xp: list[int], d: int, i: int,
+              n: int) -> int:
+    """`get_y_D`: balance `i` when `D` is reduced to `d`, the others held.
+
+    A different question from `solve_y`, which asks what `i` becomes when
+    another balance changes at constant `D`.  Here `D` itself moves -- which is
+    what a single-sided deposit or withdrawal does -- and the same quadratic is
+    iterated with `c` and `b` built from the *target* `D`.
+
+    Ported from the deployed 3pool
+    (`0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7`), generalised over
+    `A_PRECISION`: the pools that predate it have `a_precision == 1`, which
+    makes every scaling term below vanish exactly as in the original.
+    """
+    ann = amp * n
+    c = d
+    s = 0
+    for k in range(n):
+        if k == i:
+            continue
+        x = xp[k]
+        if x <= 0:
+            raise StableSwapError("empty balance")
+        s += x
+        c = c * d // (x * n)
+    c = c * d * a_precision // (ann * n)
+    b = s + d * a_precision // ann
+    y = d
+    for _ in range(255):
+        prev = y
+        y = (y * y + c) // (2 * y + b - d)
+        if (y - prev if y > prev else prev - y) <= 1:
+            return y
+    raise StableSwapError("y_D did not converge")
+
+
+@dataclass(frozen=True, slots=True)
+class StableSwapLP:
+    """A pool's LP arcs: what a deposit mints and a withdrawal returns.
+
+    The invariant is the same one `StableSwap` already reproduces; what is new
+    is that `D` moves.  Two conventions the deployed source settles, and both
+    are easy to assume wrongly:
+
+    * `calc_token_amount` takes **no fee at all** on the legacy pools -- its own
+      docstring calls it "needed to prevent front-running, not for precise
+      calculations".  It is `(D1 - D0) * totalSupply / D0` and nothing else.
+    * `calc_withdraw_one_coin` charges `fee * N / (4 * (N - 1))` on each
+      coin's *imbalance* against the ideal, not on the output, and then
+      withdraws one wei less "to account for rounding errors".
+    """
+
+    pool: StableSwap
+    total_supply: int
+
+    @property
+    def n(self) -> int:
+        return self.pool.n
+
+    def _xp(self) -> list[int]:
+        return self.pool.xp()
+
+    def calc_token_amount(self, amounts: list[int], deposit: bool) -> int:
+        """LP minted for a deposit, or burned for a withdrawal.  Fee-free."""
+        if self.total_supply <= 0:
+            raise StableSwapError("no supply")
+        p = self.pool
+        d0 = p.d()
+        moved = list(p.balances)
+        for k, amount in enumerate(amounts):
+            if deposit:
+                moved[k] += amount
+            else:
+                if amount > moved[k]:
+                    raise StableSwapError("withdrawing more than the pool holds")
+                moved[k] -= amount
+        after = StableSwap(balances=tuple(moved), rates=p.rates, amp=p.amp,
+                           fee=p.fee, offpeg_fee_multiplier=p.offpeg_fee_multiplier,
+                           a_precision=p.a_precision, fee_on_xp=p.fee_on_xp)
+        d1 = after.d()
+        diff = d1 - d0 if deposit else d0 - d1
+        return diff * self.total_supply // d0
+
+    def calc_withdraw_one_coin(self, token_amount: int, i: int) -> int:
+        """Coin `i` returned for burning `token_amount` of LP."""
+        if self.total_supply <= 0:
+            raise StableSwapError("no supply")
+        if not (0 <= i < self.n):
+            raise StableSwapError("coin index out of range")
+        p = self.pool
+        n = self.n
+        fee = p.fee * n // (4 * (n - 1))
+        xp = self._xp()
+        d0 = p.d()
+        d1 = d0 - token_amount * d0 // self.total_supply
+        new_y = solve_y_d(p.amp, p.a_precision, xp, d1, i, n)
+
+        reduced = list(xp)
+        for j in range(n):
+            if j == i:
+                expected = xp[j] * d1 // d0 - new_y
+            else:
+                expected = xp[j] - xp[j] * d1 // d0
+            reduced[j] -= fee * expected // FEE_DENOMINATOR
+        dy = reduced[i] - solve_y_d(p.amp, p.a_precision, reduced, d1, i, n)
+        # One wei less, as the pool does, and back out of `xp` space.
+        return (dy - 1) * PRECISION // p.rates[i]

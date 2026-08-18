@@ -690,6 +690,7 @@ def cmd_route(args: argparse.Namespace) -> int:
 
         from .tricrypto_params import build_exact_tricrypto
         from .twocrypto_params import build_exact_twocrypto
+        from .lp_params import build_exact_lp
         from .vault_params import build_exact_vaults
         from ..core.types import ArcKind as _ArcKind
 
@@ -718,24 +719,40 @@ def cmd_route(args: argparse.Namespace) -> int:
             # a node member rather than an arc endpoint.  Collecting only the
             # arcs modelled 28 directions and left the three vaults that
             # actually block routes (scrvUSD, sDOLA, ynETHx) unmodelled.
+            from ..core.pipeline import build_arcs as _build_arcs
+            _refs, _ = _build_arcs(load.pools, nodes)
+            _lp_pools = {r.pool.lower() for r in _refs
+                         if r.kind.is_deposit or r.kind.is_withdraw}
             vault_arcs = {a.pool for a in stake_arcs
                           if a.kind in (_ArcKind.ERC4626_DEPOSIT,
                                         _ArcKind.ERC4626_REDEEM)}
             vault_arcs |= {v.token for v in wrappers.merged_vaults}
-            return (build_exact_pools(load.pools, measured, cache=verdicts),
+            stable = build_exact_pools(load.pools, measured, cache=verdicts)
+            return (stable,
                     # Twocrypto-ng's FX Swaps: a stableswap invariant inside
                     # cryptoswap's machinery, told apart from cryptoswap proper
                     # by whether the maths reproduces the pool's own quote --
                     # never by a list of addresses.
                     build_exact_twocrypto(load.pools, measured, cache=verdicts),
                     build_exact_tricrypto(load.pools, measured, cache=verdicts),
-                    build_exact_vaults(vault_arcs, measured))
+                    build_exact_vaults(vault_arcs, measured),
+                    # Deposits and withdrawals run the same invariant, with `D`
+                    # moving.  Only pools whose swaps already reproduce are
+                    # candidates -- every parameter comes from that model --
+                    # and only those that actually carry an LP arc: LP arcs
+                    # exist where the LP token is itself traded, which is five
+                    # pools on mainnet, and checking all 252 that have a swap
+                    # model cost ~1,000 calls at startup to model 76 nobody
+                    # asks about.
+                    build_exact_lp([p for p in load.pools
+                                    if p.address.lower() in _lp_pools],
+                                   stable, measured))
 
-        exact, two, tri, vaults = _build_models()
+        exact, two, tri, vaults, lp = _build_models()
         trusted = exact.trusted + two.trusted + tri.trusted
-        if len(vaults):
-            print(f"  exact: {len(vaults)}/{vaults.checked} vault direction(s) "
-                  f"computed rather than probed")
+        if len(vaults) or len(lp):
+            print(f"  exact: {len(vaults)}/{vaults.checked} vault direction(s), "
+                  f"{len(lp)}/{lp.checked} LP pool(s) computed rather than probed")
         print(f"  exact: {len(exact)}/{exact.checked + exact.trusted} stableswap, "
               f"{len(two)}/{two.checked + two.trusted} twocrypto, "
               f"{len(tri)}/{tri.checked + tri.trusted} tricrypto "
@@ -747,7 +764,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             print(f"  {WARN} could not write the verdict cache ({exc})")
 
     if exact is not None and (exact or two or tri):
-        client = ExactQuoterClient(client, exact, two, tri, vaults,
+        client = ExactQuoterClient(client, exact, two, tri, vaults, lp,
                                    models_block=rpc.block,
                                    rebuild=_build_models)
     # Gas is priced by default.  Leaving it at zero made every route look free

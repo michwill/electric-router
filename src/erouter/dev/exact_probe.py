@@ -44,6 +44,38 @@ from ..core.types import ArcKind
 from ..core.walk import LegUnquotable, walk_route
 
 
+class _Withdraw:
+    """An LP burn, in the shape every other model answers in.
+
+    The quoter passes the coin to receive as `j` and the LP amount as `dx`,
+    which is what `calc_withdraw_one_coin` takes.
+    """
+
+    __slots__ = ("lp",)
+
+    def __init__(self, lp):
+        self.lp = lp
+
+    def get_dy(self, i: int, j: int, dx: int) -> int:
+        return self.lp.calc_withdraw_one_coin(dx, j)
+
+
+class _Deposit:
+    """A single-sided deposit: `i` is the coin paid in, `dx` the amount."""
+
+    __slots__ = ("lp",)
+
+    def __init__(self, lp):
+        self.lp = lp
+
+    def get_dy(self, i: int, j: int, dx: int) -> int:
+        amounts = [0] * self.lp.n
+        if not (0 <= i < self.lp.n):
+            raise ValueError("coin index out of range")
+        amounts[i] = dx
+        return self.lp.calc_token_amount(amounts, True)
+
+
 @dataclass(slots=True)
 class ExactStats:
     computed: int = 0
@@ -62,8 +94,8 @@ class ExactQuoterClient:
     """Wraps a `QuoterClient`, answering what it can from arithmetic."""
 
     def __init__(self, client, exact, twocrypto=None, tricrypto=None,
-                 vaults=None, *, enabled: bool = True, models_block: int = 0,
-                 rebuild=None):
+                 vaults=None, lp=None, *, enabled: bool = True,
+                 models_block: int = 0, rebuild=None):
         self.client = client
         self.exact = exact
         #: Three-coin crypto pools, whose maths is its own module again.
@@ -75,6 +107,9 @@ class ExactQuoterClient:
         #: one ratio serves every size -- and one direction may reproduce while
         #: the other does not.
         self.vaults = vaults
+        #: Deposits and withdrawals, for pools whose swap model was admitted
+        #: and whose LP arithmetic then reproduced its own answers too.
+        self.lp = lp
         self.enabled = enabled
         self.stats = ExactStats()
         #: The block these models were read at.  Not named `block`: this class
@@ -103,6 +138,8 @@ class ExactQuoterClient:
         self.exact, self.twocrypto, self.tricrypto = built[0], built[1], built[2]
         if len(built) > 3:
             self.vaults = built[3]
+        if len(built) > 4:
+            self.lp = built[4]
         self.models_block = block
         self.stats = ExactStats()
         return (len(self.exact) + len(self.twocrypto or ())
@@ -182,6 +219,14 @@ class ExactQuoterClient:
         """The model that can answer for this pool and direction, if any."""
         if kind in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM):
             return self.vaults.get(pool, kind) if self.vaults is not None else None
+        if self.lp is not None:
+            if kind is ArcKind.WITHDRAW_STABLE:
+                model = self.lp.get(pool)
+                return _Withdraw(model) if model is not None else None
+            if kind in (ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
+                        ArcKind.DEPOSIT_FIXED_NOFLAG):
+                model = self.lp.get(pool)
+                return _Deposit(model) if model is not None else None
         if kind is ArcKind.SWAP_CRYPTO:
             if i == j:
                 return None
