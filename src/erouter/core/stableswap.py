@@ -45,7 +45,7 @@ because the point of this module is to agree with them to the wei.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 PRECISION = 10**18
 FEE_DENOMINATOR = 10**10
@@ -126,13 +126,43 @@ class StableSwap:
     a_precision: int = A_PRECISION
     #: ng takes the fee in `xp` space; legacy takes it in token space.
     fee_on_xp: bool = True
+    #: Lazily filled by `xp` / `xp_float`.  Not part of the value: the pool is
+    #: frozen at a block, so these are a function of it rather than more state.
+    #:
+    #: `init=False` is what keeps them safe.  With it, `dataclasses.replace`
+    #: leaves them at `None` on the copy; without it, replacing the balances
+    #: would carry the old `xp` across and quote the new pool with the old
+    #: reserves.  Nothing does that today, which is exactly why it is worth
+    #: closing now rather than discovering later.
+    _xp: list[int] | None = field(default=None, init=False, compare=False, repr=False)
+    _xpf: list[float] | None = field(default=None, init=False, compare=False,
+                                     repr=False)
 
     @property
     def n(self) -> int:
         return len(self.balances)
 
     def xp(self) -> list[int]:
-        return [b * r // PRECISION for b, r in zip(self.balances, self.rates, strict=True)]
+        """Balances in the common-precision space.
+
+        Cached: the pool is frozen at a block, so this is a constant, and it
+        was being recomputed on every quote -- 1.14 us of integer rescaling
+        against 1.64 us for the invariant it feeds, over ~3,000 calls a route.
+        """
+        got = self._xp
+        if got is None:
+            got = [b * r // PRECISION
+                   for b, r in zip(self.balances, self.rates, strict=True)]
+            object.__setattr__(self, "_xp", got)
+        return got
+
+    def xp_float(self) -> list[float]:
+        """`xp` as floats, cached alongside it for the same reason."""
+        got = self._xpf
+        if got is None:
+            got = [float(v) for v in self.xp()]
+            object.__setattr__(self, "_xpf", got)
+        return got
 
     # ------------------------------------------------------------ invariant
 
@@ -220,7 +250,7 @@ class StableSwap:
         """
         if dx <= 0:
             return 0
-        xp = [float(v) for v in self.xp()]
+        xp = self.xp_float()
         d = d_fast(xp, float(self.amp), float(self.a_precision), self.n)
         x = xp[i] + float(dx) * self.rates[i] / PRECISION
         y = solve_y_fast(float(self.amp), float(self.a_precision), xp, d, i, j, x)

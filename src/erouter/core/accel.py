@@ -120,7 +120,7 @@ def solve_arrays(
     problem = problem_for(g)
     if problem is None:
         return None
-    return problem.solve(
+    got = problem.solve(
         src=int(src),
         dst=int(dst),
         psi_total=float(psi_total),
@@ -135,6 +135,18 @@ def solve_arrays(
         partial_ok=bool(partial_ok),
         rank1=bool(rank1),
     )
+    # The six vectors come back as raw buffers, not lists.  Building a list of
+    # 778 floats is 778 `PyFloat` allocations for numpy to walk afterwards --
+    # 14 us against 0.95 us for `frombuffer`, six times a solve.  Decoded here
+    # rather than at the call sites so the returned mapping still holds arrays.
+    #
+    # The float ones are copied because callers write into `psi`; the masks
+    # convert, which copies anyway.
+    for key in ("psi", "u", "psi_upper", "rho"):
+        got[key] = np.frombuffer(got[key], dtype=np.float64).copy()
+    for key in ("active", "upper"):
+        got[key] = np.frombuffer(got[key], dtype=np.uint8).astype(bool)
+    return got
 
 
 def calibrate_ladder(deltas, quotes, *, delta_bar, structural_flag, drift_tol,

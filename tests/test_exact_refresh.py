@@ -23,6 +23,7 @@ from __future__ import annotations
 import pytest
 
 from erouter.core.pipeline import route
+from erouter.core.types import ArcKind
 from erouter.dev.exact_probe import ExactQuoterClient
 
 from test_session_invariance import (  # noqa: E402
@@ -151,3 +152,29 @@ def test_a_client_without_the_hook_still_routes():
                    amount_in=AMOUNT * UNIT, verify_on_chain=True,
                    measure_impact=False)
     assert result.verified_out
+
+
+def test_the_model_cache_is_dropped_when_the_models_are():
+    """A memo that outlived its models would quote the wrong block.
+
+    `_model` caches `(pool, kind, i, j) -> model` because the lookup cost more
+    than the arithmetic it guards: 8.1 us a call against 1.8 us of maths.  The
+    models are only valid at the block they were read from, so `refresh_at`
+    has to invalidate it -- otherwise the rebuild lands and every leg keeps
+    being priced by the stale object.
+    """
+    first_models = ModelSet(1)
+    later_models = ModelSet(2)
+    client = ExactQuoterClient(
+        MovingQuoter(CURVES_, 1), first_models, models_block=1,
+        rebuild=lambda block: (later_models, None, None),
+    )
+    pool = next(iter(first_models.by_pool))
+    got = client._model(pool, ArcKind.SWAP_STABLE, 0, 1)
+    assert got is not None
+    assert client._model(pool, ArcKind.SWAP_STABLE, 0, 1) is got, "not memoised"
+
+    client.refresh_at(2)
+    again = client._model(pool, ArcKind.SWAP_STABLE, 0, 1)
+    assert again is not got, "the cache survived the rebuild"
+    assert again.generation == 2

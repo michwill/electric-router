@@ -209,9 +209,8 @@ def active_set_solve(
         )
         if got is not None:
             return Solution(
-                np.asarray(got["psi"], float), np.asarray(got["u"], float),
-                np.asarray(got["active"], bool), np.asarray(got["upper"], bool),
-                np.asarray(got["psi_upper"], float), np.asarray(got["rho"], float),
+                got["psi"], got["u"], got["active"], got["upper"],
+                got["psi_upper"], got["rho"],
                 int(got["pivots"]), feasible=bool(got["feasible"]),
                 reason=str(got["reason"]),
             )

@@ -147,3 +147,19 @@ def test_the_float_path_refuses_what_the_integer_path_refuses():
     with pytest.raises(stableswap.StableSwapError):
         stableswap.d_fast([1e24, 0.0], 200.0, 100.0, 2)
     assert pool.get_dy_fast(0, 1, 0) == 0
+
+
+def test_replacing_a_balance_does_not_carry_the_old_reserves():
+    """`xp` is cached because the pool is frozen at a block.
+
+    A copy with different balances is a different pool, so the cache must not
+    travel with it -- `init=False` is what stops `dataclasses.replace` from
+    passing it along and quoting the new reserves with the old ones.
+    """
+    import dataclasses
+
+    pool = _pool([1_000_000 * 10**18, 1_000_000 * 10**18])
+    pool.xp()                                   # fill the cache
+    moved = dataclasses.replace(pool, balances=(2_000_000 * 10**18, 10**24))
+    assert moved.xp() == [2_000_000 * 10**18, 10**24]
+    assert moved.get_dy(0, 1, 10**18) != pool.get_dy(0, 1, 10**18)

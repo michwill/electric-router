@@ -12,7 +12,7 @@
 //! the fiddliest part of shipping a native module.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyTuple};
 
 use crate::solve::{active_set_solve, Arcs, Options};
 
@@ -269,14 +269,37 @@ fn find_cycle(
     Ok(crate::cycles::find_cycle(&tau, &sig, n))
 }
 
+/// `f64` slice as native-endian bytes.
+///
+/// A list of 778 floats is 778 `PyFloat` allocations that numpy then walks
+/// one by one -- 14 us, against 0.95 us for `frombuffer` over the same
+/// numbers.  Six of those per solve was 80 us a solve and the largest piece
+/// of pure overhead left in a quote.
+///
+/// Still no numpy C API on this side: Rust hands over plain `bytes` and the
+/// Python builds the array, so the wheel stays the same one that loads in
+/// Pyodide.
+fn floats<'py>(py: Python<'py>, v: &[f64]) -> Bound<'py, PyBytes> {
+    let mut raw = Vec::with_capacity(v.len() * 8);
+    for x in v {
+        raw.extend_from_slice(&x.to_ne_bytes());
+    }
+    PyBytes::new(py, &raw)
+}
+
+fn flags<'py>(py: Python<'py>, v: &[bool]) -> Bound<'py, PyBytes> {
+    let raw: Vec<u8> = v.iter().map(|&b| b as u8).collect();
+    PyBytes::new(py, &raw)
+}
+
 fn pack<'py>(py: Python<'py>, out: crate::solve::Solution) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("psi", out.psi)?;
-    d.set_item("u", out.u)?;
-    d.set_item("active", out.active)?;
-    d.set_item("upper", out.upper)?;
-    d.set_item("psi_upper", out.psi_upper)?;
-    d.set_item("rho", out.rho)?;
+    d.set_item("psi", floats(py, &out.psi))?;
+    d.set_item("u", floats(py, &out.u))?;
+    d.set_item("active", flags(py, &out.active))?;
+    d.set_item("upper", flags(py, &out.upper))?;
+    d.set_item("psi_upper", floats(py, &out.psi_upper))?;
+    d.set_item("rho", floats(py, &out.rho))?;
     d.set_item("pivots", out.pivots)?;
     d.set_item("chol_failures", out.chol_failures)?;
     d.set_item("keep_changes", out.keep_changes)?;
