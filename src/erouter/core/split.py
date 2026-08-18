@@ -51,9 +51,13 @@ third trip are the three whose coarse curves failed their own check.
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field, replace
 
 import numpy as np
+
+from . import accel as _accel
 
 from . import curves as curve_mod
 from .quoter import MAX_ALL_LEGS, MAX_ROUTES, QuoterClient
@@ -93,6 +97,8 @@ COMBINED_STEPS = (1.0, 0.5, 0.25)
 # No branch may be driven to nothing: that is a topology change, and the point
 # of this pass is that the topology is fixed.
 MIN_WEIGHT = 1e-4
+#: Opt-in on the same switch as the rest of the port.
+_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 # Stop when a round buys less than this.
 TOL_BP = 0.01
 
@@ -603,6 +609,16 @@ def make_evaluator(legs: list[Leg], groups: list[list[int]], curves,
             balances[dst_of[k]] += at_of[k](take)
         return balances[dst_slot]
 
+    # What the compiled ascent needs to run this same walk itself.  Attached
+    # rather than returned so the four `_ascend` call sites are unchanged and
+    # an evaluator from anywhere else simply has no plan and stays in Python.
+    evaluate.plan = dict(
+        curves=[(list(c.x), list(c.u), list(c.slope), c.rate0, c.tail)
+                for c in curves],
+        src_of=src_of, dst_of=dst_of, static_share=list(static),
+        heads=heads, tails=tails, slots=slots, dst_slot=dst_slot,
+        amount_in=start,
+    )
     return evaluate
 
 
@@ -632,6 +648,21 @@ def _ascend(start, evaluate, free, counter, *, iters: int = GOLDEN_ITERS,
     ration round trips.  With the curves in hand an evaluation is microseconds,
     so each coordinate can simply be solved.
     """
+    plan = getattr(evaluate, "plan", None)
+    if _ACCEL_ON and plan is not None and _accel.available():
+        # The whole search crosses once: ~100,000 evaluations run inside, none
+        # of which touch Python.  Porting `Curve.at` alone would have lost --
+        # 0.7 us against a ~2 us crossing -- so the loop comes with it.
+        got = _accel.split_ascend(
+            plan, [np.asarray(w, float).tolist() for w in start],
+            [(int(g), int(j)) for g, j in free],
+            min_weight=MIN_WEIGHT, iters=iters, sweeps=sweeps,
+            window=window, sweep_tol=SWEEP_TOL)
+        if got is not None:
+            rows, value, evaluations = got
+            counter[0] += evaluations
+            return [np.asarray(r, float) for r in rows], value
+
     weights = [w.copy() for w in start]
     best = evaluate(weights)
     for _ in range(sweeps):
@@ -946,6 +977,13 @@ def _search_curves(
     def evaluate(candidate) -> float:
         counter[0] += 1
         return fast(candidate)
+
+    # The wrapper exists only to count, and it must not hide what it wraps:
+    # without this the compiled ascent sees an evaluator it does not recognise
+    # and stays in Python, which is where the whole cost of a wide route sits
+    # -- measured on USDC->WBTC $100k, 25 ascents and 772 ms of the 1,072 ms
+    # split stage, none of it compiled.  `_ascend` keeps the counter itself.
+    evaluate.plan = getattr(fast, "plan", None)
 
     # Several starts, because coordinate ascent finds a local optimum and the
     # model's own split is not a neutral place to begin from.

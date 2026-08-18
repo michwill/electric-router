@@ -222,3 +222,21 @@ def cancel_cycles(tau, sig, psi, tol=1e-12, n_nodes=None):
         None if n_nodes is None else int(n_nodes),
     )
     return np.asarray(flow, float), int(removed)
+
+
+def split_ascend(plan, start, free, *, min_weight, iters, sweeps, window,
+                 sweep_tol):
+    """The split search through the compiled ascent, or `None` if absent.
+
+    `plan` is what `make_evaluator` published: the sampled curves and the leg
+    wiring.  Nothing in the search quotes a pool, which is what lets the whole
+    loop cross in one call rather than per evaluation.
+    """
+    if _rust is None:
+        return None
+    return _rust.split_ascend(
+        plan["curves"], plan["src_of"], plan["dst_of"], plan["static_share"],
+        plan["heads"], plan["tails"], int(plan["slots"]), int(plan["dst_slot"]),
+        float(plan["amount_in"]), start, free, float(min_weight), int(iters),
+        int(sweeps), float(window), float(sweep_tol),
+    )

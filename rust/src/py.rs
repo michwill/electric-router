@@ -292,6 +292,49 @@ fn flags<'py>(py: Python<'py>, v: &[bool]) -> Bound<'py, PyBytes> {
     PyBytes::new(py, &raw)
 }
 
+/// Coordinate ascent over a route's split (§6.4).
+///
+/// Everything crosses once: the sampled curves, the leg wiring and the
+/// starting weights go in, the optimised weights come back.  The search runs
+/// ~100,000 evaluations inside, none of which touch Python.
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+#[pyo3(signature = (curves, src_of, dst_of, static_share, heads, tails, slots,
+                    dst_slot, amount_in, start, free, min_weight, iters,
+                    sweeps, window, sweep_tol))]
+fn split_ascend<'py>(
+    py: Python<'py>,
+    curves: Vec<(Vec<f64>, Vec<f64>, Vec<f64>, f64, f64)>,
+    src_of: Vec<usize>,
+    dst_of: Vec<usize>,
+    static_share: Vec<Option<f64>>,
+    heads: Vec<Vec<usize>>,
+    tails: Vec<usize>,
+    slots: usize,
+    dst_slot: usize,
+    amount_in: f64,
+    start: Vec<Vec<f64>>,
+    free: Vec<(usize, usize)>,
+    min_weight: f64,
+    iters: usize,
+    sweeps: usize,
+    window: f64,
+    sweep_tol: f64,
+) -> PyResult<(Vec<Vec<f64>>, f64, usize)> {
+    let plan = crate::split::Plan {
+        curves: curves
+            .into_iter()
+            .map(|(x, u, slope, rate0, tail)| crate::split::Curve { x, u, slope, rate0, tail })
+            .collect(),
+        src_of, dst_of, static_share, heads, tails, slots, dst_slot, amount_in,
+        min_weight,
+    };
+    let got = py.allow_threads(|| {
+        crate::split::ascend(&plan, &start, &free, iters, sweeps, window, sweep_tol)
+    });
+    Ok((got.weights, got.best, got.evaluations))
+}
+
 fn pack<'py>(py: Python<'py>, out: crate::solve::Solution) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("psi", floats(py, &out.psi))?;
@@ -316,6 +359,7 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(calibrate, m)?)?;
     m.add_function(wrap_pyfunction!(cancel_cycles, m)?)?;
     m.add_function(wrap_pyfunction!(find_cycle, m)?)?;
+    m.add_function(wrap_pyfunction!(split_ascend, m)?)?;
     m.add_class::<Problem>()?;
     m.add("__doc__", "The router's active-set QP, in Rust.")?;
     Ok(())
