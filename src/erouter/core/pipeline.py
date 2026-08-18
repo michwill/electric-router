@@ -100,11 +100,6 @@ THETA_ESCALATE = 0.10
 # something below it, and the origin is free.
 THETA_LADDER: tuple[float, ...] = (0.25, 0.5, 1.0)
 
-#: How many computable arcs get the trade-sized re-fit, deepest first.  Not a
-#: round-trip budget -- these cost none -- but a CPU one: at 15-30 us a re-fit
-#: the unbounded set was ~1,500 `calibrate` calls and ~15% of a warm quote.
-REFINE_FREE_CAP = 120
-
 # §12.4's flow-conservation gate, in two terms -- see `_kcl_tolerance`.
 KCL_RELATIVE = 1e-8
 KCL_ABSOLUTE = 1e-9
@@ -753,29 +748,13 @@ def _quote(
         # decided the answer.
         #
         # Where the pool's own invariant can be evaluated (see
-        # `dev/exact_probe.py`) there is no round trip, so the shortlist can be
-        # wider -- but not unbounded.  "No round trip" is not "no cost": at
-        # 15-30 us a re-fit, taking every computable arc meant ~800 of them and
-        # ~1,500 `calibrate` calls a quote, measured at ~15% of a warm quote,
-        # for arcs the solve could never reach.
-        #
-        # So widen by *reachability* instead: an arc can only enter the basis
-        # if it touches a node the seeded subgraph already reaches, so those
-        # get the trade-sized fit and the rest keep their coarse one.  That
-        # keeps the property this was introduced for -- the arcs that can carry
-        # flow are fitted where the flow lands, not near zero -- without paying
-        # for the ones that cannot.
+        # `dev/exact_probe.py`), that cost is 15 us and no round trip, so there
+        # is no reason to be selective: re-fit all of them at this trade's
+        # size, every quote.  The rest keep the shortlist, because for them the
+        # round trip is real.
         computes = getattr(client, "computes", None)
         if computes is not None:
-            # Reachability does not discriminate here -- the universe is a
-            # hub of major stablecoins and the seed touches them, so all but 8
-            # of ~500 computable arcs are one hop from it (measured).  What
-            # does discriminate is depth: an arc in a pool too thin to take a
-            # meaningful share of this trade cannot change the answer, and
-            # re-fitting it is the bulk of the work.
-            ranked = sorted((a for a in arcs if computes(a.pool)),
-                            key=lambda a: -a.tvl_usd)
-            free = {a.id for a in ranked[:REFINE_FREE_CAP]}
+            free = {a.id for a in arcs if computes(a.pool)}
             result.counters["arcs_refined_free"] = len(free - wanted)
             wanted |= free
         # Sample where the flow will land, not near zero.  `Psi / nu[tau]` is
