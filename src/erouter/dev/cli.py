@@ -535,19 +535,50 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
 STALE_TOL_BP = 0.5
 
 
-def _confirm_against_chain(result, rpc, chain, evm, nodes, pools, quiet=False):
+def _sent_to_chain(client) -> int | None:
+    """Routes this client has had to hand to the chain, ever, or `None`.
+
+    A quote that leaves this unchanged was answered entirely from the exact
+    models, and `walk.py` never touched the EVM to do it.  `None` means the
+    client does not report it -- a plain quoter prices every leg through the
+    EVM -- and the honest reading of that is "assume it did".
+    """
+    stats = getattr(client, "stats", None)
+    if stats is None or not hasattr(stats, "sent_routes"):
+        return None
+    return int(stats.sent_routes)
+
+
+def _chain_was_used(client, before: int | None) -> bool:
+    """Whether this quote had to ask the chain for anything at all."""
+    now = _sent_to_chain(client)
+    return before is None or now is None or now > before
+
+
+def _confirm_against_chain(result, rpc, chain, evm, nodes, pools, quiet=False,
+                           *, used_chain: bool = True):
     """Quote the chosen legs on-chain and say so if the local EVM disagreed.
 
     The local EVM is exact when its state is complete, so a disagreement is a
     statement about the prefetch, not about the route.  One `eth_call` to the
     quoter -- the only address a scoped key need allow -- turns a silent few
     basis points into something that repairs itself.
+
+    `used_chain` is that sentence read backwards.  When every candidate was
+    priced by the exact models -- `ExactQuoterClient` walked them and sent
+    nothing -- no EVM state was consulted, so there is no prefetch for this
+    call to be checking and it is a round trip spent to confirm arithmetic
+    against itself.  Measured on crvUSD->sDOLA, that is every quote up to
+    $100,000: 0 routes sent, and a confirmation costing 170-340 ms against a
+    227-296 ms route, which agreed and learned nothing every time.  Above
+    that the models start refusing sizes, the EVM answers, and the check
+    earns its keep again.
     """
     from ..core.pipeline import build_arcs
     from .boa_host import quoter_client
 
     route = result.route
-    if route is None or evm is None:
+    if route is None or evm is None or not used_chain:
         return result
     legs = [rl.leg for rl in route.legs]
     amounts, slots = [result.amount_in], [route.dst_slot]
@@ -792,6 +823,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     if args.amount_wei:
         amount_in = int(args.amount_wei)
 
+    sent_before = _sent_to_chain(client)
     try:
         result = route(
             load.pools, nodes, client,
@@ -810,7 +842,9 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} no route: {exc}")
         return 2
 
-    if _confirm_against_chain(result, rpc, chain, evm, nodes, load.pools) is None:
+    if _confirm_against_chain(result, rpc, chain, evm, nodes, load.pools,
+                              used_chain=_chain_was_used(client, sent_before)
+                              or args.confirm) is None:
         try:
             result = route(
                 load.pools, nodes, client,
@@ -891,6 +925,7 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
             continue
 
         started = time.monotonic()
+        sent_before = _sent_to_chain(client)
         try:
             result = route(
                 load.pools, nodes, client,
@@ -912,9 +947,10 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
         # quote is already computed, and it was landing in `rest` where it
         # looked like unattributed Python.
         _confirm_started = time.monotonic()
-        _confirmed = _confirm_against_chain(result, rpc, chain,
-                                            getattr(client, "transport", None),
-                                            nodes, load.pools)
+        _confirmed = _confirm_against_chain(
+            result, rpc, chain, getattr(client, "transport", None),
+            nodes, load.pools,
+            used_chain=_chain_was_used(client, sent_before) or args.confirm)
         result.timings["confirm"] = (time.monotonic() - _confirm_started) * 1000
         if _confirmed is None:
             result = route(load.pools, nodes, client, src_token=src, dst_token=dst,
@@ -2124,6 +2160,10 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd.add_argument(
         "--timings", action="store_true",
         help="print where the quote's milliseconds went, and which solver ran")
+    route_cmd.add_argument(
+        "--confirm", action="store_true",
+        help="re-quote the chosen route on-chain even when every leg was "
+             "priced by the exact models (one round trip, ~170 ms)")
     route_cmd.add_argument(
         "--max-legs", type=int, default=32,
         help="reject routes with more legs than this. The quoter can price 128; "
