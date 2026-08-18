@@ -87,3 +87,27 @@ def test_a_bigger_withdrawal_pays_proportionally_less_per_lp():
     small = lp().calc_withdraw_one_coin(SUPPLY // 10_000, 0)
     large = lp().calc_withdraw_one_coin(SUPPLY // 100, 0)
     assert large / 100 < small, "a 1% exit should price worse per LP than 0.01%"
+
+
+# --------------------------------------------------- the float fast path
+
+@pytest.mark.parametrize("frac", [1e-6, 1e-4, 1e-2, 0.1])
+def test_the_float_deposit_tracks_the_integer_one(frac):
+    pool_lp = lp()
+    dx = int(pool_lp.pool.balances[0] * frac)
+    amounts = [dx if k == 0 else 0 for k in range(pool_lp.n)]
+    exact = pool_lp.calc_token_amount(amounts, True)
+    fast = pool_lp.calc_token_amount_fast(amounts, True)
+    assert exact > 0
+    assert abs(fast / exact - 1.0) * 1e4 < 0.01
+
+
+@pytest.mark.parametrize("frac", [1e-6, 1e-4, 1e-2, 0.1])
+def test_the_float_withdrawal_tracks_the_integer_one(frac):
+    """The imbalance fee stays integer; only the invariants move to floats."""
+    pool_lp = lp()
+    burn = int(pool_lp.total_supply * frac)
+    exact = pool_lp.calc_withdraw_one_coin(burn, 0)
+    fast = pool_lp.calc_withdraw_one_coin_fast(burn, 0)
+    assert exact > 0
+    assert abs(fast / exact - 1.0) * 1e4 < 0.01

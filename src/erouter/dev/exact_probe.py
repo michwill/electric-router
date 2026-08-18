@@ -59,6 +59,9 @@ class _Withdraw:
     def get_dy(self, i: int, j: int, dx: int) -> int:
         return self.lp.calc_withdraw_one_coin(dx, j)
 
+    def get_dy_fast(self, i: int, j: int, dx: int) -> int:
+        return self.lp.calc_withdraw_one_coin_fast(dx, j)
+
 
 class _Deposit:
     """A single-sided deposit: `i` is the coin paid in, `dx` the amount."""
@@ -74,6 +77,13 @@ class _Deposit:
             raise ValueError("coin index out of range")
         amounts[i] = dx
         return self.lp.calc_token_amount(amounts, True)
+
+    def get_dy_fast(self, i: int, j: int, dx: int) -> int:
+        amounts = [0] * self.lp.n
+        if not (0 <= i < self.lp.n):
+            raise ValueError("coin index out of range")
+        amounts[i] = dx
+        return self.lp.calc_token_amount_fast(amounts, True)
 
 
 @dataclass(slots=True)

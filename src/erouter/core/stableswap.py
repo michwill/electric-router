@@ -342,6 +342,36 @@ def solve_y_d(amp: int, a_precision: int, xp: list[int], d: int, i: int,
     raise StableSwapError("y_D did not converge")
 
 
+def solve_y_d_fast(amp: float, a_precision: float, xp: list[float], d: float,
+                   i: int, n: int) -> float:
+    """`get_y_D`, in floating point.
+
+    Same quadratic as `solve_y_d`, same `c` and `b` built from the target `D`;
+    balances and `D` are dollars, so the `a_precision` scalings ride along
+    unchanged and nothing needs a 1e18.
+    """
+    ann = amp * n
+    c = d
+    s = 0.0
+    for k in range(n):
+        if k == i:
+            continue
+        x = xp[k]
+        if x <= 0.0:
+            raise StableSwapError("empty balance")
+        s += x
+        c = c * d / (x * n)
+    c = c * d * a_precision / (ann * n)
+    b = s + d * a_precision / ann
+    y = d
+    for _ in range(MAX_ITER):
+        prev = y
+        y = (y * y + c) / (2 * y + b - d)
+        if abs(y - prev) <= _FAST_TOL * y:
+            return y
+    raise StableSwapError("y_D did not converge")
+
+
 @dataclass(frozen=True, slots=True)
 class StableSwapLP:
     """A pool's LP arcs: what a deposit mints and a withdrawal returns.
@@ -388,6 +418,56 @@ class StableSwapLP:
         d1 = after.d()
         diff = d1 - d0 if deposit else d0 - d1
         return diff * self.total_supply // d0
+
+    def calc_token_amount_fast(self, amounts: list[int], deposit: bool) -> int:
+        """`calc_token_amount`, with the two invariants solved in floats."""
+        if self.total_supply <= 0:
+            raise StableSwapError("no supply")
+        p = self.pool
+        rates = p.rates
+        xp0 = [float(b) * r / PRECISION for b, r in zip(p.balances, rates, strict=True)]
+        d0 = d_fast(xp0, float(p.amp), float(p.a_precision), p.n)
+        moved = list(p.balances)
+        for k, amount in enumerate(amounts):
+            if deposit:
+                moved[k] += amount
+            else:
+                if amount > moved[k]:
+                    raise StableSwapError("withdrawing more than the pool holds")
+                moved[k] -= amount
+        xp1 = [float(b) * r / PRECISION for b, r in zip(moved, rates, strict=True)]
+        d1 = d_fast(xp1, float(p.amp), float(p.a_precision), p.n)
+        diff = d1 - d0 if deposit else d0 - d1
+        return int(diff * self.total_supply / d0)
+
+    def calc_withdraw_one_coin_fast(self, token_amount: int, i: int) -> int:
+        """`calc_withdraw_one_coin`, with the invariants solved in floats.
+
+        The imbalance fee is the contract's own integer expression and stays
+        one: it is three operations, not a loop.
+        """
+        if self.total_supply <= 0:
+            raise StableSwapError("no supply")
+        if not (0 <= i < self.n):
+            raise StableSwapError("coin index out of range")
+        p = self.pool
+        n = self.n
+        fee = p.fee * n // (4 * (n - 1))
+        xp = [float(v) for v in self._xp()]
+        amp, ap = float(p.amp), float(p.a_precision)
+        d0 = d_fast(xp, amp, ap, n)
+        d1 = d0 - float(token_amount) * d0 / self.total_supply
+        new_y = solve_y_d_fast(amp, ap, xp, d1, i, n)
+
+        reduced = list(xp)
+        for j in range(n):
+            if j == i:
+                expected = xp[j] * d1 / d0 - new_y
+            else:
+                expected = xp[j] - xp[j] * d1 / d0
+            reduced[j] -= fee * expected / FEE_DENOMINATOR
+        dy = reduced[i] - solve_y_d_fast(amp, ap, reduced, d1, i, n)
+        return int((dy - 1.0) * PRECISION / p.rates[i])
 
     def calc_withdraw_one_coin(self, token_amount: int, i: int) -> int:
         """Coin `i` returned for burning `token_amount` of LP."""
