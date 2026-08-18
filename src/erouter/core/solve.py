@@ -51,17 +51,21 @@ CYCLE_PATIENCE = 3
 # The compiled solve is **opt-in**, and stays that way until it agrees with the
 # reference on the paths that matter.
 #
-# It reproduces this function exactly on problems that converge cleanly -- six
-# shaped cases, twelve fuzzed graphs, all to 1e-12 -- and that is precisely the
-# set a unit test reaches.  On real quotes it still differs: USDC->WETH $20M
-# returned 9,052 WETH through Python and 4,681 through Rust, because the
-# divergence lives on the paths a clean problem never takes (cycling under
-# Bland's rule, `maxit` exhaustion, the `PARTIAL` return).  Those are the paths
-# a $20M trade over 25 legs takes every time.
+# It is now much faster and much closer than it was.  Replaying 94 problems
+# taken straight off a live quote, it takes the identical number of pivots on
+# 93 and agrees on feasibility on all 94; USDC->WETH at $1M returns the same
+# integer.  Per pivot it costs 23.8us against numpy's 130us, so a warm
+# crvUSD->sDOLA quote spends 53ms in the solver rather than 240ms.
 #
-# It is also not yet faster end to end: 0.9x on four of five real quotes, since
-# the solve is about a quarter of a warm quote and marshalling the arrays costs
-# what the arithmetic saves.
+# What it still does not reproduce is the degenerate tail.  At $20M the
+# reference itself converges cleanly on 9 of 86 subproblems -- 55 come back
+# PARTIAL, 14 refuse a detached pin, two cycle under Bland's rule -- and once
+# there is no clean optimum to agree on, the two implementations wander
+# differently: pivot counts match on 32 of 86, and the quote lands 113 to 315
+# bp apart on USDC->WETH, USDC->WBTC and crvUSD->sDOLA.  Those sizes sit at
+# theta in the hundreds of percent, where the model is out of its range
+# anyway, but "the answer depends on which solver ran" is not a property to
+# ship.
 #
 # So `EROUTER_ACCEL=1` opts in, for developing the port and running the
 # differential.  Nothing else uses it.

@@ -46,12 +46,14 @@ def problem_for(g):
     Cached on the `ArcArrays` itself, keyed by `id` of the arrays it was built
     from, so a graph that is rebuilt (a new block, a re-fit) gets a new problem
     rather than a stale one.  `ArcArrays` is frozen in practice but not by
-    construction, hence the key rather than a plain attribute.
+    construction, hence the key rather than a plain attribute.  It carries an
+    `accel` field for this: `slots=True` leaves nowhere else to put it, and the
+    version that wrote through `object.__setattr__` never cached anything.
     """
     if _rust is None:
         return None
     key = (id(g.tau), id(g.sig), id(g.G), id(g.eps), id(g.cap))
-    got = getattr(g, "_rust_problem", None)
+    got = g.accel
     if got is not None and got[0] == key:
         return got[1]
     cap = [float(v) if math.isfinite(v) else math.inf
@@ -65,7 +67,7 @@ def problem_for(g):
         int(g.n_nodes),
     )
     try:
-        object.__setattr__(g, "_rust_problem", (key, problem))
+        g.accel = (key, problem)
     except (AttributeError, TypeError):  # a graph that will not hold it
         pass
     return problem

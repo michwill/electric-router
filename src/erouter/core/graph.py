@@ -103,6 +103,12 @@ class ArcArrays:
     # index -> original arc indices (a merged duplicate group has several)
     sources: list[list[int]] = field(default_factory=list)
     dropped: dict[int, str] = field(default_factory=dict)
+    # Somewhere for an accelerator to keep a resident copy of this graph
+    # across the ~90 solves one quote runs over it.  `slots=True` means there
+    # is otherwise nowhere to put it, and the attempt fails silently: the
+    # cache measured 0 hits in 132 solves and re-packed the arcs every time.
+    # Not part of the value -- excluded from `__eq__` and `repr`.
+    accel: object | None = field(default=None, repr=False, compare=False)
 
     @property
     def m(self) -> int:

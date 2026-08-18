@@ -13,54 +13,68 @@
 //! LU rather than failing, because the graph deliberately tolerates
 //! `MAX_CONDITION = 1e12` and near-singular is not the same as wrong.
 //!
-//! Written column-major-ish in the inner loop so the hot accumulation walks
-//! contiguous memory; at n = 224, which is where the measured work is, that
-//! ordering is worth several times the naive row-at-a-time version.
+//! The factor is stored **transposed**: the array holds `U = L^T` in the upper
+//! triangle, row-major.  That is not a detail -- it is what decides the speed.
+//! Two of the four hot loops walk the factor by column, and with `L` stored
+//! row-major those strides are `n` apart, so every access is its own cache
+//! line.  Holding `U` instead turns all four into contiguous row walks: the
+//! right-looking factorisation writes rows, the rank-1 update sweeps a row per
+//! column of `L`, and the two substitutions take the axpy and dot forms
+//! respectively.  Measured on a live quote, the back-substitution was running
+//! at about a quarter of the arithmetic it should have been.
 
-/// Factorise `a` (row-major, `n x n`, lower triangle used) in place as `L L^T`.
-/// Returns false if a pivot is not positive -- the caller should fall back.
+/// Factorise the symmetric `a` (row-major, `n x n`) in place, leaving `U = L^T`
+/// in its upper triangle.  Returns false if a pivot is not positive -- the
+/// caller should fall back.
+///
+/// Right-looking, so the trailing update reads two rows of `U` and writes a
+/// row of the remaining matrix.  The classic left-looking form would read a
+/// column per inner product instead.
 pub fn factor(a: &mut [f64], n: usize) -> bool {
-    for j in 0..n {
-        // Diagonal: a[j][j] - sum_k L[j][k]^2
-        let mut diag = a[j * n + j];
-        for k in 0..j {
-            let v = a[j * n + k];
-            diag -= v * v;
-        }
+    for k in 0..n {
+        let diag = a[k * n + k];
         if !(diag > 0.0) || !diag.is_finite() {
             return false;
         }
         let d = diag.sqrt();
-        a[j * n + j] = d;
+        a[k * n + k] = d;
         let inv = 1.0 / d;
-        // Column below the diagonal.  `i` outer, `k` inner keeps both rows
-        // contiguous, which is what the naive ordering gives up.
-        for i in (j + 1)..n {
-            let mut sum = a[i * n + j];
-            for k in 0..j {
-                sum -= a[i * n + k] * a[j * n + k];
+        for j in (k + 1)..n {
+            a[k * n + j] *= inv;
+        }
+        // Trailing submatrix, upper triangle only.
+        for i in (k + 1)..n {
+            let u_ki = a[k * n + i];
+            if u_ki == 0.0 {
+                continue;
             }
-            a[i * n + j] = sum * inv;
+            for j in i..n {
+                a[i * n + j] -= u_ki * a[k * n + j];
+            }
         }
     }
     true
 }
 
-/// Solve `L L^T x = b` in place, given `factor` has run.
+/// Solve `L L^T x = b` in place, given `factor` has run and left `U = L^T`.
 pub fn solve_factored(a: &[f64], b: &mut [f64], n: usize) {
-    // Forward: L y = b
-    for i in 0..n {
-        let mut sum = b[i];
-        for k in 0..i {
-            sum -= a[i * n + k] * b[k];
+    // Forward, `L y = b`, in axpy form: `L[i][k] = U[k][i]`, so eliminating
+    // column `k` sweeps row `k` of `U`.
+    for k in 0..n {
+        let y = b[k] / a[k * n + k];
+        b[k] = y;
+        if y == 0.0 {
+            continue;
         }
-        b[i] = sum / a[i * n + i];
+        for i in (k + 1)..n {
+            b[i] -= a[k * n + i] * y;
+        }
     }
-    // Back: L^T x = y
+    // Back, `U x = y`, in dot form: row `i` of `U`, contiguous.
     for i in (0..n).rev() {
         let mut sum = b[i];
-        for k in (i + 1)..n {
-            sum -= a[k * n + i] * b[k];
+        for j in (i + 1)..n {
+            sum -= a[i * n + j] * b[j];
         }
         b[i] = sum / a[i * n + i];
     }
@@ -127,9 +141,9 @@ pub fn update(l: &mut [f64], n: usize, x: &mut [f64]) {
         let s = xk / lkk;
         l[k * n + k] = r;
         for i in (k + 1)..n {
-            let lik = (l[i * n + k] + s * x[i]) / c;
+            let lik = (l[k * n + i] + s * x[i]) / c;
             x[i] = c * x[i] - s * lik;
-            l[i * n + k] = lik;
+            l[k * n + i] = lik;
         }
     }
 }
@@ -154,9 +168,9 @@ pub fn downdate(l: &mut [f64], n: usize, x: &mut [f64]) -> bool {
         let s = xk / lkk;
         l[k * n + k] = r;
         for i in (k + 1)..n {
-            let lik = (l[i * n + k] - s * x[i]) / c;
+            let lik = (l[k * n + i] - s * x[i]) / c;
             x[i] = c * x[i] - s * lik;
-            l[i * n + k] = lik;
+            l[k * n + i] = lik;
         }
     }
     true
@@ -172,7 +186,7 @@ mod update_tests {
             for j in 0..n {
                 let mut s = 0.0;
                 for k in 0..=i.min(j) {
-                    s += l[i * n + k] * l[j * n + k];
+                    s += l[k * n + i] * l[k * n + j];
                 }
                 a[i * n + j] = s;
             }
