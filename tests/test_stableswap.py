@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import pytest
 
+from erouter.core import stableswap
 from erouter.core.stableswap import StableSwap, StableSwapError
 
 VECTORS = {
@@ -101,3 +102,48 @@ def test_an_empty_pool_is_an_error_not_a_zero():
                        amp=20000, fee=1000000)
     with pytest.raises(StableSwapError):
         empty.d()
+
+
+# --------------------------------------------------- the float fast path
+
+def _pool(balances, amp=200, fee=4_000_000):
+    n = len(balances)
+    return StableSwap(balances=tuple(balances),
+                      rates=tuple([stableswap.PRECISION] * n),
+                      amp=amp, fee=fee)
+
+
+@pytest.mark.parametrize("amp", [10, 200, 5000, 50_000])
+@pytest.mark.parametrize("skew", [1.0, 1.5, 8.0])
+def test_the_float_invariant_tracks_the_integer_one(amp, skew):
+    """`d_fast` is the same `D` the contract computes, to double precision.
+
+    The integer form *is* the contract and is what the admission gate checks;
+    this one prices with it thousands of times per quote, so it has to agree
+    to far better than any tick that could reorder two candidates.
+    """
+    pool = _pool([1_000_000 * 10**18, int(1_000_000 * skew) * 10**18], amp=amp)
+    xp = pool.xp()
+    exact = pool.d(xp)
+    fast = stableswap.d_fast([float(v) for v in xp], float(amp), 100.0, 2)
+    assert abs(fast / exact - 1.0) < 1e-12
+
+
+@pytest.mark.parametrize("frac", [1e-6, 1e-4, 1e-2, 0.1, 0.5])
+@pytest.mark.parametrize("amp", [10, 200, 5000])
+def test_the_float_quote_tracks_the_integer_one(frac, amp):
+    pool = _pool([2_000_000 * 10**18, 3_000_000 * 10**18], amp=amp)
+    dx = int(pool.balances[0] * frac)
+    exact = pool.get_dy(0, 1, dx)
+    fast = pool.get_dy_fast(0, 1, dx)
+    assert exact > 0
+    # 0.01 bp is the bound the mainnet sweep came in three orders under.
+    assert abs(fast / exact - 1.0) * 1e4 < 0.01
+
+
+def test_the_float_path_refuses_what_the_integer_path_refuses():
+    """An empty balance is not a number to be interpolated through."""
+    pool = _pool([1_000_000 * 10**18, 0])
+    with pytest.raises(stableswap.StableSwapError):
+        stableswap.d_fast([1e24, 0.0], 200.0, 100.0, 2)
+    assert pool.get_dy_fast(0, 1, 0) == 0

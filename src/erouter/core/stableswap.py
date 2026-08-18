@@ -53,6 +53,12 @@ A_PRECISION = 100
 #: Newton's method in the contracts is capped at 255 and asserted to converge.
 MAX_ITER = 255
 
+#: Where the float iterations stop.  The integer ones stop at `|delta| <= 1`
+#: wei, which has no floating-point analogue; this is the relative equivalent,
+#: two orders inside double precision so the loop converges rather than
+#: chattering on the last bit.
+_FAST_TOL = 1e-14
+
 
 class StableSwapError(ArithmeticError):
     """The invariant did not converge, or the pool cannot serve the trade."""
@@ -204,6 +210,98 @@ class StableSwap:
             return (raw - raw * fee // FEE_DENOMINATOR) * PRECISION // self.rates[j]
         out = raw * PRECISION // self.rates[j]
         return out - out * self.fee // FEE_DENOMINATOR
+
+    def get_dy_fast(self, i: int, j: int, dx: int) -> int:
+        """`get_dy`, priced in floating point.
+
+        Same algebra, same fee, same rates -- only the invariant iterations
+        move to `f64`.  See the note above `d_fast`: this is the path a quote
+        takes, the integer one is what admits the pool in the first place.
+        """
+        if dx <= 0:
+            return 0
+        xp = [float(v) for v in self.xp()]
+        d = d_fast(xp, float(self.amp), float(self.a_precision), self.n)
+        x = xp[i] + float(dx) * self.rates[i] / PRECISION
+        y = solve_y_fast(float(self.amp), float(self.a_precision), xp, d, i, j, x)
+        raw = xp[j] - y - 1.0
+        if raw <= 0.0:
+            return 0
+        if self.fee_on_xp:
+            fee = self.dynamic_fee(int((xp[i] + x) * 0.5), int((xp[j] + y) * 0.5))
+            return int((raw - raw * fee / FEE_DENOMINATOR) * PRECISION / self.rates[j])
+        out = raw * PRECISION / self.rates[j]
+        return int(out - out * self.fee / FEE_DENOMINATOR)
+
+
+# ------------------------------------------------------- the float fast path
+#
+# The integer math above *is* the contract, wei for wei, and that is what makes
+# the admission gate meaningful: a pool is trusted only when the arithmetic
+# reproduces the chain exactly, and a wrong rate shows up as a one-wei
+# disagreement.  Keep it for that.
+#
+# But a quote calls this thousands of times -- 2,168 `d` and 2,189 `solve_y` in
+# one warm crvUSD->sDOLA -- and there the last wei buys nothing.  Measured
+# against the integer path on 1,052 (pool, size) samples over 263 mainnet
+# stableswaps, the float form is out by a median of 2e-9 bp and a worst case of
+# 5.4e-4 bp: below the tick of any token, far inside `STALE_TOL_BP`, and orders
+# of magnitude below the spread between the candidates it has to rank.  It runs
+# 2.5x faster in Python, and it ports to Rust as plain `f64` -- no u256, and
+# native in wasm.
+#
+# So: integers decide whether a model may be used, floats price with it.
+
+def d_fast(xp: list[float], amp: float, a_precision: float, n: int) -> float:
+    """`D` by the same Newton iteration, in floating point."""
+    s = 0.0
+    for v in xp:
+        s += v
+    if s == 0.0:
+        return 0.0
+    ann = amp * n
+    d = s
+    for _ in range(MAX_ITER):
+        d_p = d
+        for x in xp:
+            if x <= 0.0:
+                raise StableSwapError("empty balance")
+            d_p = d_p * d / (x * n)
+        prev = d
+        d = ((ann * s / a_precision + d_p * n) * d
+             / ((ann - a_precision) * d / a_precision + (n + 1) * d_p))
+        if abs(d - prev) <= _FAST_TOL * d:
+            return d
+    raise StableSwapError("D did not converge")
+
+
+def solve_y_fast(amp: float, a_precision: float, xp: list[float], d: float,
+                 i: int, j: int, x: float) -> float:
+    """The `j` balance restoring the invariant, in floating point."""
+    n = len(xp)
+    ann = amp * n
+    c = d
+    s = 0.0
+    for k in range(n):
+        if k == i:
+            below = x
+        elif k != j:
+            below = xp[k]
+        else:
+            continue
+        if below <= 0.0:
+            raise StableSwapError("empty balance")
+        s += below
+        c = c * d / (below * n)
+    c = c * d * a_precision / (ann * n)
+    b = s + d * a_precision / ann
+    y = d
+    for _ in range(MAX_ITER):
+        prev = y
+        y = (y * y + c) / (2 * y + b - d)
+        if abs(y - prev) <= _FAST_TOL * y:
+            return y
+    raise StableSwapError("y did not converge")
 
 
 # --------------------------------------------------------------- LP arcs

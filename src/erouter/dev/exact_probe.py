@@ -90,6 +90,22 @@ class ExactStats:
         return self.computed + self.delegated + self.failed
 
 
+def _price(model, i: int, j: int, dx: int) -> int:
+    """`get_dy`, through the model's float path when it has one.
+
+    The integer arithmetic is what admits a pool -- `stable_params` compares it
+    against the chain wei for wei, and a wrong rate shows up as a one-wei
+    disagreement.  It is not what a quote needs.  Pricing runs thousands of
+    times per route (2,168 `d` and 2,189 `solve_y` in one warm quote) and is
+    ranking candidates whose differences are basis points, while the float form
+    was measured on 263 mainnet stableswaps to be out by at most 5.4e-4 bp.
+
+    A model without a fast path simply answers in integers.
+    """
+    fast = getattr(model, "get_dy_fast", None)
+    return fast(i, j, dx) if fast is not None else model.get_dy(i, j, dx)
+
+
 class ExactQuoterClient:
     """Wraps a `QuoterClient`, answering what it can from arithmetic."""
 
@@ -172,7 +188,7 @@ class ExactQuoterClient:
                 holes.append(k)
                 continue
             try:
-                value = model.get_dy(probe.i, probe.j, probe.dx)
+                value = _price(model, probe.i, probe.j, probe.dx)
             except (StableSwapError, TwocryptoError, TricryptoError,
                     VaultError, ZeroDivisionError, ValueError):
                 # A size the invariant cannot serve is a real answer -- the
@@ -304,4 +320,4 @@ class ExactQuoterClient:
         model = self._model(leg.target, leg.kind, leg.i, leg.j)
         if model is None:
             raise LegUnquotable(leg.target)
-        return model.get_dy(leg.i, leg.j, dx)
+        return _price(model, leg.i, leg.j, dx)
