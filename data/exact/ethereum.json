@@ -1,6 +1,6 @@
 {
  "chain_id": 1,
- "fingerprint": "7b9e54f16380ab80",
+ "fingerprint": "430aea16eba7b049",
  "verdicts": {
   "0x017433c8be1ce841d2d1b9bffd577a6b74cf302c": {
    "family": "twocrypto",
@@ -614,6 +614,11 @@
    "legacy_pool": false,
    "stable": true,
    "v21": true
+  },
+  "0x57690e5287d36733664caa21fa2dc48c156e962d": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported"
   },
   "0x579a9a9d43f9c112dee359e09a87a44f2718a483": {
    "family": "stable",

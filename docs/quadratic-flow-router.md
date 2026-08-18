@@ -1138,6 +1138,138 @@ Split **proportional to conductance**, hence to `TVL` for CPMM. Verify against b
 
 ---
 
+## Appendix E — Measured implementation notes
+
+Numbers taken on mainnet against the committed drpc key unless stated. They are
+recorded because several are counter-intuitive and were each arrived at by
+reversing an assumption that looked obviously right.
+
+### E.1 Exact evaluation replaces probing where the pool proves it
+
+A pool whose own parameters reproduce its own `get_dy` to the wei is computed
+rather than probed (§11.3). Nothing is decided by pool type or by an address
+list: every model is built, the pool is quoted for real, and the model is kept
+only if it agrees at every check point in both directions. That rule is what
+tells twocrypto's FX Swaps (stableswap invariant, cryptoswap machinery) from
+cryptoswap proper without an address list that would rot.
+
+    stableswap        261 / 266        vault directions   44 / 48
+    twocrypto          84 /  92        LP pools            4 /  5
+    tricrypto          13 /  13
+
+The remainder are named rather than trusted: pools with a `POLICY` contract
+whose fee varies with trade size, pools mid-A/gamma-ramp needing `newton_D`,
+and stableswap-ng's dynamic per-coin LP fee.
+
+**Vaults and LP arcs are the same idea at the two ends of the range.** At a
+pinned block an ERC4626 vault is `out = in * S / A` — no curve, one ratio per
+direction. Two things it is *not* safe to assume: the rounding convention
+(OpenZeppelin carries a virtual offset `(S+1)/(A+1)`), and that the two
+directions agree — three of ten mainnet vaults reproduce one direction and not
+the other, because a vault can price a deposit cleanly and charge on the way
+out. LP arcs run the same invariant with `D` moving (`solve_y_D`), where the
+deployed source settles that `calc_token_amount` takes **no** fee while
+`calc_withdraw_one_coin` charges on each coin's imbalance and returns one wei
+less.
+
+The payoff is not the arithmetic, which is ~2.5% of a quote. It is that a
+candidate route is scored locally only when *every* leg is modelled, so one
+un-modelled leg sends the whole route to the chain. On `crvUSD -> sDOLA`:
+
+    before vaults   candidates walked  1, sent 16   probes computed 94%
+    after vaults    candidates walked 10, sent  7
+    after LP arcs   candidates walked 13, sent  0   probes computed 99%
+
+### E.2 Cold start: ask the endpoint, do not assume a ceiling
+
+The storage sweep was pinned to Erigon's default batch of 100 as "a ceiling
+every node accepts". That is the slowest node's ceiling imposed on all of them;
+drpc serves 2,000.
+
+    batch     100     250     500    1000    2000
+    ms/slot 18.96    2.32    1.80    0.94    0.69
+
+    storage sweep  25,227 ms -> 3,250 ms (same 5,934 slots)
+    cold start     23,380 ms -> 10,351 ms
+
+The ceiling is now probed once, sequentially, with the request about to be sent
+— a node may cap by method or payload size — before any concurrent chunk goes
+out, which preserves the reason the constant existed: failing into a ceiling is
+recoverable one chunk at a time and not sixteen at a time.
+
+**What did not work, and why.** The state dumper (inject 27 bytes at a pool and
+read its storage) cannot run on the scoped key at all: `eth_call` state
+overrides return 403, and there is no deployable alternative because no contract
+can read another account's storage. And *skipping* the sweep for pools that are
+computed rather than executed is a net loss — those pools' getters are free
+precisely because the slots are already loaded; reading the same parameters over
+the wire cost 15.9 s against a 3.3 s sweep, since each batched `raw_batch` runs
+600 real contract calls server-side while a storage batch is bare `SLOAD`s.
+
+### E.3 Warm quotes are interpreter-bound, not arithmetic-bound
+
+A warm quote makes **zero** transport round trips. Its ~800 ms is Python.
+
+    active_set_solve (own)     45 calls   0.140 s
+    component_of            2,250 calls   0.089 s
+    numpy linalg.solve      2,242 calls   0.084 s
+    calibrate               1,476 calls   0.066 s  (0.204 cumulative)
+    numpy diff             11,886 calls   0.063 s
+    split.evaluate          1,518 calls   0.051 s
+    laplacian               2,242 calls   0.046 s
+    ufunc.reduce           41,113 calls   0.041 s
+    curves.at              43,046 calls   0.031 s
+    stableswap d + solve_y  4,542 calls   0.034 s
+
+The pool maths is 2.5% of it. The cost is call *volume*: hundreds of thousands
+of operations each carrying ~1 us of interpreter overhead over nanoseconds of
+work. A `$100` quote pays the same as a `$20M` one, because the work is a
+function of the universe rather than of the trade.
+
+Three optimisations, each measured and each answered:
+
+* **Pure Python instead of numpy: 91x worse.** A dense LU at n=50 is 2,872 us
+  in Python against 31.5 us through numpy. Dispatch is about half of that 31.5,
+  but the C kernel is what makes the call affordable at all.
+* **Rank-1 updates of the factorisation: no.** Measured at n=299 (6,304 us
+  against 1,147 us to refactorise) and re-examined at the real per-pivot size,
+  median n=49: a Python-level O(n^2) update costs hundreds of us to replace a
+  51 us solve. Only compiled CHOLMOD wins, and scipy is barred from `core/` by
+  the Pyodide constraint (§Portability).
+* **Batching the Laplacians: 1.9x, but blocked where it matters.** Systems are
+  independent *across* candidates and strictly sequential *within* a solve —
+  pivot k+1's matrix depends on pivot k's `psi`. Lockstepping candidates would
+  work and buys ~40 ms of ~800.
+
+**What a native port would actually buy.** Counting the arithmetic rather than
+the calls: 2,242 solves at n=50 is 187 Mflop (~37 ms at 5 GFLOP/s), Laplacian
+assembly ~4.5 M updates, `component_of` ~6.8 M ops, the pool maths ~218 k u256
+operations. Irreducible work is roughly **40-80 ms against a measured 800 ms**,
+so ~90% is interpreter and dispatch that a port removes outright. The candidates
+are the solver and `calibrate`: numerically self-contained, now stable, and
+about half the quote between them.
+
+Keeping it in Python while correctness is still moving has paid for itself: in
+one session it surfaced a stranded-flow bug in `cancel_cycles` (§12.4 refusing a
+route for damage done after the solve finished), a 20x cold-start batch ceiling,
+and three changes that measurement rejected outright.
+
+### E.4 Against Curve's own solver
+
+Pinned to the block their snapshot reports and given their gas price, since
+their answer comes from a periodically-warmed snapshot running blocks behind
+head; rows split into stable and volatile because on a trending price that
+staleness is worth 1.8-27.7 bp, always in their disfavour.
+
+    16 comparable stable rows: 10 ahead, 7 level, 0 behind, median +0.69 bp
+    6 of them match to the wei
+
+The wins are two-leg splits where they take one leg: +17.21 bp (arbitrum
+`USDC->crvUSD` 250k), +13.13 bp (gnosis `USDCe->WXDAI` 100k). Excluded from the
+median: an arbitrum `USDC->USDT0` 500k row reading +1063 bp, which is a pair
+with no depth at that size — their quote loses 37%, ours 30%, and neither is a
+route anybody should take.
+
 ## Appendix D — Sources
 
 The CryptoSwap-NG closed forms (§2.3), the apex localisation of the fee defect (§2.5), and the chord counterexample (§11.2) are taken from the *CryptoSwap-NG split math* lemma set — respectively its direct-pair derivatives, its pole-adapted boundary chart, and its execution-boundary result on hull relaxations. That work solves a different problem (certified integer-lattice optimum for one pair, exact invariant) and its Lagrangian support machinery is the same duality this document uses, specialised to parallel-only topology. The two compose: its certified partition is the offline form of this document's `CONVEX_FLAG`, and this document's graph layer is what it does not address.
