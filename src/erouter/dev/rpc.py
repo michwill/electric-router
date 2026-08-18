@@ -145,6 +145,7 @@ class JsonRpcTransport:
         self.url = url
         self.timeout = timeout
         self.batch_size = batch_size
+        self._batch_ceiling: int | None = None
         self.max_streams = max_streams
         self._id = 0
         self._id_lock = Lock()
@@ -347,6 +348,38 @@ class JsonRpcTransport:
             mid = (lo + hi) // 2
             self._fetch_chunk(payloads, lo, mid, out)
             self._fetch_chunk(payloads, mid, hi, out)
+
+    #: Batch sizes to try when asking an endpoint what it will take, largest
+    #: first.  Erigon's default ceiling is 100 and it refuses the *whole* batch
+    #: over it; drpc serves 2,000.  Twenty times the requests is what that
+    #: difference costs, so it is worth one round trip to find out.
+    BATCH_LADDER = (2000, 1000, 500, 200, 100, 50)
+
+    def probe_batch_limit(self, sample: tuple[str, list] | None = None) -> int:
+        """The largest batch this endpoint answers, measured once and kept.
+
+        Probed with the request actually about to be sent, not a cheap stand-in:
+        a node may cap by payload size or by method, and a ceiling learned from
+        `eth_blockNumber` would not survive contact with a storage sweep.
+        """
+        if self._batch_ceiling is not None:
+            return self._batch_ceiling
+        probe = sample or ("eth_blockNumber", [])
+        for size in self.BATCH_LADDER:
+            if size > self.batch_size and self._batch_ceiling is None:
+                pass  # still worth asking: batch_size is a default, not a limit
+            try:
+                got = self._post([{"jsonrpc": "2.0", "id": i + 1,
+                                   "method": probe[0], "params": probe[1]}
+                                  for i in range(size)])
+            except Exception:
+                continue
+            if isinstance(got, list) and len(got) == size and not any(
+                    isinstance(r, dict) and r.get("error") for r in got):
+                self._batch_ceiling = size
+                return size
+        self._batch_ceiling = self.BATCH_LADDER[-1]
+        return self._batch_ceiling
 
     def _learn_batch_limit(self, exc: RpcError) -> None:
         match = _BATCH_LIMIT.search(str(exc))
