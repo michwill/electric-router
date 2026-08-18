@@ -38,6 +38,7 @@ from ..core.quoter import Quote
 from ..core.stableswap import StableSwapError
 from ..core.tricrypto import TricryptoError
 from ..core.twocrypto import TwocryptoError
+from ..core.vault import VaultError
 from ..core.transport import Status
 from ..core.types import ArcKind
 from ..core.walk import LegUnquotable, walk_route
@@ -60,8 +61,9 @@ class ExactStats:
 class ExactQuoterClient:
     """Wraps a `QuoterClient`, answering what it can from arithmetic."""
 
-    def __init__(self, client, exact, twocrypto=None, tricrypto=None, *,
-                 enabled: bool = True, models_block: int = 0, rebuild=None):
+    def __init__(self, client, exact, twocrypto=None, tricrypto=None,
+                 vaults=None, *, enabled: bool = True, models_block: int = 0,
+                 rebuild=None):
         self.client = client
         self.exact = exact
         #: Three-coin crypto pools, whose maths is its own module again.
@@ -69,6 +71,10 @@ class ExactQuoterClient:
         #: Twocrypto-ng pools whose invariant reproduces their own `get_dy`
         #: -- today the FX Swaps, whose maths is stableswap's.
         self.twocrypto = twocrypto
+        #: ERC4626 vaults, per (address, direction): a vault has no curve, so
+        #: one ratio serves every size -- and one direction may reproduce while
+        #: the other does not.
+        self.vaults = vaults
         self.enabled = enabled
         self.stats = ExactStats()
         #: The block these models were read at.  Not named `block`: this class
@@ -91,11 +97,16 @@ class ExactQuoterClient:
         """
         if not block or block == self.models_block or self._rebuild is None:
             return 0
-        exact, twocrypto, tricrypto = self._rebuild(block)
-        self.exact, self.twocrypto, self.tricrypto = exact, twocrypto, tricrypto
+        built = self._rebuild(block)
+        # Tolerant of length: a caller that rebuilds only the pools keeps the
+        # vaults it already had, which is what the tests hand in.
+        self.exact, self.twocrypto, self.tricrypto = built[0], built[1], built[2]
+        if len(built) > 3:
+            self.vaults = built[3]
         self.models_block = block
         self.stats = ExactStats()
-        return len(exact) + len(twocrypto or ()) + len(tricrypto or ())
+        return (len(self.exact) + len(self.twocrypto or ())
+                + len(self.tricrypto or ()) + len(self.vaults or ()))
 
     # -- pass-through -------------------------------------------------------
 
@@ -126,7 +137,7 @@ class ExactQuoterClient:
             try:
                 value = model.get_dy(probe.i, probe.j, probe.dx)
             except (StableSwapError, TwocryptoError, TricryptoError,
-                    ZeroDivisionError, ValueError):
+                    VaultError, ZeroDivisionError, ValueError):
                 # A size the invariant cannot serve is a real answer -- the
                 # pool would revert too -- but a *failure to converge* is not
                 # something to guess at, so both go to the wire.
@@ -156,7 +167,11 @@ class ExactQuoterClient:
             return True
         if self.tricrypto is not None and self.tricrypto.get(pool) is not None:
             return True
-        return self.twocrypto is not None and self.twocrypto.get(pool) is not None
+        if self.twocrypto is not None and self.twocrypto.get(pool) is not None:
+            return True
+        return self.vaults is not None and any(
+            self.vaults.get(pool, k) is not None
+            for k in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM))
 
     def _model_for(self, probe):
         if probe.dx <= 0:
@@ -165,6 +180,8 @@ class ExactQuoterClient:
 
     def _model(self, pool: str, kind, i: int, j: int):
         """The model that can answer for this pool and direction, if any."""
+        if kind in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM):
+            return self.vaults.get(pool, kind) if self.vaults is not None else None
         if kind is ArcKind.SWAP_CRYPTO:
             if i == j:
                 return None
@@ -222,7 +239,7 @@ class ExactQuoterClient:
             except LegUnquotable:
                 holes.append(k)
             except (StableSwapError, TwocryptoError, TricryptoError,
-                    ZeroDivisionError, ValueError):
+                    VaultError, ZeroDivisionError, ValueError):
                 # The invariant refusing a size is a real answer -- the pool
                 # would revert too -- but this is the number the winner is
                 # chosen on, so it goes to the chain rather than being guessed.

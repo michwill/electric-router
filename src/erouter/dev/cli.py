@@ -690,6 +690,8 @@ def cmd_route(args: argparse.Namespace) -> int:
 
         from .tricrypto_params import build_exact_tricrypto
         from .twocrypto_params import build_exact_twocrypto
+        from .vault_params import build_exact_vaults
+        from ..core.types import ArcKind as _ArcKind
 
         # Read through the *unwrapped* quoter, and keep it for rebuilds.  The
         # gate that admits a pool works by disagreeing with it, so running it
@@ -705,16 +707,35 @@ def cmd_route(args: argparse.Namespace) -> int:
                 # the old ones would produce something self-consistent and
                 # wrong -- the failure this whole hook exists to prevent.
                 read_balances(load.pools, measured, None, chain.chain_id)
+            # A vault has no curve: `previewDeposit` is `x * S / A` at a fixed
+            # block, so one ratio per direction covers every size.  Which
+            # rounding convention it uses is asked, not assumed, and the two
+            # directions are decided separately -- a vault can quote a deposit
+            # exactly and charge on the way out.
+            # Both places a vault can appear, which is not obvious and cost a
+            # measurement to notice: as a wrapper *arc*, and -- for the ones
+            # the node map merged -- as a conversion *leg*, where the vault is
+            # a node member rather than an arc endpoint.  Collecting only the
+            # arcs modelled 28 directions and left the three vaults that
+            # actually block routes (scrvUSD, sDOLA, ynETHx) unmodelled.
+            vault_arcs = {a.pool for a in stake_arcs
+                          if a.kind in (_ArcKind.ERC4626_DEPOSIT,
+                                        _ArcKind.ERC4626_REDEEM)}
+            vault_arcs |= {v.token for v in wrappers.merged_vaults}
             return (build_exact_pools(load.pools, measured, cache=verdicts),
                     # Twocrypto-ng's FX Swaps: a stableswap invariant inside
                     # cryptoswap's machinery, told apart from cryptoswap proper
                     # by whether the maths reproduces the pool's own quote --
                     # never by a list of addresses.
                     build_exact_twocrypto(load.pools, measured, cache=verdicts),
-                    build_exact_tricrypto(load.pools, measured, cache=verdicts))
+                    build_exact_tricrypto(load.pools, measured, cache=verdicts),
+                    build_exact_vaults(vault_arcs, measured))
 
-        exact, two, tri = _build_models()
+        exact, two, tri, vaults = _build_models()
         trusted = exact.trusted + two.trusted + tri.trusted
+        if len(vaults):
+            print(f"  exact: {len(vaults)}/{vaults.checked} vault direction(s) "
+                  f"computed rather than probed")
         print(f"  exact: {len(exact)}/{exact.checked + exact.trusted} stableswap, "
               f"{len(two)}/{two.checked + two.trusted} twocrypto, "
               f"{len(tri)}/{tri.checked + tri.trusted} tricrypto "
@@ -726,7 +747,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             print(f"  {WARN} could not write the verdict cache ({exc})")
 
     if exact is not None and (exact or two or tri):
-        client = ExactQuoterClient(client, exact, two, tri,
+        client = ExactQuoterClient(client, exact, two, tri, vaults,
                                    models_block=rpc.block,
                                    rebuild=_build_models)
     # Gas is priced by default.  Leaving it at zero made every route look free
