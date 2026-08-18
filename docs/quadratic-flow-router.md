@@ -1254,6 +1254,71 @@ one session it surfaced a stranded-flow bug in `cancel_cycles` (§12.4 refusing 
 route for damage done after the solve finished), a 20x cold-start batch ceiling,
 and three changes that measurement rejected outright.
 
+### E.3b The port, measured against that prediction
+
+The estimate above was that ~90% of a warm quote is interpreter and dispatch,
+leaving 40-80 ms of irreducible arithmetic. The solver is now ported (PyO3
+extension plus an `rlib` for wasm, no I/O, no threads, no BLAS), and the
+prediction held for the part that was ported: the solve went from 240 ms to
+53 ms on a warm crvUSD->sDOLA at $100, and a warm quote from ~830 ms to ~235 ms.
+Per pivot, 130 us to 23.8 us. Pivot counts, call counts and the integer output
+are identical to the reference.
+
+**§9.3's rank-1 claim is right in compiled code and wrong in Python, and E.3
+above says so for the right reason.** The Python measurement that rejected it
+(6,304 us against 1,147 us to refactorise) was measuring the interpreter, not
+the algorithm. In Rust the same idea is what makes the port fast: refactorising
+is `O(k^3/6)` and an update is `O(k^2)`, the kept-node set fixes the dimension,
+and it was measured to change on 21% of pivots on real graphs. Two conditions
+had to be added that the spec does not mention:
+
+* **The factor must be dropped whenever the kept set changes**, not merely when
+  its size does. A different set of the same cardinality silently reuses a
+  factor of the wrong matrix -- measured KCL residuals of 5.6e+06.
+* **A rank-1 chain drifts, and these Laplacians run to `cond(G) ~ 1e8`.**
+  Measured 1.1e-5 where refactorising gave 6.7e-9. So each solve prices its own
+  answer: the residual is computed off the arcs in `O(m)` and only a solve that
+  has actually gone off pays for a rebuild. Residuals then match the reference's.
+
+**The factor is stored transposed, and that is worth 4x on its own.** Of the
+four hot loops over it, two walk `L` by column -- the back-substitution and the
+update's sweep below the diagonal. Row-major `L` puts those strides `n` apart.
+Holding `U = L^T` makes all four contiguous: factor 47.9 -> 8.1 us per pivot,
+back-substitution 34.9 -> 3.3 us, whole pivot 94.9 -> 23.8 us. Same arithmetic,
+same numbers; only the addresses moved. No section of the loop is now above 34%.
+
+**Two bugs the differential tests could not see.** Both lived in the seam, not
+the algorithm, and both were invisible to a unit test because a unit test
+supplies its own arguments:
+
+* `A0` may be *indices* -- `Solution.active` is exactly that, and it is what the
+  pipeline warm-starts from -- and the bridge ran `np.asarray(a0, bool)` over
+  it, mapping `[3, 17]` to two `True`s. Every accelerated solve began from a
+  basis the reference never chose. Of 54 problems taken off a live quote, 8
+  agreed on the pivot count; with the fix, 93 of 94.
+* The resident-graph cache wrote through `object.__setattr__` onto a
+  `slots=True` dataclass, so every write raised into a bare `except` and the
+  cache measured **0 hits in 132 solves**. Packing 32 ms -> 0 ms.
+
+The lesson is the one E.3 already implies: replay real problems, with the real
+arguments, and compare against the reference. Shaped cases and fuzzed graphs
+agreed to 1e-12 throughout all of the above.
+
+**What is not ported, and why it is not obvious.** The accelerator stays
+opt-in (`EROUTER_ACCEL=1`). At $1M and below the two agree to the wei, but at
+$20M the reference itself converges cleanly on 9 of 86 subproblems -- 55 return
+`PARTIAL`, 14 refuse a detached pin, two cycle under Bland's rule -- and once
+there is no clean optimum to agree on, the two wander apart, landing 113 to
+315 bp apart on USDC->WETH, USDC->WBTC and crvUSD->sDOLA. Those sizes sit at
+`theta` in the hundreds of percent, outside the model's range, but "the answer
+depends on which solver ran" is not a property to ship.
+
+After the port the warm quote is no longer solver-bound: the solve is 4-31% of
+it, and `calibrate` (37 ms over 738 arcs) and `spfa` (29 ms) are each now
+comparable to it. `calibrate` is 49.8 us per call on a **six-element** ladder,
+where a single `np.diff` pair is 5.0 us -- numpy is the wrong tool at that size,
+and scalar arithmetic in either language removes it.
+
 ### E.4 Against Curve's own solver
 
 Pinned to the block their snapshot reports and given their gas price, since
