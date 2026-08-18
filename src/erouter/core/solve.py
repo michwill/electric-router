@@ -26,10 +26,13 @@ the one-arc-per-pool repair).
 
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import accel as _accel
 from .graph import ArcArrays, component_of, laplacian
 from .linalg import DEFAULT_SOLVER, SingularSystem
 
@@ -44,6 +47,25 @@ DEGENERACY_SCREEN = 1e-4
 # iterations to break out on its own; measured cycles repeat every 2 pivots and
 # never recover, so a small number separates the two cases cleanly.
 CYCLE_PATIENCE = 3
+
+# The compiled solve is **opt-in**, and stays that way until it agrees with the
+# reference on the paths that matter.
+#
+# It reproduces this function exactly on problems that converge cleanly -- six
+# shaped cases, twelve fuzzed graphs, all to 1e-12 -- and that is precisely the
+# set a unit test reaches.  On real quotes it still differs: USDC->WETH $20M
+# returned 9,052 WETH through Python and 4,681 through Rust, because the
+# divergence lives on the paths a clean problem never takes (cycling under
+# Bland's rule, `maxit` exhaustion, the `PARTIAL` return).  Those are the paths
+# a $20M trade over 25 legs takes every time.
+#
+# It is also not yet faster end to end: 0.9x on four of five real quotes, since
+# the solve is about a quarter of a warm quote and marshalling the arrays costs
+# what the arithmetic saves.
+#
+# So `EROUTER_ACCEL=1` opts in, for developing the port and running the
+# differential.  Nothing else uses it.
+_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 
 
 def _steepest_pick(mask: np.ndarray, score: np.ndarray) -> int:
@@ -170,6 +192,26 @@ def active_set_solve(
     the mechanism a saturated capacity uses, so §6.3's pin-and-resolve sweep is
     a keyword argument rather than a new branch.
     """
+    # The Rust solve, when it is installed and nothing has asked for a
+    # specific linear solver.  One crossing per solve, not per pivot.  It is a
+    # port of exactly this function -- `tests/test_accel_differential.py`
+    # differs the two, and both against OSQP -- so the only thing that changes
+    # is how long it takes.
+    if solver is None and _ACCEL_ON and _accel.available():
+        got = _accel.solve_arrays(
+            g, src, dst, Psi, a0=A0, forbidden=forbidden, pinned=forced_upper,
+            tol=tol, maxit=maxit, min_flow=min_flow, gas_cost=gas_cost,
+            partial_ok=partial_ok,
+        )
+        if got is not None:
+            return Solution(
+                np.asarray(got["psi"], float), np.asarray(got["u"], float),
+                np.asarray(got["active"], bool), np.asarray(got["upper"], bool),
+                np.asarray(got["psi_upper"], float), np.asarray(got["rho"], float),
+                int(got["pivots"]), feasible=bool(got["feasible"]),
+                reason=str(got["reason"]),
+            )
+
     solver = solver or DEFAULT_SOLVER
     m, n = g.m, g.n_nodes
     forbidden = np.zeros(m, bool) if forbidden is None else np.asarray(forbidden, bool)
