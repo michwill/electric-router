@@ -934,7 +934,7 @@ def _stage_line(result, elapsed: float) -> str:
     from ..core import accel
     from ..core.solve import _ACCEL_ON
 
-    stages = {k: v * 1000.0 for k, v in (result.timings or {}).items()}
+    stages = dict(result.timings or {})   # already milliseconds
     named = sum(stages.values())
     ranked = sorted(stages.items(), key=lambda kv: -kv[1])[:6]
     parts = [f"{name} {ms:,.0f}" for name, ms in ranked if ms >= 1.0]
