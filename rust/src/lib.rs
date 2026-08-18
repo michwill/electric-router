@@ -9,6 +9,7 @@
 //! is why there is no I/O, no threading, no clock and no BLAS anywhere in it.
 //! See `README.md` for what each of those would break.
 
+pub mod chol;
 pub mod lu;
 pub mod solve;
 

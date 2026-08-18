@@ -12,6 +12,9 @@ name = "erouter_solve"
 crate-type = ["cdylib", "rlib"]
 
 [features]
+# Section timers inside the pivot loop.  Native profiling only: it pulls in
+# a clock, which the wasm/browser build must not have.
+bench = []
 default = []
 # PyO3 is optional so the same core compiles to wasm32 with no Python at all.
 python = ["dep:pyo3"]

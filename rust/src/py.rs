@@ -20,7 +20,7 @@ use crate::solve::{active_set_solve, Arcs, Options};
 #[pyfunction]
 #[pyo3(signature = (tau, sig, g, eps, cap, n_nodes, src, dst, psi_total,
                     a0=None, forbidden=None, pinned=None, tol=None, maxit=600,
-                    min_flow=0.0, gas_cost=0.0, partial_ok=false))]
+                    min_flow=0.0, gas_cost=0.0, partial_ok=false, rank1=None))]
 fn solve<'py>(
     py: Python<'py>,
     tau: Vec<i64>,
@@ -40,6 +40,7 @@ fn solve<'py>(
     min_flow: f64,
     gas_cost: f64,
     partial_ok: bool,
+    rank1: Option<bool>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let arcs = Arcs { tau: &tau, sig: &sig, g: &g, eps: &eps, cap: &cap, n_nodes };
     let opt = Options {
@@ -48,6 +49,7 @@ fn solve<'py>(
         min_flow,
         gas_cost,
         partial_ok,
+        rank1: rank1.unwrap_or(true),
 
     };
     let pins = pinned.unwrap_or_default();
@@ -60,6 +62,83 @@ fn solve<'py>(
         )
     });
 
+    pack(py, out)
+}
+
+
+
+/// The graph, held on the Rust side across a quote's many solves.
+///
+/// A quote runs 45-106 solves over *the same* arcs -- only the warm start, the
+/// forbidden mask and the pins change between them.  Marshalling `tau`, `sig`,
+/// `G`, `eps` and `cap` on every call meant crossing the boundary with tens of
+/// thousands of Python floats per quote to hand over data that had not
+/// changed, which cost about what the Rust arithmetic saved.
+///
+/// Building the problem once turns that into one crossing, and leaves only the
+/// per-solve masks -- which are small, and genuinely different each time.
+#[pyclass]
+pub struct Problem {
+    tau: Vec<i64>,
+    sig: Vec<i64>,
+    g: Vec<f64>,
+    eps: Vec<f64>,
+    cap: Vec<f64>,
+    n_nodes: usize,
+}
+
+#[pymethods]
+impl Problem {
+    #[new]
+    fn new(tau: Vec<i64>, sig: Vec<i64>, g: Vec<f64>, eps: Vec<f64>,
+           cap: Vec<f64>, n_nodes: usize) -> Self {
+        Problem { tau, sig, g, eps, cap, n_nodes }
+    }
+
+    #[getter]
+    fn m(&self) -> usize {
+        self.tau.len()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (src, dst, psi_total, a0=None, forbidden=None, pinned=None,
+                        tol=None, maxit=600, min_flow=0.0, gas_cost=0.0,
+                        partial_ok=false, rank1=None))]
+    fn solve<'py>(
+        &self,
+        py: Python<'py>,
+        src: usize,
+        dst: usize,
+        psi_total: f64,
+        a0: Option<Vec<bool>>,
+        forbidden: Option<Vec<bool>>,
+        pinned: Option<Vec<(usize, f64)>>,
+        tol: Option<f64>,
+        maxit: u32,
+        min_flow: f64,
+        gas_cost: f64,
+        partial_ok: bool,
+        rank1: Option<bool>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let arcs = Arcs {
+            tau: &self.tau, sig: &self.sig, g: &self.g,
+            eps: &self.eps, cap: &self.cap, n_nodes: self.n_nodes,
+        };
+        let opt = Options {
+            tol: tol.unwrap_or(crate::solve::TOL),
+            maxit, min_flow, gas_cost, partial_ok,
+            rank1: rank1.unwrap_or(true),
+        };
+        let pins = pinned.unwrap_or_default();
+        let out = py.allow_threads(|| {
+            active_set_solve(&arcs, src, dst, psi_total,
+                             a0.as_deref(), forbidden.as_deref(), &pins, &opt)
+        });
+        pack(py, out)
+    }
+}
+
+fn pack<'py>(py: Python<'py>, out: crate::solve::Solution) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("psi", out.psi)?;
     d.set_item("u", out.u)?;
@@ -68,6 +147,10 @@ fn solve<'py>(
     d.set_item("psi_upper", out.psi_upper)?;
     d.set_item("rho", out.rho)?;
     d.set_item("pivots", out.pivots)?;
+    d.set_item("chol_failures", out.chol_failures)?;
+    d.set_item("keep_changes", out.keep_changes)?;
+    d.set_item("refits", out.refits)?;
+    d.set_item("timings", out.timings.to_vec())?;
     d.set_item("feasible", out.stop.feasible())?;
     d.set_item("reason", out.stop.reason())?;
     Ok(d)
@@ -76,6 +159,7 @@ fn solve<'py>(
 #[pymodule]
 fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
+    m.add_class::<Problem>()?;
     m.add("__doc__", "The router's active-set QP, in Rust.")?;
     Ok(())
 }

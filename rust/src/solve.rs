@@ -17,6 +17,7 @@
 //!   settled, never globally -- zeroing a negative arc elsewhere strands its
 //!   flow, which is a bug this project has already paid for once.
 
+use crate::chol;
 use crate::lu;
 use std::collections::HashSet;
 
@@ -76,6 +77,11 @@ pub struct Options {
     pub min_flow: f64,
     pub gas_cost: f64,
     pub partial_ok: bool,
+    /// Carry the Cholesky factor between pivots and move it by a rank-1 term
+    /// instead of refactorising.  Cheap, but it accumulates error, and these
+    /// Laplacians are ill-conditioned (`cond(G)` runs to 1e8), so it is a
+    /// switch rather than an assumption.
+    pub rank1: bool,
 }
 
 impl Default for Options {
@@ -86,6 +92,7 @@ impl Default for Options {
             min_flow: 0.0,
             gas_cost: 0.0,
             partial_ok: false,
+            rank1: true,
         }
     }
 }
@@ -99,6 +106,98 @@ pub struct Solution {
     pub rho: Vec<f64>,
     pub pivots: u32,
     pub stop: Stop,
+    /// How often the Laplacian was not positive definite and LU had to
+    /// run after Cholesky had already failed -- both factorisations paid.
+    pub chol_failures: u32,
+    /// How often the kept-node set changed between pivots.  A rank-1
+    /// update of the factor is only worth having if this is rare.
+    pub keep_changes: u32,
+    /// How often a rank-1-updated factor failed the residual check and had to
+    /// be rebuilt.  The rank-1 path is only sound because this is watched.
+    pub refits: u32,
+    /// Nanoseconds per section of the pivot loop, under `--features bench`:
+    /// 0 setup, 1 assemble, 2 factor, 3 back-substitute, 4 price, 5 signature,
+    /// 6 pick.  All zero otherwise.
+    pub timings: [u64; 7],
+}
+
+/// How far above a rank-1 chain's drift the residual may sit before the factor
+/// is rebuilt.  Cholesky on a `cond ~ 1e8` Laplacian lands near 1e-9, so this
+/// catches drift without firing on ordinary rounding.
+const REFACTOR_RESIDUAL: f64 = 1e-9;
+
+/// The restricted Laplacian of the active arcs over the kept nodes.
+fn assemble(arcs: &Arcs, active: &[bool], index: &[usize], k: usize) -> Vec<f64> {
+    let mut mat = vec![0.0; k * k];
+    for p in 0..arcs.m() {
+        if !active[p] {
+            continue;
+        }
+        let (a, b) = (index[arcs.tau[p] as usize], index[arcs.sig[p] as usize]);
+        let g = arcs.g[p];
+        if a != usize::MAX {
+            mat[a * k + a] += g;
+        }
+        if b != usize::MAX {
+            mat[b * k + b] += g;
+        }
+        if a != usize::MAX && b != usize::MAX {
+            mat[a * k + b] -= g;
+            mat[b * k + a] -= g;
+        }
+    }
+    mat
+}
+
+/// `max|b - A x| / max|b|`, with `A x` taken straight off the arcs so no copy
+/// of the matrix has to be kept alive to check the solve.
+fn residual_ratio(
+    arcs: &Arcs, active: &[bool], index: &[usize], b: &[f64], x: &[f64],
+) -> f64 {
+    let mut r = b.to_vec();
+    for p in 0..arcs.m() {
+        if !active[p] {
+            continue;
+        }
+        let (a, c) = (index[arcs.tau[p] as usize], index[arcs.sig[p] as usize]);
+        let xa = if a != usize::MAX { x[a] } else { 0.0 };
+        let xc = if c != usize::MAX { x[c] } else { 0.0 };
+        let f = arcs.g[p] * (xa - xc);
+        if a != usize::MAX {
+            r[a] -= f;
+        }
+        if c != usize::MAX {
+            r[c] += f;
+        }
+    }
+    let num = r.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let den = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    if den > 0.0 { num / den } else { num }
+}
+
+/// Section timers for the pivot loop, compiled only under `--features bench`.
+///
+/// The library must stay clock-free for wasm, so this is a zero-sized no-op in
+/// every shipping build; `Solution::timings` is then all zeros.
+#[cfg(feature = "bench")]
+#[derive(Clone, Copy)]
+struct Mark(std::time::Instant);
+#[cfg(feature = "bench")]
+impl Mark {
+    fn now() -> Self { Mark(std::time::Instant::now()) }
+    fn lap(&mut self, slot: &mut u64) {
+        let t = std::time::Instant::now();
+        *slot += t.duration_since(self.0).as_nanos() as u64;
+        self.0 = t;
+    }
+}
+#[cfg(not(feature = "bench"))]
+#[derive(Clone, Copy)]
+struct Mark;
+#[cfg(not(feature = "bench"))]
+impl Mark {
+    fn now() -> Self { Mark }
+    fn lap(&mut self, _slot: &mut u64) {}
 }
 
 /// Nodes reachable from `root` over the active arcs, undirected (§9.4).
@@ -209,8 +308,23 @@ pub fn active_set_solve(
     let mut use_bland = false;
     let mut cycles = 0u32;
     let mut reseeded = false;
+    let mut chol_failures = 0u32;
+    let mut keep_changes = 0u32;
+    let mut refits = 0u32;
+    let mut timings = [0u64; 7];
+    let mut mark = Mark::now();
+    let mut last_keep: Vec<usize> = Vec::new();
+    // The factor is carried between pivots and updated, not rebuilt: a pivot
+    // changes one arc, which moves the Laplacian by a rank-1 term.  `pending`
+    // is that arc and the direction it moved; `None` forces a refactor.
+    let mut factor_l: Vec<f64> = Vec::new();
+    let mut pending: Option<(usize, bool)> = None;
+    // Whether the factor in hand came from an update rather than a
+    // factorisation, and so has to justify itself against the residual.
+    let mut updated = false;
 
     for _ in 0..opt.maxit {
+        mark.lap(&mut timings[6]);
         component_of(dst, arcs, &active, &mut comp);
         if !comp[src] && psi_total != 0.0 {
             // A disconnected active set is a starting point, not a verdict:
@@ -228,8 +342,7 @@ pub fn active_set_solve(
             }
             return Solution {
                 psi: vec![0.0; m], u: vec![0.0; n], active, upper, psi_upper,
-                rho: vec![0.0; m], pivots, stop: Stop::SrcDetached,
-            };
+                rho: vec![0.0; m], pivots, stop: Stop::SrcDetached, chol_failures, keep_changes, refits, timings };
         }
 
         let mut rhs = s_hat.clone();
@@ -266,10 +379,10 @@ pub fn active_set_solve(
             }
             return Solution {
                 psi: vec![0.0; m], u: vec![0.0; n], active, upper, psi_upper,
-                rho: vec![0.0; m], pivots, stop: Stop::PinDetached,
-            };
+                rho: vec![0.0; m], pivots, stop: Stop::PinDetached, chol_failures, keep_changes, refits, timings };
         }
 
+        mark.lap(&mut timings[0]);
         // Solve on the kept nodes only: `dst` is grounded, and anything
         // outside `dst`'s component is not in the system at all.
         let keep: Vec<usize> = (0..n).filter(|&i| comp[i] && i != dst).collect();
@@ -280,36 +393,127 @@ pub fn active_set_solve(
             for (slot, &node) in keep.iter().enumerate() {
                 index[node] = slot;
             }
-            let mut mat = vec![0.0; k * k];
-            for p in 0..m {
-                if !active[p] {
-                    continue;
-                }
-                let (a, b) = (index[arcs.tau[p] as usize], index[arcs.sig[p] as usize]);
-                let g = arcs.g[p];
+            let rebuild = !opt.rank1 || keep != last_keep || factor_l.len() != k * k;
+            if rebuild {
+                keep_changes += 1;
+                last_keep = keep.clone();
+                pending = None;
+                // Drop the factor as well as the pending term: a different set
+                // of nodes can have the same *count*, and then `k * k` alone
+                // would silently accept a factor of the wrong matrix.
+                factor_l.clear();
+            }
+            let mut mat = Vec::new();
+            if rebuild || pending.is_none() {
+                mat = assemble(arcs, &active, &index, k);
+            }
+            mark.lap(&mut timings[1]);
+            let mut vec_b: Vec<f64> = keep.iter().map(|&node| rhs[node]).collect();
+            // The arc that moved last pivot, as a rank-1 term on the kept set:
+            // `sqrt(G) (e_a - e_b)`, or `sqrt(G) e_a` when the other end is
+            // `dst` and therefore grounded out of the system.
+            if let Some((arc, added)) = pending.take() {
+                let (a, b) = (index[arcs.tau[arc] as usize], index[arcs.sig[arc] as usize]);
+                let root = arcs.g[arc].sqrt();
+                let mut x = vec![0.0; k];
                 if a != usize::MAX {
-                    mat[a * k + a] += g;
+                    x[a] = root;
                 }
                 if b != usize::MAX {
-                    mat[b * k + b] += g;
+                    x[b] -= root;
                 }
-                if a != usize::MAX && b != usize::MAX {
-                    mat[a * k + b] -= g;
-                    mat[b * k + a] -= g;
+                let ok = if added {
+                    chol::update(&mut factor_l, k, &mut x);
+                    true
+                } else {
+                    chol::downdate(&mut factor_l, k, &mut x)
+                };
+                if ok {
+                    updated = true;
+                } else {
+                    factor_l.clear();   // fall through to a rebuild below
                 }
             }
-            let mut vec_b: Vec<f64> = keep.iter().map(|&node| rhs[node]).collect();
-            if let Err(e) = lu::solve_in_place(&mut mat, &mut vec_b, k) {
+            // Cholesky first, factored *in place*: the restricted Laplacian is
+            // symmetric positive definite by construction, so this is both the
+            // right factorisation and half the work of LU.
+            //
+            // The fallback rebuilds rather than keeping a copy.  Cloning the
+            // matrix each pivot to have LU's input on hand cost more than the
+            // factorisation saved -- at n = 300 that is 720 KB copied per
+            // pivot, and it turned a 2x win into a 0.6x loss.  Cholesky
+            // failing is rare (it means conditioning has drifted past positive
+            // definiteness), so paying for the rebuild only then is the right
+            // way round.
+            if factor_l.len() != k * k {
+                if mat.is_empty() {
+                    mat = assemble(arcs, &active, &index, k);
+                }
+                factor_l = std::mem::take(&mut mat);
+                updated = false;
+                if !chol::factor(&mut factor_l, k) {
+                    factor_l.clear();
+                }
+            }
+            mark.lap(&mut timings[2]);
+            if !factor_l.is_empty() {
+                let b0: Vec<f64> = vec_b.clone();
+                chol::solve_factored(&factor_l, &mut vec_b, k);
+                // A rank-1 chain drifts, and these Laplacians are
+                // ill-conditioned enough that it shows: measured 1.1e-5 on a
+                // real graph where refactorising gave 6.7e-9.  So the answer
+                // is priced, not trusted -- the residual is O(m), a rebuild is
+                // O(k^3/6), and only a solve that has actually gone off pays.
+                if updated
+                    && residual_ratio(arcs, &active, &index, &b0, &vec_b)
+                        > REFACTOR_RESIDUAL
+                {
+                    refits += 1;
+                    factor_l = assemble(arcs, &active, &index, k);
+                    updated = false;
+                    if chol::factor(&mut factor_l, k) {
+                        vec_b.copy_from_slice(&b0);
+                        chol::solve_factored(&factor_l, &mut vec_b, k);
+                    } else {
+                        factor_l.clear();
+                    }
+                }
+            }
+            if factor_l.is_empty() {
+                if let Err(e) = {
+                chol_failures += 1;
+                let mut rebuilt = vec![0.0; k * k];
+                for p in 0..m {
+                    if !active[p] {
+                        continue;
+                    }
+                    let (a, b) = (index[arcs.tau[p] as usize], index[arcs.sig[p] as usize]);
+                    let g = arcs.g[p];
+                    if a != usize::MAX {
+                        rebuilt[a * k + a] += g;
+                    }
+                    if b != usize::MAX {
+                        rebuilt[b * k + b] += g;
+                    }
+                    if a != usize::MAX && b != usize::MAX {
+                        rebuilt[a * k + b] -= g;
+                        rebuilt[b * k + a] -= g;
+                    }
+                }
+                vec_b = keep.iter().map(|&node| rhs[node]).collect();
+                lu::solve_in_place(&mut rebuilt, &mut vec_b, k)
+            } {
                 return Solution {
                     psi: vec![0.0; m], u: vec![0.0; n], active, upper, psi_upper,
-                    rho: vec![0.0; m], pivots, stop: Stop::Singular(e.column),
-                };
+                    rho: vec![0.0; m], pivots, stop: Stop::Singular(e.column), chol_failures, keep_changes, refits, timings };
+                }
             }
             for (slot, &node) in keep.iter().enumerate() {
                 u[node] = vec_b[slot];
             }
         }
 
+        mark.lap(&mut timings[3]);
         for p in 0..m {
             psi[p] = if upper[p] { psi_upper[p] } else { 0.0 };
         }
@@ -329,6 +533,7 @@ pub fn active_set_solve(
             rho[p] = u[arcs.tau[p] as usize] - u[arcs.sig[p] as usize] - arcs.eps[p];
         }
 
+        mark.lap(&mut timings[4]);
         let mut signature = vec![0u64; 2 * words];
         for p in 0..m {
             if active[p] {
@@ -350,19 +555,18 @@ pub fn active_set_solve(
                         }
                         return Solution {
                             psi, u, active, upper, psi_upper, rho, pivots,
-                            stop: Stop::Partial,
-                        };
+                            stop: Stop::Partial, chol_failures, keep_changes, refits, timings };
                     }
                     return Solution {
                         psi, u, active, upper, psi_upper, rho, pivots,
-                        stop: Stop::Cycling(pivots),
-                    };
+                        stop: Stop::Cycling(pivots), chol_failures, keep_changes, refits, timings };
                 }
             }
             use_bland = true;
         }
         seen.insert(signature);
 
+        mark.lap(&mut timings[5]);
         let mut mask = vec![false; m];
         let mut score = vec![0.0; m];
 
@@ -376,6 +580,7 @@ pub fn active_set_solve(
         if any {
             let j = if use_bland { bland(&mask) } else { steepest(&mask, &score) };
             active[j] = false;
+            pending = Some((j, false));
             pivots += 1;
             continue;
         }
@@ -390,6 +595,7 @@ pub fn active_set_solve(
         if any {
             let j = if use_bland { bland(&mask) } else { steepest(&mask, &score) };
             active[j] = false;
+            pending = Some((j, false));
             upper[j] = true;
             psi_upper[j] = arcs.cap[j];
             pivots += 1;
@@ -416,6 +622,7 @@ pub fn active_set_solve(
         if any {
             let j = if use_bland { bland(&mask) } else { steepest(&mask, &score) };
             active[j] = true;
+            pending = Some((j, true));
             pivots += 1;
             continue;
         }
@@ -431,6 +638,7 @@ pub fn active_set_solve(
             let j = if use_bland { bland(&mask) } else { steepest(&mask, &score) };
             upper[j] = false;
             active[j] = true;
+            pending = Some((j, true));
             pivots += 1;
             continue;
         }
@@ -441,8 +649,7 @@ pub fn active_set_solve(
             }
         }
         return Solution {
-            psi, u, active, upper, psi_upper, rho, pivots, stop: Stop::Optimal,
-        };
+            psi, u, active, upper, psi_upper, rho, pivots, stop: Stop::Optimal, chol_failures, keep_changes, refits, timings };
     }
 
     // Out of pivots.  Every iterate satisfies conservation exactly -- `u`
@@ -451,15 +658,14 @@ pub fn active_set_solve(
     if !opt.partial_ok {
         return Solution {
             psi, u, active, upper, psi_upper, rho, pivots,
-            stop: Stop::NoConvergence(opt.maxit),
-        };
+            stop: Stop::NoConvergence(opt.maxit), chol_failures, keep_changes, refits, timings };
     }
     for v in psi.iter_mut() {
         if v.abs() < opt.tol {
             *v = 0.0;
         }
     }
-    Solution { psi, u, active, upper, psi_upper, rho, pivots, stop: Stop::Partial }
+    Solution { psi, u, active, upper, psi_upper, rho, pivots, stop: Stop::Partial, chol_failures, keep_changes, refits, timings }
 }
 
 #[cfg(test)]

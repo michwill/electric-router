@@ -223,3 +223,25 @@ def test_the_gas_screen_agrees(gas):
     theirs = rust(g, 0, 1, 1.0, gas_cost=gas)
     assert theirs["feasible"] == ours.feasible
     assert np.allclose(theirs["psi"], ours.psi, atol=1e-12)
+
+
+@pytest.mark.skipif(not available(), reason="the Rust solver is not installed")
+def test_a_warm_start_of_indices_is_the_same_warm_start():
+    """`A0` may be indices, and `Solution.active` is exactly that.
+
+    The bridge used to run `np.asarray(a0, bool)` over it, which maps
+    `[3, 17]` to `[True, True]` -- a mask over the wrong arcs and the wrong
+    length.  The Rust solve then started from a basis the Python solve never
+    chose, and every real-graph comparison was measuring that rather than the
+    port: of 54 problems taken off a live quote, only 8 agreed on the pivot
+    count.
+    """
+    g = crowded()
+    cold = active_set_solve(g, 0, 1, 1.0)
+    warm = cold.active                      # indices, not a mask
+    assert warm.dtype.kind in "iu", "the pipeline warm-starts from indices"
+
+    want = active_set_solve(g, 0, 1, 1.0, A0=warm)
+    got = rust(g, 0, 1, 1.0, a0=warm)
+    assert got["pivots"] == want.pivots
+    assert np.allclose(np.asarray(got["psi"]), want.psi, rtol=0, atol=1e-12)

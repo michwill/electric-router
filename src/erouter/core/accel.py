@@ -34,6 +34,63 @@ def available() -> bool:
 def version() -> str:
     return getattr(_rust, "__version__", "unknown") if _rust else "absent"
 
+def problem_for(g):
+    """The Rust-side graph for `g`, built once and kept on it.
+
+    A quote solves 45-106 times over the same arcs; only the warm start, the
+    forbidden mask and the pins differ.  Handing `tau`, `sig`, `G`, `eps` and
+    `cap` across the boundary every time meant tens of thousands of Python
+    floats per quote to convey data that had not changed -- which cost about
+    what the Rust arithmetic saved.
+
+    Cached on the `ArcArrays` itself, keyed by `id` of the arrays it was built
+    from, so a graph that is rebuilt (a new block, a re-fit) gets a new problem
+    rather than a stale one.  `ArcArrays` is frozen in practice but not by
+    construction, hence the key rather than a plain attribute.
+    """
+    if _rust is None:
+        return None
+    key = (id(g.tau), id(g.sig), id(g.G), id(g.eps), id(g.cap))
+    got = getattr(g, "_rust_problem", None)
+    if got is not None and got[0] == key:
+        return got[1]
+    cap = [float(v) if math.isfinite(v) else math.inf
+           for v in np.asarray(g.cap, float)]
+    problem = _rust.Problem(
+        [int(v) for v in np.asarray(g.tau)],
+        [int(v) for v in np.asarray(g.sig)],
+        [float(v) for v in np.asarray(g.G, float)],
+        [float(v) for v in np.asarray(g.eps, float)],
+        cap,
+        int(g.n_nodes),
+    )
+    try:
+        object.__setattr__(g, "_rust_problem", (key, problem))
+    except (AttributeError, TypeError):  # a graph that will not hold it
+        pass
+    return problem
+
+
+def _seed_mask(a0, m: int) -> list[bool]:
+    """`A0` as a length-`m` boolean mask, however it was spelled.
+
+    The Python solver writes `A[np.asarray(A0)] = True`, which accepts either
+    a mask or a list of indices -- and `Solution.active` is a list of indices,
+    which is exactly what the pipeline warm-starts from.  Handing that to
+    `np.asarray(a0, bool)` instead turns `[3, 17, 42]` into three `True`s, so
+    the accelerated path silently started from a different basis: measured
+    against the Python solver on 54 real problems, only 8 agreed on the pivot
+    count, and the graphs that seemed to diverge were never given the same
+    starting point to diverge from.
+    """
+    arr = np.asarray(a0)
+    if arr.dtype == np.bool_ and arr.shape == (m,):
+        return [bool(v) for v in arr]
+    mask = np.zeros(m, bool)
+    mask[arr] = True
+    return [bool(v) for v in mask]
+
+
 def solve_arrays(
     g,
     src: int,
@@ -48,6 +105,7 @@ def solve_arrays(
     min_flow: float,
     gas_cost: float,
     partial_ok: bool,
+    rank1: bool = True,
 ) -> dict | None:
     """Run the Rust solve, or return None if it is not installed.
 
@@ -55,20 +113,14 @@ def solve_arrays(
     NaN would not, and does not occur -- `calibrate` is the only source of
     `cap` and it is either finite or `inf` by construction (§2.3).
     """
-    if _rust is None:
+    problem = problem_for(g)
+    if problem is None:
         return None
-    cap = [float(v) if math.isfinite(v) else math.inf for v in np.asarray(g.cap, float)]
-    return _rust.solve(
-        tau=[int(v) for v in np.asarray(g.tau)],
-        sig=[int(v) for v in np.asarray(g.sig)],
-        g=[float(v) for v in np.asarray(g.G, float)],
-        eps=[float(v) for v in np.asarray(g.eps, float)],
-        cap=cap,
-        n_nodes=int(g.n_nodes),
+    return problem.solve(
         src=int(src),
         dst=int(dst),
         psi_total=float(psi_total),
-        a0=None if a0 is None else [bool(v) for v in np.asarray(a0, bool)],
+        a0=None if a0 is None else _seed_mask(a0, int(g.m)),
         forbidden=None if forbidden is None else
         [bool(v) for v in np.asarray(forbidden, bool)],
         pinned=None if not pinned else [(int(k), float(v)) for k, v in pinned.items()],
@@ -77,5 +129,5 @@ def solve_arrays(
         min_flow=float(min_flow),
         gas_cost=float(gas_cost),
         partial_ok=bool(partial_ok),
-        
+        rank1=bool(rank1),
     )
