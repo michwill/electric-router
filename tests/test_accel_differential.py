@@ -138,3 +138,88 @@ def test_random_graphs_agree(seed):
             f"seed {seed}: max |dpsi| "
             f"{np.max(np.abs(np.array(theirs['psi']) - ours.psi)):.3e}"
         )
+
+
+# --------------------------------------------------------- the hard paths
+#
+# Everything above converges in a handful of pivots, which is exactly what a
+# hand-written case list produces and exactly what the interesting code never
+# runs.  A real $20M quote reaches `maxit`, cycles under Bland's rule and
+# returns PARTIAL; the port disagreed with the reference on all three while
+# passing every test above.  These force them.
+
+
+def crowded(n_lanes=14, seed=3):
+    """Many near-identical lanes: the shape that makes a solve oscillate.
+
+    With `eps` clustered within a hair of each other, arcs enter and leave the
+    basis in turn, each carrying dust -- which is what the degeneracy screen
+    and Bland's rule exist for, and what a two-arc test cannot produce.
+    """
+    rng = np.random.default_rng(seed)
+    tau = np.zeros(n_lanes, np.int64)
+    sig = np.ones(n_lanes, np.int64)
+    a = 1.0 - rng.random(n_lanes) * 1e-9      # all but identical
+    B = 1.0 + rng.random(n_lanes) * 1e-9
+    return make(tau, sig, a, B, Psi=1.0, n=2)
+
+
+@pytest.mark.parametrize("maxit", [1, 2, 3, 5, 11])
+def test_running_out_of_pivots_agrees(maxit):
+    """`maxit` exhaustion: same verdict, same flow, same words."""
+    g = crowded()
+    ours = active_set_solve(g, 0, 1, 1.0, maxit=maxit)
+    theirs = rust(g, 0, 1, 1.0, maxit=maxit)
+    assert theirs["feasible"] == ours.feasible, (
+        f"maxit={maxit}: feasible {theirs['feasible']} vs {ours.feasible}"
+    )
+    assert theirs["reason"] == ours.reason, (
+        f"maxit={maxit}: {theirs['reason']!r} vs {ours.reason!r}"
+    )
+    assert np.allclose(theirs["psi"], ours.psi, atol=1e-12)
+
+
+@pytest.mark.parametrize("maxit", [1, 2, 3, 5, 11])
+def test_an_unconverged_flow_agrees_when_the_caller_accepts_one(maxit):
+    """`partial_ok`: the incumbent is handed over, and must be the same one."""
+    g = crowded()
+    ours = active_set_solve(g, 0, 1, 1.0, maxit=maxit, partial_ok=True)
+    theirs = rust(g, 0, 1, 1.0, maxit=maxit, partial_ok=True)
+    assert theirs["feasible"] == ours.feasible
+    assert theirs["reason"] == ours.reason
+    assert np.allclose(theirs["psi"], ours.psi, atol=1e-12), (
+        f"maxit={maxit}: max |dpsi| "
+        f"{np.max(np.abs(np.array(theirs['psi']) - ours.psi)):.3e}"
+    )
+
+
+@pytest.mark.parametrize("seed", range(6))
+def test_cycling_agrees(seed):
+    """Bland's rule and the cycle counter have to fire in step."""
+    g = crowded(n_lanes=20, seed=seed)
+    ours = active_set_solve(g, 0, 1, 1.0, maxit=40, partial_ok=True)
+    theirs = rust(g, 0, 1, 1.0, maxit=40, partial_ok=True)
+    assert theirs["reason"] == ours.reason, (
+        f"seed {seed}: {theirs['reason']!r} vs {ours.reason!r}"
+    )
+    assert np.allclose(theirs["psi"], ours.psi, atol=1e-12)
+
+
+@pytest.mark.parametrize("screen", [0.0, 1e-3, 1e-2, 0.1])
+def test_the_flow_screen_agrees(screen):
+    """`min_flow` refuses entry below a floor; both must refuse the same arcs."""
+    g = crowded()
+    ours = active_set_solve(g, 0, 1, 1.0, min_flow=screen)
+    theirs = rust(g, 0, 1, 1.0, min_flow=screen)
+    assert theirs["feasible"] == ours.feasible
+    assert np.allclose(theirs["psi"], ours.psi, atol=1e-12)
+
+
+@pytest.mark.parametrize("gas", [0.0, 1e-6, 1e-4, 1e-2])
+def test_the_gas_screen_agrees(gas):
+    """§11.1: an arc must beat the gas of one more leg to be admitted."""
+    g = crowded()
+    ours = active_set_solve(g, 0, 1, 1.0, gas_cost=gas)
+    theirs = rust(g, 0, 1, 1.0, gas_cost=gas)
+    assert theirs["feasible"] == ours.feasible
+    assert np.allclose(theirs["psi"], ours.psi, atol=1e-12)
