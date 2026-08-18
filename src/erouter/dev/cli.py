@@ -908,9 +908,15 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
         except RoutingError as exc:
             print(f"  {BAD} no route: {exc}")
             continue
-        if _confirm_against_chain(result, rpc, chain,
-                                  getattr(client, "transport", None),
-                                  nodes, load.pools) is None:
+        # Timed like a stage: it is one `eth_call` over the wire, after the
+        # quote is already computed, and it was landing in `rest` where it
+        # looked like unattributed Python.
+        _confirm_started = time.monotonic()
+        _confirmed = _confirm_against_chain(result, rpc, chain,
+                                            getattr(client, "transport", None),
+                                            nodes, load.pools)
+        result.timings["confirm"] = (time.monotonic() - _confirm_started) * 1000
+        if _confirmed is None:
             result = route(load.pools, nodes, client, src_token=src, dst_token=dst,
                            amount_in=amount_in, verify_on_chain=not args.no_verify,
                            max_candidates=args.candidates,
