@@ -30,6 +30,7 @@ from ..core.stableswap import StableSwap, StableSwapError
 from ..core.transport import Call
 from ..core.types import ArcKind, Probe
 from .exact_cache import trust as _trust_verdict
+from .lending_params import build_exact_lending
 
 #: Sizes to check at, as fractions of the input balance, in both directions.
 #
@@ -246,6 +247,25 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
             out.rejected.append((pool.address, why))
             if cache is not None:
                 cache.refuse(key, why)
+
+    # The lending pools reach the same holder by a different road.  Their coin
+    # list runs past their balances, so the filter at the top of this function
+    # never sees them, and their rates come from the wrappers rather than from
+    # `stored_rates()`.  `lending_params` settles both, and picks the pool's
+    # variant by reproducing its own `get_dy` -- which is this gate, one level
+    # down, so they arrive already checked.
+    block = (getattr(getattr(client, "transport", None), "block", None)
+             or getattr(client, "block", None))
+    if block and only is None:
+        try:
+            lent, refused = build_exact_lending(pools, client, block=int(block))
+        except Exception as exc:  # noqa: BLE001 - a reader must not fail a quote
+            lent, refused = {}, [("lending", str(exc))]
+        out.by_pool.update(lent)
+        out.checked += len(lent) + len(refused)
+        out.rejected.extend(refused)
+        if lent and not quiet:
+            print(f"  exact lending: {len(lent)} wrapped-token pools")
 
     if not quiet:
         print(f"  exact stableswap: {len(out)} of {out.checked} pools reproduce "

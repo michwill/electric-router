@@ -126,6 +126,11 @@ class StableSwap:
     a_precision: int = A_PRECISION
     #: ng takes the fee in `xp` space; legacy takes it in token space.
     fee_on_xp: bool = True
+    #: Whether the pool rounds its output down by a wei.  The ng generation
+    #: computes `dy = xp[j] - y - 1`; the 2020 lending pools compute
+    #: `dy = xp[j] - y` and keep the wei.  It is one wei, and one wei is the
+    #: whole difference between a model that is admitted and one that is not.
+    subtract_one: bool = True
     #: Lazily filled by `xp` / `xp_float`.  Not part of the value: the pool is
     #: frozen at a block, so these are a function of it rather than more state.
     #:
@@ -232,7 +237,7 @@ class StableSwap:
         d = self.d(xp)
         x = xp[i] + dx * self.rates[i] // PRECISION
         y = self.y(i, j, x, xp, d)
-        raw = xp[j] - y - 1
+        raw = xp[j] - y - (1 if self.subtract_one else 0)
         if raw <= 0:
             return 0
         if self.fee_on_xp:
@@ -254,7 +259,7 @@ class StableSwap:
         d = d_fast(xp, float(self.amp), float(self.a_precision), self.n)
         x = xp[i] + float(dx) * self.rates[i] / PRECISION
         y = solve_y_fast(float(self.amp), float(self.a_precision), xp, d, i, j, x)
-        raw = xp[j] - y - 1.0
+        raw = xp[j] - y - (1.0 if self.subtract_one else 0.0)
         if raw <= 0.0:
             return 0
         if self.fee_on_xp:
