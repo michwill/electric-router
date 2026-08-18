@@ -232,6 +232,43 @@ fn calibrate<'py>(
     )
 }
 
+/// Remove circulation from a flow (§5.6).  Returns `(flow, removed)`.
+///
+/// A free function rather than a `Problem` method: `cancel_cycles` is called
+/// on sub-arrays of a candidate's own support, whose indices are not the
+/// graph's, so there is nothing resident to reuse.
+#[pyfunction]
+#[pyo3(signature = (tau, sig, psi, tol=1e-12, n_nodes=None))]
+fn cancel_cycles<'py>(
+    py: Python<'py>,
+    tau: Vec<i64>,
+    sig: Vec<i64>,
+    psi: Vec<f64>,
+    tol: f64,
+    n_nodes: Option<usize>,
+) -> PyResult<(Vec<f64>, usize)> {
+    let n = n_nodes.unwrap_or_else(|| {
+        let hi = tau.iter().chain(sig.iter()).copied().max().unwrap_or(-1);
+        (hi + 1).max(0) as usize
+    });
+    Ok(py.allow_threads(|| crate::cycles::cancel_cycles(&tau, &sig, &psi, tol, n)))
+}
+
+/// One directed cycle as arc indices, or `None`.
+#[pyfunction]
+#[pyo3(signature = (tau, sig, n_nodes=None))]
+fn find_cycle(
+    tau: Vec<i64>,
+    sig: Vec<i64>,
+    n_nodes: Option<usize>,
+) -> PyResult<Option<Vec<usize>>> {
+    let n = n_nodes.unwrap_or_else(|| {
+        let hi = tau.iter().chain(sig.iter()).copied().max().unwrap_or(-1);
+        (hi + 1).max(0) as usize
+    });
+    Ok(crate::cycles::find_cycle(&tau, &sig, n))
+}
+
 fn pack<'py>(py: Python<'py>, out: crate::solve::Solution) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("psi", out.psi)?;
@@ -254,6 +291,8 @@ fn pack<'py>(py: Python<'py>, out: crate::solve::Solution) -> PyResult<Bound<'py
 fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate, m)?)?;
+    m.add_function(wrap_pyfunction!(cancel_cycles, m)?)?;
+    m.add_function(wrap_pyfunction!(find_cycle, m)?)?;
     m.add_class::<Problem>()?;
     m.add("__doc__", "The router's active-set QP, in Rust.")?;
     Ok(())

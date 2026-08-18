@@ -17,15 +17,23 @@ conversion is emitted at all.
 
 from __future__ import annotations
 
+import os
+
 import math
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import accel as _accel
+
 from .nodes import NodeMap
 from .types import ArcKind, Leg, PoolArc
 
 BPS = 10_000
+
+
+#: Opt-in on the same switch as the rest of the port.
+_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 
 
 class RealizationError(RuntimeError):
@@ -120,6 +128,13 @@ def cancel_cycles(
     Returns the acyclic flow and the number of cycles removed.
     """
     flow = np.array(psi, dtype=float)
+    # The compiled pass, when it is installed.  Same peel, same
+    # tie-breaks -- which cycle is found decides which arcs are
+    # cancelled, so `tests/test_cycles_differential.py` differs the two.
+    if _ACCEL_ON and _accel.available():
+        got = _accel.cancel_cycles(tau, sig, flow, tol)
+        if got is not None:
+            return got
     removed = 0
     for _ in range(len(flow) + 1):
         live = np.flatnonzero(flow > tol)

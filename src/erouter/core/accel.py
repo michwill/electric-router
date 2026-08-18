@@ -191,3 +191,22 @@ def shortest_path(g, src, dst, *, banned_arcs=None, banned_nodes=None,
         None if weights is None else np.asarray(weights, float).tolist(),
         int(max_hops),
     )
+
+
+def cancel_cycles(tau, sig, psi, tol=1e-12, n_nodes=None):
+    """Circulation removal through the compiled pass, or `None` if absent.
+
+    The arrays are the candidate's own support, so nothing here is resident --
+    but a full cancellation was 3.4 ms in Python against a whole quote of
+    ~200 ms, because the peel runs `np.isin` per layer.
+    """
+    if _rust is None:
+        return None
+    flow, removed = _rust.cancel_cycles(
+        np.asarray(tau, np.int64).tolist(),
+        np.asarray(sig, np.int64).tolist(),
+        np.asarray(psi, float).tolist(),
+        float(tol),
+        None if n_nodes is None else int(n_nodes),
+    )
+    return np.asarray(flow, float), int(removed)
