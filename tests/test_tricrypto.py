@@ -132,3 +132,40 @@ def test_the_float_path_keeps_the_y_over_d_bound():
         except (TricryptoError, ArithmeticError):
             refused.append(True)
     assert refused[0] == refused[1]
+
+
+# ------------------------------------------------ the 2021 generation
+
+def test_the_a_multiplier_is_not_a_constant_across_generations():
+    """`A_MULTIPLIER` is 10,000 for the optimized math and **100** for the
+    original 2021 tricrypto -- the same trap `a_precision` is in stableswap.
+
+    Taking the wrong one scales `mul1` by a hundred, which quotes the pool
+    about twice wrong: close enough to read as a rounding problem and not be
+    one.  Verified against the deployed 0x80466c64, whose `A()` returns
+    `A_precise() / 100`.
+    """
+    from erouter.core.tricrypto import A_MULTIPLIER, _newton_y
+
+    x = [100_000 * 10**18, 100_000 * 10**18, 100_000 * 10**18]
+    d = 300_000 * 10**18
+    ann, gamma = 364_500, 69_999_999_999_999
+    with_100 = _newton_y(ann, gamma, x, d, 1, a_multiplier=100)
+    with_10k = _newton_y(ann, gamma, list(x), d, 1, a_multiplier=A_MULTIPLIER)
+    assert with_100 != with_10k, "the multiplier has to reach the arithmetic"
+
+
+def test_the_2021_pools_bound_their_inputs():
+    """The original math asserts every *other* balance sits within
+    `[1e16, 1e20]` of `D`; the optimized math dropped the check.
+
+    It is a refusal the pool makes, so a model of one has to make it too --
+    otherwise we quote a size the chain reverts on.
+    """
+    from erouter.core.tricrypto import _newton_y
+
+    d = 300_000 * 10**18
+    lopsided = [10**18, 150_000 * 10**18, 150_000 * 10**18]   # x[0]/D far below 1e16
+    with pytest.raises(TricryptoError, match="unsafe values"):
+        _newton_y(364_500, 69_999_999_999_999, lopsided, d, 1,
+                  check_inputs=True, a_multiplier=100)

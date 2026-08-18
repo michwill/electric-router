@@ -64,6 +64,22 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True,
             Call(pool.address, encode_call("last_timestamp()")),
             Call(pool.address, encode_call("price_scale(uint256)", 0)),
             Call(pool.address, encode_call("price_scale(uint256)", 1)),
+            # The 2021 pools keep the three fees as separate getters; the
+            # optimized math packs them into one word.  Asking for both costs
+            # three calls a pool and is what lets tricrypto2 be modelled at
+            # all -- without it a $10M pool on the main BTC/ETH path falls
+            # through to the EVM, and every route touching it with it.
+            Call(pool.address, encode_call("mid_fee()")),
+            Call(pool.address, encode_call("out_fee()")),
+            Call(pool.address, encode_call("fee_gamma()")),
+            # `A()` does not mean the same thing across the generations.  The
+            # 2021 tricrypto2 returns `A * N**N * A_MULTIPLIER` from it; the
+            # 2021 *v1* pool divides that by `A_MULTIPLIER` and keeps the raw
+            # value under `A_precise()`, which is what its own views contract
+            # reads.  Taking `A()` from a v1 pool is off by 10,000 and quotes
+            # it 3.5x wrong -- caught by the gate, but only because the gate
+            # exists.  Prefer `A_precise()` where there is one.
+            Call(pool.address, encode_call("A_precise()")),
         ]
     answers = client.raw(calls)
 
@@ -88,13 +104,31 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True,
 
     built: list[tuple[object, Tricrypto, dict]] = []
     for k, pool in enumerate(wanted):
-        d, amp, gamma, packed, ramp_until, last, ps0, ps1 = answers[8 * k : 8 * k + 8]
-        if not (d.ok and amp.ok and packed.ok and ps0.ok and ps1.ok):
+        (d, amp, gamma, packed, ramp_until, last, ps0, ps1,
+         mid, out_f, fee_g, amp_precise) = answers[12 * k : 12 * k + 12]
+        # `A_precise() / A()` *is* the multiplier, read off the pool rather
+        # than guessed from its vintage.
+        a_multiplier = 10_000
+        if amp_precise.ok:
+            if amp.ok and amp.uint() > 0:
+                ratio = amp_precise.uint() // amp.uint()
+                a_multiplier = 100 if ratio < 1_000 else 10_000
+            else:
+                a_multiplier = 100
+            amp = amp_precise
+        if not (d.ok and amp.ok and ps0.ok and ps1.ok):
+            continue
+        legacy = not packed.ok
+        if legacy and not (mid.ok and out_f.ok and fee_g.ok):
             continue
         if ramp_until.ok and last.ok and ramp_until.uint() > last.uint():
             out.rejected.append((pool.address, "A/gamma ramp in progress"))
             continue
-        blob = packed.uint()
+        if legacy:
+            fees = (mid.uint(), out_f.uint(), fee_g.uint())
+        else:
+            blob = packed.uint()
+            fees = ((blob >> 128) & UINT64, (blob >> 64) & UINT64, blob & UINT64)
         built.append((pool, Tricrypto(
             balances=tuple(int(b) for b in pool.balances[:3]),
             precisions=precisions[pool.address.lower()],
@@ -102,10 +136,12 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True,
             d=d.uint(),
             amp=amp.uint(),
             gamma=gamma.uint_or(0) or 0,
-            mid_fee=(blob >> 128) & UINT64,
-            out_fee=(blob >> 64) & UINT64,
-            fee_gamma=blob & UINT64,
-        ), {"family": "tricrypto"}))
+            mid_fee=fees[0],
+            out_fee=fees[1],
+            fee_gamma=fees[2],
+            legacy=legacy,
+            a_multiplier=a_multiplier,
+        ), {"family": "tricrypto-2021" if legacy else "tricrypto"}))
 
     if not built:
         return out

@@ -98,14 +98,40 @@ def reduction_coefficient(x: list[int], fee_gamma: int) -> int:
     return k
 
 
-def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int) -> int:
-    """The fallback `get_y` takes when the discriminant is not positive."""
-    if not (MIN_A - 1 < ann < MAX_A + 1):
+def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
+              *, check_inputs: bool = False,
+              a_multiplier: int = A_MULTIPLIER) -> int:
+    """The fallback `get_y` takes when the discriminant is not positive.
+
+    `check_inputs` adds the bound the 2021 pools apply before iterating --
+    every *other* balance must sit within `[1e16, 1e20]` of `D` -- which the
+    optimized math dropped.  It is a refusal the pool makes, so a model of one
+    of those pools has to make it too.
+
+    `a_multiplier` is not a constant across the generations, which is the same
+    trap `a_precision` is in stableswap: tricrypto2 and the optimized math use
+    10,000, and the original 2021 tricrypto uses **100**.  Taking the wrong one
+    scales `mul1` by a hundred and quotes the pool about twice wrong -- close
+    enough to look like a rounding problem and not be one.
+    """
+    scale = a_multiplier // A_MULTIPLIER if a_multiplier >= A_MULTIPLIER else 1
+    lo_a = MIN_A * a_multiplier // A_MULTIPLIER
+    hi_a = MAX_A * a_multiplier // A_MULTIPLIER
+    del scale
+    if not (lo_a - 1 < ann < hi_a + 1):
         raise TricryptoError("unsafe values A")
     if not (MIN_GAMMA - 1 < gamma < MAX_GAMMA + 1):
         raise TricryptoError("unsafe values gamma")
     if not (10**17 - 1 < d < 10**15 * 10**18 + 1):
         raise TricryptoError("unsafe values D")
+
+    if check_inputs:
+        for k in range(N_COINS):
+            if k == i:
+                continue
+            frac = x[k] * PRECISION // d
+            if not (10**16 - 1 < frac < 10**20 + 1):
+                raise TricryptoError("unsafe values x[i]")
 
     y = d // N_COINS
     k0_i = PRECISION
@@ -134,7 +160,7 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int) -> int:
         g1k0 = gamma + PRECISION
         g1k0 = g1k0 - k0 + 1 if g1k0 > k0 else k0 - g1k0 + 1
 
-        mul1 = PRECISION * d // gamma * g1k0 // gamma * g1k0 * A_MULTIPLIER // ann
+        mul1 = PRECISION * d // gamma * g1k0 // gamma * g1k0 * a_multiplier // ann
         mul2 = PRECISION + (2 * PRECISION) * k0 // g1k0
 
         yfprime = PRECISION * y + s * mul2 + mul1
@@ -179,7 +205,7 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int) -> int:
 # makes, so the float path has to make it too.
 
 def newton_y_fast(a: float, gamma: float, x: list[float], d: float,
-                  i: int) -> float:
+                  i: int, check_inputs: bool = False) -> float:
     """Balance `i` restoring the invariant, in dollars.
 
     `a` is `ann / A_MULTIPLIER` and `gamma` is `gamma / 1e18`; `x` and `d` are
@@ -189,6 +215,12 @@ def newton_y_fast(a: float, gamma: float, x: list[float], d: float,
     others = sorted((v for k, v in enumerate(x) if k != i), reverse=True)
     if others[-1] <= 0.0 or d <= 0.0 or a <= 0.0 or gamma <= 0.0:
         raise TricryptoError("empty balance")
+
+    if check_inputs:
+        # `1e16 <= x[k] * 1e18 / D <= 1e20` reduces to `0.01 <= x[k]/D <= 100`.
+        for k in range(N_COINS):
+            if k != i and not (0.01 <= x[k] / d <= 100.0):
+                raise TricryptoError("unsafe values x[i]")
 
     y = d / N_COINS
     s_i = 0.0
@@ -347,6 +379,13 @@ class Tricrypto:
     mid_fee: int
     out_fee: int
     fee_gamma: int
+    #: True for the 2021 pools (tricrypto2 and its siblings), whose `get_dy`
+    #: goes through `newton_y` rather than the optimized math's cubic.  The
+    #: arithmetic after that point is the same in both.
+    legacy: bool = False
+    #: `A_MULTIPLIER` for this pool's generation: 10,000 for the optimized
+    #: math and tricrypto2, 100 for the original 2021 tricrypto.
+    a_multiplier: int = A_MULTIPLIER
 
     def fee(self, xp: list[int]) -> int:
         f = reduction_coefficient(xp, self.fee_gamma)
@@ -378,7 +417,15 @@ class Tricrypto:
         for k in range(N_COINS - 1):
             xp[k + 1] = xp[k + 1] * self.price_scale[k] * self.precisions[k + 1] // PRECISION
 
-        if fast:
+        if fast and self.legacy:
+            y = int(newton_y_fast(
+                self.amp / self.a_multiplier, self.gamma / PRECISION,
+                [v / PRECISION for v in xp], self.d / PRECISION, j,
+                True) * PRECISION)
+        elif self.legacy:
+            y = _newton_y(self.amp, self.gamma, xp, self.d, j, check_inputs=True,
+                          a_multiplier=self.a_multiplier)
+        elif fast:
             # The range checks the contract makes on A, gamma and D are
             # comparisons against the integers it holds, so they are made
             # here rather than re-derived in floating point.
@@ -389,7 +436,7 @@ class Tricrypto:
             if not (10**17 - 1 < self.d < 10**15 * 10**18 + 1):
                 raise TricryptoError("unsafe values D")
             y = int(newton_y_fast(
-                self.amp / A_MULTIPLIER, self.gamma / PRECISION,
+                self.amp / self.a_multiplier, self.gamma / PRECISION,
                 [v / PRECISION for v in xp], self.d / PRECISION, j) * PRECISION)
         else:
             y = get_y(self.amp, self.gamma, xp, self.d, j)[0]
