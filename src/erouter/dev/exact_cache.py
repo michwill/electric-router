@@ -6,12 +6,10 @@ across the universe -- and what it establishes is that a pool's *code*
 implements the maths we think it does.  Curve pools are not upgradeable, so
 that verdict is good until either side of the comparison changes.
 
-Keeping it matters for more than the calls it saves.  A verdict known *before
-anything is warmed* is what lets the local EVM fetch storage for the pools it
-still has to execute and skip the ones that will be computed -- which is 68% of
-the slots it reads today.  Without it the ordering is circular: you cannot know
-a pool is computable until you have run its `get_dy`, and running its `get_dy`
-is what the storage is for.
+What it saves is the gate and nothing else.  It does *not* let the local EVM
+skip those pools' storage: they are computed from that same storage, so
+skipping the sweep relocates the read onto the wire rather than removing it --
+measured, and it turned startup into minutes.  See `tests/test_startup_cost.py`.
 
 **What voids a verdict.**  Anything that changes either side of the comparison:
 
@@ -26,9 +24,13 @@ is what the storage is for.
 
 **What it does not protect against** is a pool whose behaviour changes without
 its code or its readable parameters changing -- an external fee policy, say.
-Those are excluded at build time rather than trusted here, and a sample is
-re-gated every run so that a systematic drift surfaces without waiting for a
-route to go wrong.
+Those are excluded at build time rather than trusted here: a twocrypto pool
+with a `POLICY` contract is refused before the gate, because its fee can vary
+with trade size and one probe would agree at the size it was taken.
+
+`trust` takes a `resample` set so a caller can force pools back through the
+gate.  Nothing passes one today; it is there for a scheduled audit, and saying
+so is better than implying a check that does not run.
 """
 
 from __future__ import annotations
@@ -78,8 +80,11 @@ class ExactCache:
     path: Path
     fingerprint: str = ""
     verdicts: dict[str, dict] = field(default_factory=dict)
-    #: Pools checked and found *not* to reproduce.  Worth keeping too: they are
-    #: the ones that must stay warm, and rediscovering that costs the same gate.
+    #: Pools checked this run and found *not* to reproduce, with why.  Held
+    #: for reporting and **never written**: the reason carries the mismatching
+    #: wei, which moves with the block, so persisting it rewrote a committed
+    #: file on every route.  Nothing reads it back -- a pool absent from
+    #: `verdicts` is re-gated regardless, which is the same outcome.
     refused: dict[str, str] = field(default_factory=dict)
 
     # ------------------------------------------------------------- loading
@@ -101,7 +106,6 @@ class ExactCache:
             path=path,
             fingerprint=current,
             verdicts={k.lower(): v for k, v in blob.get("verdicts", {}).items()},
-            refused={k.lower(): v for k, v in blob.get("refused", {}).items()},
         )
 
     def save(self) -> None:
@@ -111,23 +115,12 @@ class ExactCache:
             "chain_id": self.chain_id,
             "fingerprint": self.fingerprint or math_fingerprint(),
             "verdicts": dict(sorted(self.verdicts.items())),
-            "refused": dict(sorted(self.refused.items())),
         }, indent=1, sort_keys=True) + "\n")
 
     # ------------------------------------------------------------- reading
 
     def get(self, pool: str) -> dict | None:
         return self.verdicts.get(pool.lower())
-
-    def expected(self, pools) -> set[str]:
-        """Addresses this cache expects to model, so warming can skip them.
-
-        Deliberately excludes anything previously refused: those are exactly
-        the pools that still have to be executed, and a stale "refused" costs
-        a warm we would have done anyway.
-        """
-        known = self.verdicts
-        return {p.address.lower() for p in pools if p.address.lower() in known}
 
     def record(self, pool: str, variant: dict) -> None:
         key = pool.lower()

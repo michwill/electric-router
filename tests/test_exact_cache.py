@@ -1,12 +1,12 @@
 """A remembered verdict must never be believed harder than a fresh one.
 
 The cache exists so a pool that has already reproduced its own `get_dy` is not
-made to prove it again -- 2,406 gate probes down to 84, and, more importantly,
-a verdict known *before* anything is warmed is what lets the local EVM skip
-storage for the pools it will never execute.
+made to prove it again: 2,406 gate probes down to 84.  That is all it saves --
+it does *not* let the warm skip those pools, which are computed from the very
+storage the sweep fetches (see `test_startup_cost.py`).
 
-That makes it load-bearing for correctness, not just for speed, so the
-properties worth pinning are the ones that keep it honest:
+A wrong verdict would be believed silently, so the properties worth pinning are
+the ones that keep it honest:
 
 * editing the maths discards every verdict, because the verdict is a claim
   about *this* arithmetic agreeing with the chain;
@@ -92,13 +92,34 @@ def test_an_unknown_pool_is_never_trusted(tmp_path: Path):
 def test_verdicts_survive_a_round_trip(tmp_path: Path):
     cache = ExactCache.load(1, "ethereum", tmp_path)
     cache.record(POOL, STABLE)
-    cache.refuse("0x" + "cd" * 20, "no variant matched")
     cache.save()
 
     again = ExactCache.load(1, "ethereum", tmp_path)
     assert again.get(POOL) == STABLE
     assert len(again) == 1
-    assert again.refused["0x" + "cd" * 20]
+
+
+def test_refusals_are_never_written(tmp_path: Path):
+    """The file is committed, so it must change only when a verdict does.
+
+    A refusal reason carries the mismatching wei, which moves with the block,
+    so persisting it rewrote the file on every route -- a dirty working tree
+    after running a read-only command.  Nothing reads them back: a pool absent
+    from `verdicts` is re-gated either way.
+    """
+    cache = ExactCache.load(1, "ethereum", tmp_path)
+    cache.record(POOL, STABLE)
+    cache.refuse("0x" + "cd" * 20, "23350204197227025 != 21327129196346614")
+    cache.save()
+    first = (tmp_path / "ethereum.json").read_text()
+
+    again = ExactCache.load(1, "ethereum", tmp_path)
+    assert not again.refused, "a refusal was persisted"
+    # A second run refusing the same pool with different numbers, as a moving
+    # block does, must leave the bytes alone.
+    again.refuse("0x" + "cd" * 20, "99999999999999999 != 11111111111111111")
+    again.save()
+    assert (tmp_path / "ethereum.json").read_text() == first
 
 
 def test_editing_the_maths_discards_every_verdict(tmp_path: Path, monkeypatch):
@@ -121,17 +142,6 @@ def test_recording_clears_a_previous_refusal_and_vice_versa(tmp_path: Path):
 
     cache.refuse(POOL, "mismatch again")
     assert cache.get(POOL) is None and POOL.lower() in cache.refused
-
-
-def test_expected_covers_only_what_is_actually_modelled(tmp_path: Path):
-    """`expected` decides what the warm skips, so a refusal must not be in it."""
-    cache = ExactCache.load(1, "t", tmp_path)
-    other = "0x" + "cd" * 20
-    cache.record(POOL, STABLE)
-    cache.refuse(other, "mismatch")
-
-    pools = [FakePool(POOL), FakePool(other), FakePool("0x" + "ef" * 20)]
-    assert cache.expected(pools) == {POOL.lower()}
 
 
 def test_the_fingerprint_is_stable_and_not_empty():
