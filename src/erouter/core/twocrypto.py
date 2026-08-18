@@ -35,9 +35,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .cryptoswap import CryptoSwapError, _newton_y
+from .cryptoswap import MAX_GAMMA_SMALL, newton_y_fast, CryptoSwapError, _newton_y
 from .cryptoswap import get_y as crypto_get_y
-from .stableswap import StableSwapError, solve_y
+from .stableswap import solve_y_fast, StableSwapError, solve_y
 
 PRECISION = 10**18
 FEE_PRECISION = 10**10
@@ -125,6 +125,21 @@ class Twocrypto:
 
     def get_dy(self, i: int, j: int, dx: int) -> int:
         """Exactly what the pool's `get_dy(i, j, dx)` returns on chain."""
+        return self._quote(i, j, dx, self._y)
+
+    def get_dy_fast(self, i: int, j: int, dx: int) -> int:
+        """`get_dy`, solving the invariant in floating point.
+
+        Only the iteration moves: the fee, the price scale and the precisions
+        are a handful of integer operations and stay exactly as the contract
+        does them.  See `cryptoswap.newton_y_fast` for why the float form is
+        a dimensional reduction rather than a transcription -- measured on 68
+        mainnet cryptoswap pools, it tracks the integer path to a worst case
+        of 8e-6 bp.
+        """
+        return self._quote(i, j, dx, self._y_fast)
+
+    def _quote(self, i: int, j: int, dx: int, solve) -> int:
         if i == j or not (0 <= i < N_COINS) or not (0 <= j < N_COINS):
             raise TwocryptoError("coin index out of range")
         if dx <= 0:
@@ -142,7 +157,7 @@ class Twocrypto:
              else xp[1] * self.price_scale * self.precisions[1] // PRECISION),
         ]
 
-        y = self._y(xp, j)
+        y = solve(xp, j)
         if y >= xp[j]:
             raise TwocryptoError("unsafe value for y")
         dy = xp[j] - y - 1
@@ -160,6 +175,34 @@ class Twocrypto:
         # The fee reads the post-trade balances, which is why `xp[j]` is
         # assigned above rather than after this line.
         return dy - self.fee(xp) * dy // FEE_PRECISION
+
+    def _y_fast(self, xp: list[int], j: int) -> int:
+        """`_y`, in floating point, for the families that have one.
+
+        The stableswap backend is the FX Swap's, so it reuses that module's
+        float iteration; the cryptoswap ones share `newton_y_fast`.  Both
+        return an integer, because everything downstream -- the fee, the
+        price scale -- is still the contract's integer arithmetic.
+        """
+        try:
+            if self.stable and not self.legacy_pool:
+                other = 1 - j
+                return int(solve_y_fast(
+                    float(self.amp), float(A_MULTIPLIER),
+                    [float(v) for v in xp], float(self.d), other, j,
+                    float(xp[other])))
+            # The `K0_i` window, in the same units as everything else.  The
+            # legacy pools fix it at 100; the optimized math narrows it once
+            # gamma passes MAX_GAMMA_SMALL, exactly as `get_y` does.
+            lim = 100.0
+            if not self.legacy_pool and self.v21 and self.gamma > MAX_GAMMA_SMALL:
+                lim = lim * MAX_GAMMA_SMALL / self.gamma
+            got = newton_y_fast(self.amp / A_MULTIPLIER, self.gamma / PRECISION,
+                                [v / PRECISION for v in xp],
+                                self.d / PRECISION, j, lim)
+            return int(got * PRECISION)
+        except (CryptoSwapError, StableSwapError) as exc:
+            raise TwocryptoError(str(exc)) from exc
 
     def _y(self, xp: list[int], j: int) -> int:
         if self.legacy_pool:

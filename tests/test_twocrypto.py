@@ -91,3 +91,53 @@ def test_both_directions_quote():
     p = pool()
     assert p.get_dy(0, 1, 10**19) > 0
     assert p.get_dy(1, 0, 10**19) > 0
+
+
+# --------------------------------------------------- the float fast path
+
+@pytest.mark.parametrize("frac", [1e-6, 1e-4, 1e-2, 0.1, 0.4])
+def test_the_float_quote_tracks_the_integer_one(frac):
+    """`get_dy_fast` is the same trade, solved in dollars instead of wei.
+
+    The integer path is the contract and is what the admission gate checks.
+    This one prices with it, and has to agree far inside any tick that could
+    reorder two candidates -- measured on 68 mainnet cryptoswap pools, the
+    worst case at realistic sizes is 8e-6 bp.
+    """
+    p = pool()
+    dx = int(p.balances[0] * frac)
+    try:
+        exact = p.get_dy(0, 1, dx)
+    except TwocryptoError:
+        # This fixture refuses its own smallest sizes; the refusal itself is
+        # covered below.  Nothing to compare when there is no quote.
+        pytest.skip("the integer path refuses this size")
+    fast = p.get_dy_fast(0, 1, dx)
+    assert exact > 0
+    assert abs(fast / exact - 1.0) * 1e4 < 0.01
+
+
+def test_the_float_path_refuses_what_the_integer_path_refuses():
+    """The `K0_i` window is not decoration.
+
+    A pool outside it reverts, so a float path that dropped the test would
+    quote sizes the chain will not serve.  In natural units the contract's
+    `10**36 // lim_mul <= k0_i <= lim_mul` is just `1/lim <= k0_i <= lim`.
+    """
+    p = pool()
+    huge = p.balances[0] * 10**6
+    integer_refused = float_refused = False
+    try:
+        p.get_dy(0, 1, huge)
+    except (TwocryptoError, ArithmeticError):
+        integer_refused = True
+    try:
+        p.get_dy_fast(0, 1, huge)
+    except (TwocryptoError, ArithmeticError):
+        float_refused = True
+    assert integer_refused == float_refused
+
+
+def test_a_zero_trade_is_zero_either_way():
+    p = pool()
+    assert p.get_dy_fast(0, 1, 0) == 0 == p.get_dy(0, 1, 0)

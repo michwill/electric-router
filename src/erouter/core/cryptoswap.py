@@ -50,6 +50,10 @@ MIN_A = N_COINS**N_COINS * A_MULTIPLIER // 10
 MAX_A = N_COINS**N_COINS * A_MULTIPLIER * 1000
 MAX_ITER = 255
 
+#: Where the float iteration stops, relative.  The integer one stops at a
+#: wei-denominated floor, which has no floating-point meaning.
+_FAST_TOL = 1e-14
+
 
 class CryptoSwapError(ArithmeticError):
     """The state is outside what the invariant will solve."""
@@ -151,6 +155,94 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
 
         diff = y - y_prev if y > y_prev else y_prev - y
         if diff < max(convergence_limit, y // 10**14):
+            return y
+
+    raise CryptoSwapError("y did not converge")
+
+
+# ------------------------------------------------------ the float fast path
+#
+# This arithmetic was floating point before it was integer.  The deployed form
+# carries `PRECISION`, `A_MULTIPLIER` and a `divider` ladder stepping through
+# 10**48 down to 10**20, and none of that is the algorithm: it is armour that
+# keeps intermediates inside u256.  Transcribing it into `f64` would be the
+# worst of both -- `delta0 = 3ac/b - b` differences two like-sized 1e32
+# quantities, which is catastrophic cancellation at 53 bits of mantissa.
+#
+# So the scaling is undone instead, one variable at a time, by giving each its
+# dimension.  Balances, `D` and their sums are *dollars*; `PRECISION` is one
+# dollar; `gamma` and `K0` are dimensionless; `ann` carries `A_MULTIPLIER`.
+# Written that way every 1e18 cancels:
+#
+#     k0_i = 1e18 * N * x_j // d          ->  N * x_j / D
+#     k0   = k0_i * y * N // d            ->  N**2 * x_j * y / D**2
+#     g1k0 = |gamma + 1e18 - k0| + 1      ->  G = |gamma + 1 - k0|
+#     mul1 = 1e18*d//gamma*g1k0//gamma
+#            *g1k0*A_MULTIPLIER//ann      ->  D * G**2 / (gamma**2 * A)   [$]
+#     mul2 = 1e18 + 2e18*k0//g1k0         ->  1 + 2 * k0 / G             [-]
+#     fprime = yfprime // y               ->  yfprime / y                [-]
+#
+# What is left is the Newton iteration the whitepaper describes, and it is
+# self-correcting: it converges to the root of the invariant rather than
+# accumulating the rounding of a closed form.  The `+ 1` on `g1k0` and the
+# wei-denominated convergence floor are integer artifacts and go.
+
+def newton_y_fast(a: float, gamma: float, x: list[float], d: float,
+                  i: int, lim: float = 100.0) -> float:
+    """Balance `i` restoring the invariant, in dollars.
+
+    `a` is `ann / A_MULTIPLIER`, `gamma` is `gamma / 1e18`, and `x` and `d`
+    are in dollars -- the units the algorithm was written in before it was
+    made to fit in integers.
+
+    `lim` is the `K0_i` window, `lim_mul / 1e18`.  It reduces as cleanly as
+    everything else: the contract asks `10**36 // lim_mul <= k0_i <= lim_mul`
+    with `k0_i = 1e18 * N * x_j / D`, and dividing through leaves
+    `1 / lim <= N * x_j / D <= lim`.  It is not decoration -- a pool outside
+    that window reverts, so a float path that skipped the test would quote
+    sizes the chain refuses.
+    """
+    x_j = x[1 - i]
+    if x_j <= 0.0 or d <= 0.0 or a <= 0.0 or gamma <= 0.0:
+        raise CryptoSwapError("empty balance")
+
+    y = d * d / (x_j * N_COINS * N_COINS)
+    k0_i = N_COINS * x_j / d
+    if not (1.0 / lim <= k0_i <= lim):
+        raise CryptoSwapError("unsafe values x[i]")
+
+    for _ in range(MAX_ITER):
+        y_prev = y
+        if y <= 0.0:
+            raise CryptoSwapError("y collapsed")
+        k0 = k0_i * y * N_COINS / d
+        if k0 <= 0.0:
+            raise CryptoSwapError("K0 collapsed")
+        s = x_j + y
+
+        g1k0 = abs(gamma + 1.0 - k0)
+        if g1k0 <= 0.0:
+            raise CryptoSwapError("K0 at the pole")
+
+        mul1 = d * g1k0 * g1k0 / (gamma * gamma * a)
+        mul2 = 1.0 + 2.0 * k0 / g1k0
+
+        yfprime = y + s * mul2 + mul1
+        dyfprime = d * mul2
+        if yfprime < dyfprime:
+            y = y_prev * 0.5
+            continue
+        yfprime -= dyfprime
+        fprime = yfprime / y
+        if fprime <= 0.0:
+            raise CryptoSwapError("derivative collapsed")
+
+        y_minus = mul1 / fprime
+        y_plus = (yfprime + d) / fprime + y_minus / k0
+        y_minus += s / fprime
+        y = y_prev * 0.5 if y_plus < y_minus else y_plus - y_minus
+
+        if abs(y - y_prev) < _FAST_TOL * y:
             return y
 
     raise CryptoSwapError("y did not converge")
