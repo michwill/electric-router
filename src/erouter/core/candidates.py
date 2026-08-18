@@ -162,10 +162,30 @@ def _spread(top_k: tuple[int, ...], budget: int) -> set[int]:
     return {levels[int(round(i * step))] for i in range(budget)}
 
 
-def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray) -> dict[str, list[int]]:
+#: Flow below this share of the trade is not a decision the solve made -- it is
+#: the residue of a pivot, and it differs in the last bits between one linear
+#: kernel and another.  Testing `psi > 0` therefore made *membership* itself
+#: kernel-dependent: an arc carrying 1e-18 counted as active under LU and not
+#: under Cholesky, which changed which pools conflict, which changed the repair
+#: candidates, which changed the ballot.  Measured at one block: the winning
+#: candidate (72 bp better than the alternative) existed on one ballot and not
+#: the other.
+#:
+#: A floor relative to the trade makes the question "did the solve route
+#: anything here" rather than "is this float positive".
+ACTIVE_FLOOR = 1e-12
+
+
+def carries(psi: np.ndarray, Psi: float) -> np.ndarray:
+    """Arcs the solve actually routed through, as a boolean mask."""
+    return psi > max(ACTIVE_FLOOR * abs(Psi), 0.0)
+
+
+def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
+                      Psi: float = 0.0) -> dict[str, list[int]]:
     """Pools carrying flow on more than one arc (decision 3)."""
     groups: dict[str, list[int]] = {}
-    for k in np.flatnonzero(psi > 0):
+    for k in np.flatnonzero(carries(psi, Psi) if Psi else psi > 0):
         groups.setdefault(arcs[int(k)].pool.lower(), []).append(int(k))
     return {pool: idx for pool, idx in groups.items() if len(idx) > 1}
 
@@ -196,7 +216,7 @@ def generate(
 
     def width(psi: np.ndarray) -> int:
         """Distinct nodes carrying flow -- a lower bound on realised slots."""
-        live = psi > 0
+        live = carries(psi, Psi)
         if not live.any():
             return 0
         return int(np.unique(np.concatenate([g.tau[live], g.sig[live]])).size)
@@ -279,7 +299,7 @@ def generate(
     add(base.psi, "C0 full", "base", base_certificate)
 
     pools = _pool_of(arcs)
-    base_active = np.flatnonzero(base.psi > 0)
+    base_active = np.flatnonzero(carries(base.psi, Psi))
     # Warm-start from the *circulation-free* support.  The raw optimum carries
     # flow on arcs that only exist to go round a negative-eps loop; they are
     # cancelled before execution anyway, and leaving them in the start set is
@@ -392,7 +412,7 @@ def generate(
             break
 
     # 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
-    conflicts = conflicting_pools(arcs, base.psi)
+    conflicts = conflicting_pools(arcs, base.psi, Psi)
     if conflicts:
         forbidden = np.zeros(g.m, bool)
         for indices in conflicts.values():
