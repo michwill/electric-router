@@ -18,7 +18,6 @@ browser, and in a Web Worker.
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
 
@@ -56,13 +55,16 @@ def problem_for(g):
     got = g.accel
     if got is not None and got[0] == key:
         return got[1]
-    cap = [float(v) if math.isfinite(v) else math.inf
-           for v in np.asarray(g.cap, float)]
+    caps = np.asarray(g.cap, float)
+    # `inf` crosses as a float and is what a capless arc needs; anything else
+    # non-finite would be a bug upstream, and mapping it to `inf` keeps the
+    # arc admissible rather than poisoning every comparison it appears in.
+    cap = np.where(np.isfinite(caps), caps, np.inf).tolist()
     problem = _rust.Problem(
-        [int(v) for v in np.asarray(g.tau)],
-        [int(v) for v in np.asarray(g.sig)],
-        [float(v) for v in np.asarray(g.G, float)],
-        [float(v) for v in np.asarray(g.eps, float)],
+        np.asarray(g.tau, np.int64).tolist(),
+        np.asarray(g.sig, np.int64).tolist(),
+        np.asarray(g.G, float).tolist(),
+        np.asarray(g.eps, float).tolist(),
         cap,
         int(g.n_nodes),
     )
@@ -87,10 +89,10 @@ def _seed_mask(a0, m: int) -> list[bool]:
     """
     arr = np.asarray(a0)
     if arr.dtype == np.bool_ and arr.shape == (m,):
-        return [bool(v) for v in arr]
+        return arr.tolist()
     mask = np.zeros(m, bool)
     mask[arr] = True
-    return [bool(v) for v in mask]
+    return mask.tolist()
 
 
 def solve_arrays(
@@ -124,7 +126,7 @@ def solve_arrays(
         psi_total=float(psi_total),
         a0=None if a0 is None else _seed_mask(a0, int(g.m)),
         forbidden=None if forbidden is None else
-        [bool(v) for v in np.asarray(forbidden, bool)],
+        np.asarray(forbidden, bool).tolist(),
         pinned=None if not pinned else [(int(k), float(v)) for k, v in pinned.items()],
         tol=float(tol),
         maxit=int(maxit),
