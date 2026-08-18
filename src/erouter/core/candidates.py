@@ -89,6 +89,11 @@ class Candidate:
 class CandidateSet:
     candidates: list[Candidate] = field(default_factory=list)
     skipped: int = 0
+    #: How much solving this generation asked for.  Surfaced because it is
+    #: what separates "the build got slower" from "this block is harder": the
+    #: same pair and size runs 48 solves at one block and 113 at another.
+    solves: int = 0
+    pivots: int = 0
     # Node count of the relaxation when it was too wide for any perturbation of
     # it to be realisable; 0 when the pin/drop/repair families ran normally.
     skipped_wide: int = 0
@@ -257,6 +262,7 @@ def generate(
             # small perturbation of a known optimum: re-deriving the support
             # from scratch costs ~150 pivots and buys nothing, since a
             # restricted candidate cannot be certified anyway.
+            out.solves += 1
             solution = active_set_solve(
                 g, src, dst, Psi, A0=warm, forbidden=banned, forced_upper=pinned,
                 # §11.1: gas cannot enter the objective without making the
@@ -269,6 +275,7 @@ def generate(
                 gas_cost=gas_floor,
                 maxit=CANDIDATE_PIVOTS, partial_ok=True,
             )
+            out.pivots += solution.pivots
             if not solution.feasible:
                 return False
             conflicts = conflicting_pools(arcs, solution.psi)

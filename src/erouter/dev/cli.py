@@ -989,7 +989,15 @@ def _stage_line(result, elapsed: float) -> str:
     solver = ("rust" if _ACCEL_ON and accel.available()
               else "python (EROUTER_ACCEL=1 for the compiled solver)"
               if accel.available() else "python")
-    return f"  ms  {' · '.join(parts)}   solver {solver}"
+    # The work, not just the clock.  The same pair and size runs 48 solves at
+    # one block and 113 at another, which is a 2.4x swing in what there is to
+    # do -- and without it a hard block reads as a slow build.
+    work = ""
+    solves = result.counters.get("candidate_solves", 0)
+    if solves:
+        work = (f"   work {solves} solves · "
+                f"{result.counters.get('candidate_pivots', 0):,} pivots")
+    return f"  ms  {' · '.join(parts)}{work}   solver {solver}"
 
 
 def _present(result, args, chain, rpc, nodes, wrappers, load,

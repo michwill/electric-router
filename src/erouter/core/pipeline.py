@@ -1043,6 +1043,8 @@ def _quote(
             )
         result.candidates = pool_set
         result.counters["candidates"] = len(pool_set)
+        result.counters["candidate_solves"] = pool_set.solves
+        result.counters["candidate_pivots"] = pool_set.pivots
         result.counters["candidates_quoted"] = sum(
             1 for c in pool_set.candidates if c.verified_out is not None
         )
