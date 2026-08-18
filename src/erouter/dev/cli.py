@@ -444,7 +444,7 @@ def _resolve_token(nodes, symbol_or_address: str, pools, chain=None) -> str:
 
 
 def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
-                  fresh_quoter: bool = False, skip_pools=()):
+                  fresh_quoter: bool = False):
     """A quoter backed by an in-process EVM, or None if that is not available.
 
     The committed cache says which slots each pool reads and holds its code, so
@@ -470,15 +470,8 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
             print(f"  {WARN} no state cache for {chain.name}; run `erouter warmcache`")
         return None
     try:
-        # A pool evaluated from its own parameters is never executed here, so
-        # its storage is not read.  That is most of the universe -- 359 of 384
-        # pools and 68% of the slots -- and it is only knowable up front
-        # because the verdicts are cached: without them the ordering is
-        # circular, since deciding a pool is computable means running the very
-        # `get_dy` the storage exists for.
-        skipped = {a.lower() for a in skip_pools}
         evm = LocalEvm(rpc, cache=cache)
-        stats = evm.prime(skip=skipped)
+        stats = evm.prime()
         fresh = cache.unknown(p.address for p in load.pools)
         # Re-list every arc, not only the new pools.  `prime` refreshes values
         # and `unknown` finds new pools, but neither sees a pool that has begun
@@ -494,11 +487,6 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
         # to happen *before* routing: a route that fails produces no output to
         # compare, so the after-the-fact check downstream never fires.
         refs, _ = build_arcs(load.pools, nodes)
-        # The same restriction, and this is where the skipped accounts come
-        # back if anything still needs them: the retained arcs' access list
-        # names every account *they* touch, base pools included, and
-        # `warm_arcs` loads those in full.
-        refs = [r for r in refs if r.pool.lower() not in skipped]
         learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address) if refs else 0
         if fresh:
             cache.learn_pools(p.address for p in load.pools)
@@ -662,21 +650,38 @@ def cmd_route(args: argparse.Namespace) -> int:
     # allows it.  Rides with the stake arcs: same shape, same treatment.
     stake_arcs = stake_arcs + build_lending_arcs(
         nodes, chain, client, FactsCache.load(chain.chain_id, chain.name.lower()))
+    # The local EVM comes first, and that ordering is a measured result
+    # rather than a preference.
+    #
+    # Building the models before it, over the wire, looked like the way to
+    # learn which pools never need warming -- and it does, but the models are
+    # built *from* the storage that warm would have fetched. Skipping the
+    # sweep does not remove the read; it moves it from one batched dumper pass
+    # to several hundred per-pool getter calls. On the private node that cost
+    # 5-8 s and looked like a win against 5,932 slots. On the scoped endpoint,
+    # which is what the CLI uses by default, it turned startup into minutes:
+    # `route --from crvUSD --to sDOLA` never finished initialising.
+    #
+    #     HEAD          5,932 slots in ~3.3 s, no wire parameter reads
+    #     wire-first    2,891 slots, parameters for ~359 pools over the wire
+    #
+    # So the sweep stays. What the verdict cache is worth is the *gate* --
+    # 2,406 probes down to 84 -- which is pure repetition of a question already
+    # answered, and that saving does not depend on the ordering at all.
+    evm = None
+    if args.local:
+        local = _local_quoter(rpc, chain, load, nodes,
+                              fresh_quoter=getattr(args, 'fresh_quoter', False))
+        if local is not None:
+            client, evm = local, getattr(local, "transport", None)
+
     # Stableswap is computed rather than probed where its own parameters
     # reproduce its own `get_dy` to the wei -- exact at any size, where the
     # fitted quadratic is not, and it is the sizes near a pool's reserves that
     # the quadratic gets wrong by orders of magnitude.  Everything else keeps
     # being measured.  See `dev/stable_params.py` for why each pool has to
     # prove itself before it is believed.
-    #
-    # This runs *before* the local EVM, over the wire, and the order is the
-    # point.  What it produces is the list of pools that will never be
-    # executed, which is what lets the warm skip two thirds of its storage --
-    # and it cannot be built against the local EVM anyway, since the gate works
-    # by disagreeing with the chain and an unwarmed pool would disagree for the
-    # wrong reason.
     exact = two = tri = None
-    modelled: set[str] = set()
     verdicts = None
     if getattr(args, "exact", True):
         from .exact_cache import ExactCache
@@ -693,69 +698,22 @@ def cmd_route(args: argparse.Namespace) -> int:
         measured = client
         verdicts = ExactCache.load(chain.chain_id, chain.name.lower())
 
-        def _build_models(block: int = 0, source=None, only=None):
+        def _build_models(block: int = 0):
             """Every model set, from storage as it stands at this block."""
             if block:
                 # Balances are frozen into each model, so a rebuild that kept
                 # the old ones would produce something self-consistent and
                 # wrong -- the failure this whole hook exists to prevent.
                 read_balances(load.pools, measured, None, chain.chain_id)
-            read = source if source is not None else measured
-            # The full pool list is always passed even when only a few are
-            # being gated: the base-pool `virtual_price` map is built from it,
-            # and a metapool whose base pool is missing prices its LP at 1.
-            return (build_exact_pools(load.pools, read, cache=verdicts, only=only),
+            return (build_exact_pools(load.pools, measured, cache=verdicts),
                     # Twocrypto-ng's FX Swaps: a stableswap invariant inside
                     # cryptoswap's machinery, told apart from cryptoswap proper
                     # by whether the maths reproduces the pool's own quote --
                     # never by a list of addresses.
-                    build_exact_twocrypto(load.pools, read, cache=verdicts, only=only),
-                    build_exact_tricrypto(load.pools, read, cache=verdicts, only=only))
+                    build_exact_twocrypto(load.pools, measured, cache=verdicts),
+                    build_exact_tricrypto(load.pools, measured, cache=verdicts))
 
         exact, two, tri = _build_models()
-        modelled = set(exact.by_pool) | set(two.by_pool) | set(tri.by_pool)
-
-    evm = None
-    if args.local:
-        local = _local_quoter(rpc, chain, load, nodes,
-                              fresh_quoter=getattr(args, 'fresh_quoter', False),
-                              skip_pools=modelled)
-        if local is not None:
-            client, evm = local, getattr(local, "transport", None)
-            if exact is not None:
-                # Second pass, for what the wire could not read.
-                #
-                # `stored_rates()` returns an array, which the quoter's
-                # one-word `Res` truncates, so it has to be a direct `eth_call`
-                # to the pool -- and the committed scoped endpoint answers a
-                # direct pool call with 403.  A refused batch yields *no rates*
-                # rather than an error, so those pools fall back to
-                # decimals-only rates and fail their own gate: measured, 80 of
-                # them, the first mismatching by 1.2427, which is the sUSDe
-                # rate itself.
-                #
-                # The local EVM serves the same read from warm storage.  So the
-                # pools the wire could not admit are exactly the ones just
-                # warmed, and asking again here costs nothing but recovers
-                # them.  On an endpoint that does serve direct calls this pass
-                # finds nothing, which is the point: neither endpoint is
-                # special-cased and neither has to be detected.
-                rest = {p.address.lower() for p in load.pools
-                        if p.address.lower() not in modelled}
-                if rest:
-                    late = _build_models(source=local, only=rest)
-                    for have, found in zip((exact, two, tri), late, strict=True):
-                        have.by_pool.update(found.by_pool)
-                        have.checked += found.checked
-                        have.trusted += found.trusted
-                    recovered = sum(len(f) for f in late)
-                    if recovered:
-                        print(f"  exact: {recovered} more pool(s) read through "
-                              f"the local EVM, which the endpoint would not "
-                              f"serve directly")
-                    modelled = set(exact.by_pool) | set(two.by_pool) | set(tri.by_pool)
-
-    if exact is not None:
         trusted = exact.trusted + two.trusted + tri.trusted
         print(f"  exact: {len(exact)}/{exact.checked + exact.trusted} stableswap, "
               f"{len(two)}/{two.checked + two.trusted} twocrypto, "
