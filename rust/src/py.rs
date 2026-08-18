@@ -85,6 +85,9 @@ pub struct Problem {
     eps: Vec<f64>,
     cap: Vec<f64>,
     n_nodes: usize,
+    /// Built on first use by `shortest_path` and kept: Yen's algorithm walks
+    /// the same arcs dozens of times per quote.
+    adj: Option<crate::seed::Adjacency>,
 }
 
 #[pymethods]
@@ -92,7 +95,7 @@ impl Problem {
     #[new]
     fn new(tau: Vec<i64>, sig: Vec<i64>, g: Vec<f64>, eps: Vec<f64>,
            cap: Vec<f64>, n_nodes: usize) -> Self {
-        Problem { tau, sig, g, eps, cap, n_nodes }
+        Problem { tau, sig, g, eps, cap, n_nodes, adj: None }
     }
 
     #[getter]
@@ -100,10 +103,59 @@ impl Problem {
         self.tau.len()
     }
 
+    /// Shortest `src -> dst` path over `weights` (or `eps`), §5.3.
+    ///
+    /// On the resident problem rather than a free function: Yen's algorithm
+    /// calls this ~83 times a quote over the same arcs, and handing `tau`,
+    /// `sig` and the adjacency across each time would cost what the search
+    /// saves.  The adjacency is built once, on first use.
+    #[pyo3(signature = (src, dst, banned_arcs=None, banned_nodes=None,
+                        weights=None, max_hops=8))]
+    fn shortest_path<'py>(
+        &mut self,
+        py: Python<'py>,
+        src: usize,
+        dst: usize,
+        banned_arcs: Option<Vec<usize>>,
+        banned_nodes: Option<Vec<usize>>,
+        weights: Option<Vec<f64>>,
+        max_hops: usize,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if self.adj.is_none() {
+            self.adj = Some(crate::seed::build_adjacency(&self.tau, self.n_nodes));
+        }
+        let adj = self.adj.as_ref().unwrap();
+        let m = self.tau.len();
+        let mut arc_mask = vec![false; m];
+        for p in banned_arcs.unwrap_or_default() {
+            if p < m {
+                arc_mask[p] = true;
+            }
+        }
+        let mut node_mask = vec![false; self.n_nodes];
+        for v in banned_nodes.unwrap_or_default() {
+            if v < self.n_nodes {
+                node_mask[v] = true;
+            }
+        }
+        let cost = weights.unwrap_or_else(|| self.eps.clone());
+        let got = py.allow_threads(|| {
+            crate::seed::spfa(&self.tau, &self.sig, &cost, self.n_nodes, adj, src, dst,
+                              &arc_mask, &node_mask, max_hops)
+        });
+        let d = PyDict::new(py);
+        d.set_item("arcs", got.arcs)?;
+        d.set_item("length", got.length)?;
+        d.set_item("found", got.found)?;
+        d.set_item("negative_cycle", got.negative_cycle)?;
+        Ok(d)
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (src, dst, psi_total, a0=None, forbidden=None, pinned=None,
                         tol=None, maxit=600, min_flow=0.0, gas_cost=0.0,
                         partial_ok=false, rank1=None))]
+
     fn solve<'py>(
         &self,
         py: Python<'py>,

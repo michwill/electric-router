@@ -16,3 +16,4 @@ pub mod solve;
 #[cfg(feature = "python")]
 mod py;
 pub mod calibrate;
+pub mod seed;

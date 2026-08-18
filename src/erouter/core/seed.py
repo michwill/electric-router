@@ -19,12 +19,15 @@ allowed to be approximate and is not allowed to be slow.
 
 from __future__ import annotations
 
+import os
+
 import heapq
 from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import accel as _accel
 from .graph import ArcArrays
 
 INF = float("inf")
@@ -37,6 +40,8 @@ INF = float("inf")
 # so a path the seed misses can still be found by column generation.  The seed
 # decides how many CG rounds run, never what the answer is.
 MAX_HOPS = 8
+#: Opt-in on the same switch as the rest of the port.
+_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 
 
 @dataclass(slots=True)
@@ -107,6 +112,20 @@ def spfa(
     Reading `g.sig[arc]` from the numpy array instead costs 3.4x as much per
     access, and this loop runs ~300k times per route.
     """
+    # The compiled search, when it is installed.  Same algorithm, same
+    # tie-breaks; `tests/test_seed_differential.py` differs the two.  The
+    # loop below runs ~300k times a route, which is what a port helps.
+    if _ACCEL_ON and _accel.available():
+        got = _accel.shortest_path(
+            g, src, dst, banned_arcs=banned_arcs, banned_nodes=banned_nodes,
+            weights=weights, max_hops=max_hops)
+        if got is not None:
+            if got["negative_cycle"]:
+                return ShortestPath(negative_cycle=list(got["negative_cycle"]))
+            if not got["found"]:
+                return ShortestPath()
+            return ShortestPath(list(got["arcs"]), float(got["length"]), True)
+
     n = g.n_nodes
     banned_arcs = banned_arcs or set()
     banned_nodes = banned_nodes or set()

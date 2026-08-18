@@ -171,3 +171,23 @@ def calibrate_ladder(deltas, quotes, *, delta_bar, structural_flag, drift_tol,
         split_hint=got[8], calib_delta=got[9], tangent_delta=got[10],
         note=got[11],
     )
+
+
+def shortest_path(g, src, dst, *, banned_arcs=None, banned_nodes=None,
+                  weights=None, max_hops=8):
+    """`spfa` through the compiled search, or `None` if it is absent.
+
+    Goes through the resident `Problem`, so the arcs and the adjacency cross
+    once per graph rather than once per call -- Yen's algorithm runs this ~83
+    times a quote.
+    """
+    problem = problem_for(g)
+    if problem is None:
+        return None
+    return problem.shortest_path(
+        int(src), int(dst),
+        None if not banned_arcs else [int(v) for v in banned_arcs],
+        None if not banned_nodes else [int(v) for v in banned_nodes],
+        None if weights is None else np.asarray(weights, float).tolist(),
+        int(max_hops),
+    )
