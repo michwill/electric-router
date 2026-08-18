@@ -247,6 +247,31 @@ def active_set_solve(
             np.add.at(rhs, g.sig[uidx], psi_upper[uidx])
             outside = ~comp[g.tau[uidx]] | ~comp[g.sig[uidx]]
             if outside.any():
+                # An arc at its upper bound whose endpoints have left `dst`'s
+                # component cannot deliver what it is pinned to carry, so the
+                # system is not solvable as it stands.  Whether that is fatal
+                # depends on *why* the arc is there.
+                #
+                # A caller's pin (§6.3's sweep) is the candidate's whole point:
+                # honouring it is the question being asked, so a detached one
+                # makes that candidate infeasible and generation drops it.
+                #
+                # An arc that merely *saturated* during pivoting is different.
+                # Nothing asked for it to be at its cap; it went there because
+                # it filled up, and a later pivot then orphaned it.  Releasing
+                # it is the pivot the loop would have made had it looked, and
+                # refusing instead threw away routes that were perfectly
+                # reachable: measured on USDC->crvUSD $20M, this fired 21 times
+                # inside one quote, and when every candidate happened to hit it
+                # the whole quote failed rather than one candidate.
+                stray = uidx[outside]
+                loose = np.array([j for j in stray if int(j) not in pinned],
+                                 dtype=np.int64)
+                if loose.size:
+                    U[loose] = False
+                    psi_upper[loose] = 0.0
+                    pivots += 1
+                    continue
                 return Solution(
                     np.zeros(m), np.zeros(n), A, U, psi_upper, np.zeros(m), pivots,
                     feasible=False, reason="a pinned arc is detached from the active network",
