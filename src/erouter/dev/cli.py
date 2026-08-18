@@ -923,6 +923,30 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
 
+def _stage_line(result, elapsed: float) -> str:
+    """Where the quote's milliseconds went, biggest first.
+
+    Without this the only honest answer to "did the accelerator do anything"
+    is to re-run under a profiler, and the stage timings the pipeline already
+    records go unread.  `rest` is the part no stage claimed -- rendering,
+    marshalling, and the pipeline's own bookkeeping.
+    """
+    from ..core import accel
+    from ..core.solve import _ACCEL_ON
+
+    stages = {k: v * 1000.0 for k, v in (result.timings or {}).items()}
+    named = sum(stages.values())
+    ranked = sorted(stages.items(), key=lambda kv: -kv[1])[:6]
+    parts = [f"{name} {ms:,.0f}" for name, ms in ranked if ms >= 1.0]
+    rest = elapsed - named
+    if rest >= 1.0:
+        parts.append(f"rest {rest:,.0f}")
+    solver = ("rust" if _ACCEL_ON and accel.available()
+              else "python (EROUTER_ACCEL=1 for the compiled solver)"
+              if accel.available() else "python")
+    return f"  ms  {' · '.join(parts)}   solver {solver}"
+
+
 def _present(result, args, chain, rpc, nodes, wrappers, load,
              src, dst, amount_in, started, *, lean: bool = False,
              suppress: set[str] | None = None) -> int:
@@ -988,6 +1012,8 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
         )
     print(render(diagram, unicode=not args.ascii, color=not args.no_color,
                  legend=not lean))
+    if getattr(args, "timings", False):
+        print(_stage_line(result, elapsed))
 
     if args.json:
         payload = to_json(
@@ -2086,6 +2112,9 @@ def build_parser() -> argparse.ArgumentParser:
              "and sends no probe at all)")
     route_cmd.set_defaults(exact=True)
     route_cmd.add_argument("--refit", type=int, default=2, help="§8 refit rounds (0 = off)")
+    route_cmd.add_argument(
+        "--timings", action="store_true",
+        help="print where the quote's milliseconds went, and which solver ran")
     route_cmd.add_argument(
         "--max-legs", type=int, default=32,
         help="reject routes with more legs than this. The quoter can price 128; "
