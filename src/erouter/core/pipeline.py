@@ -954,9 +954,19 @@ def _quote(
         # the usual route pays nothing for it.
         conditioned = _achievable_kcl(g, report.solution.A, dst_node)
         if residual > max(tolerance, conditioned):
+            _r, node, n_in, n_out = _kcl_detail(g, psi, src_node, dst_node, Psi)
+            where = nodes.node_symbol(node) if node >= 0 else "?"
+            # Say which failure this is.  Flow leaving a node with none
+            # arriving is conjured, not imprecise, and no amount of better
+            # conditioning would fix it.
+            shape = (" -- flow leaves this node with none arriving"
+                     if n_in == 0 and n_out > 0 else
+                     (" -- flow arrives at this node with none leaving"
+                      if n_out == 0 and n_in > 0 else ""))
             raise RoutingError(
                 f"flow conservation is violated by {residual:.3e} of the routed "
-                f"value (achievable at this conditioning: {conditioned:.3e})"
+                f"value at {where} ({n_in} arc(s) in, {n_out} out){shape} "
+                f"(achievable at this conditioning: {conditioned:.3e})"
             )
         result.counters["kcl_conditioning_allowed"] = 1
     # §12.2b: a certificate that failed is worth far less than a certificate
@@ -1808,13 +1818,37 @@ def _kcl_residual(
     g: ArcArrays, psi: np.ndarray, src: int, dst: int, Psi: float
 ) -> float:
     """`||B^T psi - s_hat||_inf / Psi` -- Kirchhoff's current law (§12.4)."""
+    return _kcl_detail(g, psi, src, dst, Psi)[0]
+
+
+def _kcl_detail(
+    g: ArcArrays, psi: np.ndarray, src: int, dst: int, Psi: float
+) -> tuple[float, int, int, int]:
+    """The residual, and *where* it is -- worst node, and its live arc counts.
+
+    A refusal reading only "violated by 8.4e-03" says nothing about what to
+    look at.  The node is what makes it diagnosable: a node with flow leaving
+    and none arriving is conjured flow, which is a different bug from a
+    conditioning failure and has to be told apart from one.
+    """
     net = np.zeros(g.n_nodes)
     np.add.at(net, g.tau, psi)
     np.subtract.at(net, g.sig, psi)
     want = np.zeros(g.n_nodes)
     want[src] += Psi
     want[dst] -= Psi
-    return float(np.max(np.abs(net - want)) / Psi) if Psi > 0 else 0.0
+    if Psi <= 0:
+        return 0.0, -1, 0, 0
+    err = np.abs(net - want) / Psi
+    worst = int(np.argmax(err))
+    live = psi > 0
+    # `tau` is an arc's origin and `sig` its head -- that is the orientation
+    # `_find_cycle` walks (`outgoing[tau] -> sig`) and the one that makes
+    # `want[src] = +Psi` come out right.  Counting `tau == worst` therefore
+    # counts what *leaves* the node.
+    n_out = int(np.count_nonzero((g.tau == worst) & live))
+    n_in = int(np.count_nonzero((g.sig == worst) & live))
+    return float(err[worst]), worst, n_in, n_out
 
 
 def _restrict_to_component(

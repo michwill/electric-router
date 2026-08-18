@@ -130,7 +130,17 @@ def cancel_cycles(
             break
         arcs = live[cycle]
         flow[arcs] -= flow[arcs].min()
-        flow[flow <= tol] = 0.0
+        # Only the cycle's own arcs.  `flow[flow <= tol] = 0` looks like the
+        # same statement and is not: `<= tol` catches every *negative* entry in
+        # the whole vector, and a negative flow is real flow in the reverse
+        # direction, not dust.  An active-set solve that stopped early leaves
+        # those behind, and zeroing one strands exactly its magnitude at both
+        # of its endpoints -- conservation held to 3.2e-10 coming out of the
+        # solve and to 8.4e-03 coming out of here, on a single arc carrying
+        # -0.1304 of a Psi of 15.52.  §12.4 then refused the route, correctly,
+        # for damage done after the solve was finished.
+        settled = arcs[flow[arcs] <= tol]
+        flow[settled] = 0.0
         removed += 1
     return flow, removed
 
