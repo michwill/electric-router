@@ -21,9 +21,14 @@ dev = [
     "pytest>=8",
     "pytest-xdist>=3.6,<4",
     "hypothesis>=6,<7",
-    # test-only oracles: eth_abi checks core/codec.py, scipy checks core/linalg.py
+    # test-only oracles: eth_abi checks core/codec.py, scipy checks
+    # core/linalg.py, osqp checks the solve itself (§13.3).  The last one is
+    # the only independent implementation of (P) in the tree -- everything else
+    # would validate the active set against itself, which is what makes it the
+    # oracle a port has to be checked against.
     "eth-abi>=5,<6",
     "scipy>=1.14",
+    "osqp>=1,<2",
     "ruff>=0.6",
 ]
 
