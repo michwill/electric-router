@@ -12,7 +12,7 @@
 //! the fiddliest part of shipping a native module.
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 
 use crate::solve::{active_set_solve, Arcs, Options};
 
@@ -138,6 +138,48 @@ impl Problem {
     }
 }
 
+/// One arc's ladder, fitted.  Returns the fields of `core.calibrate.Calibration`
+/// as a tuple, in declaration order, so the Python side builds the dataclass
+/// and keeps its own postconditions.
+#[allow(clippy::too_many_arguments)]
+#[pyfunction]
+#[pyo3(signature = (deltas, quotes, delta_bar=None, structural_flag=false,
+                    drift_tol=crate::calibrate::DRIFT_TOL, cap=None,
+                    f_at_cap=None, quantum=0.0))]
+fn calibrate<'py>(
+    py: Python<'py>,
+    deltas: Vec<f64>,
+    quotes: Vec<f64>,
+    delta_bar: Option<f64>,
+    structural_flag: bool,
+    drift_tol: f64,
+    cap: Option<f64>,
+    f_at_cap: Option<f64>,
+    quantum: f64,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let got = crate::calibrate::calibrate(
+        &deltas, &quotes, delta_bar, structural_flag, drift_tol, cap, f_at_cap, quantum,
+    )
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.0))?;
+    PyTuple::new(
+        py,
+        [
+            got.a.into_pyobject(py)?.into_any(),
+            got.b.into_pyobject(py)?.into_any(),
+            got.cap.into_pyobject(py)?.into_any(),
+            got.clamped.into_pyobject(py)?.to_owned().into_any(),
+            got.convex_flag.into_pyobject(py)?.to_owned().into_any(),
+            got.flag.as_str().into_pyobject(py)?.into_any(),
+            got.drift.into_pyobject(py)?.into_any(),
+            got.eta.into_pyobject(py)?.into_any(),
+            got.split_hint.into_pyobject(py)?.to_owned().into_any(),
+            got.calib_delta.into_pyobject(py)?.into_any(),
+            got.tangent_delta.into_pyobject(py)?.into_any(),
+            got.note.into_pyobject(py)?.into_any(),
+        ],
+    )
+}
+
 fn pack<'py>(py: Python<'py>, out: crate::solve::Solution) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("psi", out.psi)?;
@@ -159,6 +201,7 @@ fn pack<'py>(py: Python<'py>, out: crate::solve::Solution) -> PyResult<Bound<'py
 #[pymodule]
 fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate, m)?)?;
     m.add_class::<Problem>()?;
     m.add("__doc__", "The router's active-set QP, in Rust.")?;
     Ok(())

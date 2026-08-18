@@ -24,13 +24,18 @@ stays quadratic and `B` is clamped at zero, never negative.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass
 
 import numpy as np
 
+from . import accel as _accel
 from .types import FlagReason
 
 DRIFT_TOL = 0.25
+#: The compiled fit is opt-in on the same switch as the compiled solve, so
+#: a session runs both ports or neither and a comparison means something.
+_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 # Two probes an order of magnitude apart returning the *same* output is not a
 # curve, it is a wall: the venue has handed over everything it has.  Measured
 # on a LLAMMA WETH market, `get_dy` returned 11.472806 crvUSD for every input
@@ -139,6 +144,19 @@ def calibrate(
     `1e-6 * reserve` and a couple return zero, and a zero `a` would poison
     `log a` in the reference-price fit.
     """
+    # The compiled fit, when it is installed.  Six-element arrays are the
+    # whole reason: `np.diff`, `np.interp` and `np.concatenate` over six
+    # floats cost 50 us a call and this runs 736 times a quote, so the
+    # dispatch is the bill rather than the arithmetic.
+    # `tests/test_calibrate_differential.py` differs the two.
+    if _ACCEL_ON and _accel.available():
+        got = _accel.calibrate_ladder(
+            deltas, quotes, delta_bar=delta_bar,
+            structural_flag=structural_flag, drift_tol=drift_tol, cap=cap,
+            f_at_cap=f_at_cap, quantum=quantum)
+        if got is not None:
+            return got
+
     x = np.asarray(deltas, dtype=float)
     y = np.asarray(quotes, dtype=float)
     if x.ndim != 1 or x.shape != y.shape:

@@ -135,3 +135,39 @@ def solve_arrays(
         partial_ok=bool(partial_ok),
         rank1=bool(rank1),
     )
+
+
+def calibrate_ladder(deltas, quotes, *, delta_bar, structural_flag, drift_tol,
+                     cap, f_at_cap, quantum):
+    """One arc's ladder through the compiled fit, or `None` if it is absent.
+
+    Returns a `Calibration`, built here rather than in Rust so the dataclass
+    keeps its own postconditions -- `B >= 0` and `clamped => cap finite` are
+    checked in the one place that produces a `B`, whichever language did the
+    arithmetic.
+    """
+    if _rust is None:
+        return None
+    from .calibrate import Calibration, CalibrationError
+    from .types import FlagReason
+
+    try:
+        got = _rust.calibrate(
+            [float(v) for v in deltas], [float(v) for v in quotes],
+            None if delta_bar is None else float(delta_bar),
+            bool(structural_flag), float(drift_tol),
+            None if cap is None else float(cap),
+            None if f_at_cap is None else float(f_at_cap),
+            float(quantum),
+        )
+    except ValueError as exc:
+        # The reference raises `CalibrationError`, and callers catch exactly
+        # that.  PyO3 hands back a plain `ValueError`, which is its base class
+        # but not the same thing to an `except` clause.
+        raise CalibrationError(str(exc)) from None
+    return Calibration(
+        a=got[0], B=got[1], cap=got[2], clamped=got[3], convex_flag=got[4],
+        flag_reason=FlagReason(got[5]), drift=got[6], eta=got[7],
+        split_hint=got[8], calib_delta=got[9], tangent_delta=got[10],
+        note=got[11],
+    )
