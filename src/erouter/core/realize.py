@@ -323,7 +323,22 @@ def realize(
 
     # --- slots ----------------------------------------------------------
     def slot(token: str) -> int:
+        """The accumulator this token's balance lands in.
+
+        Aliases share one.  Two addresses over a single balance -- gnosis's
+        two EURe contracts report the same `totalSupply` to the wei and the
+        same `balanceOf` for every holder -- have no conversion leg between
+        them, because there is nothing to execute.  Giving them a slot each
+        meant the legs delivered into one and the route read the other, so a
+        perfectly good route quoted zero and was dropped as reverting: on
+        gnosis WXDAI->EURe that silently discarded the whole USDC.e side of
+        the market.  Only aliases collapse; a vault or a native wrapper still
+        needs its own slot, because a leg converts between them.
+        """
         key = token.lower()
+        conversion = nodes.conversion.get(key)
+        if conversion is not None and conversion.is_alias:
+            key = conversion.canonical.lower()
         if key not in route.slots:
             route.slots[key] = len(route.slots)
             route.node_of_slot[route.slots[key]] = nodes.node(key)

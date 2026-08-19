@@ -516,3 +516,67 @@ def test_a_mixed_node_still_funnels_through_one_slot():
         if slot in seen:
             assert all(rl.leg.bps == 0 for rl in group), "re-drained with a stale base"
         seen.add(slot)
+
+
+# ------------------------------------------------------ aliases share a slot
+#
+# Gnosis has two EURe contracts over one balance -- same `totalSupply` to the
+# wei, same `balanceOf` for every holder -- so `discover_aliases` merges them
+# into one node and no conversion leg exists between them, because there is
+# nothing to execute.  Giving them a slot each meant the legs delivered into
+# one accumulator and the route read the other, so the quoter returned 0 and a
+# working route was dropped as reverting.  On WXDAI->EURe that silently threw
+# away the entire USDC.e side of the market.
+
+EURE_1 = "0x" + "e1" * 20
+EURE_2 = "0x" + "e2" * 20
+
+
+def alias_nodes() -> NodeMap:
+    nodes = base_nodes()
+    nodes.add_token(EURE_1, "EURe", 18)
+    nodes.add_token(EURE_2, "EURe", 18)
+    # The deeper side is canonical; the other folds into it.
+    nodes.merge(Conversion(ConversionKind.ALIAS, EURE_2, EURE_1, target=EURE_2))
+    return nodes
+
+
+def _to_eure(dst: str):
+    nodes = alias_nodes()
+    arcs = [arc(POOL_A, USDC, dst, nodes, a=1.0)]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(dst)] = 1.0
+    return nodes, realize(arcs, np.array([1000.0]), nu, nodes,
+                          src_token=USDC, dst_token=dst,
+                          amount_in=1000 * 10**6)
+
+
+def test_a_route_delivering_the_other_alias_still_lands_in_the_slot_read():
+    """The bug: legs filled slot 3 while the route read slot 4."""
+    _, route = _to_eure(EURE_2)
+    assert route.dst_slot == route.legs[-1].leg.dst_slot
+
+
+def test_both_alias_addresses_map_to_one_slot():
+    nodes, route = _to_eure(EURE_1)
+    assert route.slots.get(EURE_2.lower()) is None or (
+        route.slots[EURE_2.lower()] == route.slots[EURE_1.lower()])
+    assert len(set(route.slots.values())) == len(route.slots)
+
+
+def test_a_conversion_still_gets_its_own_slot():
+    """Only aliases collapse.  A wrapper converts, so it needs two.
+
+    Without this the fix would quietly merge ETH into WETH and drop the wrap
+    leg's destination, which is a different route breaking the same way.
+    """
+    nodes = merged_nodes()
+    arcs = [arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0)]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    route = realize(arcs, np.array([1000.0]), nu, nodes,
+                    src_token=USDC, dst_token=ETH, amount_in=1000 * 10**6)
+    assert route.slots[WETH.lower()] != route.slots[ETH.lower()]
+    assert route.dst_slot == route.slots[ETH.lower()]
