@@ -48,6 +48,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 PRECISION = 10**18
+#: The same, as a float, so the quote path never converts it.
+PRECISION_F = 1e18
 FEE_DENOMINATOR = 10**10
 A_PRECISION = 100
 #: Newton's method in the contracts is capped at 255 and asserted to converge.
@@ -142,6 +144,12 @@ class StableSwap:
     _xp: list[int] | None = field(default=None, init=False, compare=False, repr=False)
     _xpf: list[float] | None = field(default=None, init=False, compare=False,
                                      repr=False)
+    #: The pool's own constants, as floats, so the quote path stops converting
+    #: them.  `rates` reach 1e30 and `amp` is read twice a call; every one of
+    #: those is a big-integer-to-double conversion at ~47 ns, and a quote makes
+    #: thousands.  See `_constants`.
+    _consts: tuple | None = field(default=None, init=False, compare=False,
+                                  repr=False)
 
     @property
     def n(self) -> int:
@@ -160,6 +168,40 @@ class StableSwap:
                    for b, r in zip(self.balances, self.rates, strict=True)]
             object.__setattr__(self, "_xp", got)
         return got
+
+    def _constants(self) -> tuple:
+        """`(amp, a_precision, rates, PRECISION / rates)`, all as floats.
+
+        The quote path multiplies and divides by these on every call and they
+        never change: the pool is frozen at a block.  Converting `rates[j]`
+        from a 1e30 integer costs about what the division it feeds does.
+        """
+        got = self._consts
+        if got is None:
+            inv = tuple(PRECISION / r if r else 0.0 for r in self.rates)
+            got = (float(self.amp), float(self.a_precision),
+                   tuple(float(r) for r in self.rates), inv)
+            object.__setattr__(self, "_consts", got)
+        return got
+
+    def dynamic_fee_fast(self, xpi: float, xpj: float) -> float:
+        """`dynamic_fee`, without squaring a 1e24 integer into a 1e48 one.
+
+        The integer form computes `(xpi + xpj) ** 2` and two products of the
+        same magnitude, which is 160-bit arithmetic on every quote.  In floats
+        the same expression is three multiplications; the fee it produces is
+        the same to a part in 1e12, which is a part in 1e12 of a four
+        basis-point fee.
+        """
+        multiplier = self.offpeg_fee_multiplier
+        if multiplier <= FEE_DENOMINATOR:
+            return float(self.fee)
+        total = xpi + xpj
+        if total <= 0.0:
+            return float(self.fee)
+        balanced = 4.0 * xpi * xpj / (total * total)
+        return ((multiplier * self.fee)
+                / ((multiplier - FEE_DENOMINATOR) * balanced + FEE_DENOMINATOR))
 
     def xp_float(self) -> list[float]:
         """`xp` as floats, cached alongside it for the same reason."""
@@ -256,16 +298,19 @@ class StableSwap:
         if dx <= 0:
             return 0
         xp = self.xp_float()
-        d = d_fast(xp, float(self.amp), float(self.a_precision), self.n)
-        x = xp[i] + float(dx) * self.rates[i] / PRECISION
-        y = solve_y_fast(float(self.amp), float(self.a_precision), xp, d, i, j, x)
+        amp, a_precision, rates, inv_rates = self._constants()
+        d = d_fast(xp, amp, a_precision, self.n)
+        # `dx` is the one integer that has to cross: it is the caller's amount
+        # and changes every call.  Everything it meets is already a float.
+        x = xp[i] + float(dx) * rates[i] / PRECISION_F
+        y = solve_y_fast(amp, a_precision, xp, d, i, j, x)
         raw = xp[j] - y - (1.0 if self.subtract_one else 0.0)
         if raw <= 0.0:
             return 0
         if self.fee_on_xp:
-            fee = self.dynamic_fee(int((xp[i] + x) * 0.5), int((xp[j] + y) * 0.5))
-            return int((raw - raw * fee / FEE_DENOMINATOR) * PRECISION / self.rates[j])
-        out = raw * PRECISION / self.rates[j]
+            fee = self.dynamic_fee_fast((xp[i] + x) * 0.5, (xp[j] + y) * 0.5)
+            return int((raw - raw * fee / FEE_DENOMINATOR) * inv_rates[j])
+        out = raw * inv_rates[j]
         return int(out - out * self.fee / FEE_DENOMINATOR)
 
 
