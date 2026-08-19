@@ -515,6 +515,38 @@ WARM_ATTEMPTS = 2
 _TRACEBACK = os.environ.get("EROUTER_TRACEBACK", "") == "1"
 
 
+def _state_cache_for(chain):
+    """The committed slot cache, or `None` if there is not one to use."""
+    try:
+        from .state_cache import StateCache
+    except ImportError:
+        return None
+    cache = StateCache.load(chain.chain_id, chain.name.lower())
+    return cache if cache.accounts else None
+
+
+def _learn_arcs(evm, rpc, chain, load, nodes, *, quiet: bool = False) -> int:
+    """The access-list half of the warm, once the arcs are known.
+
+    Split from priming so the getters in between can be answered locally.  A
+    pool that has begun reading a slot it was not reading before is only
+    visible here, and reading it as zero is a wrong quote rather than a
+    missing one -- see `refresh_arcs`.
+    """
+    from ..core.pipeline import build_arcs
+    from .boa_host import quoter_client
+
+    refs, _ = build_arcs(load.pools, nodes)
+    if not refs:
+        return 0
+    learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address)
+    if learned:
+        getattr(evm, 'cache', None) and evm.cache.save()
+        if not quiet:
+            print(f"  local EVM: {learned} stale slot(s) recovered")
+    return learned
+
+
 def _warm_once(rpc, chain, load, nodes, cache, *, quiet: bool,
                fresh_quoter: bool):
     """One attempt at a warmed local EVM.  Raises rather than degrading."""
@@ -538,12 +570,20 @@ def _warm_once(rpc, chain, load, nodes, cache, *, quiet: bool,
     # One access-list pass over 887 arcs, ~1.0-1.4 s, concurrent.  It has
     # to happen *before* routing: a route that fails produces no output to
     # compare, so the after-the-fact check downstream never fires.
-    refs, _ = build_arcs(load.pools, nodes)
-    learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address) if refs else 0
-    if fresh:
-        cache.learn_pools(p.address for p in load.pools)
-    if fresh or learned:
-        cache.save()
+    # `nodes is None` is the first half of a split warm: values are loaded now
+    # so the pool getters that follow can be answered locally, and the
+    # access-list pass waits until there are arcs to list.  Explicit, because
+    # it otherwise "works" only because balances are still unread at that
+    # point and `build_arcs` quietly yields nothing -- which would stop being
+    # true the moment anything upstream changed.
+    learned = 0
+    if nodes is not None:
+        refs, _ = build_arcs(load.pools, nodes)
+        learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address) if refs else 0
+        if fresh:
+            cache.learn_pools(p.address for p in load.pools)
+        if fresh or learned:
+            cache.save()
 
 
     # Degrade on an *incomplete* warm too, not only on a raised one.  Every
@@ -702,10 +742,47 @@ def cmd_route(args: argparse.Namespace) -> int:
     rpc = JsonRpcTransport(_rpc_url(chain, args), block=args.block,
                            chain_id=chain.chain_id)
     client = quoter_client(rpc, chain)
-    resolve_dialects(load.pools, client, chain, use_cache=not args.refresh)
+
+    # Warm the local EVM *before* asking any pool or vault anything.
+    #
+    # Every getter below -- dialects, balances, LP tokens, the node map, the
+    # stake and lending arcs -- reads storage the warm has already fetched, so
+    # over the wire they are paying twice for the same bytes.  Measured on a
+    # cold start: balances alone were 9,098 ms over the wire and 1,152 ms
+    # against a primed EVM, and the answers are identical on all 385 pools.
+    #
+    # Only when the cache covers the universe.  A pool the cache has never
+    # seen has no slots loaded, and py-evm reads an absent slot as **zero** --
+    # which is a plausible balance, so the pool would be silently dropped or
+    # mis-sized rather than erroring.  When anything is unknown, everything
+    # goes over the wire as before and the warm still happens, just later.
+    #
+    # And only for the pools' *own* getters.  The state cache holds what the
+    # quoter touched, which is pool storage -- not the ERC20s and not the
+    # vaults.  `check_reserves_are_real` asks a token what it holds, and the
+    # node map and stake arcs ask vaults their rates; against an unloaded
+    # account every one of those reads zero, which is a plausible answer.
+    # Measured: routing them locally dropped pumpBTC/WBTC and sUSD/sUSDe as
+    # empty when the wire says they hold $842,751 and $110,637.  Those stay on
+    # the wire, and `reader` is only ever handed pool getters.
+    evm = None
+    reader = client
+    warm_cache = _state_cache_for(chain)
+    covered = warm_cache is not None and not warm_cache.unknown(
+        p.address for p in load.pools)
+    if args.local and covered:
+        try:
+            primed = _local_quoter(rpc, chain, load, None, quiet=False,
+                                   fresh_quoter=getattr(args, 'fresh_quoter', False))
+        except WarmFailed:
+            return 4
+        if primed is not None:
+            reader, evm = primed, getattr(primed, "transport", None)
+
+    resolve_dialects(load.pools, reader, chain, use_cache=not args.refresh)
     decimals_fixed: list[str] = []
-    read_balances(load.pools, client, decimals_fixed, chain.chain_id)
-    resolve_lp_tokens(load.pools, client, chain.chain_id)
+    read_balances(load.pools, reader, decimals_fixed, chain.chain_id)
+    resolve_lp_tokens(load.pools, reader, chain.chain_id)
     for warning in decimals_fixed:
         print(f"{WARN} {warning}")
     for warning in check_reserves_are_real(load.pools, client, rpc):
@@ -732,6 +809,10 @@ def cmd_route(args: argparse.Namespace) -> int:
     # allows it.  Rides with the stake arcs: same shape, same treatment.
     stake_arcs = stake_arcs + build_lending_arcs(
         nodes, chain, client, FactsCache.load(chain.chain_id, chain.name.lower()))
+    if evm is not None:
+        # The half that needed arcs.  Everything above was answered from the
+        # values loaded before it.
+        _learn_arcs(evm, rpc, chain, load, nodes, quiet=False)
     # The local EVM comes first, and that ordering is a measured result
     # rather than a preference.
     #
@@ -750,8 +831,12 @@ def cmd_route(args: argparse.Namespace) -> int:
     # So the sweep stays. What the verdict cache is worth is the *gate* --
     # 2,406 probes down to 84 -- which is pure repetition of a question already
     # answered, and that saving does not depend on the ordering at all.
-    evm = None
-    if args.local:
+    # Already warmed above when the cache covered the universe, and the
+    # getters in between were answered from it.  Otherwise this is where the
+    # warm happens, as it always did.
+    if evm is not None:
+        client = reader
+    elif args.local:
         # A failed warm stops the quote rather than quietly changing it.  The
         # wire path answers *differently* from the local one, so falling back
         # silently produced a number nobody asked for; `--no-local` is how you
