@@ -450,3 +450,76 @@ class Tricrypto:
 
         # The fee reads the post-trade balances.
         return dy - self.fee(xp) * dy // FEE_PRECISION
+
+
+@dataclass(frozen=True, slots=True)
+class TricryptoLP:
+    """A tricrypto pool's withdrawal arc, to the wei.
+
+    Only `remove_liquidity_one_coin` is modelled here.  Deposits are already
+    exact through the pool's own `calc_token_amount`, which charges the same
+    fee `add_liquidity` does -- measured across every tricrypto pool on
+    Ethereum, view and execution agree to the wei -- so there is nothing for a
+    model to correct and no reason to carry the risk of a second
+    implementation.
+
+    **What this does not model is the admin fee claim.**
+    `remove_liquidity_one_coin` runs `_claim_admin_fees()` before it prices
+    `dy`, and that is a *state* change the pool makes to itself, not part of
+    the withdrawal arithmetic.  It is corrected in `RouteQuoter._quote`, where
+    it applies to the probed path and the verified path alike.  Keeping the two
+    separate is deliberate: this reproduces `calc_withdraw_one_coin`, and that
+    is the thing it can be checked against.
+    """
+
+    pool: Tricrypto
+    total_supply: int
+
+    @property
+    def n(self) -> int:
+        return N_COINS
+
+    def calc_withdraw_one_coin(self, token_amount: int, i: int) -> int:
+        """Exactly what the pool's `calc_withdraw_one_coin` returns on chain."""
+        if not 0 <= i < N_COINS:
+            raise TricryptoError("coin index out of range")
+        if self.total_supply <= 0:
+            raise TricryptoError("no supply")
+        if token_amount > self.total_supply:
+            raise TricryptoError("token amount more than supply")
+        if token_amount <= 0:
+            return 0
+        p = self.pool
+        if not all(p.balances) or p.d <= 0:
+            raise TricryptoError("empty pool")
+
+        # `price_scale_i` is read *before* `xp[i]` is overwritten, so for i > 0
+        # it carries `precisions[i]` and not the scaled balance.  Following the
+        # source literally here matters: the two differ by the balance itself.
+        xp = list(p.precisions)
+        price_scale_i = PRECISION * p.precisions[0]
+        xp[0] *= p.balances[0]
+        for k in range(1, N_COINS):
+            scale = p.price_scale[k - 1]
+            if i == k:
+                price_scale_i = scale * xp[i]
+            xp[k] = xp[k] * p.balances[k] * scale // PRECISION
+
+        d = p.d
+        # The fee is charged on a deliberately imprecise post-withdrawal `xp`:
+        # the pool says so in as many words, because it only wants the fee to
+        # rise with imbalance, not to be exact.  A withdrawal too large for the
+        # correction to fit keeps the maximum fee, which is what stops the
+        # subtraction underflowing.
+        imprecise = list(xp)
+        correction = xp[i] * N_COINS * token_amount // self.total_supply
+        fee = p.out_fee
+        if correction < imprecise[i]:
+            imprecise[i] -= correction
+            fee = p.fee(imprecise)
+
+        d_delta = token_amount * d // self.total_supply
+        d_fee = fee * d_delta // (2 * 10**10) + 1
+        d -= d_delta - d_fee
+        y = get_y(p.amp, p.gamma, xp, d, i)[0]
+        return (xp[i] - y) * PRECISION // price_scale_i

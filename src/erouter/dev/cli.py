@@ -1002,6 +1002,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         from .tricrypto_params import build_exact_tricrypto
         from .twocrypto_params import build_exact_twocrypto
         from .lp_params import build_exact_lp
+        from .crypto_lp_params import build_exact_crypto_lp
         from .vault_params import build_exact_vaults
         from ..core.types import ArcKind as _ArcKind
 
@@ -1039,13 +1040,14 @@ def cmd_route(args: argparse.Namespace) -> int:
                                         _ArcKind.ERC4626_REDEEM)}
             vault_arcs |= {v.token for v in wrappers.merged_vaults}
             stable = build_exact_pools(load.pools, measured, cache=verdicts)
+            crypto = build_exact_tricrypto(load.pools, measured, cache=verdicts)
             return (stable,
                     # Twocrypto-ng's FX Swaps: a stableswap invariant inside
                     # cryptoswap's machinery, told apart from cryptoswap proper
                     # by whether the maths reproduces the pool's own quote --
                     # never by a list of addresses.
                     build_exact_twocrypto(load.pools, measured, cache=verdicts),
-                    build_exact_tricrypto(load.pools, measured, cache=verdicts),
+                    crypto,
                     build_exact_vaults(vault_arcs, measured),
                     # Deposits and withdrawals run the same invariant, with `D`
                     # moving.  Only pools whose swaps already reproduce are
@@ -1057,14 +1059,24 @@ def cmd_route(args: argparse.Namespace) -> int:
                     # asks about.
                     build_exact_lp([p for p in load.pools
                                     if p.address.lower() in _lp_pools],
-                                   stable, measured))
+                                   stable, measured),
+                    # Cryptoswap withdrawals, on the same two conditions: the
+                    # pool's swap model was admitted, and its LP token is
+                    # actually traded.  Withdrawals only -- a cryptoswap
+                    # deposit's own view already charges what `add_liquidity`
+                    # does, so there is nothing for a model to correct.
+                    build_exact_crypto_lp([p for p in load.pools
+                                           if p.address.lower() in _lp_pools],
+                                          crypto, measured))
 
         with _boot("exact models"):
-            exact, two, tri, vaults, lp = _build_models()
+            exact, two, tri, vaults, lp, crypto_lp = _build_models()
         trusted = exact.trusted + two.trusted + tri.trusted
-        if len(vaults) or len(lp):
+        if len(vaults) or len(lp) or len(crypto_lp):
             print(f"  exact: {len(vaults)}/{vaults.checked} vault direction(s), "
-                  f"{len(lp)}/{lp.checked} LP pool(s) computed rather than probed")
+                  f"{len(lp)}/{lp.checked} LP pool(s), "
+                  f"{len(crypto_lp)}/{crypto_lp.checked} crypto withdrawal(s) "
+                  f"computed rather than probed")
         print(f"  exact: {len(exact)}/{exact.checked + exact.trusted} stableswap, "
               f"{len(two)}/{two.checked + two.trusted} twocrypto, "
               f"{len(tri)}/{tri.checked + tri.trusted} tricrypto "
@@ -1078,7 +1090,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     if exact is not None and (exact or two or tri):
         client = ExactQuoterClient(client, exact, two, tri, vaults, lp,
                                    models_block=rpc.block,
-                                   rebuild=_build_models)
+                                   rebuild=_build_models, crypto_lp=crypto_lp)
     # Gas is priced by default.  Leaving it at zero made every route look free
     # to branch, which is exactly backwards for the small trades where an extra
     # leg costs more than it saves.

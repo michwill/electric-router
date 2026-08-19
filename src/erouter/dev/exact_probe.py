@@ -135,7 +135,7 @@ class ExactQuoterClient:
 
     def __init__(self, client, exact, twocrypto=None, tricrypto=None,
                  vaults=None, lp=None, *, enabled: bool = True,
-                 models_block: int = 0, rebuild=None):
+                 models_block: int = 0, rebuild=None, crypto_lp=None):
         self.client = client
         self.exact = exact
         #: Three-coin crypto pools, whose maths is its own module again.
@@ -150,6 +150,11 @@ class ExactQuoterClient:
         #: Deposits and withdrawals, for pools whose swap model was admitted
         #: and whose LP arithmetic then reproduced its own answers too.
         self.lp = lp
+        #: Cryptoswap withdrawals, same admission rule as `lp`.  Separate
+        #: because the arithmetic is a different invariant, and because a
+        #: cryptoswap pool has no deposit model -- its own `calc_token_amount`
+        #: already charges what `add_liquidity` charges.
+        self.crypto_lp = crypto_lp
         self.enabled = enabled
         #: `(pool, kind, i, j) -> model`, cleared whenever the models are
         #: rebuilt.  See `_model`.
@@ -186,6 +191,8 @@ class ExactQuoterClient:
             self.vaults = built[3]
         if len(built) > 4:
             self.lp = built[4]
+        if len(built) > 5:
+            self.crypto_lp = built[5]
         self.models_block = block
         # The models the cache pointed at are gone.
         self._model_cache.clear()
@@ -291,6 +298,10 @@ class ExactQuoterClient:
             if kind is ArcKind.WITHDRAW_STABLE:
                 model = self.lp.get(pool)
                 return _Withdraw(model) if model is not None else None
+        if kind is ArcKind.WITHDRAW_CRYPTO and self.crypto_lp is not None:
+            model = self.crypto_lp.get(pool)
+            return _Withdraw(model) if model is not None else None
+        if self.lp is not None:
             if kind in (ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
                         ArcKind.DEPOSIT_FIXED_NOFLAG):
                 # The deposit direction is admitted on its own evidence: a pool
