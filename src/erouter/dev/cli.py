@@ -525,6 +525,80 @@ def _state_cache_for(chain):
     return cache if cache.accounts else None
 
 
+def _recording(client):
+    """`[proxy, calls]` -- answers as `client` does and keeps a log.
+
+    One run over a cache that does not cover the wrapper stages, so the warm
+    can be told what they actually ask for rather than guessing.
+    """
+    calls: list = []
+
+    class Recorder:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def raw(self, batch):
+            calls.extend(batch)
+            return self._inner.raw(batch)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    return [Recorder(client), calls]
+
+
+def _wrapper_signature(nodes, wrappers, stake_arcs) -> str:
+    """What the wrapper stages produced, in one comparable string.
+
+    Coverage says the state *should* be there; this says it was.  Cheap to
+    compute, and it catches the failure that matters -- a vault read as empty
+    because a slot was missing, which drops its arc silently.
+    """
+    import hashlib
+
+    parts = [str(nodes.n_nodes)]
+    parts += sorted(f"{a.pool.lower()}:{int(a.kind)}:{a.i}:{a.j}" for a in stake_arcs)
+    parts += sorted(f"v:{v.token.lower()}" for v in wrappers.merged_vaults)
+    parts += sorted(f"r:{e.symbol}" for e in wrappers.rejected_vaults)
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+def _build_wrappers(load, chain, reader, facts):
+    """The node map and the stake/transmuter/lending arcs, off one client."""
+    from .wrappers import (build_lending_arcs, build_node_map, build_stake_arcs,
+                           build_transmuter_arcs)
+
+    nodes, wrappers = build_node_map(load.pools, chain, reader, facts=facts)
+    stake = build_stake_arcs(nodes, chain, reader)
+    stake = stake + build_transmuter_arcs(nodes, chain, reader)
+    stake = stake + build_lending_arcs(nodes, chain, reader, facts)
+    return nodes, wrappers, stake
+
+
+def _learn_wrappers(evm, cache, rpc, calls, signature) -> None:
+    """Warm what the wrapper stages read, at slot granularity.
+
+    Their access lists are taken over the calls they actually made, because
+    guessing means warming every ERC20 in the universe to catch the sixty that
+    matter -- and would still miss the thirteen accounts they reach *through*.
+    """
+    # The EVM holds its *own* `StateCache` instance -- `_local_quoter` loads
+    # one and this caller loaded another -- and `warm` learns slots into that
+    # one.  Recording the requirement on a different object and saving it
+    # wrote a cache that claimed to need slots it did not have, so coverage
+    # never became true and the wire pass ran forever.
+    cache = getattr(evm, "cache", None) or cache
+    if cache is None or not calls:
+        return
+    try:
+        needs = evm.list_state(list(calls))
+        evm.warm(list(calls))
+    except Exception:  # noqa: BLE001 - a warm that fails is not a failed quote
+        return
+    cache.learn_wrapper_needs(needs, signature)
+    cache.save()
+
+
 def _learn_arcs(evm, rpc, chain, load, nodes, *, quiet: bool = False) -> int:
     """The access-list half of the warm, once the arcs are known.
 
@@ -800,15 +874,33 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} {exc}")
         return 2
 
-    nodes, wrappers = build_node_map(
-        load.pools, chain, client,
-        facts=FactsCache.load(chain.chain_id, chain.name.lower()))
-    stake_arcs = build_stake_arcs(nodes, chain, client)
-    stake_arcs = stake_arcs + build_transmuter_arcs(nodes, chain, client)
-    # Leaving a lending wrapper, where `data/facts` says the protocol still
-    # allows it.  Rides with the stake arcs: same shape, same treatment.
-    stake_arcs = stake_arcs + build_lending_arcs(
-        nodes, chain, client, FactsCache.load(chain.chain_id, chain.name.lower()))
+    facts = FactsCache.load(chain.chain_id, chain.name.lower())
+
+    # The wrapper stages read vaults and ERC20s rather than pools, so no arc
+    # access list names those accounts: 377 calls, 6 round trips, 1.3 s.
+    #
+    # Run them locally when the cache covers every slot they read, and then
+    # *check* -- coverage says the state should be there, the signature says it
+    # was.  A missing slot reads as zero, which makes a vault look unusable and
+    # drops its arc in silence; that is what an account-level check let
+    # through, 12 stake arcs where the chain gives 19.  A signature that does
+    # not match costs one wire pass, which is what today costs anyway.
+    recorded: list = []
+    nodes = wrappers = stake_arcs = None
+    live_cache = getattr(evm, "cache", None) or warm_cache
+    if evm is not None and live_cache is not None and live_cache.covers_wrappers():
+        nodes, wrappers, stake_arcs = _build_wrappers(load, chain, reader, facts)
+        if _wrapper_signature(nodes, wrappers, stake_arcs) != live_cache.wrapper_sig:
+            nodes = None      # the state moved; ask the chain and re-record
+    if nodes is None:
+        source = client
+        if evm is not None:
+            recorded = _recording(client)
+            source = recorded[0]
+        nodes, wrappers, stake_arcs = _build_wrappers(load, chain, source, facts)
+        if recorded:
+            _learn_wrappers(evm, warm_cache, rpc, recorded[1],
+                            _wrapper_signature(nodes, wrappers, stake_arcs))
     if evm is not None:
         # The half that needed arcs.  Everything above was answered from the
         # values loaded before it.

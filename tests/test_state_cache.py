@@ -67,10 +67,16 @@ def test_no_slot_values_are_ever_written(tmp_path):
     with gzip.open(cache.path, "rt", encoding="utf-8") as handle:
         raw = json.load(handle)
     assert set(raw) == {"version", "chain_id", "accounts", "code_of", "code",
-                        "funded", "pools", "volatile"}
+                        "funded", "pools", "volatile", "wrapper_needs",
+                        "wrapper_sig"}
     assert raw["version"] == VERSION
     # `accounts` maps to slot *keys* only.
     assert all(isinstance(k, int) for keys in raw["accounts"].values() for k in keys)
+    # `wrapper_needs` is the same shape: which slots those stages read, never
+    # what is in them.  `wrapper_sig` is a digest of the arcs they produced.
+    assert all(isinstance(k, int)
+               for keys in raw["wrapper_needs"].values() for k in keys)
+    assert isinstance(raw["wrapper_sig"], str)
 
 
 def test_saving_twice_produces_an_identical_file(tmp_path):
@@ -111,3 +117,30 @@ def test_missing_bytecode_is_absent_not_empty(tmp_path):
     assert cache.bytecode(OTHER) is None
     with pytest.raises(AssertionError):
         assert cache.bytecode(OTHER) == b""
+
+
+def test_wrapper_coverage_is_judged_by_slot_not_by_account(tmp_path):
+    """The distinction that matters, and the one that was got wrong.
+
+    The wrapper stages reach 167 accounts, of which 122 are already cached
+    because some pool swap touched them.  So "is the account present" answers
+    yes while the slots a vault's `convertToAssets` reads are still missing --
+    and a missing slot is zero, which makes the vault look unusable and drops
+    its arc.  Measured: 12 stake arcs where the chain gives 19.
+    """
+    cache = build(tmp_path)
+    cache.learn_wrapper_needs({"0xVault": {7, 9}}, "sig")
+
+    cache.accounts["0xvault"] = {7}          # present, and not enough
+    assert not cache.covers_wrappers()
+
+    cache.accounts["0xvault"] = {7, 9}
+    assert cache.covers_wrappers()
+
+
+def test_coverage_needs_a_signature_to_check_against(tmp_path):
+    """Without one there is nothing to catch a stale requirement."""
+    cache = build(tmp_path)
+    cache.learn_wrapper_needs({"0xVault": {1}}, "")
+    cache.accounts["0xvault"] = {1}
+    assert not cache.covers_wrappers()

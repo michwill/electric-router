@@ -1,6 +1,9 @@
 {
  "chain_id": 100,
- "fingerprint": "430aea16eba7b049",
+ "fingerprint": "b4ab4135e6c24b4b",
+ "unquotable": {
+  "0x056c6c5e684cec248635ed86033378cc444459b0": "47822d4637e9"
+ },
  "verdicts": {
   "0x0ecec6f5276d2ec6bb864f063d2b76393d6a1a74": {
    "family": "twocrypto",

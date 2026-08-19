@@ -439,6 +439,32 @@ class LocalEvm:
                     self.stats.errors.append(f"balance {address[:10]} unreadable")
                     self.stats.unreadable += 1
 
+    def list_state(self, calls: list[Call]) -> dict[str, set[int]]:
+        """`account -> slots` these calls read, without loading anything.
+
+        The same access lists `warm` uses, kept rather than consumed, so a
+        caller can record *what was needed* and check later whether it still
+        has it.  Account presence is not that check: these calls reach 167
+        accounts of which 122 are already cached for other reasons, and the
+        slots are what differ.
+        """
+        block = self.rpc.pin.hex_block
+        extra = self._access_list_shape(calls[0] if calls else None)
+        payloads = [
+            ("eth_createAccessList",
+             [{"from": CALLER, "to": one.to, "data": "0x" + bytes(one.data).hex(),
+               **extra}, block])
+            for one in calls
+        ]
+        needs: dict[str, set[int]] = {}
+        for answer in self._batched(payloads):
+            if _access_list_failed(answer):
+                continue
+            for entry in (answer or {}).get("accessList") or []:
+                needs.setdefault(entry["address"].lower(), set()).update(
+                    int(k, 16) for k in entry.get("storageKeys") or ())
+        return needs
+
     def warm(self, calls: list[Call]) -> WarmStats:
         """Load every account and slot these calls touch.
 
@@ -678,9 +704,18 @@ class LocalEvm:
             # empty slot set, which the EVM then reads as a pool holding zero.
             touched.setdefault(one.to.lower(), set())
             served = True
-            for entry in answer.get("accessList", []):
+            for entry in answer.get("accessList") or []:
+                # `storageKeys` may be **null**, not an empty list.  It is a
+                # valid reply -- an account touched for its code or balance
+                # names no slots -- and some backends spell that as `null`
+                # while others send `[]`.  Iterating it raised `'NoneType'
+                # object is not iterable`, which killed the whole warm and
+                # read as a transport failure: reported as an intermittent
+                # warm that "worked on the second attempt", because whether it
+                # happens depends on which account the call touches and which
+                # backend answers.
                 touched.setdefault(entry["address"].lower(), set()).update(
-                    int(k, 16) for k in entry["storageKeys"])
+                    int(k, 16) for k in entry.get("storageKeys") or ())
         self.stats.list_calls += len(payloads)
         if not served:
             return False

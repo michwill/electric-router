@@ -60,6 +60,23 @@ class StateCache:
     funded: set[str] = field(default_factory=set)
     pools: set[str] = field(default_factory=set)
     volatile: set[str] = field(default_factory=set)
+    #: What the *wrapper* stages need, at slot granularity.
+    #:
+    #: `build_node_map` and the stake/transmuter/lending arcs read vaults and
+    #: ERC20s, which no pool probe touches, so no arc access list names them.
+    #: Their 377 calls reach 167 accounts -- they call through, to Aave's pool
+    #: and to rate oracles -- of which 122 are already cached because some pool
+    #: swap touched them, 32 are cached but missing slots, and 13 are absent.
+    #:
+    #: Account presence is therefore *not* the test.  A vault's
+    #: `convertToAssets` reads different slots than the swap that first cached
+    #: that account, and an unread slot is zero, which makes the vault look
+    #: unusable and quietly drops the arc: measured, 12 stake arcs instead of
+    #: 19, with nothing to say so.
+    wrapper_needs: dict[str, set[int]] = field(default_factory=dict)
+    #: What those stages produced when they last ran against the chain.  The
+    #: local run is checked against it -- see `cli._wrapper_signature`.
+    wrapper_sig: str = ""
     dirty: bool = False
 
     # ------------------------------------------------------------- load/save
@@ -80,7 +97,38 @@ class StateCache:
         cache.funded = set(raw.get("funded", []))
         cache.pools = set(raw.get("pools", []))
         cache.volatile = set(raw.get("volatile", []))
+        cache.wrapper_needs = {a: set(v) for a, v in raw.get("wrapper_needs", {}).items()}
+        cache.wrapper_sig = str(raw.get("wrapper_sig", "") or "")
         return cache
+
+    def learn_wrapper_needs(self, needs: dict, signature: str) -> None:
+        """Record what the wrapper stages read, and what they produced."""
+        changed = False
+        for address, slots in needs.items():
+            key = address.lower()
+            have = self.wrapper_needs.setdefault(key, set())
+            if not set(slots) <= have:
+                have |= set(slots)
+                changed = True
+        if signature and signature != self.wrapper_sig:
+            self.wrapper_sig = signature
+            changed = True
+        self.dirty = self.dirty or changed
+
+    def covers_wrappers(self) -> bool:
+        """Whether every slot those stages read is loaded, not merely present.
+
+        Slot granularity is the whole point: the accounts are almost all
+        cached already, and that is what made an account-level check pass
+        while the arcs it produced were wrong.
+        """
+        if not self.wrapper_needs or not self.wrapper_sig:
+            return False
+        for address, slots in self.wrapper_needs.items():
+            have = self.accounts.get(address)
+            if have is None or not set(slots) <= have:
+                return False
+        return True
 
     def save(self) -> None:
         if not self.dirty:
@@ -95,6 +143,9 @@ class StateCache:
             "funded": sorted(self.funded),
             "pools": sorted(self.pools),
             "volatile": sorted(self.volatile),
+            "wrapper_needs": {a: sorted(v)
+                              for a, v in sorted(self.wrapper_needs.items())},
+            "wrapper_sig": self.wrapper_sig,
         }
         tmp = self.path.with_suffix(".tmp")
         # `mtime=0` so an unchanged cache produces a byte-identical file: this
