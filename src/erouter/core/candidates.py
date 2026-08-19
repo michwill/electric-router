@@ -437,10 +437,18 @@ def generate(
     #    which is why this is here and not in the arc flags.
     made = 0
     swept = {int(k) for k in base_active if g.flagged[k]}
+    live_pools = {pools[int(k)] for k in base_active}
+    # Every arc of a pool the route touches, not only the ones carrying flow:
+    # the sweep wants the co-active ones, and the element generator below
+    # wants the idle siblings too.
     by_pool: dict[str, list[int]] = {}
+    for k in range(len(arcs)):
+        if pools[k] in live_pools:
+            by_pool.setdefault(pools[k], []).append(k)
+    active_by_pool: dict[str, list[int]] = {}
     for k in base_active:
-        by_pool.setdefault(pools[int(k)], []).append(int(k))
-    for shared in by_pool.values():
+        active_by_pool.setdefault(pools[int(k)], []).append(int(k))
+    for shared in active_by_pool.values():
         if len(shared) > 1:
             swept.update(shared)
     flagged_active = sorted(swept)
@@ -482,13 +490,26 @@ def generate(
     #     `element_split` is supplied by the caller because pricing needs a
     #     pool model and this module is pure -- it holds `a` and `B`, not a
     #     `StableSwap`.  Absent, nothing here runs.
+    #     Pairs are proposed **speculatively**, not read off the base solve.
+    #     Gating on "the solver already went through this pool twice" makes
+    #     the generator unable to reach the case it was built for: gnosis
+    #     WXDAI -> EURe runs 100% down one arm, so no pool is co-active, so no
+    #     element is offered, so the second arm is never priced.  Both ports
+    #     have to be on the table before either can win.  So an active arc is
+    #     paired with its idle siblings -- same pool, same input coin -- and
+    #     the candidate competes on measured output like any other.
     if element_split is not None:
+        pairs: list[tuple[int, int]] = []
+        active_set = {int(k) for k in base_active}
         for shared in by_pool.values():
-            if len(shared) != 2 or len(out) >= max_candidates:
-                continue
-            k1, k2 = shared
-            if arcs[k1].tau != arcs[k2].tau:
-                continue  # not one-in-two-out: the ports leave different nodes
+            live = [k for k in shared if k in active_set]
+            for k1 in live:
+                for k2 in shared:
+                    if k2 != k1 and arcs[k1].tau == arcs[k2].tau:
+                        pairs.append((k1, k2) if k1 < k2 else (k2, k1))
+        for k1, k2 in dict.fromkeys(pairs):
+            if len(out) >= max_candidates or exhausted("element"):
+                break
             try:
                 tuned = element_split(arcs[k1], arcs[k2],
                                       float(base.psi[k1]), float(base.psi[k2]))
