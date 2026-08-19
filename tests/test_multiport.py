@@ -9,6 +9,7 @@ stands for, executed in order, to the wei.
 from __future__ import annotations
 
 import pytest
+from dataclasses import replace
 
 from erouter.core.multiport import LP, MultiPort, MultiPortError, Port, evaluate
 from erouter.core.stableswap import StableSwap, StableSwapLP
@@ -121,3 +122,68 @@ def test_many_in_many_out_is_refused_rather_than_guessed():
     made = element([Port(0, 5_000), Port(1, 5_000)], [Port(2, 5_000), Port(LP, 5_000)])
     with pytest.raises(MultiPortError, match="pairing rule"):
         evaluate(made, POOL, lp(), 100 * UNIT)
+
+
+# --- choosing the split -----------------------------------------------
+
+def par(k, amount):
+    """Both ports pay a dollar-ish token, so output is comparable."""
+    return amount / UNIT
+
+
+def test_the_best_split_beats_the_halves():
+    """Which is the whole reason to optimise rather than bracket."""
+    from erouter.core.multiport import best_split
+
+    made = element([Port(2, 10_000)], [Port(0, 5_000), Port(1, 5_000)])
+    dx = 900_000 * UNIT
+    tuned, best = best_split(made, POOL, lp(), dx, par)
+
+    half, _, _ = evaluate(made, POOL, lp(), dx)
+    assert best >= sum(par(k, v) for k, v in enumerate(half))
+    assert 1 <= tuned.outputs[0].bps <= 9_999
+    assert tuned.outputs[0].bps + tuned.outputs[1].bps == 10_000
+
+
+def test_the_best_split_beats_the_pin_ladder():
+    """§6.3's ladder is a bracket; this is the thing it brackets."""
+    from erouter.core.multiport import best_split
+
+    made = element([Port(2, 10_000)], [Port(0, 5_000), Port(1, 5_000)])
+    dx = 900_000 * UNIT
+    _, best = best_split(made, POOL, lp(), dx, par)
+
+    ladder = []
+    for step in (0.125, 0.25, 0.5, 1.0, 2.0):
+        bps = int(5_000 * step)
+        if not 1 <= bps <= 9_999:
+            continue
+        outs, _, _ = evaluate(
+            element([Port(2, 10_000)], [Port(0, bps), Port(1, 10_000 - bps)]),
+            POOL, lp(), dx)
+        ladder.append(sum(par(k, v) for k, v in enumerate(outs)))
+    assert best >= max(ladder)
+
+
+def test_a_lopsided_pool_moves_the_split_off_centre():
+    """A symmetric answer on an asymmetric pool would mean it is not looking."""
+    from erouter.core.multiport import best_split
+
+    lopsided = replace(POOL, balances=(200_000 * UNIT, 1_800_000 * UNIT,
+                                       1_000_000 * UNIT))
+    made = element([Port(2, 10_000)], [Port(0, 5_000), Port(1, 5_000)])
+    tuned, _ = best_split(made, lopsided,
+                          StableSwapLP(pool=lopsided, total_supply=SUPPLY),
+                          600_000 * UNIT, par)
+    assert abs(tuned.outputs[0].bps - 5_000) > 100, (
+        f"split stayed at {tuned.outputs[0].bps} bps on a 1:9 pool")
+
+
+def test_three_ports_are_refused():
+    from erouter.core.multiport import best_split
+
+    made = element([Port(2, 10_000)], [Port(0, 5_000), Port(1, 5_000)])
+    made = MultiPort(pool=ADDRESS, n_coins=3, inputs=made.inputs,
+                     outputs=(Port(0, 3_000), Port(1, 3_000), Port(LP, 4_000)))
+    with pytest.raises(MultiPortError, match="one-in two-out"):
+        best_split(made, POOL, lp(), 100 * UNIT, par)

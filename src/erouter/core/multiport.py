@@ -163,3 +163,62 @@ def evaluate(element: MultiPort, pool, lp, amount_in: int) -> tuple[list[int], o
                 lp = replace(lp, pool=pool)
             outs.append(dy)
     return outs, pool, lp
+
+
+def best_split(element: MultiPort, pool, lp, amount_in: int, value,
+               *, grid: int = 25) -> tuple[MultiPort, float]:
+    """The two-port split that maximises what the element pays out.
+
+    `value(port_index, amount) -> float` prices each port's token, because the
+    ports pay different tokens and only the caller knows what they are worth.
+
+    This is the piece the pin sweep approximates.  §6.3 sweeps an allocation
+    over `psi* x {0, 1/8, 1/4, 1/2, 1, 2, 4}` because the model underneath it
+    cannot be trusted; here the element's own arithmetic *is* trustworthy --
+    it advances the pool between legs, matching execution to within a wei on
+    the shapes tested -- so the split can be optimised rather than bracketed.
+
+    Ternary search, because the objective is concave in the split: each port's
+    output is concave in its own share, and a sum of concave functions of a
+    linear split is concave.  That holds for `exchange` and `add_liquidity` on
+    a stableswap in its normal range; it is not asserted for a pool being
+    pushed off its peg, where §2.5's split arcs apply and the caller should
+    not be here.  Falls back to the best grid point if the search leaves the
+    feasible interior.
+
+    Only two ports.  Three needs a simplex search and no caller wants one yet.
+    """
+    if len(element.inputs) != 1 or len(element.outputs) != 2:
+        raise MultiPortError("best_split is for one-in two-out elements")
+
+    def payout(bps: int) -> float:
+        try:
+            outs, _, _ = evaluate(_at(element, bps), pool, lp, amount_in)
+        except (MultiPortError, ArithmeticError, ValueError):
+            return float("-inf")
+        return sum(value(k, out) for k, out in enumerate(outs))
+
+    low, high = 1, BPS - 1
+    for _ in range(grid):
+        if high - low < 3:
+            break
+        left = low + (high - low) // 3
+        right = high - (high - low) // 3
+        if payout(left) < payout(right):
+            low = left
+        else:
+            high = right
+    best = max(range(low, high + 1), key=payout)
+    found = payout(best)
+    if found == float("-inf"):
+        raise MultiPortError("no feasible split")
+    return _at(element, best), found
+
+
+def _at(element: MultiPort, bps: int) -> MultiPort:
+    """`element` with its two output ports split `bps` / `BPS - bps`."""
+    first, second = element.outputs
+    return MultiPort(pool=element.pool, n_coins=element.n_coins,
+                     inputs=element.inputs,
+                     outputs=(Port(first.coin, bps),
+                              Port(second.coin, BPS - bps)))
