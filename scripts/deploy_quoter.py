@@ -90,8 +90,22 @@ def account_load(name: str):
     return account.Account.from_key(key)
 
 
+#: Etherscan's several ways of saying the job is already done.  Matched
+#: case-insensitively: the v2 API answers "Contract source code already
+#: verified" in lower case, which a match on "Already Verified" misses -- so a
+#: *success* was retried six times over a minute and then reported as a
+#: failure, on every chain, on every deploy.
+ALREADY_VERIFIED = ("already verified", "already been verified")
+
+
 def verify_with_retries(contract, etherscan, attempts: int = 6, pause: int = 10) -> None:
-    """Etherscan needs the code indexed before it will look at it."""
+    """Etherscan needs the code indexed before it will look at it.
+
+    Retries exist for that indexing delay, and for nothing else.  "Already
+    verified" is the desired end state -- CREATE2 puts identical bytecode on
+    every chain, so the second chain onward is frequently verified the moment
+    it is submitted -- and retrying it cannot change the outcome.
+    """
     from boa.verifiers import verify as boa_verify
 
     for attempt in range(attempts):
@@ -100,8 +114,9 @@ def verify_with_retries(contract, etherscan, attempts: int = 6, pause: int = 10)
             boa_verify(contract, etherscan, wait=True)
             print("  verified")
             return
-        except ValueError as exc:
-            if "Already Verified" in str(exc):
+        except Exception as exc:            # noqa: BLE001 - classified below
+            text = str(exc).lower()
+            if any(phrase in text for phrase in ALREADY_VERIFIED):
                 print("  already verified")
                 return
             print(f"  verify attempt {attempt + 1}/{attempts}: {exc}")
