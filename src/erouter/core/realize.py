@@ -456,7 +456,16 @@ def realize(
         group: list[tuple[int, int]] = []  # (arc index, destination slot)
         for k in outgoing:
             token_in = arcs[k].token_in.lower()
-            if token_in == hub:
+            # Compare *slots*, not addresses.  An alias is a second address
+            # over one balance -- gnosis's two EURe contracts report the same
+            # `balanceOf` for every holder -- so `slot` deliberately collapses
+            # it onto the canonical, and an arc drawing on the alias is already
+            # drawing on the hub.  Testing the address instead sent it down the
+            # spoke path, where the conversion leg it then built moved slot 0
+            # to slot 0 and `Leg` refused it outright: EURe -> USDC on gnosis
+            # died with "leg must move between slots (got 0)".  The fold above
+            # skips aliases for the same reason, in as many words.
+            if slot(token_in) == slot(hub):
                 group.append((k, -1))
             else:
                 spoke = slot(token_in)
