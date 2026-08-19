@@ -517,30 +517,56 @@ def build_transmuter_arcs(
     if not entries:
         return []
 
-    # What the adapter can actually pay out, per side.
+    # What the adapter can actually pay out, per side: either from a reserve
+    # it holds, or -- where it is a minter of the output -- from its mint
+    # allowance.  Both are read; which one applies is decided per direction.
     calls = []
     for token_a, token_b, adapter in entries:
-        calls += [Call(token_a, encode_call("balanceOf(address)", adapter)),
-                  Call(token_b, encode_call("balanceOf(address)", adapter))]
+        for token in (token_a, token_b):
+            calls += [Call(token, encode_call("balanceOf(address)", adapter)),
+                      Call(token, encode_call("isMinter(address)", adapter)),
+                      Call(token, encode_call("minterAllowance(address)", adapter))]
     answers = client.raw(calls)
+
+    def _uint(answer) -> int:
+        return answer.uint() if answer.status is Status.VALUE else 0
 
     arcs: list[PoolArc] = []
     for k, (token_a, token_b, adapter) in enumerate(entries):
-        held_a, held_b = answers[2 * k], answers[2 * k + 1]
+        side = {}
+        for n, token in enumerate((token_a, token_b)):
+            base = 6 * k + 3 * n
+            side[token] = (
+                _uint(answers[base]),                       # held
+                bool(_uint(answers[base + 1])),             # is a minter
+                _uint(answers[base + 2]),                   # mint allowance
+            )
         if nodes.node(token_a) == nodes.node(token_b):
             continue  # already one node by some other route
-        for token_in, token_out, held, kind in (
-            (token_a, token_b, held_b, ArcKind.WRAP_NATIVE),
-            (token_b, token_a, held_a, ArcKind.UNWRAP_NATIVE),
+        for token_in, token_out, kind in (
+            (token_a, token_b, ArcKind.WRAP_NATIVE),
+            (token_b, token_a, ArcKind.UNWRAP_NATIVE),
         ):
-            # A side the adapter mints holds nothing of the output, and the
-            # other side's reserve is the only on-chain measure of the
-            # machine's scale.  Conservative in the direction that matters:
-            # too small a cap costs a better route, too large invents one.
-            reserve = held.uint() if held.status is Status.VALUE else 0
-            if reserve == 0:
-                other = held_a if held is held_b else held_b
-                reserve = other.uint() if other.status is Status.VALUE else 0
+            held_out, mints_out, allowance = side[token_out]
+            held_in = side[token_in][0]
+            # Which of the three the cap comes from is a real difference, so
+            # it is asked rather than inferred from a zero balance.  Gnosis's
+            # USDCTransmuter *mints* USDC.e against USDC deposited -- it holds
+            # no USDC.e at all -- and burns USDC.e to pay USDC back out of a
+            # reserve.  Reading the empty side as "no capacity" and falling
+            # back on the opposite reserve understated that direction sevenfold
+            # (10.3M against a 77.5M mint allowance); reading it as unbounded
+            # would invent a route the moment Circle revoked the allowance.
+            if mints_out and allowance:
+                reserve, decimals = allowance, nodes.decimals(token_out)
+            elif held_out:
+                reserve, decimals = held_out, nodes.decimals(token_out)
+            else:
+                # Neither a reserve nor a mint right: the opposite side's
+                # holdings are the only remaining measure of the machine's
+                # scale, and too small a cap costs a route where too large
+                # invents one.
+                reserve, decimals = held_in, nodes.decimals(token_in)
             if reserve == 0:
                 continue
             arcs.append(PoolArc(
@@ -549,7 +575,7 @@ def build_transmuter_arcs(
                 token_in=token_in, token_out=token_out,
                 tau=nodes.node(token_in), sigma=nodes.node(token_out),
                 a=1.0, B=0.0,
-                cap=reserve / 10 ** nodes.decimals(token_in),
+                cap=reserve / 10 ** decimals,
                 clamped=True, convex_flag=False,
                 decimals_in=nodes.decimals(token_in),
                 decimals_out=nodes.decimals(token_out),
