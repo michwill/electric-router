@@ -216,9 +216,24 @@ def _execute(
     on this must set them; a measurement must not.
     """
     if kind == WRAP_NATIVE:
-        return self._send(target, method_id("deposit()"), dx)
+        if token_in == NATIVE:
+            # WETH and its siblings: payable `deposit()`, value carries the amount.
+            return self._send(target, method_id("deposit()"), dx)
+        # A 1:1 *token* adapter wearing the same kind.  Gnosis's USDC
+        # transmuter takes `deposit(uint256)`, is not payable, and needs an
+        # allowance -- so the payable spelling reverts on it, and every route
+        # crossing that adapter failed to execute while quoting perfectly well.
+        # Measured: it is on the path for USDC -> USDC.e, worth 55 bp there.
+        self._approve(token_in, target, dx)
+        return self._send(
+            target, concat(method_id("deposit(uint256)"), abi_encode(dx)), 0
+        )
 
     if kind == UNWRAP_NATIVE:
+        # One spelling covers both: WETH burns the caller's balance and the
+        # adapter pulls it, so the allowance is harmless in the first case and
+        # required in the second.
+        self._approve(token_in, target, dx)
         return self._send(
             target, concat(method_id("withdraw(uint256)"), abi_encode(dx)), 0
         )
