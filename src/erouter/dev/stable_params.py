@@ -106,6 +106,11 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
             Call(pool.address, encode_call("A()")),
             Call(pool.address, encode_call("fee()")),
             Call(pool.address, encode_call("offpeg_fee_multiplier()")),
+            # Only `exchange` needs this, never `get_dy`, so a pool that does
+            # not report it still models and quotes -- it just cannot have its
+            # state advanced, and `StableSwap.exchange` refuses rather than
+            # assuming a zero that would flatter the next leg.
+            Call(pool.address, encode_call("admin_fee()")),
         ]
     answers = client.raw(calls)
 
@@ -129,7 +134,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
 
     built: list[tuple[object, StableSwap, dict]] = []
     for k, pool in enumerate(wanted):
-        precise, plain, fee, offpeg = answers[4 * k : 4 * k + 4]
+        precise, plain, fee, offpeg, admin = answers[5 * k : 5 * k + 5]
         if precise.ok and precise.uint():
             amp, a_precision, fee_on_xp = precise.uint(), 100, True
         elif plain.ok and plain.uint():
@@ -175,6 +180,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
                     rates=rates, amp=amp, fee=fee.uint(),
                     offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
                     a_precision=a_precision, fee_on_xp=on_xp,
+                    admin_fee=admin.uint_or(-1) if admin.ok else -1,
                 ), {"family": "stable", "rates": label, "fee_on_xp": on_xp}))
 
     if not built:

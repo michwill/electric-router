@@ -45,7 +45,7 @@ because the point of this module is to agree with them to the wei.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 PRECISION = 10**18
 #: The same, as a float, so the quote path never converts it.
@@ -128,6 +128,13 @@ class StableSwap:
     a_precision: int = A_PRECISION
     #: ng takes the fee in `xp` space; legacy takes it in token space.
     fee_on_xp: bool = True
+    #: The share of the fee that leaves the pool for the DAO.  Only `exchange`
+    #: needs it -- `get_dy` is the trader's side and never sees it -- but the
+    #: pool keeps `fee - admin_fee` and that is the part which changes the next
+    #: quote, so a model that advanced its own state without it would drift.
+    #: `-1` means "not read", and `exchange` refuses rather than assuming zero:
+    #: assuming zero leaves too much in the pool and flatters the second leg.
+    admin_fee: int = -1
     #: Whether the pool rounds its output down by a wei.  The ng generation
     #: computes `dy = xp[j] - y - 1`; the 2020 lending pools compute
     #: `dy = xp[j] - y` and keep the wei.  It is one wei, and one wei is the
@@ -287,6 +294,57 @@ class StableSwap:
             return (raw - raw * fee // FEE_DENOMINATOR) * PRECISION // self.rates[j]
         out = raw * PRECISION // self.rates[j]
         return out - out * self.fee // FEE_DENOMINATOR
+
+    def exchange(self, i: int, j: int, dx: int) -> tuple[int, "StableSwap"]:
+        """`(dy, the pool after the trade)` -- what `exchange` would leave.
+
+        A view-only chained quoter cannot see its own earlier leg, which is
+        the whole reason a route may not touch a pool twice (decision 3).  It
+        is a limitation of *asking the chain*, not of the arithmetic: for a
+        pool the wei-exact gate admitted, the state after a trade is as
+        computable as the trade itself, and stableswap makes it easy because
+        `D` is derived from the balances rather than stored.
+
+        The update is the contract's own, and the admin fee is the part worth
+        being careful about:
+
+            balances[i] = balances[i] + dx
+            balances[j] = balances[j] - dy - dy_admin_fee
+
+        so the pool keeps the LP's share of the fee and loses the DAO's.  A
+        model that skipped `dy_admin_fee` would leave the pool richer than it
+        is and quote the next leg through it too well.
+        """
+        if self.admin_fee < 0:
+            raise StableSwapError("admin_fee unknown; cannot advance state")
+        if dx <= 0:
+            return 0, self
+        xp = self.xp()
+        d = self.d(xp)
+        x = xp[i] + dx * self.rates[i] // PRECISION
+        y = self.y(i, j, x, xp, d)
+        raw = xp[j] - y - (1 if self.subtract_one else 0)
+        if raw <= 0:
+            return 0, self
+        if self.fee_on_xp:
+            fee = self.dynamic_fee((xp[i] + x) // 2, (xp[j] + y) // 2)
+            charged = raw * fee // FEE_DENOMINATOR
+            dy = (raw - charged) * PRECISION // self.rates[j]
+            admin = (charged * self.admin_fee // FEE_DENOMINATOR
+                     * PRECISION // self.rates[j])
+        else:
+            out = raw * PRECISION // self.rates[j]
+            charged = out * self.fee // FEE_DENOMINATOR
+            dy = out - charged
+            admin = charged * self.admin_fee // FEE_DENOMINATOR
+        balances = list(self.balances)
+        balances[i] += dx
+        if balances[j] < dy + admin:
+            raise StableSwapError("pool cannot pay the trade")
+        balances[j] -= dy + admin
+        # `replace` drops the cached `xp`/`_consts` because both are `init=False`
+        # -- see the note on those fields, which exists for exactly this call.
+        return dy, replace(self, balances=tuple(balances))
 
     def get_dy_fast(self, i: int, j: int, dx: int) -> int:
         """`get_dy`, priced in floating point.

@@ -163,3 +163,96 @@ def test_replacing_a_balance_does_not_carry_the_old_reserves():
     moved = dataclasses.replace(pool, balances=(2_000_000 * 10**18, 10**24))
     assert moved.xp() == [2_000_000 * 10**18, 10**24]
     assert moved.get_dy(0, 1, 10**18) != pool.get_dy(0, 1, 10**18)
+
+
+# ----------------------------------------------------- advancing the state
+#
+# A route may not touch a pool twice (decision 3) because a view-only chained
+# quoter cannot see its own earlier leg.  That is a limit of *asking the
+# chain*, not of the arithmetic: for a pool the wei-exact gate admitted, the
+# state after a trade is as computable as the trade itself.  Measured on
+# gnosis WXDAI->EURe at 100,000, splitting across two branches that both enter
+# the 3pool -- one depositing, one swapping -- returns 81,321 EURe against
+# 66,074 for the single branch the rule permits, and the interaction between
+# the two legs costs 1.5 bp of that.  So the update below is worth getting
+# exactly right.
+
+GNOSIS_3POOL = dict(
+    balances=(142638 * 10**18, 153563 * 10**6, 246110 * 10**6),
+    rates=(10**18, 10**30, 10**30),
+    amp=200 * 100,
+    fee=3 * 10**6,
+    a_precision=100,
+    fee_on_xp=True,
+    admin_fee=5 * 10**9,
+)
+
+
+def test_the_trader_sees_the_same_number_either_way():
+    """`exchange` must not quote differently from `get_dy`.
+
+    They are the same trade; only one of them also reports what is left.  A
+    difference here would mean a route priced one way and executed another.
+    """
+    pool = StableSwap(**GNOSIS_3POOL)
+    for dx in (10**18, 1000 * 10**18, 50_000 * 10**18):
+        dy, _ = pool.exchange(0, 1, dx)
+        assert dy == pool.get_dy(0, 1, dx)
+
+
+def test_advancing_without_the_admin_fee_is_refused():
+    """Assuming zero would leave the pool richer than it is.
+
+    The DAO's share leaves the pool, so a model that skipped it would quote
+    the *next* leg through that pool too well -- and too well is the direction
+    that invents value.
+    """
+    pool = StableSwap(**{**GNOSIS_3POOL, "admin_fee": -1})
+    assert pool.get_dy(0, 1, 10**18) > 0, "quoting still works without it"
+    with pytest.raises(StableSwapError, match="admin_fee"):
+        pool.exchange(0, 1, 10**18)
+
+
+def test_the_pool_keeps_the_lp_share_and_loses_the_dao_share():
+    pool = StableSwap(**GNOSIS_3POOL)
+    dx = 10_000 * 10**18
+    dy, after = pool.exchange(0, 1, dx)
+    assert after.balances[0] == pool.balances[0] + dx
+    # Everything the trader took, plus the DAO's cut, left the `j` side.
+    gone = pool.balances[1] - after.balances[1]
+    assert gone > dy, "the admin fee leaves too"
+    assert after.balances[2] == pool.balances[2], "an untouched coin is untouched"
+
+    # With no admin fee the whole fee stays behind, so the pool keeps more.
+    free = StableSwap(**{**GNOSIS_3POOL, "admin_fee": 0})
+    _, after_free = free.exchange(0, 1, dx)
+    assert after_free.balances[1] > after.balances[1]
+
+
+def test_the_second_leg_is_priced_worse_than_the_first():
+    """The point of the whole exercise: the pool moved.
+
+    Without this the two legs of a double entry would each be quoted against
+    the opening balances, which is precisely the over-count decision 3 exists
+    to prevent.
+    """
+    pool = StableSwap(**GNOSIS_3POOL)
+    dx = 20_000 * 10**18
+    first, after = pool.exchange(0, 1, dx)
+    assert after.get_dy(0, 1, dx) < first, "the same trade again must cost more"
+    assert pool.get_dy(0, 1, dx) == first, "the original is not mutated"
+
+
+def test_the_cached_xp_does_not_survive_the_advance():
+    """`_xp` is a function of the balances, and the balances just changed.
+
+    `init=False` on the cache is what makes `replace` drop it; this pins that,
+    because carrying it across would quote the new pool with the old reserves
+    and the numbers would still look plausible.
+    """
+    pool = StableSwap(**GNOSIS_3POOL)
+    pool.xp()  # fill the cache
+    _, after = pool.exchange(0, 1, 10_000 * 10**18)
+    assert after.xp()[0] > pool.xp()[0]
+    assert after.xp() == [b * r // 10**18
+                          for b, r in zip(after.balances, after.rates)]
