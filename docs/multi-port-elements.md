@@ -123,3 +123,43 @@ allowed, the element kinds are one kind:
 `w` is free on the coin side, and for a deposit the amounts vector *is* `w`
 -- the same variable, not a second element kind.  So pricing-out optimises
 over one thing, which is what makes the inner problem well-posed.
+
+
+## Wiring step 2 -- what it actually takes
+
+Checked rather than assumed, and it is smaller than it looked.
+
+**`realize.py` needs no change at all.**  The reentry work already lays out
+two arcs of one pool in an admissible order (`ADVANCEABLE`, the group sort in
+`_emit`, `check_one_arc_per_pool(..., reentrant=)`).  An element's legs *are*
+those legs; what the element changes is which split they carry.
+
+**`candidates.py` needs one generator, and it reuses `resolve`.**  A tuned
+element is expressible as a pin: `resolve` already takes
+`pinned -> forced_upper`, a dict of per-arc bounds, so emitting the tuned
+allocation is
+
+    resolve(np.zeros(g.m, bool), label, "element",
+            pinned={k1: psi1, k2: psi2})
+
+with `psi1, psi2` from `best_split`.  `forced_upper` is an upper bound rather
+than an equality, so the solver may take less -- which can only improve the
+candidate, never invalidate it.
+
+**The one real obstacle is that `core/candidates.py` cannot see a pool
+model.**  It is pure, and holds arcs with `a` and `B`, not `StableSwap`
+objects; the models live in `dev/exact_probe.py`.  So `generate` needs an
+optional pricer threaded in from the pipeline, the way `reentrant` already
+is:
+
+    generate(..., element_split=None)
+    element_split(pool, i, (j1, j2), amount) -> (psi1, psi2) | None
+
+supplied by `ExactQuoterClient`, defaulting to `None` so the generator is
+inert until it is.  That keeps `test_purity.py` green and makes the change
+switch-off-able, which matters because this is the first step here that can
+alter a live quote.
+
+Estimated shape: ~40 lines in `candidates.py`, ~20 in `pipeline.py`, ~30 in
+`exact_probe.py`, plus a route-level regression that the candidate never
+*loses* to the pin ladder it replaces.
