@@ -162,14 +162,35 @@ def test_scrvusd_is_merged_into_crvusd(universe):
     assert SCRVUSD in merged
 
 
-def test_routing_between_merged_tokens_is_refused(universe, quoter_client):
-    """They are one node, so there is nothing to route -- just convert."""
+def test_routing_between_merged_tokens_converts(universe, quoter_client):
+    """They are one node, so the merge itself is the route.
+
+    This used to be refused outright -- two addresses on one node have no arc
+    between them, so the solver had nothing to do and said so.  `7a02663`
+    changed the contract: a merged pair quotes the conversion instead, because
+    "there is no arc" is a statement about the graph and not an answer to the
+    question the caller asked.  The test kept asserting the refusal, so it went
+    red the moment the behaviour improved.
+
+    What is worth pinning is the shape of the answer: one leg, the vault's own
+    `previewDeposit`, and a rate that is the vault's rather than 1:1 -- scrvUSD
+    is worth more than crvUSD, so fewer shares come back than assets went in,
+    and a route that returned the input unchanged would mean the merge had
+    quietly become an alias.
+    """
     specs, nodes, _ = universe
     if not nodes.has(SCRVUSD):
         pytest.skip("scrvUSD is not in the universe")
-    with pytest.raises(RoutingError, match="same node"):
-        route(specs, nodes, quoter_client,
-              src_token=CRVUSD, dst_token=SCRVUSD, amount_in=10**21)
+    result = route(specs, nodes, quoter_client,
+                   src_token=CRVUSD, dst_token=SCRVUSD, amount_in=10**21)
+
+    assert result.ok and result.verified_out > 0
+    assert result.counters.get("conversion_only") == 1
+    assert len(result.route.legs) == 1
+    assert result.route.legs[0].kind is ArcKind.ERC4626_DEPOSIT
+    assert result.verified_out < 10**21, (
+        "scrvUSD is worth more than crvUSD, so a deposit must return fewer "
+        f"shares than assets; got {result.verified_out} for {10**21}")
 
 
 def test_unreachable_destination_reports_rather_than_crashes(universe, quoter_client):
