@@ -191,12 +191,26 @@ class StateCache:
         self.dirty = True
 
     def learn_code(self, address: str, blob: bytes) -> None:
+        """Record an account's bytecode, and make sure it is loadable.
+
+        `prime` walks `slots()` to decide which accounts to insert into the
+        EVM, so code recorded without an entry there is never loaded and the
+        address answers every call as if it had no code -- which is a zero, not
+        an error.  A stateless contract has no storage to record, so it would
+        otherwise never appear: measured after the quoter was redeployed, its
+        code was cached correctly and every pool still read as holding nothing,
+        because the account it lived at was never materialised.
+
+        An empty slot set is the right entry: it costs no storage reads and it
+        is the truth about a contract that keeps no state.
+        """
         address = address.lower()
         if not blob:
             return
         digest = "0x" + hashlib.sha256(blob).hexdigest()[:32]
         self.code[digest] = blob.hex()
         self.code_of[address] = digest
+        self.accounts.setdefault(address, set())
         self.dirty = True
 
     def learn_funded(self, address: str, balance: int) -> None:

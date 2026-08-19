@@ -154,7 +154,7 @@ CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 # Changing RouteQuoter.vy moves this address.  The salt carries the version so
 # that move is deliberate rather than a whitelist entry quietly describing
 # something that is no longer deployed.
-QUOTER = "0xd0f20bd005df7657b6192873ca7e2b84f7d11e49"
+QUOTER = "0x9a32418b9fd744efd6820577037529d5ba9de679"
 
 #: The scoped drpc key, committed on purpose.
 #

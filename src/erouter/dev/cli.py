@@ -2288,9 +2288,40 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     # `refresh_arcs` passes the quoter to `warm`, which learns it.  This is so
     # the cache is complete before one is run, not after.)
     quoter = (getattr(chain, "quoter", "") or "").lower()
-    quoter_known = not quoter or quoter in cache.code_of
+    # Known means *loadable*, not merely recorded.  `prime` inserts the accounts
+    # in `slots()`, so code without an entry there is never put into the EVM and
+    # the address answers every call with a zero.
+    quoter_known = not quoter or (quoter in cache.code_of
+                                  and quoter in cache.accounts)
     if not quoter_known:
         print(f"  {WARN} quoter {quoter[:12]} is not in the cache -- learning it")
+        # Read it straight off the chain rather than by recording a route
+        # through it.  Learning it *by use* cannot work when it is missing:
+        # every call through an address with no code answers zero, so the probe
+        # that was meant to capture the code calibrates nothing and the direct
+        # path below never touches the quoter at all.  Measured after a
+        # redeployment -- warmcache reported "learning it" and learned zero code
+        # blobs twice in a row, and the next route read all ten gnosis pools as
+        # holding nothing.
+        try:
+            blob = rpc.fetch("eth_getCode", [quoter, hex(rpc.block)])
+            code = bytes.fromhex(blob[2:] if blob.startswith("0x") else blob)
+        except Exception as exc:                   # noqa: BLE001
+            code = b""
+            print(f"  {WARN} could not read the quoter's code: {exc}")
+        if code:
+            cache.learn_code(quoter, code)
+            quoter_known = True
+            # Save here, not at the end.  When the universe is already known
+            # the run short-circuits on "nothing to do" and returns before the
+            # save at the bottom -- so the code just read would be discarded and
+            # the next run would report learning it all over again, which is
+            # exactly what happened.
+            cache.save()
+            print(f"  {OK} quoter code learned ({len(code):,} bytes)")
+        else:
+            print(f"  {WARN} the quoter has no code at {quoter} on {chain.name} -- "
+                  f"check chains.py against what is deployed")
     print(f"  universe: {len(load.pools)} pools, {len(fresh)} to learn "
           f"({len(volatile)} volatile)")
     if not fresh and quoter_known:
