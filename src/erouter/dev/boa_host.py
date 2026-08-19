@@ -14,6 +14,7 @@ fallback for a node that rejects state overrides.
 from __future__ import annotations
 
 import functools
+from pathlib import Path
 import pathlib
 from typing import Any
 
@@ -34,9 +35,33 @@ def _deployer():
     return boa.loads_partial(CONTRACT.read_text(), name="RouteQuoter")
 
 
+#: The compiled runtime, committed beside the source.
+RUNTIME = Path(__file__).resolve().parents[3] / "data" / "quoter" / "RouteQuoter.runtime.hex"
+
+
 @functools.lru_cache(maxsize=1)
 def runtime_bytecode() -> bytes:
-    """What a state override injects.  Compiled once per process."""
+    """What a state override injects.
+
+    Read from disk rather than compiled, because compiling needs boa and
+    vyper and the override path has to work where neither exists -- the Flet
+    frontend runs under Pyodide, which has no compiler and no boa.  Every
+    chain in the table has a deployed quoter today, so this is the day-one
+    fallback for a new one; it should not be the thing that makes the browser
+    build impossible.
+
+    Compiling stays as the fallback *here*, where a developer has the tools,
+    and `tests/test_quoter_bytecode.py` holds the committed copy to what the
+    source compiles to -- so it cannot rot silently.
+    """
+    try:
+        text = RUNTIME.read_text()
+    except OSError:
+        text = ""
+    body = "".join(line.strip() for line in text.splitlines()
+                   if line.strip() and not line.startswith("#"))
+    if body:
+        return bytes.fromhex(body)
     return _deployer().compiler_data.bytecode_runtime
 
 
