@@ -73,6 +73,18 @@ class Chain:
     # pools at 99,448 per 100,000 -- 55 bp -- while curve_solver, which
     # configures the adapter, returned 100,000.000000.
     transmuters: tuple[tuple[str, str, str], ...] = ()
+    #: Token pairs that are one market but not one balance -- **declared**,
+    #: because no read distinguishes them.  `discover_aliases` merges two
+    #: addresses that share a balance to the wei; these do not, and are still
+    #: interchangeable, because the duality is a property of what executes
+    #: rather than of what is stored.  A swap denominated in one settles
+    #: against the other with no contract in between, so there is nothing for
+    #: a transmuter arc to call and nothing for a leg to do: they are one node.
+    #:
+    #: Gnosis EURe is the case.  Held apart, `--to EURe` picks the deeper side
+    #: ($714k) and the market behind the other ($174k) is unreachable -- which
+    #: is why WXDAI -> EURe would only ever use one arm, at 1,467 bp on 100k.
+    duals: tuple[tuple[str, str], ...] = ()
     # Tokens that hold a peg.  Used only to decide how much a routing gain has
     # to be worth before another leg is taken: a pair of these moves 0.17 bp
     # over a thousand blocks, where ETH moves 125, so a gain worth chasing on
@@ -259,6 +271,14 @@ CHAINS: dict[str, Chain] = {
              "0x2a22f9c3b484c3629090FeED35F17Ff8F88f76F0",
              "0x0392A2F5Ac47388945D8c84212469F545fAE52B2"),
         ),  # WXDAI
+        duals=(
+            # Monerium EURe: v1 and v2 are one market.  Their supplies and
+            # balances differ, so alias discovery refuses them, correctly --
+            # this is the declaration that says the refusal is about storage
+            # and the market is not.
+            ("0xcB444e90D8198415266c6a2724b7900fb12FC56E",
+             "0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430"),
+        ),
         quoter=QUOTER,
         public_rpc=scoped_rpc("gnosis"),
     ),

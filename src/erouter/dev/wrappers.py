@@ -122,7 +122,11 @@ def build_node_map(
     # Aliases first: two addresses over one balance are one node, and merging
     # them before anything else means every later step -- wrappers, vaults,
     # arcs -- sees the consolidated market rather than two halves of it.
-    for left, right in discover_aliases(pools, nodes, token_client or client):
+    known = {(a.lower(), b.lower()) for a, b in getattr(chain, "duals", ())}
+    for left, right in list(known) + [
+            pair for pair in discover_aliases(pools, nodes, token_client or client)
+            if (pair[0].lower(), pair[1].lower()) not in known
+            and (pair[1].lower(), pair[0].lower()) not in known]:
         # The deeper side is canonical, so the token most pools already hold
         # stays the one legs are denominated in.
         weight = {left: 0.0, right: 0.0}
