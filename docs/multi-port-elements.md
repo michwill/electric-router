@@ -90,10 +90,36 @@ certificate that no longer means what it says.
 Step 2 is the one to start with.  It is most of the benefit, none of the
 risk, and it measures whether step 3 is worth doing.
 
-## Open question worth settling first
+## Ports, and how many an element may have
 
-Is `w` a free variable, or is it pinned by the pool?  For two `exchange`
-legs it is free -- any split of `dx` between two output coins is executable.
-For `add_liquidity` it is not: the amounts vector *is* the split.  These may
-want to be two element kinds rather than one, and getting that wrong makes
-the inner optimisation in pricing-out either impossible or trivial.
+`w` is the split across the element's **ports**, on either side -- an element
+may take several coins in as well as pay several out.
+
+    #coin-ports in + #coin-ports out <= N
+
+Each port occupies a distinct coin, which is why this is the right bound and
+not an arbitrary cap: one coin cannot be both an input and an output (a
+wash), and two input ports on one coin are just one larger port.  So ports
+map injectively onto coins.  It also bounds enumeration -- every coin is in,
+out, or unused, so `3^N` before pruning: nothing for `N = 3`, and cappable
+for the wide stableswap-ngs.
+
+**The LP token does not consume a coin slot.**  It is not one of the `N`, so
+it cannot collide with a coin-port.  Counting it would reject
+`add_liquidity` of both coins of a 2-coin pool -- 2 in, 1 out, against
+`N = 2` -- which is a perfectly good operation.
+
+This settles what looked like an open question.  With several inputs
+allowed, the element kinds are one kind:
+
+| operation | ports |
+|---|---|
+| `exchange` | 1 in, 1 out |
+| `add_liquidity` | k in, 1 out (LP) |
+| `remove_liquidity_one_coin` | 1 in (LP), 1 out |
+| `remove_liquidity` | 1 in (LP), k out |
+| the case this exists for | j in, k out |
+
+`w` is free on the coin side, and for a deposit the amounts vector *is* `w`
+-- the same variable, not a second element kind.  So pricing-out optimises
+over one thing, which is what makes the inner problem well-posed.
