@@ -19,6 +19,8 @@ which is what makes the two Curve dialects a one-line difference.
 
 from __future__ import annotations
 
+import functools
+
 from typing import Any
 
 from .keccak import keccak256
@@ -218,14 +220,33 @@ def decode(types: list[str], data: bytes) -> list[Any]:
 # ----------------------------------------------------------------- signatures
 
 
+@functools.lru_cache(maxsize=None)
 def selector(signature: str) -> bytes:
-    """First 4 bytes of keccak256 of a canonical signature."""
+    """First 4 bytes of keccak256 of a canonical signature.
+
+    Cached, because a selector is a property of the signature and the hash
+    behind it is not cheap here: `keccak.py` is pure Python by design, so that
+    `core` stays importable under Pyodide with nothing but numpy.  One call is
+    ~430 us.
+
+    Reading every pool's balances asked for the same handful of signatures
+    2,403 times and spent 1.04 s hashing them -- more than the revm calls the
+    selectors were for, and the reason "reading storage" looked like it cost a
+    second.  There are a few dozen distinct signatures in the whole codebase.
+    """
     return keccak256(signature.encode())[:4]
 
 
-def signature_types(signature: str) -> list[str]:
+@functools.lru_cache(maxsize=None)
+def _signature_types(signature: str) -> tuple[str, ...]:
+    """Parsed once per signature, for the same reason `selector` is cached."""
     body = signature[signature.index("(") + 1 : signature.rindex(")")]
-    return _split_top(body) if body.strip() else []
+    return tuple(_split_top(body)) if body.strip() else ()
+
+
+def signature_types(signature: str) -> list[str]:
+    """The argument types.  A list, because callers mutate what they get."""
+    return list(_signature_types(signature))
 
 
 def encode_call(signature: str, *values: Any) -> bytes:
