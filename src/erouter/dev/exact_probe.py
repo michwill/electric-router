@@ -35,7 +35,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 from ..core.quoter import Quote
-from ..core.stableswap import StableSwapError
+from ..core.stableswap import StableSwapError, StableSwapLP
 from ..core.tricrypto import TricryptoError
 from ..core.twocrypto import TwocryptoError
 from ..core.vault import VaultError
@@ -333,10 +333,20 @@ class ExactQuoterClient:
         holes: list[int] = []
         for k, (legs, amount, dst) in enumerate(
                 zip(routes, amounts_in, dst_slots, strict=True)):
+            reused = self._reused(legs)
             try:
                 out[k] = walk_route(legs, amount, dst, self._stateful_leg(legs))
             except LegUnquotable:
-                holes.append(k)
+                if reused:
+                    # A route that enters a pool twice must be walked here or
+                    # dropped.  The chain cannot price it: `quote_routes` is
+                    # static calls, so its second leg reads the pool before
+                    # the first one touched it and answers too well.  Sending
+                    # it would turn "we cannot price this" into a number that
+                    # beats every honest candidate.
+                    out[k] = 0
+                else:
+                    holes.append(k)
             except (StableSwapError, TwocryptoError, TricryptoError,
                     VaultError, ZeroDivisionError, ValueError):
                 # The invariant refusing a size is a real answer -- the pool
@@ -383,6 +393,15 @@ class ExactQuoterClient:
             self._reentrant = got
         return got
 
+    @staticmethod
+    def _reused(legs) -> set:
+        """Pools this route enters more than once."""
+        seen: dict[str, int] = {}
+        for leg in legs:
+            key = leg.target.lower()
+            seen[key] = seen.get(key, 0) + 1
+        return {pool for pool, n in seen.items() if n > 1}
+
     def _stateful_leg(self, legs):
         """A `quote_leg` that carries each reused pool forward as it goes.
 
@@ -401,7 +420,7 @@ class ExactQuoterClient:
         for leg in legs:
             key = leg.target.lower()
             remaining[key] = remaining.get(key, 0) + 1
-        reused = {k for k, n in remaining.items() if n > 1}
+        reused = self._reused(legs)
         if not reused:
             return self._quote_leg
         allowed = self.reentrant_pools
@@ -414,7 +433,8 @@ class ExactQuoterClient:
             if key not in allowed:
                 raise LegUnquotable(leg.target)
             moved = state.get(key)
-            model = (self._reseat(leg, moved) if moved is not None
+            pool_now = moved.pool if isinstance(moved, StableSwapLP) else moved
+            model = (self._reseat(leg, pool_now) if pool_now is not None
                      else self._model(leg.target, leg.kind, leg.i, leg.j))
             if model is None:
                 raise LegUnquotable(leg.target)
@@ -423,14 +443,32 @@ class ExactQuoterClient:
                 # Nothing follows on this pool, so there is no state to keep
                 # and the float path is enough.
                 return _price(model, leg.i, leg.j, dx)
-            if leg.kind is not ArcKind.SWAP_STABLE:
-                # Only a swap can be advanced past; a deposit's own mint pays
-                # an imbalance fee `calc_token_amount` does not model.
+            lp = self.lp.get(leg.target) if self.lp is not None else None
+            if moved is not None:
+                lp = moved if isinstance(moved, StableSwapLP) else lp
+            if leg.kind is ArcKind.SWAP_STABLE:
+                base = (moved.pool if isinstance(moved, StableSwapLP)
+                        else moved if moved is not None else model)
+                dy, after = base.exchange(leg.i, leg.j, dx)
+                # A swap leaves the supply alone, so an LP model we are also
+                # carrying keeps its own and only its pool moves.
+                state[key] = (replace(lp, pool=after)
+                              if isinstance(lp, StableSwapLP) else after)
+                return dy
+            if lp is None or leg.kind not in (
+                    ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
+                    ArcKind.DEPOSIT_FIXED_NOFLAG):
                 raise LegUnquotable(leg.target)
-            base = moved if moved is not None else model
-            dy, after = base.exchange(leg.i, leg.j, dx)
-            state[key] = after
-            return dy
+            # `add_liquidity`, not `calc_token_amount`: the getter is fee-free
+            # on the legacy pools and over-states the mint, and it is the
+            # executed number that the next leg through this pool must see.
+            amounts = [0] * lp.n
+            if not (0 <= leg.i < lp.n):
+                raise LegUnquotable(leg.target)
+            amounts[leg.i] = dx
+            minted, after_lp = lp.add_liquidity(amounts)
+            state[key] = after_lp
+            return minted
 
         return quote
 

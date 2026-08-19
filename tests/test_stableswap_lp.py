@@ -111,3 +111,96 @@ def test_the_float_withdrawal_tracks_the_integer_one(frac):
     fast = pool_lp.calc_withdraw_one_coin_fast(burn, 0)
     assert exact > 0
     assert abs(fast / exact - 1.0) * 1e4 < 0.01
+
+
+# ------------------------------------------------- what a deposit really pays
+#
+# `calc_token_amount` is fee-free on the legacy pools by its own admission --
+# "needed to prevent front-running, not for precise calculations" -- so it
+# over-states every deposit.  Measured on the gnosis 3pool, a $100,000
+# single-sided deposit quotes 1.7 bp better than it executes.  `add_liquidity`
+# is the executable number, and the pool it leaves behind is what a second leg
+# through that pool must be priced against.
+
+GNOSIS_3POOL = dict(
+    balances=(142638 * 10**18, 153563 * 10**6, 246110 * 10**6),
+    rates=(10**18, 10**30, 10**30),
+    amp=200 * 100,
+    fee=3 * 10**6,
+    a_precision=100,
+    fee_on_xp=True,
+    admin_fee=5 * 10**9,
+)
+
+
+def _lp(**over):
+    from erouter.core.stableswap import StableSwap, StableSwapLP
+
+    return StableSwapLP(pool=StableSwap(**{**GNOSIS_3POOL, **over}),
+                        total_supply=520_000 * 10**18)
+
+
+def test_a_balanced_deposit_pays_no_imbalance_fee():
+    """The fee is on the *imbalance*, so a deposit in pool proportion is free.
+
+    This is the test that says the fee is being charged on the right
+    quantity: charge it on the deposit instead and this fails immediately.
+    """
+    lp = _lp()
+    pool = lp.pool
+    d0 = pool.d()
+    # In proportion to the current balances, so `ideal` and `new` coincide.
+    amounts = [b // 100 for b in pool.balances]
+    free = lp.calc_token_amount(amounts, True)
+    real, _ = lp.add_liquidity(amounts)
+    assert abs(free - real) * 10**6 < free, "a balanced deposit is ~fee-free"
+    assert d0 > 0
+
+
+def test_a_one_sided_deposit_mints_less_than_the_getter_promises():
+    lp = _lp()
+    amounts = [100_000 * 10**18, 0, 0]
+    free = lp.calc_token_amount(amounts, True)
+    real, _ = lp.add_liquidity(amounts)
+    assert real < free, "the getter does not charge the imbalance fee"
+    assert (free / real - 1) * 1e4 < 100, "and the gap is basis points, not %"
+
+
+def test_the_pool_keeps_everything_but_the_dao_share():
+    """Two different subtractions: the mint is priced against balances less
+    the whole fee, the pool keeps all but the admin part."""
+    amounts = [100_000 * 10**18, 0, 0]
+    kept, after_kept = _lp(admin_fee=0).add_liquidity(amounts)
+    taken, after_taken = _lp(admin_fee=5 * 10**9).add_liquidity(amounts)
+    assert kept == taken, "the depositor pays the same either way"
+    assert after_kept.pool.balances[0] > after_taken.pool.balances[0]
+    # With no admin fee the whole deposit stays in the pool.
+    assert after_kept.pool.balances[0] == GNOSIS_3POOL["balances"][0] + amounts[0]
+
+
+def test_the_supply_grows_by_what_was_minted():
+    lp = _lp()
+    minted, after = lp.add_liquidity([100_000 * 10**18, 0, 0])
+    assert after.total_supply == lp.total_supply + minted
+
+
+def test_advancing_needs_the_admin_fee_and_a_supply():
+    import pytest
+
+    from erouter.core.stableswap import StableSwapError
+
+    with pytest.raises(StableSwapError, match="admin_fee"):
+        _lp(admin_fee=-1).add_liquidity([10**18, 0, 0])
+    empty = _lp()
+    object.__setattr__(empty, "total_supply", 0)
+    with pytest.raises(StableSwapError, match="no supply"):
+        empty.add_liquidity([10**18, 0, 0])
+
+
+def test_a_deposit_that_does_not_move_the_invariant_is_refused():
+    import pytest
+
+    from erouter.core.stableswap import StableSwapError
+
+    with pytest.raises(StableSwapError):
+        _lp().add_liquidity([0, 0, 0])

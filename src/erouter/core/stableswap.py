@@ -557,6 +557,61 @@ class StableSwapLP:
         diff = d1 - d0 if deposit else d0 - d1
         return diff * self.total_supply // d0
 
+    def add_liquidity(self, amounts: list[int]) -> tuple[int, "StableSwapLP"]:
+        """`(LP minted, the pool after)` -- what `add_liquidity` really does.
+
+        Not the same number as `calc_token_amount`, and the gap is the point.
+        That getter is fee-free on the legacy pools by its own admission
+        ("needed to prevent front-running, not for precise calculations"), so
+        it over-states a deposit; this charges the imbalance fee the deposit
+        actually pays:
+
+            fee_i     = fee * N / (4(N-1)) * |ideal_i - new_i|
+            minted    = supply * (D(new - fees) - D0) / D0
+            stored_i  = new_i - fee_i * admin_fee / FEE_DENOMINATOR
+
+        Two different subtractions, which is the part worth reading twice.
+        The *mint* is computed against balances less the whole fee, so the
+        depositor pays all of it; the pool *keeps* all but the DAO's share, so
+        the balances left behind are higher than the ones the mint was priced
+        from.  Using one figure for both -- the obvious simplification --
+        would leave the pool poorer than it is and misprice every later leg
+        through it.
+
+        A pool with no supply yet is refused rather than guessed: the first
+        deposit sets the price of the pool and takes a different branch.
+        """
+        if self.total_supply <= 0:
+            raise StableSwapError("no supply")
+        p = self.pool
+        if p.admin_fee < 0:
+            raise StableSwapError("admin_fee unknown; cannot advance state")
+        n = self.n
+        if len(amounts) != n:
+            raise StableSwapError("amounts do not match the coins")
+        d0 = p.d()
+        new = [b + a for b, a in zip(p.balances, amounts, strict=True)]
+        after_d1 = replace(p, balances=tuple(new))
+        d1 = after_d1.d()
+        if d1 <= d0:
+            raise StableSwapError("deposit does not raise the invariant")
+        fee = p.fee * n // (4 * (n - 1)) if n > 1 else 0
+        charged = [0] * n
+        stored = list(new)
+        priced = list(new)
+        for k in range(n):
+            ideal = d1 * p.balances[k] // d0
+            difference = ideal - new[k] if ideal > new[k] else new[k] - ideal
+            charged[k] = fee * difference // FEE_DENOMINATOR
+            stored[k] = new[k] - charged[k] * p.admin_fee // FEE_DENOMINATOR
+            priced[k] = new[k] - charged[k]
+        d2 = replace(p, balances=tuple(priced)).d()
+        minted = self.total_supply * (d2 - d0) // d0
+        return minted, replace(
+            self, pool=replace(p, balances=tuple(stored)),
+            total_supply=self.total_supply + minted,
+        )
+
     def calc_token_amount_fast(self, amounts: list[int], deposit: bool) -> int:
         """`calc_token_amount`, with the two invariants solved in floats."""
         if self.total_supply <= 0:

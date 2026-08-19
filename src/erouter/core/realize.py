@@ -751,12 +751,18 @@ def _reused_pools(arcs: list[PoolArc]) -> set[str]:
     return {pool for pool, count in seen.items() if count > 1}
 
 
-#: The one leg kind whose effect on a pool the models can reproduce.  A swap
-#: moves two balances by amounts `StableSwap.exchange` computes exactly; a
-#: deposit mints against an imbalance fee that `calc_token_amount` explicitly
-#: does not model ("needed to prevent front-running, not for precise
-#: calculations"), so what a pool looks like *after* one is not ours to say.
-ADVANCEABLE = (ArcKind.SWAP_STABLE,)
+#: The leg kinds whose effect on a pool the models can reproduce.  A swap
+#: moves two balances by amounts `StableSwap.exchange` computes exactly, and a
+#: deposit is `StableSwapLP.add_liquidity` -- which charges the imbalance fee
+#: `calc_token_amount` explicitly does not ("needed to prevent front-running,
+#: not for precise calculations") and keeps all of it but the DAO's share.
+#: A *withdrawal* is still not here: `calc_withdraw_one_coin` has the fee but
+#: `remove_liquidity_one_coin`'s effect on the supply has not been read off
+#: the deployed source, and guessing it is exactly what this list exists to
+#: prevent.  Whether a given pool has the models to do any of it is the
+#: quoting client's business, not this list's.
+ADVANCEABLE = (ArcKind.SWAP_STABLE, ArcKind.DEPOSIT_FIXED,
+               ArcKind.DEPOSIT_DYN, ArcKind.DEPOSIT_FIXED_NOFLAG)
 
 
 def check_one_arc_per_pool(route: RealizedRoute,
