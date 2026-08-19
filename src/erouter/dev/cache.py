@@ -131,5 +131,24 @@ class TokenFactsCache:
         return self.cache.read(*self._parts(chain_id)) or {}
 
     def save(self, chain_id: int, facts: dict[str, dict]) -> None:
-        merged = self.load(chain_id) | facts
+        """Merge per address, not per file.
+
+        Three passes write here about the same address -- a coin's `decimals`,
+        a pool's `lp_token`/`lp_decimals`, and a token's ERC4626 `asset` -- and
+        `a | b` at the top level replaces an address's whole entry rather than
+        updating it.  So whichever pass ran last was the only one whose facts
+        survived, and the others silently re-read theirs every session.
+
+        That is not merely wasted round trips.  A reader that has already
+        established the address is present concludes its own fact is known and
+        never asks: measured on gnosis, `read_balances` skipped the `decimals()`
+        call for USDC.e because the wrapper pass had overwritten `{"decimals":
+        6}` with `{"asset": ""}`, so the API's null-defaulted 18 stood, every
+        amount through that pool was out by 1e12, and the whole pool fell out
+        of the graph.  Across 20 cached chains, 674 Ethereum entries and not
+        one of them still held a `decimals`.
+        """
+        merged = self.load(chain_id)
+        for address, fresh in facts.items():
+            merged[address] = (merged.get(address) or {}) | fresh
         self.cache.write(merged, *self._parts(chain_id))

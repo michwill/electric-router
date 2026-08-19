@@ -523,11 +523,13 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
     *answers* wins -- "answers" meaning 32 bytes back, not merely no revert.
 
     **The coin's own `decimals()` rides along, and it wins.**  The API is a
-    directory, not an oracle: it reports gnosis USDC.e as 18 decimals where the
-    token says 6, and a decimals error is not a small error -- every amount
-    through that pool is out by 1e12, which either poisons the reference-price
-    fit or gets the arc thrown away by a conditioning guard.  It costs one more
-    call per coin in a batch that is already going out, and `decimals` never
+    directory, not an oracle: it omits `decimals` altogether on its newer
+    registries -- every `twocryptong` and `stableswapng` entry measured, on
+    Ethereum, BSC and gnosis alike -- and a missing value defaults to 18.  A
+    decimals error is not a small error: gnosis USDC.e really has 6, so every
+    amount through that pool came out 1e12 wrong, which left one direction with
+    `eps = +10000 bp` and threw the other away as dust.  It costs one more call
+    per coin in a batch that is already going out, and `decimals` never
     changes, so this is the cheapest possible place to catch it.
     """
     from ..core.codec import encode_call
@@ -569,7 +571,16 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
                                                         pool.address)))
             # Only for a coin whose decimals nobody has read yet.  A placeholder
             # keeps the stride so the unpacking below stays simple.
-            unknown = coin is not None and coin.address.lower() not in known
+            #
+            # Ask whether the *fact* is known, not whether the address is.
+            # Other passes cache other things about the same token -- an
+            # ERC4626 `asset`, a pool's `lp_token` -- so an address can be
+            # present with no `decimals` in it, and testing membership then
+            # skips the read and finds nothing to use.  It fails silent and
+            # sticky: the API's value stands, and it stands on every later run
+            # too.  This is also what heals a cache an older build poisoned.
+            unknown = coin is not None and "decimals" not in known.get(
+                coin.address.lower(), {})
             token_calls.append(Call(target, encode_call("decimals()")) if unknown
                                else Call(target, b""))
         spans.append((start, len(calls)))
@@ -609,9 +620,17 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
                     said = int(cached["decimals"])
                 elif digits.status is Status.VALUE:
                     said = digits.uint()
-                    if 0 <= said <= 36:
+                    # A zero is far likelier to be a missed read than a real
+                    # token: an account the local EVM has not loaded answers
+                    # every getter with zero, and zero decimals is legal enough
+                    # for an ERC20 that nothing downstream would question it.
+                    # Refusing it keeps the API's value, which is a guess that
+                    # gets re-checked, rather than caching a wrong fact for
+                    # good -- the same rule `resolve_lp_tokens` already applies
+                    # to `lp_decimals`, and for the same reason.
+                    if 1 <= said <= 36:
                         learned[coins[k].address.lower()] = {"decimals": said}
-            if said is not None and 0 <= said <= 36 and said != coins[k].decimals:
+            if said is not None and 1 <= said <= 36 and said != coins[k].decimals:
                 if report is not None:
                     report.append(
                         f"{coins[k].symbol} ({coins[k].address}) has "
