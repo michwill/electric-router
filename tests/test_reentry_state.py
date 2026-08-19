@@ -35,13 +35,22 @@ POOL_ADDRESS = "0x" + "3c" * 20
 
 
 class FakeSet:
-    """The shape `ExactQuoterClient` reads: `by_pool` plus a `get`."""
+    """The shape `ExactQuoterClient` reads: the two directions, each with a getter.
 
-    def __init__(self, model):
+    Deposits and withdrawals are admitted separately by `build_exact_lp` -- a
+    pool can reproduce one and not the other -- so a double that serves only
+    `get` would let a caller drop the deposit path without any test noticing.
+    """
+
+    def __init__(self, model, deposits=True):
         self.by_pool = {POOL_ADDRESS: model}
+        self.deposits = {POOL_ADDRESS: model} if deposits else {}
 
     def get(self, pool):
         return self.by_pool.get(pool.lower())
+
+    def get_deposit(self, pool):
+        return self.deposits.get(pool.lower())
 
 
 def client() -> ExactQuoterClient:

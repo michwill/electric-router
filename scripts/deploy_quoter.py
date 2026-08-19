@@ -52,7 +52,7 @@ CREATE2_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C"
 # The salt carries the version, so changing the contract is a deliberate new
 # address rather than a silent collision with a whitelist entry that no longer
 # describes what is deployed.
-SALT_PHRASE = b"erouter.RouteQuoter.v1"
+SALT_PHRASE = b"erouter.RouteQuoter.v2"
 # A pool and a swap that every mainnet fork can answer, used to prove the
 # deployed contract behaves identically to the one we have been overriding.
 SANITY_POOL = "0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7"  # 3pool

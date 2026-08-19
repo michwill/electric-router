@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from ..core.codec import encode_call
 from ..core.stableswap import StableSwapError, StableSwapLP
 from ..core.transport import Call
-from ..core.types import ArcKind
+from ..core.types import ArcKind, Probe
 
 #: Fractions of total supply to check a withdrawal at, and of each balance for
 #: a deposit.  Three decades, because a fee charged on an imbalance is exactly
@@ -35,15 +35,37 @@ DEPOSITS = (ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
 
 @dataclass(slots=True)
 class ExactLP:
+    """Admitted per direction, because the two are separate claims.
+
+    A pool's deposit arithmetic can reproduce to the wei while its withdrawal
+    does not -- `calc_withdraw_one_coin` charges on the imbalance and
+    `calc_token_amount` does not, so they exercise different code -- and
+    rejecting the pool wholesale on the withdrawal throws away a deposit model
+    that was measured to be correct.
+
+    That is not hypothetical: on Ethereum the withdrawal check rejected 111
+    pools, and with them every deposit those pools could have priced.  Since
+    the chain's own `calc_token_amount` is fee-free on the legacy pools, each
+    of those deposits then went to the chain and came back overstated -- up to
+    22 bp, measured against execution.  Same shape as the lending wrappers,
+    which are per-direction for the same reason.
+    """
+
     by_pool: dict[str, StableSwapLP] = field(default_factory=dict)
+    deposits: dict[str, StableSwapLP] = field(default_factory=dict)
     checked: int = 0
     rejected: list[tuple[str, str]] = field(default_factory=list)
+    rejected_deposits: list[tuple[str, str]] = field(default_factory=list)
 
     def __len__(self) -> int:
         return len(self.by_pool)
 
     def get(self, pool: str):
+        """The withdrawal model.  Named for history; `get_deposit` is the twin."""
         return self.by_pool.get(pool.lower())
+
+    def get_deposit(self, pool: str):
+        return self.deposits.get(pool.lower())
 
 
 def build_exact_lp(pools, swaps, client, *, quiet: bool = True) -> ExactLP:
@@ -115,7 +137,74 @@ def build_exact_lp(pools, swaps, client, *, quiet: bool = True) -> ExactLP:
         else:
             out.by_pool[key] = model
 
+    _admit_deposits(built, client, out)
+
     if not quiet:
         print(f"  exact LP: {len(out)} of {out.checked} pools reproduce their own "
-              f"calc_withdraw_one_coin to the wei")
+              f"calc_withdraw_one_coin to the wei, {len(out.deposits)} their "
+              f"own calc_token_amount")
     return out
+
+
+def _admit_deposits(built, client, out: ExactLP) -> None:
+    """Admit the deposit direction on its own evidence.
+
+    **What the chain answers here is not one quantity but two.**  Stableswap-NG
+    charges the imbalance fee inside `calc_token_amount`; the legacy pools do
+    not, and only take it in `add_liquidity` itself.  Both were measured against
+    real execution -- NG agrees to the wei, legacy overstates by `fee/2` on a
+    one-sided deposit, 0.055 bp on gnosis 3pool and 22 bp on an imbalanced
+    factory pool.
+
+    So a match against *either* convention proves the same thing: the invariant
+    arithmetic reproduces this pool.  Which convention matched says only whether
+    the pool's own view charges, and pricing uses `calc_token_amount_charged`
+    regardless, because `add_liquidity` always charges.  That is the whole point
+    of admitting these -- the model is the only path that is right for both.
+    """
+    probes, at = [], []
+    for pool, model in built:
+        kind = ArcKind.DEPOSIT_DYN if pool.dynamic_arrays else ArcKind.DEPOSIT_FIXED
+        for frac in CHECK_FRACTIONS:
+            if not pool.balances or not pool.balances[0]:
+                continue
+            dx = max(1, int(pool.balances[0] * frac))
+            probes.append(Probe(pool=pool.address, kind=kind, i=0, j=0,
+                                n=pool.n_coins, dx=dx))
+            at.append((pool.address.lower(), dx))
+    if not probes:
+        return
+    quotes = client.probe(probes)
+
+    truth: dict[str, list] = {}
+    for (address, dx), quote in zip(at, quotes, strict=True):
+        truth.setdefault(address, []).append((dx, quote))
+
+    for pool, model in built:
+        key = pool.address.lower()
+        points = [(dx, q) for dx, q in truth.get(key, []) if q.ok and q.value > 0]
+        if not points:
+            out.rejected_deposits.append((pool.address, "pool would not quote a deposit"))
+            continue
+        charged = free = True
+        failure = ""
+        for dx, quote in points:
+            amounts = [0] * model.n
+            amounts[0] = dx
+            try:
+                mine_charged = model.calc_token_amount_charged(amounts)
+                mine_free = model.calc_token_amount(amounts, True)
+            except (StableSwapError, ZeroDivisionError, IndexError) as exc:
+                charged = free = False
+                failure = str(exc)[:44]
+                break
+            charged = charged and mine_charged == quote.value
+            free = free and mine_free == quote.value
+            if not (charged or free):
+                failure = (f"charged {mine_charged} / free {mine_free} "
+                           f"!= {quote.value} depositing {dx}")
+                break
+        if charged or free:
+            out.deposits[key] = model
+        else:
+            out.rejected_deposits.append((pool.address, failure))

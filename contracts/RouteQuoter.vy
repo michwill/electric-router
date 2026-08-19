@@ -33,6 +33,9 @@ MAX_COINS: public(constant(uint256)) = 8
 
 BPS: constant(uint256) = 10_000
 CALL_GAS: constant(uint256) = 2_000_000
+# Cryptoswap's admin share of accrued profit, hardcoded in the pools themselves
+# (50% of earned fees, of which half is already spent rebalancing).
+ADMIN_FEE: constant(uint256) = 5 * 10**9
 
 # --- result status --------------------------------------------------------
 
@@ -159,12 +162,18 @@ def _quote(target: address, kind: uint8, i: uint8, j: uint8, n: uint8, dx: uint2
         )
 
     if kind == WITHDRAW_CRYPTO:
-        return self._static(
+        withdrawn: Res = self._static(
             target,
             concat(
                 method_id("calc_withdraw_one_coin(uint256,uint256)"),
                 abi_encode(dx, convert(j, uint256)),
             ),
+        )
+        if withdrawn.status != STATUS_VALUE:
+            return withdrawn
+        return Res(
+            status=STATUS_VALUE,
+            value=self._after_admin_claim(target, withdrawn.value),
         )
 
     if kind == WSTETH_UNWRAP:
@@ -230,6 +239,70 @@ def _quote(target: address, kind: uint8, i: uint8, j: uint8, n: uint8, dx: uint2
         return self._static(target, concat(selector, amounts_fixed))
 
     return Res(status=STATUS_REVERTED, value=0)
+
+
+@internal
+@view
+def _after_admin_claim(target: address, dy: uint256) -> uint256:
+    """Dilute a cryptoswap withdrawal by the admin fees it will itself claim.
+
+    `remove_liquidity_one_coin` runs `_claim_admin_fees()` *before* it prices
+    `dy`; `calc_withdraw_one_coin` does not.  The claim mints LP to the fee
+    receiver with `mint_relative`, so supply grows by `vprice / (vprice - fees)`
+    and the same LP burns for correspondingly less.  The view therefore
+    overstates every withdrawal by that ratio, and does so for as long as fees
+    sit unclaimed -- measured across 71 mainnet cryptoswap pools, 27 were wrong,
+    the worst by 264 bp on a pool nobody had touched in months.
+
+    Two things make this worth doing here rather than as a correction applied to
+    the answer afterwards.  A withdrawal is often not the last leg, and scaling
+    a route's *output* is only equivalent when every later leg is linear in its
+    input, which no pool is.  And probing runs through the same `_quote`, so the
+    calibration this feeds is fixed by the same change.
+
+    `fee_receiver == empty(address)` would mean no mint at all, but reading it
+    costs two more calls per quote (factory, then the factory's getter) and
+    leaves the answer *under*-stated when it is unset, which is the safe
+    direction for a quote.  A pool that does not answer these getters is not
+    this kind of pool and is returned untouched.
+    """
+    profit: Res = self._static(target, method_id("xcp_profit()"))
+    claimed: Res = self._static(target, method_id("xcp_profit_a()"))
+    vprice: Res = self._static(target, method_id("virtual_price()"))
+    supply: Res = self._static(target, method_id("totalSupply()"))
+    if (
+        profit.status != STATUS_VALUE
+        or claimed.status != STATUS_VALUE
+        or vprice.status != STATUS_VALUE
+        or supply.status != STATUS_VALUE
+    ):
+        return dy
+    # The pool's own guards: nothing accrued, or too little supply to claim
+    # against without letting the virtual price be manipulated.
+    if profit.value <= claimed.value or supply.value < 10**18:
+        return dy
+    # **The admin share is not a constant across the family, and assuming it
+    # is corrects the wrong way.**  Tricrypto-NG hardcodes it as the public
+    # *constant* `ADMIN_FEE`, so its getter is upper case; twocrypto and the
+    # older pools keep a mutable `admin_fee`, and measured on mainnet those
+    # carry 5e8 (TriDBR, ten times smaller) and 0 (both Yield Basis pools,
+    # which claim nothing at all).  Taking 5e9 on faith over-corrected all
+    # three, and over-correcting is the worse failure: it under-quotes a
+    # perfectly good arc and loses the route.
+    share: uint256 = ADMIN_FEE
+    mutable: Res = self._static(target, method_id("admin_fee()"))
+    if mutable.status == STATUS_VALUE:
+        share = mutable.value
+    else:
+        declared: Res = self._static(target, method_id("ADMIN_FEE()"))
+        if declared.status == STATUS_VALUE:
+            share = declared.value
+    if share == 0:
+        return dy
+    fees: uint256 = (profit.value - claimed.value) * share // (2 * 10**10)
+    if fees == 0 or fees >= vprice.value:
+        return dy
+    return dy * (vprice.value - fees) // vprice.value
 
 
 @internal

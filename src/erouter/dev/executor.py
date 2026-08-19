@@ -104,11 +104,46 @@ def slot_tokens(route: RealizedRoute) -> list[str]:
     return out
 
 
-def fork(url: str, block: int):
-    """Point boa at the chain, at the block the quote was pinned to."""
+def serves_prestate(url: str, timeout: float = 10.0) -> bool:
+    """Does this node answer `debug_traceCall` with the prestate tracer?"""
+    import json
+    import urllib.request
+
+    body = json.dumps({
+        "jsonrpc": "2.0", "id": 1, "method": "debug_traceCall",
+        "params": [{"to": "0x" + "00" * 19 + "01", "data": "0x"},
+                   "latest", {"tracer": "prestateTracer"}],
+    }).encode()
+    request = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as reply:
+            return "result" in json.loads(reply.read())
+    except Exception:                              # noqa: BLE001
+        return False
+
+
+def fork(url: str, block: int, *, prefetch: bool | None = None):
+    """Point boa at the chain, at the block the quote was pinned to.
+
+    **Prefetch decides whether this takes minutes or hours.**  Without it every
+    storage slot a leg touches is its own `eth_getStorageAt`, and that costs
+    ~33 ms apiece even against a node on the LAN -- the cost is per-request
+    scheduling, not per-slot work, so a pool with a few hundred slots spends
+    ten seconds fetching before it computes anything.  With it, boa asks
+    `debug_traceCall{prestateTracer}` once per message and gets the whole
+    working set in ~0.13 s.
+
+    Not every node serves `debug_*`, and a hosted endpoint generally does not,
+    so this probes rather than assumes: `None` means detect, and a node that
+    will not answer keeps the slow path instead of failing.
+    """
     import boa
 
     boa.fork(url, block_identifier=block, allow_dirty=True)
+    if prefetch is None:
+        prefetch = serves_prestate(url)
+    boa.env.evm._fork_try_prefetch_state = bool(prefetch)
     return boa.env
 
 

@@ -293,7 +293,12 @@ class ExactQuoterClient:
                 return _Withdraw(model) if model is not None else None
             if kind in (ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
                         ArcKind.DEPOSIT_FIXED_NOFLAG):
-                model = self.lp.get(pool)
+                # The deposit direction is admitted on its own evidence: a pool
+                # whose withdrawal does not reproduce may still deposit exactly,
+                # and on the legacy pools the model is the *only* honest path,
+                # since their own `calc_token_amount` omits the fee that
+                # `add_liquidity` charges.
+                model = self.lp.get_deposit(pool)
                 return _Deposit(model) if model is not None else None
         if kind is ArcKind.SWAP_CRYPTO:
             if i == j:
