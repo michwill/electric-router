@@ -104,6 +104,7 @@ def build_node_map(
     *,
     value_wei: int = 0,
     facts=None,
+    token_client: QuoterClient | None = None,
 ) -> tuple[NodeMap, WrapperReport]:
     """Every pool coin as a node, with wrappers and vaults merged in.
 
@@ -121,7 +122,7 @@ def build_node_map(
     # Aliases first: two addresses over one balance are one node, and merging
     # them before anything else means every later step -- wrappers, vaults,
     # arcs -- sees the consolidated market rather than two halves of it.
-    for left, right in discover_aliases(pools, nodes, client):
+    for left, right in discover_aliases(pools, nodes, token_client or client):
         # The deeper side is canonical, so the token most pools already hold
         # stays the one legs are denominated in.
         weight = {left: 0.0, right: 0.0}
@@ -381,6 +382,14 @@ def discover_aliases(pools: list[PoolSpec], nodes: NodeMap,
     equal decimals, equal supply, and equal balances at several independent
     holders -- the pools themselves, which are exactly the accounts whose
     balances the router is about to reason about.
+
+    **These are token reads, so they must not come from the local EVM.**  It
+    holds pool storage; an ERC20 it never loaded answers `totalSupply` with
+    zero, the "a supply of nothing agrees with everything" guard below
+    correctly refuses to merge on that, and the alias is silently not found.
+    Which is how gnosis EURe stayed two nodes after this function was written
+    to join them -- and the third time the same zero has been believed
+    somewhere in this pipeline, after `read_balances` and `lp_decimals`.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call

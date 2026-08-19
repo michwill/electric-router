@@ -563,12 +563,13 @@ def _wrapper_signature(nodes, wrappers, stake_arcs) -> str:
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
 
 
-def _build_wrappers(load, chain, reader, facts):
+def _build_wrappers(load, chain, reader, facts, token_client=None):
     """The node map and the stake/transmuter/lending arcs, off one client."""
     from .wrappers import (build_lending_arcs, build_node_map, build_stake_arcs,
                            build_transmuter_arcs)
 
-    nodes, wrappers = build_node_map(load.pools, chain, reader, facts=facts)
+    nodes, wrappers = build_node_map(load.pools, chain, reader, facts=facts,
+                                     token_client=token_client)
     stake = build_stake_arcs(nodes, chain, reader)
     stake = stake + build_transmuter_arcs(nodes, chain, reader)
     stake = stake + build_lending_arcs(nodes, chain, reader, facts)
@@ -930,7 +931,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     live_cache = getattr(evm, "cache", None) or warm_cache
     if evm is not None and live_cache is not None and live_cache.covers_wrappers():
         with _boot("wrappers"):
-            nodes, wrappers, stake_arcs = _build_wrappers(load, chain, reader, facts)
+            nodes, wrappers, stake_arcs = _build_wrappers(load, chain, reader, facts, client)
         if _wrapper_signature(nodes, wrappers, stake_arcs) != live_cache.wrapper_sig:
             nodes = None      # the state moved; ask the chain and re-record
     if nodes is None:
@@ -939,7 +940,7 @@ def cmd_route(args: argparse.Namespace) -> int:
             recorded = _recording(client)
             source = recorded[0]
         with _boot("wrappers"):
-            nodes, wrappers, stake_arcs = _build_wrappers(load, chain, source, facts)
+            nodes, wrappers, stake_arcs = _build_wrappers(load, chain, source, facts, client)
         if recorded:
             with _boot("wrappers"):
                 _learn_wrappers(evm, warm_cache, rpc, recorded[1],
