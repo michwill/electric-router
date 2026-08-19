@@ -654,8 +654,22 @@ def conversion_route(
 def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
     """Replay the legs the way the quoter will, to fill in modelled amounts.
 
-    Uses the same group-snapshot semantics as the contract, so the numbers the
-    diagram shows are the numbers the quoter will be asked to confirm.
+    The *routing* matches the contract exactly -- same group snapshot, same
+    `bps`-of-base arithmetic, same order -- so the split the diagram shows is
+    the split the quoter will be asked to confirm.
+
+    The *amounts* are the model's, not the chain's, and deliberately so.  Each
+    leg keeps the ratio its arc was calibrated at, rescaled linearly to
+    whatever actually arrives, which is a straight line through a curve: worst
+    measured drift against a stateful walk of the same legs is 0.135 bp on
+    mainnet crvUSD -> sDOLA and 2.78 bp on gnosis WXDAI -> EURe.
+
+    Pricing these legs from the exact models instead would make them agree with
+    the chain and would destroy the one number that makes the loss ledger worth
+    reading: `verified - modelled` is a measurement of the model, so a
+    `modelled_out` computed from the exact models would report its own accuracy
+    as zero.  The renderer says which is which, and that is the right place for
+    the distinction to live.
     """
     balances: dict[int, int] = {0: route.amount_in}
     current = None
