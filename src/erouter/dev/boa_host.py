@@ -155,6 +155,13 @@ def fork_client(url: str, block: int, *, prefetch: bool | None = None) -> Quoter
         probe = JsonRpcTransport(url, block=block)
         prefetch = probe.supports_debug_trace()
 
-    boa.fork(url, block_identifier=block)
+    # `allow_dirty` because boa's env is process-global and any earlier forked
+    # test may have deployed into it -- the executor tests and the reentry
+    # tests both do.  Without it this raises "Cannot fork with dirty state",
+    # which made the forked suite pass or fail on collection order alone:
+    # green run alphabetically, red the moment a forking module ran first.
+    # Forking rebuilds state from the chain regardless, so there is nothing to
+    # protect here; every other fork site in this repo already says so.
+    boa.fork(url, block_identifier=block, allow_dirty=True)
     boa.env.evm._fork_try_prefetch_state = bool(prefetch)
     return BoaHost().client()
