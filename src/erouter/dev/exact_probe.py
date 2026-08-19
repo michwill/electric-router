@@ -426,15 +426,35 @@ class ExactQuoterClient:
         allowed = self.reentrant_pools
         state: dict[str, object] = {}
 
+        def carried(key: str):
+            """`(pool, lp)` as this pool now stands, or `(None, base)`.
+
+            One place decides what "now" means, because two disagreed.  The
+            supply and the balances move on different legs -- a deposit mints
+            and moves both, a swap moves only the balances -- so reading each
+            from wherever it happened to be lying around gave a withdrawal
+            the *pre-deposit* supply to burn against, and a deposit the
+            *pre-swap* balances to price into.
+            """
+            base = self.lp.get(key) if self.lp is not None else None
+            moved = state.get(key)
+            if isinstance(moved, StableSwapLP):
+                return moved.pool, moved
+            if moved is not None:
+                # A swap leaves `total_supply` alone, so the LP wrapper keeps
+                # its own and takes the balances the swap left behind.
+                return moved, (replace(base, pool=moved) if base is not None
+                               else None)
+            return None, base
+
         def quote(leg, dx: int) -> int:
             key = leg.target.lower()
             if key not in reused:
                 return self._quote_leg(leg, dx)
             if key not in allowed:
                 raise LegUnquotable(leg.target)
-            moved = state.get(key)
-            pool_now = moved.pool if isinstance(moved, StableSwapLP) else moved
-            model = (self._reseat(leg, pool_now) if pool_now is not None
+            pool_now, lp = carried(key)
+            model = (self._reseat(leg, pool_now, lp) if pool_now is not None
                      else self._model(leg.target, leg.kind, leg.i, leg.j))
             if model is None:
                 raise LegUnquotable(leg.target)
@@ -443,17 +463,11 @@ class ExactQuoterClient:
                 # Nothing follows on this pool, so there is no state to keep
                 # and the float path is enough.
                 return _price(model, leg.i, leg.j, dx)
-            lp = self.lp.get(leg.target) if self.lp is not None else None
-            if moved is not None:
-                lp = moved if isinstance(moved, StableSwapLP) else lp
             if leg.kind is ArcKind.SWAP_STABLE:
-                base = (moved.pool if isinstance(moved, StableSwapLP)
-                        else moved if moved is not None else model)
+                base = pool_now if pool_now is not None else model
                 dy, after = base.exchange(leg.i, leg.j, dx)
-                # A swap leaves the supply alone, so an LP model we are also
-                # carrying keeps its own and only its pool moves.
-                state[key] = (replace(lp, pool=after)
-                              if isinstance(lp, StableSwapLP) else after)
+                state[key] = (replace(lp, pool=after) if lp is not None
+                              else after)
                 return dy
             if lp is None or leg.kind not in (
                     ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
@@ -472,18 +486,13 @@ class ExactQuoterClient:
 
         return quote
 
-    def _reseat(self, leg, pool):
-        """The model for `leg`, rebuilt on a pool that has already traded."""
+    def _reseat(self, leg, pool, lp=None):
+        """The model for `leg`, on the pool and supply as they now stand."""
         if leg.kind is ArcKind.SWAP_STABLE:
             return pool
-        if self.lp is not None and leg.kind in (
+        if lp is not None and leg.kind in (
                 ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
                 ArcKind.DEPOSIT_FIXED_NOFLAG, ArcKind.WITHDRAW_STABLE):
-            lp = self.lp.get(leg.target)
-            if lp is None:
-                return None
-            # A swap leaves `total_supply` alone, so only the pool moves.
-            on = replace(lp, pool=pool)
-            return (_Withdraw(on) if leg.kind is ArcKind.WITHDRAW_STABLE
-                    else _Deposit(on))
+            return (_Withdraw(lp) if leg.kind is ArcKind.WITHDRAW_STABLE
+                    else _Deposit(lp))
         return None
