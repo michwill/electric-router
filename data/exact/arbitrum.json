@@ -1,6 +1,9 @@
 {
  "chain_id": 42161,
- "fingerprint": "430aea16eba7b049",
+ "fingerprint": "1a0627c978902c15",
+ "unquotable": {
+  "0x6eb2dc694eb516b16dc9fbc678c60052bbdd7d80": "cb454fce1110"
+ },
  "verdicts": {
   "0x1446999b0b0e4f7ada6ee73f2ae12a2cfdc5d9e7": {
    "family": "stable",
@@ -20,6 +23,7 @@
   "0x1fb84fa6d252762e8367ea607a6586e09dcebe3d": {
    "family": "twocrypto",
    "legacy_fee": true,
+   "legacy_mul2": false,
    "legacy_pool": false,
    "stable": false,
    "v21": true
@@ -47,6 +51,7 @@
   "0x590f7e2b211fa5ff7840dd3c425b543363797701": {
    "family": "twocrypto",
    "legacy_fee": true,
+   "legacy_mul2": false,
    "legacy_pool": false,
    "stable": false,
    "v21": true
@@ -59,6 +64,7 @@
   "0x6579758e9e85434450d638cfbea0f2fe79856dda": {
    "family": "twocrypto",
    "legacy_fee": true,
+   "legacy_mul2": false,
    "legacy_pool": false,
    "stable": false,
    "v21": true
@@ -94,12 +100,16 @@
    "fee_on_xp": true,
    "rates": "reported"
   },
+  "0x960ea3e3c7fb317332d990873d354e18d7645590": {
+   "family": "tricrypto-2021"
+  },
   "0x96aaf8f6a2e3f45aaf548b753a0e004211e0ad63": {
    "family": "tricrypto"
   },
   "0x98961b846d1a046701af1a56023e29ff55522ad5": {
    "family": "twocrypto",
    "legacy_fee": true,
+   "legacy_mul2": false,
    "legacy_pool": false,
    "stable": false,
    "v21": true
@@ -127,6 +137,7 @@
   "0xea7a3cc19b96691fbf3bbf2e4458d74b20f05147": {
    "family": "twocrypto",
    "legacy_fee": false,
+   "legacy_mul2": false,
    "legacy_pool": false,
    "stable": false,
    "v21": true

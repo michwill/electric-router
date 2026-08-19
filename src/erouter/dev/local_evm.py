@@ -532,11 +532,20 @@ class LocalEvm:
     #: a large cap it cannot pay for and wants either a small one or a zero
     #: price; arbitrum and polygon reject a zero price outright.  Hence: try
     #: them in order once per endpoint and remember which answered.
+    #:
+    #: The 50M rung is last because it is the one only a *heavy call* needs,
+    #: not a fussy endpoint: arbitrum resolves to the 2M cap and then meets a
+    #: leg that does not fit in it -- measured, one call in a 34-pool universe
+    #: -- and "out of gas" is a failure of the cap rather than of the shape.
+    #: It sits at the end so no chain's resolution order changes; the retry
+    #: ladder is what reaches it.  Arbitrum accepts 100M on the same call it
+    #: refuses at 2M, so this is headroom the endpoint already offers.
     ACCESS_LIST_SHAPES = (
         {},
         {"gas": "0x1e8480"},                      # 2M, small enough to afford
         {"gas": "0x1e8480", "gasPrice": "0x0"},
         {"gasPrice": "0x0"},
+        {"gas": "0x2faf080"},                     # 50M, for a leg 2M cannot run
     )
 
     def _access_list_shape(self, sample: Call | None = None) -> dict:
@@ -666,6 +675,19 @@ class LocalEvm:
         # run and to a gas cap on the next, and a failure here is not a warning
         # -- it is slots the local EVM will read as zero, which is a wrong
         # quote rather than a missing one.
+        # What the *resolved* shape said, kept so a call that no shape can
+        # serve is reported by the reason that shape gave.  The retries below
+        # walk shapes this endpoint may reject wholesale -- arbitrum and
+        # polygon refuse a zero gas price outright -- so the last attempt's
+        # error is the ladder talking about itself, not a fact about the call.
+        # Reporting it sent a real "failed to apply transaction" out as
+        # "gasPrice must be non-zero after london", which is a different bug
+        # on a different layer and cost an afternoon.
+        first: dict[int, object] = {
+            k: answer for k, answer in enumerate(listed)
+            if _access_list_failed(answer)
+        }
+        index = {id(one): k for k, one in enumerate(calls)}
         for shape in self.ACCESS_LIST_SHAPES[1:]:
             failed = [one for one, answer in pending if _access_list_failed(answer)]
             ok = [pair for pair in pending if not _access_list_failed(pair[1])]
@@ -683,7 +705,9 @@ class LocalEvm:
 
         for one, answer in pending:
             if _access_list_failed(answer):
-                self.stats.errors.append(f"accessList: {_access_list_error(answer)[:100]}")
+                original = first.get(index.get(id(one), -1), answer)
+                self.stats.errors.append(
+                    f"accessList: {_access_list_error(original)[:100]}")
                 if isinstance(answer, Exception):
                     # A transport failure, not a reverting probe -- and every
                     # shape above has already been tried, so this is the node
