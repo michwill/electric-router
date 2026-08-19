@@ -469,33 +469,82 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
         if not quiet:
             print(f"  {WARN} no state cache for {chain.name}; run `erouter warmcache`")
         return None
-    try:
-        evm = LocalEvm(rpc, cache=cache)
-        stats = evm.prime()
-        fresh = cache.unknown(p.address for p in load.pools)
-        # Re-list every arc, not only the new pools.  `prime` refreshes values
-        # and `unknown` finds new pools, but neither sees a pool that has begun
-        # reading a slot it did not read before -- an oracle round that
-        # advanced, a band that moved.  Those slots then read as zero, which is
-        # not a small error: it gives an arc the wrong `a`, `B` and `cap`, and
-        # the solve built on it violates flow conservation outright.  Measured
-        # at a block 10,802 after the cache was built, 18 such slots turned
-        # USDC->sUSDS 3M from a route into a hard failure, and recovering them
-        # brought every size back to within 0.2 bp of the wire path.
-        #
-        # One access-list pass over 887 arcs, ~1.0-1.4 s, concurrent.  It has
-        # to happen *before* routing: a route that fails produces no output to
-        # compare, so the after-the-fact check downstream never fires.
-        refs, _ = build_arcs(load.pools, nodes)
-        learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address) if refs else 0
-        if fresh:
-            cache.learn_pools(p.address for p in load.pools)
-        if fresh or learned:
-            cache.save()
-    except Exception as exc:  # a cold cache must degrade, never abort a route
-        if not quiet:
-            print(f"  {WARN} local EVM warm failed ({str(exc)[:70]}); quoting over the wire")
-        return None
+    # Retry a failed warm rather than quoting without one.
+    #
+    # `lb.drpc.live` is a load balancer, so a request can land on a backend
+    # that answers differently or not at all -- the shape retry inside
+    # `_warm_by_proof` exists for the same reason.  What it does not cover is a
+    # warm that raises partway through, and the fallback for that was to quote
+    # over the wire, which is the one outcome nobody wants: it is slower, and
+    # it silently produces a *different* answer from the local path.
+    #
+    # So: try again, and say what went wrong rather than only that something
+    # did.  `--traceback` keeps the stack, because a warm that fails twice with
+    # `'NoneType' object is not iterable` is a bug in this code and the message
+    # alone cannot say where.
+    last: Exception | None = None
+    for attempt in range(WARM_ATTEMPTS):
+        try:
+            return _warm_once(rpc, chain, load, nodes, cache, quiet=quiet,
+                              fresh_quoter=fresh_quoter)
+        except Exception as exc:  # noqa: BLE001 - reported and retried below
+            last = exc
+            if not quiet and attempt + 1 < WARM_ATTEMPTS:
+                print(f"  {WARN} local EVM warm failed "
+                      f"({type(exc).__name__}: {str(exc)[:60]}); retrying")
+    if not quiet:
+        print(f"  {BAD} local EVM warm failed {WARM_ATTEMPTS} times "
+              f"({type(last).__name__}: {str(last)[:60]})")
+        print(f"       quoting over the wire would answer differently; "
+              f"re-run, or --no-local to accept that")
+    if _TRACEBACK:
+        import traceback
+        traceback.print_exception(last)
+    raise WarmFailed(str(last)) from last
+
+
+class WarmFailed(RuntimeError):
+    """The local EVM could not be warmed, after retrying."""
+
+
+#: How many times to try before giving up.  Two, because the failure this
+#: exists for is a load balancer picking a bad backend, and a third attempt
+#: has never been observed to succeed where a second did not.
+WARM_ATTEMPTS = 2
+
+_TRACEBACK = os.environ.get("EROUTER_TRACEBACK", "") == "1"
+
+
+def _warm_once(rpc, chain, load, nodes, cache, *, quiet: bool,
+               fresh_quoter: bool):
+    """One attempt at a warmed local EVM.  Raises rather than degrading."""
+    from ..core.pipeline import build_arcs
+    from .boa_host import quoter_client
+    from .local_evm import LocalEvm
+
+    evm = LocalEvm(rpc, cache=cache)
+    stats = evm.prime()
+    fresh = cache.unknown(p.address for p in load.pools)
+    # Re-list every arc, not only the new pools.  `prime` refreshes values
+    # and `unknown` finds new pools, but neither sees a pool that has begun
+    # reading a slot it did not read before -- an oracle round that
+    # advanced, a band that moved.  Those slots then read as zero, which is
+    # not a small error: it gives an arc the wrong `a`, `B` and `cap`, and
+    # the solve built on it violates flow conservation outright.  Measured
+    # at a block 10,802 after the cache was built, 18 such slots turned
+    # USDC->sUSDS 3M from a route into a hard failure, and recovering them
+    # brought every size back to within 0.2 bp of the wire path.
+    #
+    # One access-list pass over 887 arcs, ~1.0-1.4 s, concurrent.  It has
+    # to happen *before* routing: a route that fails produces no output to
+    # compare, so the after-the-fact check downstream never fires.
+    refs, _ = build_arcs(load.pools, nodes)
+    learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address) if refs else 0
+    if fresh:
+        cache.learn_pools(p.address for p in load.pools)
+    if fresh or learned:
+        cache.save()
+
 
     # Degrade on an *incomplete* warm too, not only on a raised one.  Every
     # slot the sweep could not read is a zero the EVM will happily quote
@@ -506,10 +555,12 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
     # the storage sweep had happened to succeed.  The wire path is slower and
     # right, which is the correct way round for a tie-break.
     if not stats.complete:
-        if not quiet:
-            print(f"  {WARN} local EVM incomplete ({stats.unreadable} slot(s) "
-                  f"unreadable: {'; '.join(stats.errors[:2])}); quoting over the wire")
-        return None
+        # Raised, not returned: an incomplete sweep is the same transient the
+        # retry above exists for -- slots the endpoint declined to serve this
+        # time -- and it has the same fix.  Degrading here instead was how a
+        # flaky read turned into a quietly different answer.
+        raise WarmFailed(
+            f"{stats.unreadable} slot(s) unreadable: {'; '.join(stats.errors[:2])}")
 
     if not quiet:
         extra = f", {len(fresh)} new pool(s)" if fresh else ""
@@ -701,8 +752,15 @@ def cmd_route(args: argparse.Namespace) -> int:
     # answered, and that saving does not depend on the ordering at all.
     evm = None
     if args.local:
-        local = _local_quoter(rpc, chain, load, nodes,
-                              fresh_quoter=getattr(args, 'fresh_quoter', False))
+        # A failed warm stops the quote rather than quietly changing it.  The
+        # wire path answers *differently* from the local one, so falling back
+        # silently produced a number nobody asked for; `--no-local` is how you
+        # ask for it on purpose.
+        try:
+            local = _local_quoter(rpc, chain, load, nodes,
+                                  fresh_quoter=getattr(args, 'fresh_quoter', False))
+        except WarmFailed:
+            return 4
         if local is not None:
             client, evm = local, getattr(local, "transport", None)
 
