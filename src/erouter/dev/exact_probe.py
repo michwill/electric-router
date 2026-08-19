@@ -32,7 +32,7 @@ nothing downstream could tell which half it was reading.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..core.quoter import Quote
 from ..core.stableswap import StableSwapError
@@ -140,6 +140,9 @@ class ExactQuoterClient:
         #: `(pool, kind, i, j) -> model`, cleared whenever the models are
         #: rebuilt.  See `_model`.
         self._model_cache: dict = {}
+        #: Pools that can be carried forward, worked out once.  See
+        #: `reentrant_pools`.
+        self._reentrant: frozenset | None = None
         self.stats = ExactStats()
         #: The block these models were read at.  Not named `block`: this class
         #: forwards unknown attributes to the quoter, and shadowing one it may
@@ -172,6 +175,7 @@ class ExactQuoterClient:
         self.models_block = block
         # The models the cache pointed at are gone.
         self._model_cache.clear()
+        self._reentrant = None
         self.stats = ExactStats()
         return (len(self.exact) + len(self.twocrypto or ())
                 + len(self.tricrypto or ()) + len(self.vaults or ()))
@@ -330,7 +334,7 @@ class ExactQuoterClient:
         for k, (legs, amount, dst) in enumerate(
                 zip(routes, amounts_in, dst_slots, strict=True)):
             try:
-                out[k] = walk_route(legs, amount, dst, self._quote_leg)
+                out[k] = walk_route(legs, amount, dst, self._stateful_leg(legs))
             except LegUnquotable:
                 holes.append(k)
             except (StableSwapError, TwocryptoError, TricryptoError,
@@ -355,3 +359,93 @@ class ExactQuoterClient:
         if model is None:
             raise LegUnquotable(leg.target)
         return _price(model, leg.i, leg.j, dx)
+
+    # -- routes that touch one pool twice ----------------------------------
+
+    @property
+    def reentrant_pools(self) -> frozenset:
+        """Pools whose state a second leg can be priced against.
+
+        Stableswap only, and only where `admin_fee` was readable: `D` comes
+        from the balances there, so the pool after a trade is `exchange`'s
+        business and nothing is stored that we would have to guess.  A
+        cryptoswap keeps `D` and `price_scale` in storage and moves both in
+        `tweak_price` on a real exchange, so advancing one by adjusting
+        balances would be wrong in a way no gate here would catch.
+        """
+        got = self._reentrant
+        if got is None:
+            got = frozenset(
+                pool for pool, model in (self.exact.by_pool.items()
+                                         if self.exact else ())
+                if getattr(model, "admin_fee", -1) >= 0
+                and hasattr(model, "exchange"))
+            self._reentrant = got
+        return got
+
+    def _stateful_leg(self, legs):
+        """A `quote_leg` that carries each reused pool forward as it goes.
+
+        `walk_route` calls this in leg order, which is the order an executor
+        would run them in, so advancing as we go is the same arithmetic the
+        chain would perform.  Only pools that actually appear twice are
+        advanced -- the rest keep the fast float path, since a route that
+        touches every pool once has nothing to carry.
+
+        The advanced leg is priced by `exchange` rather than `_price`, so the
+        number returned and the state left behind come from one computation.
+        That costs the integer path on those legs, which is the right trade:
+        they are the legs whose answer depends on getting the state right.
+        """
+        remaining: dict[str, int] = {}
+        for leg in legs:
+            key = leg.target.lower()
+            remaining[key] = remaining.get(key, 0) + 1
+        reused = {k for k, n in remaining.items() if n > 1}
+        if not reused:
+            return self._quote_leg
+        allowed = self.reentrant_pools
+        state: dict[str, object] = {}
+
+        def quote(leg, dx: int) -> int:
+            key = leg.target.lower()
+            if key not in reused:
+                return self._quote_leg(leg, dx)
+            if key not in allowed:
+                raise LegUnquotable(leg.target)
+            moved = state.get(key)
+            model = (self._reseat(leg, moved) if moved is not None
+                     else self._model(leg.target, leg.kind, leg.i, leg.j))
+            if model is None:
+                raise LegUnquotable(leg.target)
+            remaining[key] -= 1
+            if remaining[key] <= 0:
+                # Nothing follows on this pool, so there is no state to keep
+                # and the float path is enough.
+                return _price(model, leg.i, leg.j, dx)
+            if leg.kind is not ArcKind.SWAP_STABLE:
+                # Only a swap can be advanced past; a deposit's own mint pays
+                # an imbalance fee `calc_token_amount` does not model.
+                raise LegUnquotable(leg.target)
+            base = moved if moved is not None else model
+            dy, after = base.exchange(leg.i, leg.j, dx)
+            state[key] = after
+            return dy
+
+        return quote
+
+    def _reseat(self, leg, pool):
+        """The model for `leg`, rebuilt on a pool that has already traded."""
+        if leg.kind is ArcKind.SWAP_STABLE:
+            return pool
+        if self.lp is not None and leg.kind in (
+                ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
+                ArcKind.DEPOSIT_FIXED_NOFLAG, ArcKind.WITHDRAW_STABLE):
+            lp = self.lp.get(leg.target)
+            if lp is None:
+                return None
+            # A swap leaves `total_supply` alone, so only the pool moves.
+            on = replace(lp, pool=pool)
+            return (_Withdraw(on) if leg.kind is ArcKind.WITHDRAW_STABLE
+                    else _Deposit(on))
+        return None

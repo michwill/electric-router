@@ -22,13 +22,15 @@ can find the interior optimum.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from .graph import ArcArrays
 from .quoter import MAX_LEGS, MAX_SLOTS
-from .realize import RealizedRoute, cancel_cycles, prune_dust
+from .realize import (ADVANCEABLE, RealizedRoute, cancel_cycles,
+                      prune_dust)
 from .seed import k_shortest_paths
 from .solve import Solution, active_set_solve
 from .types import PoolArc
@@ -187,12 +189,29 @@ def carries(psi: np.ndarray, Psi: float) -> np.ndarray:
 
 
 def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
-                      Psi: float = 0.0) -> dict[str, list[int]]:
-    """Pools carrying flow on more than one arc (decision 3)."""
+                      Psi: float = 0.0,
+                      reentrant: Collection[str] = ()) -> dict[str, list[int]]:
+    """Pools carrying flow on more than one arc that may not carry two.
+
+    `reentrant` names pools whose state the caller can compute forward, so a
+    second arc on one of them is not a conflict.  At most one of its arcs may
+    be a kind we cannot advance past, because realisation can order that one
+    last and nothing needs the pool moved after it -- `check_one_arc_per_pool`
+    is what actually holds that, on the realised legs, where the order exists.
+    """
+    allowed = {pool.lower() for pool in reentrant}
     groups: dict[str, list[int]] = {}
     for k in np.flatnonzero(carries(psi, Psi) if Psi else psi > 0):
         groups.setdefault(arcs[int(k)].pool.lower(), []).append(int(k))
-    return {pool: idx for pool, idx in groups.items() if len(idx) > 1}
+    out: dict[str, list[int]] = {}
+    for pool, idx in groups.items():
+        if len(idx) < 2:
+            continue
+        if pool in allowed and sum(
+                1 for k in idx if arcs[k].kind not in ADVANCEABLE) <= 1:
+            continue
+        out[pool] = idx
+    return out
 
 
 def generate(
@@ -209,6 +228,7 @@ def generate(
     top_k: tuple[int, ...] = TOP_K,
     gas_floor: float = 0.0,
     max_legs: int = MAX_LEGS,
+    reentrant: Collection[str] = (),
 ) -> CandidateSet:
     out = CandidateSet()
     seen: set[tuple] = set()
@@ -278,7 +298,8 @@ def generate(
             out.pivots += solution.pivots
             if not solution.feasible:
                 return False
-            conflicts = conflicting_pools(arcs, solution.psi)
+            conflicts = conflicting_pools(arcs, solution.psi,
+                                          reentrant=reentrant)
             if not conflicts:
                 break
             for indices in conflicts.values():
@@ -419,7 +440,7 @@ def generate(
             break
 
     # 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
-    conflicts = conflicting_pools(arcs, base.psi, Psi)
+    conflicts = conflicting_pools(arcs, base.psi, Psi, reentrant=reentrant)
     if conflicts:
         forbidden = np.zeros(g.m, bool)
         for indices in conflicts.values():
@@ -428,6 +449,34 @@ def generate(
                 if k != keep_index:
                     forbidden[k] = True
         resolve(forbidden, f"repair {len(conflicts)} pool conflict(s)", "repair")
+
+        # Keeping one arc per pool is a heavy hammer where the pool can be
+        # entered twice.  Measured on gnosis WXDAI->EURe at 100,000, the
+        # unrestricted optimum wants the 3pool six ways -- three swaps and
+        # three deposits -- and dropping to a single arc gives up 23% against
+        # a split that swaps through it and then deposits into it.  So also
+        # offer the largest *admissible* subset: every arc we can advance
+        # past, plus the biggest one we cannot, which realisation orders last.
+        if reentrant:
+            allowed = {pool.lower() for pool in reentrant}
+            subset = np.zeros(g.m, bool)
+            trimmed = False
+            for pool, indices in conflicts.items():
+                if pool not in allowed:
+                    keep_index = max(indices, key=lambda k: base.psi[k])
+                    for k in indices:
+                        if k != keep_index:
+                            subset[k] = True
+                    continue
+                blocked = [k for k in indices if arcs[k].kind not in ADVANCEABLE]
+                if len(blocked) > 1:
+                    keep_index = max(blocked, key=lambda k: base.psi[k])
+                    for k in blocked:
+                        if k != keep_index:
+                            subset[k] = True
+                            trimmed = True
+            if trimmed:
+                resolve(subset, f"reenter {len(conflicts)} pool(s)", "repair")
         worst = max(conflicts.items(), key=lambda kv: len(kv[1]))
         for keep_index in sorted(worst[1], key=lambda k: -base.psi[k])[1:2]:
             alt = np.zeros(g.m, bool)

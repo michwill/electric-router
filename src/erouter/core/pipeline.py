@@ -996,7 +996,11 @@ def _quote(
             src_token=src_token, dst_token=dst_token, amount_in=amount_in,
             potentials=report.solution.u,
         )
-    conflicts = check_one_arc_per_pool(result.route)
+    # Which pools the quoting client can compute forward.  Asked of the
+    # client rather than imported, so `core` stays free of `dev`: a plain
+    # quoter offers nothing and the rule is exactly as it was.
+    reentrant = frozenset(getattr(client, "reentrant_pools", ()) or ())
+    conflicts = check_one_arc_per_pool(result.route, reentrant)
     if conflicts:
         result.warnings.append(
             f"{len(conflicts)} pool(s) used more than once; a view-only quote "
@@ -1024,7 +1028,7 @@ def _quote(
                 g, arcs, src_node, dst_node, Psi_scaled, report.solution,
                 base_certificate=report.certificate, seed=seed,
                 max_candidates=max_candidates, gas_floor=gas_floor,
-                max_legs=max_legs,
+                max_legs=max_legs, reentrant=reentrant,
             )
             for candidate in pool_set.candidates:
                 candidate.psi = candidate.psi * g.g_scale
@@ -1033,6 +1037,7 @@ def _quote(
                 pool_set, arcs, nu, nodes,
                 src_token=src_token, dst_token=dst_token, amount_in=amount_in,
                 potentials=report.solution.u, max_legs=max_legs,
+                reentrant=reentrant,
             )
         with clock("verify"):
             verify(

@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 
 import math
+from collections.abc import Collection
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -447,6 +448,19 @@ def realize(
                 group.append((k, spoke))
                 spokes.append((k, spoke))
 
+        # A pool may only be entered twice if everything before its final leg
+        # can be advanced past, so put the legs we cannot advance past last.
+        # Both legs of the measured gnosis split leave the same node, so they
+        # land in this one group and this is the whole of the ordering: it
+        # swaps through the 3pool and then deposits into it.  Emitted the
+        # other way round the route is correct but unquotable, and
+        # `check_one_arc_per_pool` would refuse it -- which is how it behaved
+        # before this sort, and why the split never survived.
+        if _reused_pools(arcs):
+            reused = _reused_pools(arcs)
+            group.sort(key=lambda item: (arcs[item[0]].pool.lower() in reused
+                                         and arcs[item[0]].kind not in ADVANCEABLE))
+
         for position, (k, spoke) in enumerate(group):
             last = position == len(group) - 1
             bps = 0 if last else max(1, min(BPS - 1, round(BPS * deltas[k] / total)))
@@ -713,20 +727,57 @@ def _decompose(route: RealizedRoute) -> list[list[str]]:
     return paths
 
 
-def check_one_arc_per_pool(route: RealizedRoute) -> list[str]:
-    """Decision 3: a pool may appear at most once in a route.
+def _reused_pools(arcs: list[PoolArc]) -> set[str]:
+    """Pools carrying more than one of these arcs."""
+    seen: dict[str, int] = {}
+    for arc in arcs:
+        key = arc.pool.lower()
+        seen[key] = seen.get(key, 0) + 1
+    return {pool for pool, count in seen.items() if count > 1}
+
+
+#: The one leg kind whose effect on a pool the models can reproduce.  A swap
+#: moves two balances by amounts `StableSwap.exchange` computes exactly; a
+#: deposit mints against an imbalance fee that `calc_token_amount` explicitly
+#: does not model ("needed to prevent front-running, not for precise
+#: calculations"), so what a pool looks like *after* one is not ours to say.
+ADVANCEABLE = (ArcKind.SWAP_STABLE,)
+
+
+def check_one_arc_per_pool(route: RealizedRoute,
+                           reentrant: Collection[str] = ()) -> list[str]:
+    """Decision 3: a pool may appear at most once -- unless it can be advanced.
 
     Deposits and withdrawals mutate pool state and a view-only chained quoter
     cannot see its own earlier leg, so two arcs of the same pool would be
-    quoted against stale state.  Returns the offending pool addresses.
+    quoted against stale state.  That is a limit of *asking the chain*, not of
+    the arithmetic: `reentrant` names the pools whose state the caller can
+    compute forward, and for those a second leg is priced against the pool the
+    first one left behind.
+
+    Two conditions, and the second is the subtle one.  Every leg **but the
+    last** on such a pool must be a kind we can advance past, because only the
+    legs with something after them need the pool moved.  That is what lets the
+    measured gnosis split work: it swaps through the 3pool and then deposits
+    into it, and the deposit -- which we could not advance past -- is last.
+    Reverse the order and this refuses it, correctly.
+
+    Returns the offending pool addresses.
     """
-    seen: dict[str, int] = {}
+    allowed = {pool.lower() for pool in reentrant}
+    order: dict[str, list[RealizedLeg]] = {}
     for realized in route.legs:
         if realized.is_conversion:
             continue
-        key = realized.target.lower()
-        seen[key] = seen.get(key, 0) + 1
-    return sorted(pool for pool, count in seen.items() if count > 1)
+        order.setdefault(realized.target.lower(), []).append(realized)
+    bad: list[str] = []
+    for pool, legs in order.items():
+        if len(legs) < 2:
+            continue
+        if pool not in allowed or any(rl.kind not in ADVANCEABLE
+                                      for rl in legs[:-1]):
+            bad.append(pool)
+    return sorted(bad)
 
 
 def max_theta(route: RealizedRoute) -> float:

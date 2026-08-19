@@ -23,6 +23,8 @@ here, the difference between a fitted reference price and the real curve.
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 import numpy as np
 
 from .candidates import Candidate, CandidateSet
@@ -112,6 +114,7 @@ def realize_candidates(
     amount_in: int,
     potentials: np.ndarray | None = None,
     max_legs: int = MAX_LEGS,
+    reentrant: Collection[str] = (),
 ) -> None:
     """Turn each candidate's flow into legs, marking the ones that cannot be.
 
@@ -142,7 +145,7 @@ def realize_candidates(
             candidate.note = str(exc)
             continue
 
-        conflicts = check_one_arc_per_pool(route)
+        conflicts = check_one_arc_per_pool(route, reentrant)
         if conflicts:
             candidate.status = "conflict"
             candidate.note = f"{len(conflicts)} pool(s) used twice"
