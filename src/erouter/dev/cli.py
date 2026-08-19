@@ -855,7 +855,10 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     resolve_dialects(load.pools, reader, chain, use_cache=not args.refresh)
     decimals_fixed: list[str] = []
-    read_balances(load.pools, reader, decimals_fixed, chain.chain_id)
+    # Pool getters from the warm; the token reads that ride the same pass stay
+    # on the wire, because the cache holds pool storage and not the ERC20s'.
+    read_balances(load.pools, reader, decimals_fixed, chain.chain_id,
+                  token_client=client)
     resolve_lp_tokens(load.pools, reader, chain.chain_id)
     for warning in decimals_fixed:
         print(f"{WARN} {warning}")

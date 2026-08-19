@@ -503,7 +503,8 @@ def count_swap_arcs(pools: list[PoolSpec]) -> int:
 
 def read_balances(pools: list[PoolSpec], client: QuoterClient,
                   report: list[str] | None = None,
-                  chain_id: int | None = None) -> int:
+                  chain_id: int | None = None,
+                  token_client: QuoterClient | None = None) -> int:
     """Fill in each pool's reserves, in one batched call.
 
     Curve has two spellings of the same getter and the registry does not say
@@ -533,7 +534,18 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
     known = facts.load(chain_id) if chain_id is not None else {}
     learned: dict[str, dict] = {}
 
+    # Two of the four calls per coin go to the **coin**, not the pool, and that
+    # distinction decides which client may answer them.  A caller reading pools
+    # out of a warmed local EVM has the pools' storage and not the tokens': an
+    # unloaded account answers `balanceOf` with zero, which reads as a pool
+    # holding nothing, and `check_reserves_are_real` then drops it as insolvent.
+    # Measured on gnosis, that took five pools out and left no path at all.
+    #
+    # So the token calls go to `token_client` -- the wire, when there is one --
+    # while the pool calls stay wherever the caller pointed them.
+    tokens = token_client if token_client is not None else client
     calls: list[Call] = []
+    token_calls: list[Call] = []
     spans: list[tuple[int, int]] = []
     for pool in pools:
         start = len(calls)
@@ -542,15 +554,27 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
             calls.append(Call(pool.address, encode_call("balances(int128)", k)))
             coin = pool.coins[k] if k < len(pool.coins) else None
             target = coin.address if coin else pool.address
-            calls.append(Call(target, encode_call("balanceOf(address)", pool.address)))
+            token_calls.append(Call(target, encode_call("balanceOf(address)",
+                                                        pool.address)))
             # Only for a coin whose decimals nobody has read yet.  A placeholder
-            # keeps the stride at four so the unpacking below stays simple.
+            # keeps the stride so the unpacking below stays simple.
             unknown = coin is not None and coin.address.lower() not in known
-            calls.append(Call(target, encode_call("decimals()")) if unknown
-                         else Call(target, b""))
+            token_calls.append(Call(target, encode_call("decimals()")) if unknown
+                               else Call(target, b""))
         spans.append((start, len(calls)))
 
-    answers = client.raw(calls)
+    pool_answers = client.raw(calls)
+    token_answers = tokens.raw(token_calls) if token_calls else []
+    # Re-interleave, so everything below reads as it did: pool, pool, coin, coin.
+    answers = []
+    for k in range(len(spans)):
+        lo, hi = spans[k]
+        for c in range((hi - lo) // 2):
+            answers.append(pool_answers[lo + 2 * c])
+            answers.append(pool_answers[lo + 2 * c + 1])
+            answers.append(token_answers[lo + 2 * c])
+            answers.append(token_answers[lo + 2 * c + 1])
+    spans = [(2 * lo, 2 * hi) for lo, hi in spans]
     filled = 0
     for pool, (lo, hi) in zip(pools, spans, strict=True):
         chunk = answers[lo:hi]
