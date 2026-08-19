@@ -30,7 +30,7 @@ from ..core.stableswap import StableSwap, StableSwapError
 from ..core.transport import Call
 from ..core.types import ArcKind, Probe
 from .exact_cache import trust as _trust_verdict
-from .lending_params import build_exact_lending
+from .lending_params import build_exact_lending, build_exact_rate_pools
 
 #: Sizes to check at, as fractions of the input balance, in both directions.
 #
@@ -266,6 +266,29 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
         out.rejected.extend(refused)
         if lent and not quiet:
             print(f"  exact lending: {len(lent)} wrapped-token pools")
+
+        # And the ones the ordinary reading could not reproduce: a coin whose
+        # value is not one -- rETH, ankrETH -- or a moving target like RAI's
+        # redemption price.  Only the rejects are retried, so a pool that
+        # models correctly with a plain rate cannot be talked out of it.
+        stubborn = {a.lower() for a, _ in out.rejected}
+        if stubborn:
+            try:
+                rated = build_exact_rate_pools(
+                    pools, client, addresses=stubborn,
+                    # `virtual` is keyed by the *issuing pool*; the retry wants
+                    # it keyed by the LP token it is the price of.
+                    virtual={token: virtual[owner.lower()]
+                             for token, owner in issuer.items()
+                             if owner.lower() in virtual})
+            except Exception:  # noqa: BLE001 - a reader must not fail a quote
+                rated = {}
+            if rated:
+                out.by_pool.update(rated)
+                out.rejected = [(a, w) for a, w in out.rejected
+                                if a.lower() not in rated]
+                if not quiet:
+                    print(f"  exact rate pools: {len(rated)} with wrapper rates")
 
     if not quiet:
         print(f"  exact stableswap: {len(out)} of {out.checked} pools reproduce "

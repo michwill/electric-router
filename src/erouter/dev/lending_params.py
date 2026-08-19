@@ -214,3 +214,127 @@ def _pick_variant(pool, held: int, shaped: dict, client) -> StableSwap | None:
         except (StableSwapError, ZeroDivisionError, ValueError):
             continue
     return None
+
+
+# ---------------------------------------------------------------- rate pools
+#
+# The same idea one step further out.  These pools hold a token whose value is
+# not one -- rETH, ankrETH -- or price a coin against a moving target, as
+# RAI3CRV does against its redemption price.  The invariant is still
+# stableswap and `xp = rate * balance / PRECISION` is still the convention;
+# only the rate has somewhere else to come from.
+#
+# Each pool's own `_stored_rates` says where, and it is `@internal`, so the
+# wrapper has to be asked directly:
+#
+#     ETH/rETH   [PRECISION, rETH.getExchangeRate()]
+#     ETH/aETH   [PRECISION, PRECISION * LENDING_PRECISION / aETH.ratio()]
+#     RAI3CRV    [snappedRedemptionPrice() / 10**9, base virtual price]
+#
+# This runs **only over pools the ordinary reading already rejected**.  A pool
+# that models correctly today with a plain rate must keep doing so: some pools
+# hold rETH and genuinely value it at one, and asking the wrapper there would
+# turn a working model into a rejected one.  Retrying only the failures cannot
+# regress anything, and the wei-exact check still decides.
+
+#: `getter -> how to turn its answer into a rate`.  Tried in order.
+RATE_SOURCES = (
+    ("getExchangeRate()", lambda v: v),          # rETH
+    ("ratio()", lambda v: 10**36 // v if v else 0),   # ankrETH, inverted
+    ("exchangeRateStored()", lambda v: v),       # cTokens
+)
+
+#: `snappedRedemptionPrice()` carries 27 decimals; the pools want 18.
+REDEMPTION_PRICE_SCALE = 10**9
+
+
+def _wrapper_rates(pools, client) -> dict[str, int]:
+    """`coin -> rate`, for coins that answer a known wrapper interface."""
+    coins = sorted({c.address.lower() for p in pools for c in p.coins})
+    if not coins:
+        return {}
+    calls = [Call(a, encode_call(sig)) for a in coins for sig, _ in RATE_SOURCES]
+    answers = client.raw(calls)
+    out: dict[str, int] = {}
+    width = len(RATE_SOURCES)
+    for k, address in enumerate(coins):
+        for slot, (_, convert) in enumerate(RATE_SOURCES):
+            answer = answers[k * width + slot]
+            if answer.ok and answer.uint():
+                rate = convert(answer.uint())
+                if rate:
+                    out[address] = rate
+                break
+    return out
+
+
+def build_exact_rate_pools(pools, client, *, addresses, virtual=None,
+                           quiet: bool = True):
+    """Retry `addresses` with rates taken from their wrappers.
+
+    `virtual` maps an LP token's issuing pool to its virtual price, for a
+    metapool whose second coin is someone else's LP.
+    """
+    wanted = [p for p in pools if p.address.lower() in addresses
+              and p.balances and all(p.balances)]
+    made: dict[str, StableSwap] = {}
+    if not wanted:
+        return made
+    rates_by_coin = _wrapper_rates(wanted, client)
+
+    # A pool-level oracle: RAI's redemption price is a property of the pool,
+    # not of the token, so it cannot come from the coin table above.
+    snaps = client.raw([Call(p.address, encode_call("redemption_price_snap()"))
+                        for p in wanted])
+    snapped: dict[str, int] = {}
+    holders = [(p, a) for p, a in zip(wanted, snaps, strict=True) if a.ok and a.uint()]
+    if holders:
+        answers = client.raw([Call("0x%040x" % a.uint(),
+                                   encode_call("snappedRedemptionPrice()"))
+                              for _, a in holders])
+        for (pool, _), answer in zip(holders, answers, strict=True):
+            if answer.ok and answer.uint():
+                snapped[pool.address.lower()] = answer.uint() // REDEMPTION_PRICE_SCALE
+
+    meta: list[Call] = []
+    for pool in wanted:
+        meta += [Call(pool.address, encode_call("A_precise()")),
+                 Call(pool.address, encode_call("A()")),
+                 Call(pool.address, encode_call("fee()")),
+                 Call(pool.address, encode_call("offpeg_fee_multiplier()"))]
+    answers = client.raw(meta)
+
+    for k, pool in enumerate(wanted):
+        precise, plain, fee, offpeg = answers[4 * k : 4 * k + 4]
+        if not fee.ok:
+            continue
+        if precise.ok and precise.uint():
+            amp, a_precision = precise.uint(), 100
+        elif plain.ok and plain.uint():
+            amp, a_precision = plain.uint(), 1
+        else:
+            continue
+        key = pool.address.lower()
+        rates = []
+        for i, coin in enumerate(pool.coins):
+            base = 10 ** (36 - int(coin.decimals))
+            if i == 0 and key in snapped:
+                rates.append(snapped[key])
+                continue
+            got = rates_by_coin.get(coin.address.lower())
+            if got is not None:
+                rates.append(got * 10 ** (18 - int(coin.decimals)))
+            elif virtual and coin.address.lower() in virtual:
+                rates.append(virtual[coin.address.lower()])
+            else:
+                rates.append(base)
+        shaped = dict(balances=tuple(int(b) for b in pool.balances),
+                      rates=tuple(rates), amp=amp, fee=fee.uint(),
+                      offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
+                      a_precision=a_precision)
+        picked = _pick_variant(pool, len(pool.coins), shaped, client)
+        if picked is not None:
+            made[key] = picked
+            if not quiet:
+                print(f"  rate pool {pool.name}: rates {rates}")
+    return made

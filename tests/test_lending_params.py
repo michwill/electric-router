@@ -75,3 +75,42 @@ def test_keeping_the_wei_is_worth_exactly_one_wei():
 def test_a_coin_that_is_not_lent_is_worth_one_underlying():
     """`LENDING_PRECISION` is the rate of a coin with no wrapper."""
     assert LENDING_PRECISION == 10**18
+
+
+# ------------------------------------------------------------- rate pools
+
+def test_the_wrapper_rate_sources_cover_the_deployed_shapes():
+    """Each pool's `_stored_rates` is `@internal`, so the wrapper is asked.
+
+        ETH/rETH   [PRECISION, rETH.getExchangeRate()]
+        ETH/aETH   [PRECISION, PRECISION * LENDING_PRECISION / aETH.ratio()]
+
+    `ratio()` is the *inverse* -- ankrETH reports how much ankrETH one ETH
+    buys -- and reading it as a rate directly would value the pool upside
+    down rather than merely wrongly.
+    """
+    from erouter.dev.lending_params import RATE_SOURCES
+
+    sources = {sig: convert for sig, convert in RATE_SOURCES}
+    assert "getExchangeRate()" in sources
+    assert sources["getExchangeRate()"](11 * 10**17) == 11 * 10**17
+
+    # ankrETH at a ratio of 0.8 is worth 1.25 ETH, not 0.8.
+    inverted = sources["ratio()"](8 * 10**17)
+    assert inverted == 10**36 // (8 * 10**17) == 1_250_000_000_000_000_000
+
+
+def test_the_redemption_price_is_scaled_from_27_decimals():
+    """RAI's snapshot carries 27 decimals; `xp` wants 18."""
+    from erouter.dev.lending_params import REDEMPTION_PRICE_SCALE
+
+    snapped = 3_059_000_000_000_000_000_000_000_000        # ~3.059, 27 dp
+    assert snapped // REDEMPTION_PRICE_SCALE == 3_059_000_000_000_000_000
+
+
+def test_a_zero_ratio_does_not_divide_by_zero():
+    """A wrapper answering zero is not a rate of infinity."""
+    from erouter.dev.lending_params import RATE_SOURCES
+
+    sources = {sig: convert for sig, convert in RATE_SOURCES}
+    assert sources["ratio()"](0) == 0
