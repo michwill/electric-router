@@ -407,6 +407,40 @@ class ExactQuoterClient:
             self._reentrant = got
         return got
 
+    def element_split(self, pool: str, i: int, j1: int, j2: int,
+                      dx: int) -> tuple[int, int] | None:
+        """The best `(bps, bps)` split of `dx` between two output coins.
+
+        Priced as one element -- the second port sees the pool the first one
+        left -- which is the thing two arcs cannot express.  `None` whenever
+        this pool is not one the models can advance, so the caller falls back
+        to the sweep it would have done anyway.
+        """
+        from ..core.multiport import LP, MultiPort, MultiPortError, Port, best_split
+
+        model = self.exact.get(pool) if self.exact else None
+        if model is None or pool.lower() not in self.reentrant_pools:
+            return None
+        lp = self.lp.get(pool) if self.lp is not None else None
+        n = model.n
+        if not (0 <= i < n and 0 <= j1 < n and 0 <= j2 < n):
+            return None
+        try:
+            element = MultiPort(pool=pool, n_coins=n,
+                                inputs=(Port(i, 10_000),),
+                                outputs=(Port(j1, 5_000), Port(j2, 5_000)))
+            # Value the two ports in the pool's own common denominator.
+            # Raw wei would not do: 3pool pays USDC in 6 decimals and DAI in
+            # 18, so comparing them directly would hand the whole trade to
+            # whichever coin happens to carry more digits.
+            rates, coins = model.rates, (j1, j2)
+            tuned, _ = best_split(
+                element, model, lp, dx,
+                lambda k, amount: amount * rates[coins[k]] / 1e18)
+        except (MultiPortError, StableSwapError, ArithmeticError, ValueError):
+            return None
+        return tuned.outputs[0].bps, tuned.outputs[1].bps
+
     @staticmethod
     def _reused(legs) -> set:
         """Pools this route enters more than once."""
