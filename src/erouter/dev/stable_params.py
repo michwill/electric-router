@@ -197,7 +197,8 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
     # above and is not cached, so what is being trusted is only "this variant,
     # not one of the other five".
     order = [p for p in order
-             if not _trust_verdict(out, cache, resample, built, p.address.lower())]
+             if not _trust_verdict(out, cache, resample, built, p.address.lower())
+             and not (cache is not None and cache.skip(p.address, p.balances))]
 
     probes, where = [], []
     for pool in order:
@@ -217,7 +218,12 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
         key = pool.address.lower()
         points = [(pr, q) for pr, q in truth.get(key, []) if q.ok and q.value > 0]
         if not points:
+            # Recorded, not just reported: a pool that answers nothing is
+            # empty or holds dust, and re-deriving that costs a probe per size
+            # per direction on every run for as long as it stays that way.
             out.rejected.append((pool.address, "pool would not quote the check"))
+            if cache is not None:
+                cache.refuse(key, "would not quote", balances=pool.balances)
             continue
         best: str = ""
         for candidate_pool, model, variant in built:
@@ -246,7 +252,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
             why = best or "no variant matched"
             out.rejected.append((pool.address, why))
             if cache is not None:
-                cache.refuse(key, why)
+                cache.refuse(key, why, balances=pool.balances)
 
     # The lending pools reach the same holder by a different road.  Their coin
     # list runs past their balances, so the filter at the top of this function

@@ -24,6 +24,7 @@ that gets warmed and read properly.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -147,3 +148,63 @@ def test_recording_clears_a_previous_refusal_and_vice_versa(tmp_path: Path):
 def test_the_fingerprint_is_stable_and_not_empty():
     assert math_fingerprint() == math_fingerprint()
     assert len(math_fingerprint()) == 16
+
+
+# ------------------------------------------------- remembering a failure
+
+def test_a_failure_is_remembered_against_the_balances_it_happened_at(tmp_path):
+    """The fact is written; the reason is not.
+
+    Re-deriving "this pool answers nothing" costs a probe per size per
+    direction on every run.  Once the verdicts are warm those probes are the
+    entire remaining gate -- measured at 94 of 94, all on pools that never
+    pass.
+    """
+    cache = ExactCache(chain_id=1, path=tmp_path / "c.json")
+    cache.refuse("0xAA", "would not quote", balances=[0, 0])
+    assert cache.skip("0xaa", [0, 0])
+
+    cache.save()
+    again = ExactCache.load(1, "c", directory=tmp_path)
+    assert again.skip("0xaa", [0, 0]), "the fact did not survive the round trip"
+    assert "0xaa" not in again.refused, "the reason should not be written"
+
+
+def test_a_deposit_makes_the_pool_worth_checking_again(tmp_path):
+    """Keyed by balances so forgetting is automatic.
+
+    A pool that answers nothing is empty, and an empty pool does not trade, so
+    its balances sit still and the record stays valid without being refreshed.
+    The moment someone deposits, the key stops matching -- which is exactly
+    when the answer might have changed.
+    """
+    cache = ExactCache(chain_id=1, path=tmp_path / "c.json")
+    cache.refuse("0xAA", "would not quote", balances=[0, 0])
+    assert cache.skip("0xaa", [0, 0])
+    assert not cache.skip("0xaa", [10**18, 0]), "a funded pool must be re-checked"
+
+
+def test_admitting_a_pool_clears_its_failure(tmp_path):
+    cache = ExactCache(chain_id=1, path=tmp_path / "c.json")
+    cache.refuse("0xAA", "would not quote", balances=[1, 1])
+    cache.record("0xAA", {"family": "stable"})
+    assert not cache.skip("0xaa", [1, 1])
+    assert cache.get("0xaa") == {"family": "stable"}
+
+
+def test_changing_the_maths_forgets_every_failure(tmp_path):
+    """A pool that disagreed may agree once the arithmetic moves.
+
+    The balances key cannot see that, so the fingerprint has to -- and it
+    already discards the whole file, failures included.
+    """
+    cache = ExactCache(chain_id=1, path=tmp_path / "c.json")
+    cache.refuse("0xAA", "mismatch", balances=[1, 1])
+    cache.save()
+
+    blob = json.loads((tmp_path / "c.json").read_text())
+    blob["fingerprint"] = "not the current maths"
+    (tmp_path / "c.json").write_text(json.dumps(blob))
+
+    again = ExactCache.load(1, "c", directory=tmp_path)
+    assert not again.skip("0xaa", [1, 1])

@@ -83,9 +83,25 @@ class ExactCache:
     #: Pools checked this run and found *not* to reproduce, with why.  Held
     #: for reporting and **never written**: the reason carries the mismatching
     #: wei, which moves with the block, so persisting it rewrote a committed
-    #: file on every route.  Nothing reads it back -- a pool absent from
-    #: `verdicts` is re-gated regardless, which is the same outcome.
+    #: file on every route.
     refused: dict[str, str] = field(default_factory=dict)
+    #: Pools that failed, keyed by the balances they failed at.
+    #:
+    #: The reason is not written -- that is what churned the file -- but the
+    #: *fact* is, because re-deriving it costs a probe per size per direction
+    #: on every run.  Once the verdicts are warm those probes are the entire
+    #: remaining gate: measured at 94 of 94, all of them on pools that will
+    #: never pass.
+    #:
+    #: Keyed by balances because that is what makes forgetting automatic.  A
+    #: pool that answers nothing is empty or holds dust, and a pool in that
+    #: state does not trade, so its balances sit still and the record stays
+    #: valid without being refreshed.  The moment someone deposits, the key
+    #: stops matching and it is checked again -- which is exactly when the
+    #: answer might have changed.  A pool that merely disagreed is covered by
+    #: the same key for the same reason, and by the maths fingerprint above
+    #: for the other reason it might start passing.
+    unquotable: dict[str, str] = field(default_factory=dict)
 
     # ------------------------------------------------------------- loading
 
@@ -106,6 +122,8 @@ class ExactCache:
             path=path,
             fingerprint=current,
             verdicts={k.lower(): v for k, v in blob.get("verdicts", {}).items()},
+            unquotable={k.lower(): v
+                        for k, v in blob.get("unquotable", {}).items()},
         )
 
     def save(self) -> None:
@@ -115,6 +133,7 @@ class ExactCache:
             "chain_id": self.chain_id,
             "fingerprint": self.fingerprint or math_fingerprint(),
             "verdicts": dict(sorted(self.verdicts.items())),
+            "unquotable": dict(sorted(self.unquotable.items())),
         }, indent=1, sort_keys=True) + "\n")
 
     # ------------------------------------------------------------- reading
@@ -126,14 +145,28 @@ class ExactCache:
         key = pool.lower()
         self.verdicts[key] = variant
         self.refused.pop(key, None)
+        self.unquotable.pop(key, None)
 
-    def refuse(self, pool: str, why: str) -> None:
+    def refuse(self, pool: str, why: str, balances=None) -> None:
         key = pool.lower()
         self.refused[key] = why[:80]
         self.verdicts.pop(key, None)
+        if balances is not None:
+            self.unquotable[key] = balance_key(balances)
+
+    def skip(self, pool: str, balances) -> bool:
+        """Whether this pool failed before, in the state it is in now."""
+        got = self.unquotable.get(pool.lower())
+        return got is not None and got == balance_key(balances)
 
     def __len__(self) -> int:
         return len(self.verdicts)
+
+
+def balance_key(balances) -> str:
+    """A short digest of a pool's balances, as the state a failure belongs to."""
+    raw = ",".join(str(int(b)) for b in (balances or ()))
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
 def trust(out, cache, resample, built, key: str) -> bool:

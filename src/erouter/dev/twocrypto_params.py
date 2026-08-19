@@ -239,7 +239,8 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
     # the fee formula, the bounds -- never a number: `D`, `A`, `gamma`, the fee
     # terms, `POLICY` and the ramp are all read fresh above.
     order = [p for p in order
-             if not _trust_verdict(out, cache, resample, built, p.address.lower())]
+             if not _trust_verdict(out, cache, resample, built, p.address.lower())
+             and not (cache is not None and cache.skip(p.address, p.balances))]
 
     probes, at = [], []
     for pool in order:
@@ -258,7 +259,12 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
         key = pool.address.lower()
         points = [(pr, q) for pr, q in truth.get(key, []) if q.ok and q.value > 0]
         if not points:
+            # Recorded, not just reported: a pool that answers nothing is
+            # empty or holds dust, and re-deriving that costs a probe per size
+            # per direction on every run for as long as it stays that way.
             out.rejected.append((pool.address, "pool would not quote the check"))
+            if cache is not None:
+                cache.refuse(key, "would not quote", balances=pool.balances)
             continue
         best = ""
         for candidate, model, variant in built:
@@ -287,7 +293,7 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
             why = best or "no variant matched"
             out.rejected.append((pool.address, why))
             if cache is not None:
-                cache.refuse(key, why)
+                cache.refuse(key, why, balances=pool.balances)
 
     if not quiet:
         print(f"  exact twocrypto: {len(out)} of {out.checked} pools reproduce "

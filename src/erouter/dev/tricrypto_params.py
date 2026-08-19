@@ -152,7 +152,9 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True,
     gate = {pool.address.lower() for pool, _, _ in built
             if not _trust_verdict(out, cache, resample, built,
                                   pool.address.lower())}
-    order = [pool for pool, _, _ in built if pool.address.lower() in gate]
+    order = [pool for pool, _, _ in built
+             if pool.address.lower() in gate
+             and not (cache is not None and cache.skip(pool.address, pool.balances))]
 
     probes, at = [], []
     for pool in order:
@@ -173,7 +175,12 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True,
         key = pool.address.lower()
         points = [(pr, q) for pr, q in truth.get(key, []) if q.ok and q.value > 0]
         if not points:
+            # Recorded, not just reported: a pool that answers nothing is
+            # empty or holds dust, and re-deriving that costs a probe per size
+            # per direction on every run for as long as it stays that way.
             out.rejected.append((pool.address, "pool would not quote the check"))
+            if cache is not None:
+                cache.refuse(key, "would not quote", balances=pool.balances)
             continue
         failed = ""
         for probe, quote in points:
@@ -188,7 +195,7 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True,
         if failed:
             out.rejected.append((pool.address, failed))
             if cache is not None:
-                cache.refuse(key, failed)
+                cache.refuse(key, failed, balances=pool.balances)
         else:
             out.by_pool[key] = model
             if cache is not None:
