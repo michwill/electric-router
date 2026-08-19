@@ -229,7 +229,6 @@ def generate(
     gas_floor: float = 0.0,
     max_legs: int = MAX_LEGS,
     reentrant: Collection[str] = (),
-    element_split=None,
 ) -> CandidateSet:
     out = CandidateSet()
     seen: set[tuple] = set()
@@ -471,58 +470,6 @@ def generate(
         if made >= pin_budget or len(out) >= max_candidates or exhausted("pin"):
             break
 
-    # 3b. multi-port elements (docs/multi-port-elements.md, step 2).
-    #
-    #     Where one pool pays two ports out of one coin, the split between
-    #     them is not something the model can rank: they are two independent
-    #     resistors here, and the second was calibrated against a pool the
-    #     first has already moved.  The sweep above brackets that.  An element
-    #     *solves* it -- `best_split` advances the pool between legs, which is
-    #     the arithmetic that matches execution -- so its answer is pinned as
-    #     one more candidate and ranked on measured output like everything
-    #     else.
-    #
-    #     Pinned rather than forced: `resolve` takes these as `forced_upper`,
-    #     so the solver may take less than the element asked for.  That can
-    #     only improve the candidate, and it means a bad split cannot make a
-    #     route worse than the unpinned solve already was.
-    #
-    #     `element_split` is supplied by the caller because pricing needs a
-    #     pool model and this module is pure -- it holds `a` and `B`, not a
-    #     `StableSwap`.  Absent, nothing here runs.
-    #     Pairs are proposed **speculatively**, not read off the base solve.
-    #     Gating on "the solver already went through this pool twice" makes
-    #     the generator unable to reach the case it was built for: gnosis
-    #     WXDAI -> EURe runs 100% down one arm, so no pool is co-active, so no
-    #     element is offered, so the second arm is never priced.  Both ports
-    #     have to be on the table before either can win.  So an active arc is
-    #     paired with its idle siblings -- same pool, same input coin -- and
-    #     the candidate competes on measured output like any other.
-    if element_split is not None:
-        pairs: list[tuple[int, int]] = []
-        active_set = {int(k) for k in base_active}
-        for shared in by_pool.values():
-            live = [k for k in shared if k in active_set]
-            for k1 in live:
-                for k2 in shared:
-                    if k2 != k1 and arcs[k1].tau == arcs[k2].tau:
-                        pairs.append((k1, k2) if k1 < k2 else (k2, k1))
-        for k1, k2 in dict.fromkeys(pairs):
-            if len(out) >= max_candidates or exhausted("element"):
-                break
-            try:
-                tuned = element_split(arcs[k1], arcs[k2],
-                                      float(base.psi[k1]), float(base.psi[k2]))
-            except Exception:
-                tuned = None      # a pricer that cannot answer is not an error
-            if not tuned:
-                continue
-            psi1, psi2 = tuned
-            if psi1 <= 0 or psi2 <= 0:
-                continue
-            resolve(np.zeros(g.m, bool),
-                    f"element {arcs[k1].note[:16]} {psi1 / (psi1 + psi2):.0%}",
-                    "element", pinned={k1: psi1, k2: psi2})
 
     # 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
     conflicts = conflicting_pools(arcs, base.psi, Psi, reentrant=reentrant)

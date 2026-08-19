@@ -1023,33 +1023,12 @@ def _quote(
         result.counters["gas_floor_bp"] = int(
             gas_floor * g.g_scale / Psi * 10_000 if Psi > 0 else 0
         )
-        # A pool paying two ports out of one coin can be priced as a single
-        # element, which advances the pool between legs; `candidates` is pure
-        # and holds `a` and `B` rather than a pool model, so the pricing is
-        # handed in.  `None` from any of it means the sweep handles that pool
-        # as before.
-        splitter = getattr(client, "element_split", None)
-
-        def element_split(one, two, psi_one: float, psi_two: float):
-            total = (psi_one + psi_two) * g.g_scale
-            if total <= 0 or one.pool.lower() != two.pool.lower():
-                return None
-            delta = int(_realised_delta(one, total, nu, nodes))
-            if delta <= 0:
-                return None
-            got = splitter(one.pool, one.i, one.j, two.j, delta)
-            if not got:
-                return None
-            first = total * got[0] / 10_000 / g.g_scale
-            return first, (total / g.g_scale) - first
-
         with clock("candidates"):
             pool_set = generate(
                 g, arcs, src_node, dst_node, Psi_scaled, report.solution,
                 base_certificate=report.certificate, seed=seed,
                 max_candidates=max_candidates, gas_floor=gas_floor,
                 max_legs=max_legs, reentrant=reentrant,
-                element_split=element_split if splitter is not None else None,
             )
             for candidate in pool_set.candidates:
                 candidate.psi = candidate.psi * g.g_scale
