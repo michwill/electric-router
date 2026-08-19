@@ -18,6 +18,7 @@ were each established by measurement against the local Erigon node:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -25,6 +26,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -127,6 +129,53 @@ class RpcStats:
         self.round_trips = 0
         self.seconds = 0.0
         self.bytes_sent = 0
+
+
+#: Endpoint capabilities, between runs.  Gitignored: this is a property of
+#: whichever node the machine talks to, not of the repository.
+CAPS_PATH = Path(__file__).resolve().parents[3] / ".cache" / "endpoints.json"
+
+
+def _endpoint_key(url: str) -> str:
+    """A stable name for an endpoint that is not the endpoint.
+
+    The URL carries the API key, so it never reaches disk -- only a digest of
+    it does, which is enough to recognise the same endpoint again.
+    """
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+def _read_caps() -> dict:
+    try:
+        return json.loads(CAPS_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _remembered_ceiling(url: str) -> int | None:
+    got = _read_caps().get(_endpoint_key(url), {}).get("batch")
+    return int(got) if isinstance(got, int) and got > 0 else None
+
+
+def _remember_ceiling(url: str, size: int) -> None:
+    caps = _read_caps()
+    caps[_endpoint_key(url)] = {"batch": int(size)}
+    try:
+        CAPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CAPS_PATH.write_text(json.dumps(caps, indent=1, sort_keys=True) + "\n")
+    except OSError:
+        pass          # a cache that cannot be written is not an error
+
+
+def _forget_ceiling(url: str) -> None:
+    caps = _read_caps()
+    if caps.pop(_endpoint_key(url), None) is None:
+        return
+    try:
+        CAPS_PATH.write_text(json.dumps(caps, indent=1, sort_keys=True) + "\n")
+    except OSError:
+        pass
+
 
 
 class JsonRpcTransport:
@@ -361,9 +410,20 @@ class JsonRpcTransport:
         Probed with the request actually about to be sent, not a cheap stand-in:
         a node may cap by payload size or by method, and a ceiling learned from
         `eth_blockNumber` would not survive contact with a storage sweep.
+
+        Remembered between runs, because measuring it costs 1.2 s of a cold
+        start and the answer is a property of the endpoint rather than of the
+        block.  A remembered ceiling that is too high is not dangerous: the
+        batch is rejected, `_learn_batch_limit` reads the real cap out of the
+        error and lowers it, and the entry is dropped so the next run measures
+        again.  One that is too low only costs an extra round trip.
         """
         if self._batch_ceiling is not None:
             return self._batch_ceiling
+        remembered = _remembered_ceiling(self.url)
+        if remembered:
+            self._batch_ceiling = remembered
+            return remembered
         probe = sample or ("eth_blockNumber", [])
         for size in self.BATCH_LADDER:
             if size > self.batch_size and self._batch_ceiling is None:
@@ -377,6 +437,7 @@ class JsonRpcTransport:
             if isinstance(got, list) and len(got) == size and not any(
                     isinstance(r, dict) and r.get("error") for r in got):
                 self._batch_ceiling = size
+                _remember_ceiling(self.url, size)
                 return size
         self._batch_ceiling = self.BATCH_LADDER[-1]
         return self._batch_ceiling
@@ -389,6 +450,9 @@ class JsonRpcTransport:
         with self._id_lock:
             if 0 < limit < self.batch_size:
                 self.batch_size = limit
+                # What was remembered is wrong; measure again next time rather
+                # than keep paying for a batch this endpoint will reject.
+                _forget_ceiling(self.url)
 
     # ------------------------------------------------------------ capabilities
 
