@@ -417,9 +417,32 @@ def generate(
 
     # 3. pin sweep on every active flagged arc (§6.3).  Still ahead of the drop
     #    candidates, because no drop candidate can find a chord interior.
+    #
+    #    Arcs of a **re-entered pool** join the sweep, and this is the whole
+    #    treatment reentry gets in the solver.  Two arcs of one pool are two
+    #    independent resistors here: separate `psi^2/2G` terms, no cross-term,
+    #    both calibrated at a state neither of them will see -- because the
+    #    first leg through the pool moves it before the second arrives.  The
+    #    honest fix is a dense Hessian block per pool, which the diagonal the
+    #    §5.5 certificate prices out against does not admit.
+    #
+    #    So do what §6.3 already does for a chord: stop trusting the model for
+    #    the *allocation*, sweep it, and let a real quote adjudicate.  The
+    #    walk prices each pin with the pool actually advanced between legs
+    #    (`_stateful_leg`), so every pin is evaluated on state the solver
+    #    could not see.  If the diagonal was good enough the sweep returns
+    #    C0 and costs a handful of candidates; if it was not, the sweep wins
+    #    and says by how much.  Co-activity is only known after the solve,
+    #    which is why this is here and not in the arc flags.
     made = 0
-    flagged_active = [int(k) for k in base_active if g.flagged[k]]
-    flagged_active.sort(key=lambda k: -base.psi[k])
+    swept = {int(k) for k in base_active if g.flagged[k]}
+    by_pool: dict[str, list[int]] = {}
+    for k in base_active:
+        by_pool.setdefault(pools[int(k)], []).append(int(k))
+    for shared in by_pool.values():
+        if len(shared) > 1:
+            swept.update(shared)
+    flagged_active = sorted(swept)
     for arc_index in flagged_active[:3]:
         star = float(base.psi[arc_index])
         for step in PIN_LADDER:
