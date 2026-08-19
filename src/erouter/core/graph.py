@@ -182,8 +182,21 @@ def build(
     floor = base_floor
     finite_G = G[np.isfinite(G)]
     positive_G = finite_G[finite_G > 0]
-    if positive_G.size > 1:
-        raw_spread = float(positive_G.max() / positive_G.min())
+    # Measured over the arcs that will survive the floor, not over every arc.
+    #
+    # What this catches is a `B` floored instead of a `G` ceilinged, which puts
+    # a spike at the *top* -- a 1e-30 floor becoming a 1e30 conductance.  The
+    # bottom is a different animal: a dust pool that is almost entirely on one
+    # side genuinely quotes a huge rate, and `a` is then correct rather than
+    # broken.  Measured on `oBTC/sbtcCRV` holding 0.0105 oBTC against 1.39
+    # crvRenWSBTC, a probe of 0.0000105 oBTC really does return 9.55x, and the
+    # local EVM and the chain agree on it to the wei.  Its `G` was 4.1e-16
+    # against a floor of 1e-4, so the arc was about to be dropped anyway --
+    # but the spread was computed first and the whole quote died on an
+    # assertion about a pool no route could have used.
+    usable_G = positive_G[positive_G >= base_floor]
+    if usable_G.size > 1:
+        raw_spread = float(usable_G.max() / usable_G.min())
         if raw_spread > PATHOLOGICAL_CONDITION:
             # No real universe looks like this: the widest genuine spread
             # measured on Ethereum is ~4e10.  A spread of 1e15+ means B was
