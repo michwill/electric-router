@@ -41,6 +41,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 VERSION = 1
+
+#: A run refusing more than this share of what it knows is reporting an
+#: outage, not a universe.  Sits well above the 13-of-375 (3.5%) a healthy
+#: mainnet rebuild produces and well below the 73-of-377 (19%) that one bad
+#: batch produced.  See `ExactCache.save`.
+MASS_REFUSAL_SHARE = 0.15
+
+#: ...and refusing fewer than this many is not evidence of anything.  A run
+#: that looks at three pools and refuses one is not an outage, it is a small
+#: universe, and a batch failure that touches a handful costs little either
+#: way.  The failure this guards against was 58 at once.
+MASS_REFUSAL_FLOOR = 10
 DEFAULT_DIR = Path(__file__).resolve().parents[3] / "data" / "exact"
 
 #: Every module whose source decides whether a pool reproduces its own quote:
@@ -102,6 +114,12 @@ class ExactCache:
     #: the same key for the same reason, and by the maths fingerprint above
     #: for the other reason it might start passing.
     unquotable: dict[str, str] = field(default_factory=dict)
+    #: Refusals learned *this run*, held back until `save` can see how many
+    #: there were.  See `MASS_REFUSAL_SHARE`.
+    pending_unquotable: dict[str, str] = field(default_factory=dict, repr=False)
+    #: How many refusals the last `save` dropped as an outage, for the caller
+    #: to report.  Zero when nothing was dropped.
+    mass_refusal: int = 0
 
     # ------------------------------------------------------------- loading
 
@@ -127,6 +145,36 @@ class ExactCache:
         )
 
     def save(self) -> None:
+        """Persist, unless this run looks like an outage rather than a survey.
+
+        A refusal is cached so the next run does not re-probe a pool that
+        holds dust -- worth real time, since it is a probe per size per
+        direction.  But the same code path records a pool the endpoint simply
+        declined to answer for, and *that* is worth nothing and costs a great
+        deal: measured, a rebuild that lost 58 of 266 stableswap models to one
+        bad batch made every later quote send 6 routes to the chain instead of
+        0, which fired a 182 ms confirmation and took the routing stages from
+        202 ms to 369 ms.  The entries lapse when balances move, so it heals --
+        slowly, while every quote pays.
+
+        Mass failure is the signal.  Pools do not empty in concert; endpoints
+        fail in batches.  So a run that refuses more than a share of everything
+        it holds a verdict on is describing the endpoint, and its refusals are
+        dropped rather than written.  `warmcache` already refuses to cache its
+        own failure this way ("learned no slots; not marking these pools as
+        known"); this is the same rule for the same reason.
+        """
+        keep = dict(self.pending_unquotable)
+        total = len(self.verdicts) + len(keep)
+        if (len(keep) >= MASS_REFUSAL_FLOOR and total
+                and len(keep) > MASS_REFUSAL_SHARE * total):
+            self.mass_refusal = len(keep)
+            keep = {}
+        self.unquotable.update(keep)
+        # `pending` is not cleared: it is what this run learned, and `skip`
+        # reads it.  Dropping it here would make a pool that refused before the
+        # save look fresh after it, and would make two saves in one process
+        # disagree.  Re-running the decision on the same entries is idempotent.
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps({
             "version": VERSION,
@@ -146,17 +194,26 @@ class ExactCache:
         self.verdicts[key] = variant
         self.refused.pop(key, None)
         self.unquotable.pop(key, None)
+        self.pending_unquotable.pop(key, None)
 
     def refuse(self, pool: str, why: str, balances=None) -> None:
         key = pool.lower()
         self.refused[key] = why[:80]
         self.verdicts.pop(key, None)
         if balances is not None:
-            self.unquotable[key] = balance_key(balances)
+            self.pending_unquotable[key] = balance_key(balances)
 
     def skip(self, pool: str, balances) -> bool:
-        """Whether this pool failed before, in the state it is in now."""
-        got = self.unquotable.get(pool.lower())
+        """Whether this pool failed before, in the state it is in now.
+
+        Reads the refusals learned this run as well as the persisted ones.
+        Holding a refusal back from *disk* is about not teaching the next run
+        something false; within this one it is still the best thing known, and
+        re-probing a pool that just declined would cost the probes the refusal
+        exists to save.
+        """
+        key = pool.lower()
+        got = self.unquotable.get(key, self.pending_unquotable.get(key))
         return got is not None and got == balance_key(balances)
 
     def __len__(self) -> int:

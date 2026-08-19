@@ -1084,6 +1084,10 @@ def cmd_route(args: argparse.Namespace) -> int:
               f"{f' ({trusted} on a cached verdict)' if trusted else ''}")
         try:
             verdicts.save()
+            if verdicts.mass_refusal:
+                print(f"  {WARN} {verdicts.mass_refusal} pool(s) refused to quote at "
+                      f"once -- treating that as the endpoint, not the pools, and "
+                      f"not caching it")
         except OSError as exc:  # a read-only checkout must still route
             print(f"  {WARN} could not write the verdict cache ({exc})")
 
