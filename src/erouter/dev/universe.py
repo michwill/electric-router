@@ -313,7 +313,8 @@ class DialectAudit:
 
 
 def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient,
-                      chain_id: int | None = None) -> int:
+                      chain_id: int | None = None,
+                      token_client: QuoterClient | None = None) -> int:
     """Find each pool's LP token, so deposits and withdrawals can be arcs.
 
     The API reports `lp_token_address` for none of them -- 0 of 385 on mainnet
@@ -381,7 +382,13 @@ def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient,
         supply = supplies[k]
         cached = known.get(pool.address.lower(), {})
         address = cached.get("lp_token", "")
-        decimals = int(cached.get("lp_decimals", 18))
+        # A cached zero is not a fact, it is the shape of a missed read: the
+        # local EVM holds pool storage, and an LP token that lives at its own
+        # address answers `decimals()` out of storage it does not have.  Zero
+        # decimals is legal for an ERC20 and has never been legal for a Curve
+        # LP token, so it is read again rather than believed -- which is also
+        # what heals the three mainnet entries this already poisoned.
+        decimals = int(cached.get("lp_decimals") or 18)
         if not address and pool.address.lower() in found:
             address, decimals = found[pool.address.lower()]
         if not address and supply.status is Status.VALUE and supply.uint() > 0:
@@ -402,13 +409,17 @@ def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient,
     separate = [p for p in pools
                 if p.lp_token and p.lp_token != p.address.lower() and not p.lp_supply]
     if separate:
-        extra = client.raw([Call(p.lp_token, encode_call("totalSupply()")) for p in separate]
+        # An LP token at its own address is an ERC20, not a pool, so these two
+        # reads are the ones the local EVM cannot serve -- same split as
+        # `read_balances`, and for the same reason.
+        reader = token_client or client
+        extra = reader.raw([Call(p.lp_token, encode_call("totalSupply()")) for p in separate]
                            + [Call(p.lp_token, encode_call("decimals()")) for p in separate])
         for idx, pool in enumerate(separate):
             supply, digits = extra[idx], extra[len(separate) + idx]
             if supply.status is Status.VALUE:
                 pool.lp_supply = supply.uint()
-            if digits.status is Status.VALUE and 0 <= digits.uint() <= 36:
+            if digits.status is Status.VALUE and 1 <= digits.uint() <= 36:
                 pool.lp_decimals = digits.uint()
     for pool in pools:
         if pool.lp_token:

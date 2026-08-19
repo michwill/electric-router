@@ -53,6 +53,19 @@ def test_format_units_is_exact():
     assert format_units(123456789 * 10**18, 18) == "123,456,789.000000"
 
 
+def test_format_units_survives_an_absurd_amount():
+    """A bad leg amount must not take the whole quote down in the renderer.
+
+    `quantize` raises rather than rounding once the result outgrows the
+    context precision, so a 1e42-wei intermediate -- which is what a
+    mis-scaled deposit arc produced -- ended the route with
+    `decimal.InvalidOperation` and a traceback naming neither pool nor leg.
+    """
+    assert format_units(10**42, 18) == (
+        "1,000,000,000,000,000,000,000,000.000000")
+    assert format_units(-(10**42), 18).startswith("-1,000,000,000,000")
+
+
 def test_diagram_has_a_bus_per_slot_and_an_element_per_leg(hybrid):
     route, nodes = hybrid
     diagram = build_diagram(route, nodes)

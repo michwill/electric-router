@@ -9,7 +9,7 @@ renderer has to re-derive them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from .nodes import NodeMap
 from .realize import RealizedRoute
@@ -17,9 +17,19 @@ from .types import ArcKind
 
 
 def format_units(amount: int, decimals: int, places: int = 6) -> str:
-    """Exact decimal formatting -- never a float, which would lose wei."""
-    value = Decimal(amount) / (Decimal(10) ** decimals)
-    quantized = value.quantize(Decimal(1).scaleb(-places))
+    """Exact decimal formatting -- never a float, which would lose wei.
+
+    The context precision is raised to fit the number rather than left at the
+    default 28 digits.  `quantize` *raises* rather than rounding when the
+    result would not fit, so a diagram is one absurd intermediate away from
+    taking the whole quote down with `InvalidOperation` -- which is how a bad
+    leg amount used to surface: as a traceback in the renderer, naming
+    neither the leg nor the pool.
+    """
+    with localcontext() as ctx:
+        ctx.prec = max(28, len(str(abs(amount))) + places + 2)
+        value = Decimal(amount).scaleb(-decimals)
+        quantized = value.quantize(Decimal(1).scaleb(-places))
     return f"{quantized:,}"
 
 
