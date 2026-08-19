@@ -111,14 +111,42 @@ def _isqrt(x: int) -> int:
 
 
 def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
-              lim_mul: int) -> int:
-    """The fallback `get_y` reaches for when the discriminant is not positive."""
+              lim_mul: int, *, inline: bool = False,
+              mul2_over_sum: bool = False) -> int:
+    """The fallback `get_y` reaches for when the discriminant is not positive.
+
+    It is also the *whole* of `get_y` for the 2-coin pools that predate the
+    optimized math and iterate in the pool itself (`inline`).  Those state
+    their own bounds -- on `K0_i` rather than on `frac`, and so twice ours at
+    each end, since `K0_i` carries the `N_COINS` factor `frac` does not --
+    and re-check the answer before returning it.
+
+    `mul2_over_sum` is the one line on which two deployed generations of that
+    same inline loop disagree.  Vyper 0.3.1 wrote
+
+        mul2 = 10**18 + (2 * 10**18) * K0 / _g1k0
+
+    and 0.3.3 rewrote it with the unsafe helpers as
+
+        mul2 = unsafe_div(10**18 + (2 * 10**18) * K0, _g1k0)
+
+    which moved the `10**18` inside the division.  Both are live -- 41 mainnet
+    pools take the first, Gnosis's EURe-3Crv takes the second -- so this is a
+    fork in what is deployed, not a slip in what we transcribed.  The forms
+    differ by about 1e18 in 2e20; Newton damps that to 4e-10 in the answer,
+    which is small enough to read as rounding and far too large to be it, and
+    the pool misses the wei-exact gate and goes unmodelled.  Which one a pool
+    implements is settled by that gate, never by a list of addresses.
+    """
     x_j = x[1 - i]
     if x_j <= 0 or d <= 0:
         raise CryptoSwapError("empty balance")
     y = d**2 // (x_j * N_COINS**2)
     k0_i = (PRECISION * N_COINS) * x_j // d
-    if not (k0_i >= 10**36 // lim_mul and k0_i <= lim_mul):
+    if inline:
+        if not (10**16 * N_COINS - 1 < k0_i < 10**20 * N_COINS + 1):
+            raise CryptoSwapError("unsafe values x[i]")
+    elif not (k0_i >= 10**36 // lim_mul and k0_i <= lim_mul):
         raise CryptoSwapError("unsafe values x[i]")
 
     convergence_limit = max(max(x_j // 10**14, d // 10**14), 100)
@@ -136,7 +164,8 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
         g1k0 = g1k0 - k0 + 1 if g1k0 > k0 else k0 - g1k0 + 1
 
         mul1 = PRECISION * d // gamma * g1k0 // gamma * g1k0 * A_MULTIPLIER // ann
-        mul2 = PRECISION + (2 * PRECISION) * k0 // g1k0
+        mul2 = ((PRECISION + (2 * PRECISION) * k0) // g1k0 if mul2_over_sum
+                else PRECISION + (2 * PRECISION) * k0 // g1k0)
 
         yfprime = PRECISION * y + s * mul2 + mul1
         dyfprime = d * mul2
@@ -155,6 +184,10 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
 
         diff = y - y_prev if y > y_prev else y_prev - y
         if diff < max(convergence_limit, y // 10**14):
+            if inline and not (10**16 - 1 < y * PRECISION // d < 10**20 + 1):
+                # The inline generation checks its own answer before handing
+                # it back, so a size it would refuse must not be quoted here.
+                raise CryptoSwapError("unsafe value for y")
             return y
 
     raise CryptoSwapError("y did not converge")
@@ -180,6 +213,7 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
 #     mul1 = 1e18*d//gamma*g1k0//gamma
 #            *g1k0*A_MULTIPLIER//ann      ->  D * G**2 / (gamma**2 * A)   [$]
 #     mul2 = 1e18 + 2e18*k0//g1k0         ->  1 + 2 * k0 / G             [-]
+#       ... or (1e18 + 2e18*k0)//g1k0    ->  (1 + 2 * k0) / G           [-]
 #     fprime = yfprime // y               ->  yfprime / y                [-]
 #
 # What is left is the Newton iteration the whitepaper describes, and it is
@@ -188,7 +222,8 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
 # wei-denominated convergence floor are integer artifacts and go.
 
 def newton_y_fast(a: float, gamma: float, x: list[float], d: float,
-                  i: int, lim: float = 100.0) -> float:
+                  i: int, lim: float = 100.0, *, inline: bool = False,
+                  mul2_over_sum: bool = False) -> float:
     """Balance `i` restoring the invariant, in dollars.
 
     `a` is `ann / A_MULTIPLIER`, `gamma` is `gamma / 1e18`, and `x` and `d`
@@ -208,7 +243,11 @@ def newton_y_fast(a: float, gamma: float, x: list[float], d: float,
 
     y = d * d / (x_j * N_COINS * N_COINS)
     k0_i = N_COINS * x_j / d
-    if not (1.0 / lim <= k0_i <= lim):
+    if inline:
+        # `10**16 * N < K0_i < 10**20 * N` with the 1e18 divided out.
+        if not (0.01 * N_COINS < k0_i < 100.0 * N_COINS):
+            raise CryptoSwapError("unsafe values x[i]")
+    elif not (1.0 / lim <= k0_i <= lim):
         raise CryptoSwapError("unsafe values x[i]")
 
     for _ in range(MAX_ITER):
@@ -225,7 +264,7 @@ def newton_y_fast(a: float, gamma: float, x: list[float], d: float,
             raise CryptoSwapError("K0 at the pole")
 
         mul1 = d * g1k0 * g1k0 / (gamma * gamma * a)
-        mul2 = 1.0 + 2.0 * k0 / g1k0
+        mul2 = (1.0 + 2.0 * k0) / g1k0 if mul2_over_sum else 1.0 + 2.0 * k0 / g1k0
 
         yfprime = y + s * mul2 + mul1
         dyfprime = d * mul2
@@ -243,6 +282,8 @@ def newton_y_fast(a: float, gamma: float, x: list[float], d: float,
         y = y_prev * 0.5 if y_plus < y_minus else y_plus - y_minus
 
         if abs(y - y_prev) < _FAST_TOL * y:
+            if inline and not (0.01 < y / d < 100.0):
+                raise CryptoSwapError("unsafe value for y")
             return y
 
     raise CryptoSwapError("y did not converge")

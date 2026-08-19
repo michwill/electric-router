@@ -198,14 +198,17 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
         # `_fee` formulas the pool implements, and which math version bounds
         # it.  An address list would work today and rot the day a new
         # implementation is deployed, or on a chain nobody has surveyed.
-        for stable, legacy_fee, v21, legacy_pool in product(
-                (True, False), (False, True), (True, False), (False, True)):
+        for stable, legacy_fee, v21, legacy_pool, legacy_mul2 in product(
+                (True, False), (False, True), (True, False), (False, True),
+                (False, True)):
             if stable and not v21:
                 continue  # `v21` only selects cryptoswap bounds
             if legacy_pool and (stable or not legacy_fee or not v21):
                 continue  # the old generation is Newton with the old fee
             if legacy_pool and not legacy_possible:
                 continue
+            if legacy_mul2 and not legacy_pool:
+                continue  # only the inline Newton has the second spelling
             built.append((pool, Twocrypto(
                 balances=(int(pool.balances[0]), int(pool.balances[1])),
                 precisions=precisions[key],
@@ -220,9 +223,10 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
                 legacy_fee=legacy_fee,
                 v21=v21,
                 legacy_pool=legacy_pool,
+                legacy_mul2=legacy_mul2,
             ), {"family": "twocrypto", "stable": stable,
                 "legacy_fee": legacy_fee, "v21": v21,
-                "legacy_pool": legacy_pool}))
+                "legacy_pool": legacy_pool, "legacy_mul2": legacy_mul2}))
 
     if not built:
         return out

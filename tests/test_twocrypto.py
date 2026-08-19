@@ -161,3 +161,91 @@ def test_a_policy_that_charges_nothing_leaves_the_native_fee_curve():
     # policy returning 0 has to leave this untouched to be modellable at all.
     assert p.fee(xp) > 0
     assert MIN_FEE <= p.fee(xp) <= MAX_FEE
+
+
+# --------------------------------------------------- the two inline spellings
+#
+# `Curve EURe-3Crv` on Gnosis, `0x056C6C5e684CeC248635eD86033378Cc444459B0`,
+# read at block 47,805,120.  It is the inline-Newton generation -- the loop
+# lives in the pool, not in a math contract -- compiled by Vyper 0.3.3, which
+# rewrote `mul2` with the unsafe helpers as
+#
+#     mul2 = unsafe_div(10**18 + (2 * 10**18) * K0, _g1k0)
+#
+# where 0.3.1 had written `10**18 + (2 * 10**18) * K0 / _g1k0`.  Moving the
+# `10**18` inside the division is a real difference in deployed code, not a
+# transcription slip: 41 mainnet pools take the first spelling and this one
+# takes the second.  Newton damps the ~1e18-in-2e20 gap down to 4e-10 in the
+# answer -- small enough to read as rounding, far too large to be it -- so
+# without the variant the pool misses the wei-exact gate and goes unmodelled,
+# which costs a network round trip on every quote that crosses it.
+EURE_3CRV = dict(
+    balances=(168024079489927527752180, 182559895614877999742329),
+    precisions=(1, 1),
+    price_scale=871840195201223331,
+    d=327186996362370014692089,
+    amp=20000000,
+    gamma=10000000000000000,
+    mid_fee=3000000,
+    out_fee=45000000,
+    fee_gamma=300000000000000000,
+    stable=False,
+    legacy_fee=True,
+    v21=True,
+    legacy_pool=True,
+)
+
+#: `(i, j, dx) -> get_dy`, read from the pool itself at that block.
+EURE_3CRV_QUOTES = [
+    (0, 1, 1680240794899275520, 1926500247714547539),
+    (1, 0, 1825598956148780288, 1591249577697396266),
+    (0, 1, 16802407948992753664, 19264997630678407251),
+    (1, 0, 18255989561487800320, 15912494097192457806),
+    (0, 1, 168024079489927544832, 192649484454823814952),
+    (1, 0, 182559895614877990912, 159124774458311913619),
+    (0, 1, 1680240794899275317248, 1926437837811611174923),
+    (1, 0, 1825598956148780171264, 1591232257233010098072),
+    (0, 1, 16802407948992754221056, 19239691918711889414037),
+    (1, 0, 18255989561487800664064, 15908789764341695653214),
+]
+
+
+@pytest.mark.parametrize(("i", "j", "dx", "want"), EURE_3CRV_QUOTES)
+def test_the_0_3_3_spelling_of_mul2_reproduces_the_chain(i, j, dx, want):
+    got = Twocrypto(**EURE_3CRV, legacy_mul2=True).get_dy(i, j, dx)
+    assert got == want, f"{got} != {want} at dx={dx}"
+
+
+@pytest.mark.parametrize(("i", "j", "dx", "want"), EURE_3CRV_QUOTES)
+def test_the_0_3_1_spelling_does_not(i, j, dx, want):
+    """The variant earns its keep only if the other one really is wrong.
+
+    Without this the test above would still pass if `legacy_mul2` were
+    quietly ignored, which is exactly how a variant rots.
+    """
+    assert Twocrypto(**EURE_3CRV, legacy_mul2=False).get_dy(i, j, dx) != want
+
+
+@pytest.mark.parametrize(("i", "j", "dx", "want"), EURE_3CRV_QUOTES)
+def test_the_float_path_tracks_the_integer_one(i, j, dx, want):
+    got = Twocrypto(**EURE_3CRV, legacy_mul2=True).get_dy_fast(i, j, dx)
+    assert abs(got - want) / want < 1e-9, f"{got} vs {want} at dx={dx}"
+
+
+def test_the_inline_generation_applies_its_own_bounds():
+    """`K0_i` outside `[1e16*N, 1e20*N]` reverts on chain, so it must here.
+
+    The inline pools state the window on `K0_i`, which carries the `N_COINS`
+    factor that the optimized math's `frac` does not -- so it is twice as
+    wide at both ends, and reusing the wrong one would quote sizes the pool
+    refuses.  `k0_i` below is 1.5e16: inside the optimized window, outside
+    the inline one, so the two generations must disagree here or the flag is
+    doing nothing.
+    """
+    from erouter.core.cryptoswap import CryptoSwapError, _newton_y
+
+    d, x_j = 10**21, 75 * 10**17  # k0_i = 2e18 * x_j / d = 1.5e16
+    args = (20000000, 10**16, [x_j, 10**20], d, 1, 100 * 10**18)
+    with pytest.raises(CryptoSwapError, match="unsafe values"):
+        _newton_y(*args, inline=True)
+    _newton_y(*args, inline=False)  # the optimized window admits it

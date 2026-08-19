@@ -86,6 +86,11 @@ class Twocrypto:
     #: `precisions[0]` alone for `j == 0` -- not by both in sequence.  Same
     #: value in exact arithmetic, different wei in integer arithmetic.
     legacy_pool: bool = False
+    #: Within that inline generation, whether `mul2` divides the whole sum.
+    #: Vyper 0.3.1 wrote `10**18 + (2 * 10**18) * K0 / _g1k0`; 0.3.3 rewrote
+    #: it as `unsafe_div(10**18 + (2 * 10**18) * K0, _g1k0)`, moving the
+    #: `10**18` inside.  Both are deployed, so both are offered to the gate.
+    legacy_mul2: bool = False
 
     # ------------------------------------------------------------------ fee
 
@@ -199,7 +204,9 @@ class Twocrypto:
                 lim = lim * MAX_GAMMA_SMALL / self.gamma
             got = newton_y_fast(self.amp / A_MULTIPLIER, self.gamma / PRECISION,
                                 [v / PRECISION for v in xp],
-                                self.d / PRECISION, j, lim)
+                                self.d / PRECISION, j, lim,
+                                inline=self.legacy_pool,
+                                mul2_over_sum=self.legacy_mul2)
             return int(got * PRECISION)
         except (CryptoSwapError, StableSwapError) as exc:
             raise TwocryptoError(str(exc)) from exc
@@ -210,7 +217,8 @@ class Twocrypto:
             # pool itself.  `lim_mul` is the fixed 100e18 of that era.
             try:
                 return _newton_y(self.amp, self.gamma, xp, self.d, j,
-                                 100 * PRECISION)
+                                 100 * PRECISION, inline=True,
+                                 mul2_over_sum=self.legacy_mul2)
             except CryptoSwapError as exc:
                 raise TwocryptoError(str(exc)) from exc
         if not self.stable:
