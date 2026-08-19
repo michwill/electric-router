@@ -770,6 +770,33 @@ def _confirm_against_chain(result, rpc, chain, evm, nodes, pools, quiet=False,
     return result if not learned else None  # None == repaired, route again
 
 
+# Startup is several seconds of work between "the slots are read" and "ready",
+# and none of it was attributed to anything: the only figures printed were the
+# warm sweep's own and the prepare stage's, which together account for a
+# fraction of it.  `--timings` now closes that gap.
+_BOOT: dict[str, float] = {}
+
+
+@contextlib.contextmanager
+def _boot(name: str):
+    """Attribute a startup phase, accumulating across repeat entries."""
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        _BOOT[name] = _BOOT.get(name, 0.0) + (time.monotonic() - start) * 1000
+
+
+def _boot_line(started: float) -> str:
+    """Where startup went, biggest first, with what nothing claimed."""
+    total = (time.monotonic() - started) * 1000
+    named = sum(_BOOT.values())
+    parts = [f"{k} {v:,.0f}" for k, v in
+             sorted(_BOOT.items(), key=lambda kv: -kv[1]) if v >= 1]
+    parts.append(f"rest {max(0.0, total - named):,.0f}")
+    return f"  startup {total:,.0f} ms · " + " · ".join(parts)
+
+
 def cmd_route(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
@@ -794,16 +821,18 @@ def cmd_route(args: argparse.Namespace) -> int:
     chain = chain_table.get(args.chain)
     started = time.monotonic()
     try:
-        load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
-                          pool_filters=getattr(args, "pool_filters", False),
-                          llamma=getattr(args, "llamma", False),
-                          pin=getattr(args, "pin_universe", False))
+        with _boot("universe"):
+            load = load_pools(chain, min_tvl=args.min_tvl, refresh=args.refresh,
+                              pool_filters=getattr(args, "pool_filters", False),
+                              llamma=getattr(args, "llamma", False),
+                              pin=getattr(args, "pin_universe", False))
     except CurveApiError as exc:
         print(f"{BAD} {exc}")
         return 4
 
-    gas_table, gas_measured = _gas_table(chain, args, load.pools)
-    risk_table, risk_measured = _risk_table(chain, args)
+    with _boot("gas/risk"):
+        gas_table, gas_measured = _gas_table(chain, args, load.pools)
+        risk_table, risk_measured = _risk_table(chain, args)
     route_opts = _route_options(args)
     if gas_measured:
         print(f"  gas: {gas_measured:,} legs priced from measured execution")
@@ -846,23 +875,31 @@ def cmd_route(args: argparse.Namespace) -> int:
         p.address for p in load.pools)
     if args.local and covered:
         try:
-            primed = _local_quoter(rpc, chain, load, None, quiet=False,
-                                   fresh_quoter=getattr(args, 'fresh_quoter', False))
+            with _boot("warm"):
+                primed = _local_quoter(
+                    rpc, chain, load, None, quiet=False,
+                    fresh_quoter=getattr(args, 'fresh_quoter', False))
         except WarmFailed:
             return 4
         if primed is not None:
             reader, evm = primed, getattr(primed, "transport", None)
 
-    resolve_dialects(load.pools, reader, chain, use_cache=not args.refresh)
+    with _boot("dialects"):
+        resolve_dialects(load.pools, reader, chain, use_cache=not args.refresh)
     decimals_fixed: list[str] = []
     # Pool getters from the warm; the token reads that ride the same pass stay
     # on the wire, because the cache holds pool storage and not the ERC20s'.
-    read_balances(load.pools, reader, decimals_fixed, chain.chain_id,
-                  token_client=client)
-    resolve_lp_tokens(load.pools, reader, chain.chain_id)
+    with _boot("balances"):
+        read_balances(load.pools, reader, decimals_fixed, chain.chain_id,
+                      token_client=client)
+    with _boot("lp tokens"):
+        resolve_lp_tokens(load.pools, reader, chain.chain_id,
+                          token_client=client)
     for warning in decimals_fixed:
         print(f"{WARN} {warning}")
-    for warning in check_reserves_are_real(load.pools, client, rpc):
+    with _boot("reserves"):
+        reserve_warnings = list(check_reserves_are_real(load.pools, client, rpc))
+    for warning in reserve_warnings:
         print(f"{WARN} {warning}")
     if not args.no_cache:
         # Probe results are a pure function of (pool state at the pinned block,
@@ -892,7 +929,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     nodes = wrappers = stake_arcs = None
     live_cache = getattr(evm, "cache", None) or warm_cache
     if evm is not None and live_cache is not None and live_cache.covers_wrappers():
-        nodes, wrappers, stake_arcs = _build_wrappers(load, chain, reader, facts)
+        with _boot("wrappers"):
+            nodes, wrappers, stake_arcs = _build_wrappers(load, chain, reader, facts)
         if _wrapper_signature(nodes, wrappers, stake_arcs) != live_cache.wrapper_sig:
             nodes = None      # the state moved; ask the chain and re-record
     if nodes is None:
@@ -900,14 +938,17 @@ def cmd_route(args: argparse.Namespace) -> int:
         if evm is not None:
             recorded = _recording(client)
             source = recorded[0]
-        nodes, wrappers, stake_arcs = _build_wrappers(load, chain, source, facts)
+        with _boot("wrappers"):
+            nodes, wrappers, stake_arcs = _build_wrappers(load, chain, source, facts)
         if recorded:
-            _learn_wrappers(evm, warm_cache, rpc, recorded[1],
-                            _wrapper_signature(nodes, wrappers, stake_arcs))
+            with _boot("wrappers"):
+                _learn_wrappers(evm, warm_cache, rpc, recorded[1],
+                                _wrapper_signature(nodes, wrappers, stake_arcs))
     if evm is not None:
         # The half that needed arcs.  Everything above was answered from the
         # values loaded before it.
-        _learn_arcs(evm, rpc, chain, load, nodes, quiet=False)
+        with _boot("arc slots"):
+            _learn_arcs(evm, rpc, chain, load, nodes, quiet=False)
     # The local EVM comes first, and that ordering is a measured result
     # rather than a preference.
     #
@@ -1017,7 +1058,8 @@ def cmd_route(args: argparse.Namespace) -> int:
                                     if p.address.lower() in _lp_pools],
                                    stable, measured))
 
-        exact, two, tri, vaults, lp = _build_models()
+        with _boot("exact models"):
+            exact, two, tri, vaults, lp = _build_models()
         trusted = exact.trusted + two.trusted + tri.trusted
         if len(vaults) or len(lp):
             print(f"  exact: {len(vaults)}/{vaults.checked} vault direction(s), "
@@ -1049,6 +1091,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     # these match; a run whose fingerprint moved was handed a different market.
     print(f"  universe {load.fingerprint} · {len(load.pools)} pools · "
           f"{load.source} {load.age:.0f}s old")
+    if getattr(args, "timings", False):
+        print(_boot_line(started))
     if not nodes.has(src) or not nodes.has(dst):
         print(f"{BAD} token not routable in this universe")
         return 2
