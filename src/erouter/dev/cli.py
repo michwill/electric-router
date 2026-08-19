@@ -1364,9 +1364,58 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
                 handle.write(text)
             print(f"\n  wrote {args.json}")
 
+    if getattr(args, "execute", False):
+        _report_execution(result, chain, rpc, nodes, dst)
+
     if args.strict and not result.certificate:
         return 5
     return 0
+
+
+def _report_execution(result, chain, rpc, nodes, dst) -> None:
+    """Run the winning route for real and say whether the quote was honest.
+
+    Quoting walks the route with chained `staticcall`, which cannot see its own
+    earlier leg.  For most routes that is exact and this reports a flat zero.
+    Where it is not -- a pool entered twice, a multi-port element, a transfer
+    that reverts only when value actually moves -- this is the only thing that
+    can tell the difference between a good route and a good-looking one.
+
+    Forking needs unrestricted access, so it reads the endpoint out of
+    `networks.py` rather than using the committed scoped one, which serves only
+    whitelisted contracts.  Without a `networks.py` there is nothing to say and
+    it says so.
+    """
+    from . import config
+    from .executor import execute, fork
+
+    if not config.have_networks():
+        print(f"  {WARN} --execute needs networks.py for an unrestricted endpoint")
+        return
+    if result.route is None or not result.route.legs:
+        print("  execute: nothing to run (the pair is a node merge)")
+        return
+    started = time.monotonic()
+    try:
+        fork(config.rpc_url(chain.rpc_attr), rpc.block)
+        report = execute(result.route, quoted_out=result.verified_out,
+                         wrapped=chain.wrapped, expect_block=rpc.block)
+    except Exception as exc:                       # noqa: BLE001
+        print(f"  {BAD} execute: {type(exc).__name__}: {exc}")
+        return
+    took = (time.monotonic() - started) * 1000
+    decimals = nodes.decimals(dst)
+    symbol = nodes.symbol(dst)
+    if not report.ok:
+        print(f"  {BAD} execute: the route did not run -- {report.error}")
+        return
+    print(f"\n  executed on a fork at block {rpc.block:,} "
+          f"({report.legs} legs, {took:,.0f} ms)")
+    print(f"    quoted    {report.quoted_out / 10**decimals:>22,.6f} {symbol}")
+    print(f"    executed  {report.executed_out / 10**decimals:>22,.6f} {symbol}"
+          f"   {report.drift_bp:+.4f} bp")
+    for line in report.warnings:
+        print(f"    {WARN} {line}")
 
 
 # `prepare` is a parent span wrapping these, so counting both double-counts.
@@ -2430,6 +2479,9 @@ def build_parser() -> argparse.ArgumentParser:
              "so it is the input `--block` does not pin: two runs are only "
              "comparable when the universe fingerprint in the header matches")
     route_cmd.add_argument("--json", help="write JSON here, or '-' for stdout")
+    route_cmd.add_argument(
+        "--execute", action="store_true",
+        help="run the winning route on a boa fork and report what it really pays")
     route_cmd.add_argument("--ascii", action="store_true", help="no box-drawing characters")
     route_cmd.add_argument("--no-color", action="store_true")
     route_cmd.add_argument("--strict", action="store_true", help="exit 5 without a certificate")
