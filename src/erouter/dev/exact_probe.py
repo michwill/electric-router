@@ -64,26 +64,40 @@ class _Withdraw:
 
 
 class _Deposit:
-    """A single-sided deposit: `i` is the coin paid in, `dx` the amount."""
+    """A single-sided deposit: `i` is the coin paid in, `dx` the amount.
+
+    Priced by what `add_liquidity` mints, **not** by `calc_token_amount`.
+    The getter is fee-free on the legacy pools by its own admission -- its
+    docstring says it is "needed to prevent front-running, not for precise
+    calculations" -- so quoting a deposit with it promises a mint the
+    deposit does not pay.  The quoter contract has no choice but to call the
+    getter; here there is a choice, and the executed number is the right one
+    to route on.
+
+    This is deliberately a disagreement with the chain-delegated path, which
+    still gets the getter's answer for a pool with no LP model.  The two are
+    not equally right.
+    """
 
     __slots__ = ("lp",)
 
     def __init__(self, lp):
         self.lp = lp
 
-    def get_dy(self, i: int, j: int, dx: int) -> int:
-        amounts = [0] * self.lp.n
+    def _amounts(self, i: int) -> list:
         if not (0 <= i < self.lp.n):
             raise ValueError("coin index out of range")
+        return [0] * self.lp.n
+
+    def get_dy(self, i: int, j: int, dx: int) -> int:
+        amounts = self._amounts(i)
         amounts[i] = dx
-        return self.lp.calc_token_amount(amounts, True)
+        return self.lp.calc_token_amount_charged(amounts)
 
     def get_dy_fast(self, i: int, j: int, dx: int) -> int:
-        amounts = [0] * self.lp.n
-        if not (0 <= i < self.lp.n):
-            raise ValueError("coin index out of range")
+        amounts = self._amounts(i)
         amounts[i] = dx
-        return self.lp.calc_token_amount_fast(amounts, True)
+        return self.lp.calc_token_amount_charged_fast(amounts)
 
 
 @dataclass(slots=True)

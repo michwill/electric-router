@@ -204,3 +204,52 @@ def test_a_deposit_that_does_not_move_the_invariant_is_refused():
 
     with pytest.raises(StableSwapError):
         _lp().add_liquidity([0, 0, 0])
+
+
+def test_the_getter_over_states_what_a_deposit_mints():
+    """`calc_token_amount` takes no fee; `add_liquidity` charges one.
+
+    The gap is the whole point of pricing deposits by the second: a router
+    that quotes the getter promises a mint the deposit does not pay.
+    """
+    amounts = [0, 0, 100_000 * UNIT]
+    free = lp().calc_token_amount(amounts, True)
+    charged = lp().calc_token_amount_charged(amounts)
+    assert charged < free, "the imbalance fee was not charged"
+    # A balanced deposit is not imbalancing, so it pays nothing.
+    even = [50_000 * UNIT] * 3
+    assert lp().calc_token_amount_charged(even) == lp().calc_token_amount(even, True)
+
+
+def test_the_charged_mint_is_what_add_liquidity_returns():
+    """One arithmetic, two callers -- the state is the only difference."""
+    amounts = [0, 0, 100_000 * 10**6]
+    minted, _ = _lp().add_liquidity(amounts)
+    assert _lp().calc_token_amount_charged(amounts) == minted
+
+
+def test_the_mint_does_not_need_the_admin_fee():
+    """The DAO's share changes what the pool keeps, never what you are given.
+
+    Which is why pricing a deposit is available to every modelled pool, and
+    not only to the ones `admin_fee` could be read from.
+    """
+    amounts = [0, 0, 100_000 * 10**6]
+    assert (_lp(admin_fee=-1).calc_token_amount_charged(amounts)
+            == _lp(admin_fee=5 * 10**9).calc_token_amount_charged(amounts))
+
+
+def test_the_float_path_tracks_the_integer_one():
+    """`_price` takes the fast path, so it has to agree to well under a bp."""
+    for size in (UNIT, 1_000 * UNIT, 100_000 * UNIT, 500_000 * UNIT):
+        amounts = [0, 0, size]
+        exact = lp().calc_token_amount_charged(amounts)
+        fast = lp().calc_token_amount_charged_fast(amounts)
+        assert abs(fast - exact) / exact * 10_000 < 0.01, (
+            f"float deposit is {abs(fast - exact) / exact * 10_000:.4f} bp "
+            f"off the integer one at {size}")
+
+
+def test_a_deposit_that_does_not_move_the_invariant_is_refused():
+    with pytest.raises(StableSwapError):
+        lp().calc_token_amount_charged([0, 0, 0])
