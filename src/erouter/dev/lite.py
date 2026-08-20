@@ -1,31 +1,27 @@
 """Curve Lite: the small deployments, on a different API.
 
 The Prices API indexes trades, so it can report volume and TVL and history.
-**Curve Lite** is the other kind of deployment -- factory contracts and a
-gauge, without any of that indexing -- and it is served by
-`api2.curve.finance`, a separate service with a different shape.
+**Curve Lite** is the other kind of deployment -- factory contracts and a gauge,
+without any of that indexing -- and is served by `api2.curve.finance`.
 
 **It cannot replace the main API**, which was worth checking rather than
-assuming: `get_pools/1` and `get_pools/42161` both answer 404.  `get_platforms`
-lists 26 deployments and only one of them, sonic, is also a Prices chain --
-where Prices wins, because it serves sonic as a full deployment while Lite
-reports $0.2M across its 173 pools.  So this is a second source for the chains
+assuming: `get_pools/1` and `get_pools/42161` both answer 404.  Of the 26 Lite
+deployments only sonic is also a Prices chain, and there Prices wins because Lite
+reports a fraction of the deployment.  So this is a second source for the chains
 the first one does not have, not a migration.
 
 Two differences that matter to the router:
 
-* **The floor comes down, but not to zero.**  A whole Lite deployment is
-  smaller than the $10,000 pool floor mainnet uses, so that cut would return an
-  empty universe -- which reads as "chain not supported" rather than "chain is
-  small".  But these deployments are also mostly scam and dust, so no floor at
-  all admits far more junk than liquidity.  $1,000 is the knee; see
-  `LITE_MIN_TVL`.
-* **No paging.**  The whole chain arrives in one response, which is why there
-  is no `min_tvl` in the request: it is filtered here.
+* **The floor comes down, but not to zero.**  A whole Lite deployment is smaller
+  than mainnet's $10,000 pool floor, so that cut returns an empty universe --
+  which reads as "chain not supported" rather than "chain is small".  But these
+  deployments are also mostly scam and dust, so no floor at all admits far more
+  junk than liquidity.  $1,000 is the knee; see `LITE_MIN_TVL`.
+* **No paging.**  The whole chain arrives in one response, which is why there is
+  no `min_tvl` in the request: it is filtered here.
 
-The field names differ throughout and are translated to what
-`PoolSpec.from_api` reads, so nothing downstream needs to know which API a
-pool came from.
+Field names differ throughout and are translated to what `PoolSpec.from_api`
+reads, so nothing downstream needs to know which API a pool came from.
 """
 
 from __future__ import annotations

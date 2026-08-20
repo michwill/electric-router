@@ -38,16 +38,12 @@ def problem_for(g):
 
     A quote solves 45-106 times over the same arcs; only the warm start, the
     forbidden mask and the pins differ.  Handing `tau`, `sig`, `G`, `eps` and
-    `cap` across the boundary every time meant tens of thousands of Python
-    floats per quote to convey data that had not changed -- which cost about
-    what the Rust arithmetic saved.
+    `cap` across the boundary every time cost about what the Rust arithmetic
+    saved.
 
     Cached on the `ArcArrays` itself, keyed by `id` of the arrays it was built
-    from, so a graph that is rebuilt (a new block, a re-fit) gets a new problem
-    rather than a stale one.  `ArcArrays` is frozen in practice but not by
-    construction, hence the key rather than a plain attribute.  It carries an
-    `accel` field for this: `slots=True` leaves nowhere else to put it, and the
-    version that wrote through `object.__setattr__` never cached anything.
+    from, so a graph that is rebuilt gets a new problem rather than a stale one.
+    It carries an `accel` field for this: `slots=True` leaves nowhere else.
     """
     if _rust is None:
         return None
@@ -78,14 +74,11 @@ def problem_for(g):
 def _seed_mask(a0, m: int) -> list[bool]:
     """`A0` as a length-`m` boolean mask, however it was spelled.
 
-    The Python solver writes `A[np.asarray(A0)] = True`, which accepts either
-    a mask or a list of indices -- and `Solution.active` is a list of indices,
-    which is exactly what the pipeline warm-starts from.  Handing that to
-    `np.asarray(a0, bool)` instead turns `[3, 17, 42]` into three `True`s, so
-    the accelerated path silently started from a different basis: measured
-    against the Python solver on 54 real problems, only 8 agreed on the pivot
-    count, and the graphs that seemed to diverge were never given the same
-    starting point to diverge from.
+    The Python solver writes `A[np.asarray(A0)] = True`, which accepts either a
+    mask or a list of indices -- and `Solution.active` is a list of indices, which
+    is what the pipeline warm-starts from.  Handing that to `np.asarray(a0, bool)`
+    turns `[3, 17, 42]` into three `True`s, so the accelerated path silently
+    started from a different basis.
     """
     arr = np.asarray(a0)
     if arr.dtype == np.bool_ and arr.shape == (m,):

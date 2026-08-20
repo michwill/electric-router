@@ -37,30 +37,16 @@ CONVERGED = 1e-4  # §8's stopping rule on max|d psi| / Psi
 #: measurement rather than rounding.
 #
 # `B = 2(a d - f(d)) / d^2` differences two numbers that agree to within a few
-# basis points, then divides by `d^2`.  `a` is a *fitted* tangent, not an exact
-# quantity, so the numerator carries an error of order `sigma_a * d` and the
-# error in `B` falls only as `1/d`.  Below some size the numerator is entirely
-# that error -- including its sign.
+# basis points, then divides by `d^2`.  `a` is a *fitted* tangent, so the
+# numerator carries an error of order `sigma_a * d` and the error in `B` falls
+# only as `1/d`.  Below some size the numerator is entirely that error --
+# including its sign, which is how a refit at a realised delta of 3 USDC replaced
+# a fit made at a million, got `B < 0`, and clamped the best pool for the pair to
+# a cap of 3 USDC.
 #
-# Measured on mainnet USDC -> crvUSD at $5M, block 25,769,383, on the
-# crvUSD/USDC pool whose true `B` is about 5e-10:
-#
-#     delta (USDC)        a*d - f(d)            B
-#                3        -3.251e-07   -7.2252e-08   <- sign is rounding
-#               30        -2.994e-06   -6.6536e-09   <- still wrong
-#            3,000        +2.528e-03   +5.6170e-10
-#           34,434       +3.692e-01   +6.2275e-10
-#        1,000,000       +2.493e+02   +4.9865e-10
-#
-# The arc's realised delta was 3 USDC against a `calib_delta` of 1,000,000, so
-# the refit replaced a fit made at a million with one made at three, got
-# `B < 0`, and took the zero-curvature branch below -- clamping the best pool
-# for the pair to a cap of 3 USDC.  It was then unusable, and the router paid
-# 1.2 bp for it.
-#
-# `a` is good to something like 1e-7 relative; this asks an order of magnitude
-# of headroom on top.  Failing the test is not an error: it means this probe
-# knows less than the ladder fit already in hand, so the ladder's fit stands.
+# `a` is good to something like 1e-7 relative; this asks an order of magnitude of
+# headroom on top.  Failing the test is not an error: it means this probe knows
+# less than the ladder fit already in hand, so the ladder's fit stands.
 SECANT_REL_FLOOR = 1e-6
 #: How far below the size an arc was last calibrated at the refit may re-anchor.
 #

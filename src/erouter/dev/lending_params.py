@@ -1,32 +1,26 @@
 """The lending pools: stableswap with wrapped tokens (§2.4).
 
 The oldest Curve pools hold *wrapped* balances -- cDAI, aDAI -- and value them
-through the wrapper's own exchange rate.  `cDAI/cUSDC` is the first Curve pool
-ever deployed and still quotes today.
-
-None of this is new arithmetic.  The invariant is stableswap, `StableSwap`
-already takes `rates`, and the whole difference is where those rates come from.
-The Compound pools compute theirs, from the pool's own source:
+through the wrapper's own exchange rate.  None of this is new arithmetic: the
+invariant is stableswap, `StableSwap` already takes `rates`, and the whole
+difference is where those rates come from.  The Compound pools compute theirs:
 
     rate  = cToken.exchangeRateStored()
     rate += rate * supplyRatePerBlock * (block.number - accrualBlockNumber) / 1e18
     rates[i] = PRECISION_MUL[i] * rate
 
-which is block-dependent, and therefore only meaningful at a pinned block --
-which is what every model here already is.  The Aave pools hold rebasing
-aTokens worth one underlying each, so their rate is the plain
-`10**(36 - decimals)` every other stableswap uses.
+which is block-dependent, and therefore only meaningful at a pinned block.  The
+Aave pools hold rebasing aTokens worth one underlying each, so their rate is the
+plain `10**(36 - decimals)` every other stableswap uses.
 
 Two things kept these out of `build_exact_pools`, and neither was the maths:
 
 * **The coin list includes the underlying tokens.**  `cDAI/cUSDC` reports four
-  coins -- cDAI, cUSDC, DAI, USDC -- with zero balances on the last two,
-  because `exchange_underlying` trades those.  `all(pool.balances)` then reads
-  the pool as empty and drops it before any builder sees it.
+  coins with zero balances on the last two, because `exchange_underlying` trades
+  those -- so `all(pool.balances)` reads the pool as empty and drops it.
 * **Wrapped balances move between blocks.**  aTokens rebase, so the universe's
-  snapshot is a few wei off the pool's own `balances()` by the time a quote is
-  taken -- 3.3e-5 on aDAI/aSUSD, which is nothing to a router and fatal to a
-  wei-exact gate.  These read their balances fresh at the pinned block.
+  snapshot is a few wei off the pool's own `balances()` -- nothing to a router
+  and fatal to a wei-exact gate.  These read their balances fresh.
 """
 
 from __future__ import annotations
@@ -219,10 +213,9 @@ def _pick_variant(pool, held: int, shaped: dict, client) -> StableSwap | None:
 # ---------------------------------------------------------------- rate pools
 #
 # The same idea one step further out.  These pools hold a token whose value is
-# not one -- rETH, ankrETH -- or price a coin against a moving target, as
-# RAI3CRV does against its redemption price.  The invariant is still
-# stableswap and `xp = rate * balance / PRECISION` is still the convention;
-# only the rate has somewhere else to come from.
+# not one -- rETH, ankrETH -- or price a coin against a moving target.  The
+# invariant is still stableswap and `xp = rate * balance / PRECISION` is still
+# the convention; only the rate has somewhere else to come from.
 #
 # Each pool's own `_stored_rates` says where, and it is `@internal`, so the
 # wrapper has to be asked directly:
@@ -231,11 +224,10 @@ def _pick_variant(pool, held: int, shaped: dict, client) -> StableSwap | None:
 #     ETH/aETH   [PRECISION, PRECISION * LENDING_PRECISION / aETH.ratio()]
 #     RAI3CRV    [snappedRedemptionPrice() / 10**9, base virtual price]
 #
-# This runs **only over pools the ordinary reading already rejected**.  A pool
-# that models correctly today with a plain rate must keep doing so: some pools
-# hold rETH and genuinely value it at one, and asking the wrapper there would
-# turn a working model into a rejected one.  Retrying only the failures cannot
-# regress anything, and the wei-exact check still decides.
+# This runs **only over pools the ordinary reading already rejected**.  Some
+# pools hold rETH and genuinely value it at one, and asking the wrapper there
+# would turn a working model into a rejected one.  Retrying only the failures
+# cannot regress anything, and the wei-exact check still decides.
 
 #: `getter -> how to turn its answer into a rate`.  Tried in order.
 RATE_SOURCES = (

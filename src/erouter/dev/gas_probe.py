@@ -1,30 +1,25 @@
 """Execution gas, measured by executing it.
 
 `core/gas.py` prices every swap at a flat 102,000 borrowed from curve_solver.
-That number cannot be right for every pool, and quote gas is no help: `get_dy`
-is a view call that pays for none of the transfers or storage writes the real
-`exchange` pays for.  So the only honest source is an execution.
-
-revm gives us one for free.  The state is already local and pinned, `snapshot`
-/ `revert` isolate each attempt, and a caller can be funded by writing the
-token's own balance slot -- so measuring a leg costs no round trip and leaves
-no trace.  Against the assumed 102,000: 3pool DAI>USDC is 118,778, its own
-USDC>USDT pair is 121,702, crvUSD/USDC is 124,839 and TricryptoUSDC is 155,891.
+That cannot be right for every pool, and quote gas is no help: `get_dy` is a view
+call that pays for none of the transfers or storage writes the real `exchange`
+pays for.  So the only honest source is an execution, and revm gives us one for
+free -- the state is already local and pinned, `snapshot`/`revert` isolate each
+attempt, and a caller can be funded by writing the token's own balance slot.
 
 Two properties of the measurement, both load-bearing for how it is used:
 
 - **It is cold.**  Each leg runs alone in a fresh snapshot, so every account it
   touches is a first touch.  A later leg in a real route inherits warm accounts
   and costs less, which makes a sum over legs an upper bound (see `GasTable`).
-- **It is size-dependent, and not smoothly.**  A crypto pool may rebalance
-  inside `exchange` -- tens of thousands of gas that appear only at some sizes
-  and states.  Measuring at the size a route actually chose is the point of
-  driving this from realised legs rather than from a synthetic ladder.
+- **It is size-dependent, and not smoothly.**  A crypto pool may rebalance inside
+  `exchange` -- tens of thousands of gas that appear only at some sizes -- which
+  is why this is driven from realised legs rather than a synthetic ladder.
 
-Funding needs the token's balance and allowance slots, which are not
-discoverable from an ABI.  They are found by writing a candidate slot and
-asking the token whether it agrees, over both mapping layouts -- Solidity hashes
-`key ‖ slot`, Vyper hashes `slot ‖ key`, and the universe holds plenty of both.
+Funding needs the token's balance and allowance slots, which are not discoverable
+from an ABI.  They are found by writing a candidate slot and asking the token
+whether it agrees, over both mapping layouts -- Solidity hashes `key ‖ slot`,
+Vyper hashes `slot ‖ key`, and the universe holds plenty of both.
 """
 
 from __future__ import annotations
@@ -118,13 +113,10 @@ class Funder:
         """Approve `spender` as `holder`, and trade as them.
 
         Some tokens keep balances where a slot scan cannot reach: Lido's stETH
-        puts its shares mapping at `keccak256("lido.StETH.totalShares")` rather
-        than at a small integer, and a rebasing balance is not a slot at all.
-        Rather than teach the prober every such layout, borrow an account that
-        already holds the token -- any *other* pool in the universe does -- and
-        let the token's own `approve` do the work.  No layout knowledge, and
-        the storage the swap touches is warm-or-cold exactly as it would be for
-        a real holder.
+        puts its shares mapping behind a hashed name, and a rebasing balance is
+        not a slot at all.  Rather than teach the prober every such layout, borrow
+        an account that already holds the token and let the token's own `approve`
+        do the work.
         """
         approve = keccak256(b"approve(address,uint256)")[:4]
         try:
@@ -152,14 +144,10 @@ class Funder:
     def balance_of(self, token: str, owner: str) -> int:
         """What `owner` holds, as the token itself reports it.
 
-        Asked as `CALLER`, deliberately.  Asking *as the owner* made every
-        holder look empty: the call failed and `-1` was then flattened to `0`,
-        which reads as "holds nothing" and is indistinguishable from it.  The
-        same balance read as a neutral caller comes back correct, so this is a
-        question about who asks and not about what is there.
-
-        Returns -1 when the token will not answer, so a caller can tell a
-        refusal from a zero.
+        Asked as `CALLER`, deliberately.  Asking *as the owner* made every holder
+        look empty: the call failed and `-1` was flattened to `0`, which is
+        indistinguishable from holding nothing.  Returns -1 when the token will
+        not answer, so a caller can tell a refusal from a zero.
         """
         return self._read(token, _BALANCE_OF, [owner])
 

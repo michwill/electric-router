@@ -41,16 +41,14 @@ RETRY_GRID: tuple[float, ...] = (1e-3, 3e-2, 1e-1)
 
 # Where the refine pass samples, as fractions of *the trade* rather than of the
 # pool's reserve.  The quadratic is a local model, so it should be fitted where
-# the flow is going to land, not near zero.  Measured against the chain's own
-# answer at the size each leg actually carried, the reserve-sized grid was off
-# by -97,094 bp on one arc and -1,036,815 bp on another -- both shallow pools
-# where `1e-6 .. 1e-1 * reserve` samples three orders below the operating point
-# -- while these three points came within 0.1 bp on the same arcs.
+# the flow is going to land, not near zero: measured against the chain, the
+# reserve-sized grid was off by five and six figures of basis points on shallow
+# pools, where `1e-6 .. 1e-1 * reserve` samples three orders below the operating
+# point, while these three points came within 0.1 bp.
 #
-# Three is enough: with the free origin they give `a` from the smallest node,
-# `B` from a secant at the largest, and two second divided differences, which
-# is every quantity the solve consumes.  Only `eta` needs more, and `eta` is a
-# diagnostic.
+# Three is enough: with the free origin they give `a` from the smallest node, `B`
+# from a secant at the largest, and two second divided differences -- every
+# quantity the solve consumes.  Only `eta` needs more, and `eta` is a diagnostic.
 TRADE_GRID: tuple[float, ...] = (0.05, 0.10, 0.20)
 
 
@@ -77,17 +75,15 @@ class ArcRef:
 
 #: The fewest units of the output token a probe's answer may consist of.
 #
-# Quotes come back as integers, so an answer of `n` units carries a rounding
-# error of `1/n`.  The curvature a ladder is trying to measure is often 1e-4 or
-# smaller, so an answer of a few thousand units is *all* rounding: measured on
-# mainnet 3Crv -> GUSD, whose two decimals made a healthy stableswap look like
-# it had increasing returns, which clamped the arc and made $10,000 of a pool
-# holding 393,473 GUSD unroutable.
+# Quotes come back as integers, so an answer of `n` units carries a rounding error
+# of `1/n`.  The curvature a ladder is trying to measure is often 1e-4 or smaller,
+# so an answer of a few thousand units is *all* rounding -- measured on 3Crv ->
+# GUSD, whose two decimals made a healthy stableswap look like it had increasing
+# returns, clamping the arc and making $10,000 unroutable.
 #
-# Ten thousand units puts the rounding at 1e-4 and below most real curvature.
-# It costs nothing on an 18-decimal token, where any probe worth sending
-# already clears it by fourteen orders of magnitude; it moves the small end of
-# the ladder outward exactly where the token is coarse.
+# Ten thousand units puts the rounding at 1e-4, below most real curvature.  It
+# costs nothing on an 18-decimal token and moves the small end of the ladder
+# outward exactly where the token is coarse.
 MIN_OUT_QUANTA = 10_000
 
 
