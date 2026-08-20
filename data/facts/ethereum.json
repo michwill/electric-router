@@ -5853,7 +5853,9 @@
   "0xb79bbc5c96ba248e10c1bdac1a2b83790ff22b7f:2:1>0": "get_p: unsafe D values -- D below the math contract's 1e17 floor",
   "0xd658a338613198204dca1143ac3f01a722b5d94a:1:0>1": "quotes and reverts on execution (reason not propagated)",
   "0xdebf20617708857ebe4f679508e7b7863a8a8eee:14:0>1": "reverted without a reason",
-  "0xdebf20617708857ebe4f679508e7b7863a8a8eee:14:1>0": "reverted without a reason"
+  "0xdebf20617708857ebe4f679508e7b7863a8a8eee:14:1>0": "reverted without a reason",
+  "0xf253f83aca21aabd2a20553ae0bf7f65c755a07f:0:0>1": "Synth is suspended. Operation prohibited (Synthetix)",
+  "0xf253f83aca21aabd2a20553ae0bf7f65c755a07f:5:0>1": "Synth is suspended. Operation prohibited (Synthetix)"
  },
  "chain_id": 1,
  "class_of": {
