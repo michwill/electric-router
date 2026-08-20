@@ -24,87 +24,71 @@ class Chain:
     rpc_attr: str  # attribute name in networks.py
     native_symbol: str
     wrapped: str  # wrapped-native ERC20
-    # ERC4626 vaults that may be MERGED with their asset into one graph node.
-    # Allowlist, never auto-discovery: linearity of convertToAssets is necessary
-    # and nowhere near sufficient.  pufETH is perfectly linear and redeems
-    # through a withdrawal queue; sUSDe has a 7-day cooldown; sfrxUSD has
-    # maxDeposit == 0.  Merging any of those mints value from nothing.
-    # Every entry must pass an executed deposit/redeem on a fork (see tests).
-    # A deployed RouteQuoter, if there is one.  With it, quoting is a plain
-    # `eth_call` to a known address; without it the runtime bytecode rides
-    # along as a state override on every call (7,486 bytes, ~14% of a cold
-    # route's upload).  A deployed quoter also takes boa out of the request
-    # path, which is what the browser build needs.
     # Served by `api2.curve.finance` rather than the Prices API -- a factory
     # deployment with no trade indexing.  See `dev/lite.py`; the only chain in
-    # both lists is sonic, where Prices wins because it has the whole
-    # deployment and Lite reports a fraction of it.
+    # both lists is sonic, where Prices wins because it has the whole deployment
+    # and Lite reports a fraction of it.
     lite: bool = False
     #: This chain cannot be read at all until `RouteQuoter` is deployed on it,
     #: because it rejects `eth_call` state overrides.  Distinct from an empty
     #: `quoter`, which merely means quoting pays to ship the bytecode.
     needs_quoter: bool = False
+    # A deployed RouteQuoter, if there is one.  With it, quoting is a plain
+    # `eth_call` to a known address; without it the runtime bytecode rides along
+    # as a state override on every call (7,486 bytes, ~14% of a cold route's
+    # upload), and boa stays in the request path, which the browser build cannot
+    # have.
     quoter: str = ""
-    # Pools that quote fine and cannot be traded, so no probe should be spent
-    # on them and no route should reach them.  Not the same as the reserve
-    # check, which catches accounting that has come adrift from the tokens
-    # actually held: these hold what they claim, and the failure is one layer
-    # down, in a protocol that will no longer accept a deposit.  Only executing
-    # finds them, so they are recorded once rather than rediscovered.
+    # Pools that quote fine and cannot be traded, so no probe should be spent on
+    # them and no route should reach them.  Not the same as the reserve check:
+    # these hold what they claim, and the failure is one layer down, in a
+    # protocol that will no longer accept a deposit.  Only executing finds them.
     blacklist: tuple[str, ...] = ()
     # Pools worth re-testing on every `facts` build, whether or not they are
     # currently routable: deprecated lending protocols whose `exchange` quotes
-    # but whose `exchange_underlying` cannot deposit.  Kept explicit because
-    # there are few of them and they change on a protocol's schedule, not a
-    # block's -- and because a blacklisted pool builds no arcs, so nothing else
-    # would ever look at it again.  Re-testing is what lets one come back.
+    # but whose `exchange_underlying` cannot deposit.  A blacklisted pool builds
+    # no arcs, so nothing else would ever look at it again; re-testing is what
+    # lets one come back.
     watch: tuple[str, ...] = ()
     # (wrapper, underlying, family) -- lending tokens whose mint and redeem are
     # tested on every `facts` build.  What survives becomes an arc; see
     # `wrappers.build_lending_arcs`.
     wrappers: tuple[tuple[str, str, str], ...] = ()
-    # (token_a, token_b, adapter) -- a contract that converts between two
-    # tokens 1:1 in both directions, holding a reserve of one and minting the
-    # other.  Not a merge: the redeem side is bounded by what the adapter
-    # actually holds, and a merge asserts there is no bound.
-    #
-    # Gnosis's USDC transmuter is the case: `USDC.e -> USDC` at exactly 1:1 for
-    # as long as its 10.04M USDC lasts.  Our router priced that hop through
-    # pools at 99,448 per 100,000 -- 55 bp -- while curve_solver, which
-    # configures the adapter, returned 100,000.000000.
+    # (token_a, token_b, adapter) -- a contract that converts between two tokens
+    # 1:1 in both directions, holding a reserve of one and minting the other.
+    # Not a merge: the redeem side is bounded by what the adapter actually holds,
+    # and a merge asserts there is no bound.  Gnosis's USDC transmuter is the
+    # case -- `USDC.e -> USDC` at 1:1 for as long as its 10.04M USDC lasts, a hop
+    # we priced 55 bp worse through pools.
     transmuters: tuple[tuple[str, str, str], ...] = ()
     #: Token pairs that are one market but not one balance -- **declared**,
     #: because no read distinguishes them.  `discover_aliases` merges two
     #: addresses that share a balance to the wei; these do not, and are still
-    #: interchangeable, because the duality is a property of what executes
-    #: rather than of what is stored.  A swap denominated in one settles
-    #: against the other with no contract in between, so there is nothing for
-    #: a transmuter arc to call and nothing for a leg to do: they are one node.
+    #: interchangeable, because the duality is a property of what executes rather
+    #: than of what is stored.  A swap denominated in one settles against the
+    #: other with no contract in between, so there is nothing for a transmuter
+    #: arc to call and nothing for a leg to do: they are one node.
     #:
     #: Gnosis EURe is the case.  Held apart, `--to EURe` picks the deeper side
-    #: ($714k) and the market behind the other ($174k) is unreachable -- which
-    #: is why WXDAI -> EURe would only ever use one arm, at 1,467 bp on 100k.
+    #: and the market behind the other is unreachable.
     duals: tuple[tuple[str, str], ...] = ()
-    # Tokens that hold a peg.  Used only to decide how much a routing gain has
-    # to be worth before another leg is taken: a pair of these moves 0.17 bp
-    # over a thousand blocks, where ETH moves 125, so a gain worth chasing on
-    # one is noise on the other.  Membership is not measurable by execution the
-    # way redemption is -- it is a claim about what a token is for.
+    # Tokens that hold a peg.  Used only to decide how much a routing gain has to
+    # be worth before another leg is taken: a pair of these moves 0.17 bp over a
+    # thousand blocks where ETH moves 125.  Membership is not measurable by
+    # execution the way redemption is -- it is a claim about what a token is for.
     stables: tuple[str, ...] = ()
-    # A committed endpoint, for a checkout with no `networks.py`.
-    #
-    # Deliberately public, and safe to be: the key serves reads only --
-    # `eth_getStorageAt`, `eth_getCode`, `eth_getBalance`, `eth_getBlockByNumber`,
-    # `eth_blockNumber`, `eth_createAccessList`, `eth_gasPrice` -- plus
-    # `eth_call` restricted to the quoter address above, which is a stateless
-    # view contract that can move nothing.  `eth_simulateV1` is off: it is not
-    # address-scoped, and with state overrides it can fabricate balances and
-    # execute against them, which is strictly more than `eth_call` allows.
-    #
-    # Everything the router needs runs on this: the local EVM holds the pools'
-    # code and storage and computes `get_dy` in-process, so quoting needs no
-    # execution rights at all.
+    # A committed endpoint, for a checkout with no `networks.py`.  Safe to be
+    # public: the key serves reads only, plus `eth_call` restricted to the quoter
+    # address, which is a stateless view contract that can move nothing.
+    # `eth_simulateV1` is off -- it is not address-scoped, and with state
+    # overrides it can fabricate balances and execute against them.
     public_rpc: str = ""
+    # ERC4626 vaults that may be MERGED with their asset into one graph node.
+    # Allowlist, never auto-discovery: linearity of `convertToAssets` is
+    # necessary and nowhere near sufficient.  pufETH is perfectly linear and
+    # redeems through a withdrawal queue; sUSDe has a 7-day cooldown; sfrxUSD has
+    # `maxDeposit == 0`.  Merging any of those mints value from nothing, so every
+    # entry must pass an executed deposit/redeem on a fork (see tests).
     erc4626_allowlist: tuple[str, ...] = ()
     # (token, canonical) pairs handled by ConversionKind.WSTETH.  Kept off the
     # ERC4626 list because wstETH predates that standard and exposes its own
@@ -135,8 +119,7 @@ SFRXETH = "0xac3E018457B222d93114458476f3E3416Abbe38F"
 SGHO = "0xE1753F2E00940cC31213dD92013CF019dfe4ca1D"
 STUSDS = "0x99cD4EC3F88a45940936f469E4Bb72a2a701EeB9"
 # Round-trip clean but only $3.0M and $1.1M deep.  A merge asserts unbounded
-# depth in both directions, which those cannot honour at routing sizes, so
-# they stay out until there is a capped bidirectional element to hold them.
+# depth in both directions, which those cannot honour at routing sizes.
 # cvcrvUSD = 0xcea18a8752bb7e7817f9ae7565328fe415c0f2ca
 # sUSG     = 0xf17d6f98a5c6eaa99d149079984119e0a4ef6900
 PUFETH = "0xD9A442856C234a39a81a089C06451EBAa4306a72"
@@ -144,30 +127,24 @@ CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 
 #: RouteQuoter, at the same address on every chain.
 #
-# Deployed through the canonical CREATE2 proxy with salt
-# keccak("erouter.RouteQuoter.v1"), so the address is a function of the
-# initcode alone -- see `scripts/deploy_quoter.py --create2`.  One address is
-# not a tidiness argument: a scoped RPC key gates `eth_call` by target address
-# and holds ten of them, against fifteen chains, so per-chain addresses cannot
-# all be whitelisted at once.
-#
-# Changing RouteQuoter.vy moves this address.  The salt carries the version so
-# that move is deliberate rather than a whitelist entry quietly describing
-# something that is no longer deployed.
+# Deployed through the canonical CREATE2 proxy with a salt carrying the version,
+# so the address is a function of the initcode alone -- see
+# `scripts/deploy_quoter.py --create2`.  One address is not a tidiness argument:
+# a scoped RPC key gates `eth_call` by target address and holds ten of them,
+# against fifteen chains, so per-chain addresses cannot all be whitelisted.
+# Changing RouteQuoter.vy moves this address, and the salt carries the version so
+# that move is deliberate.
 QUOTER = "0x9a32418b9fd744efd6820577037529d5ba9de679"
 
 #: The scoped drpc key, committed on purpose.
 #
 # It cannot do anything a public node could not: reads, plus `eth_call`
 # restricted to `QUOTER` above -- a stateless view contract that can move
-# nothing.  Measured on every chain: a direct `eth_call` to a pool answers
-# HTTP 403 "address 0x...", while the same call through the quoter returns a
-# quote.  `eth_sendRawTransaction` is not served at all, which is why
-# deployments still go through `networks.py`.
-#
-# Committing it is the point.  A checkout with no `networks.py` routes on
-# fifteen chains, and the browser build ships this URL rather than asking the
-# user for one.
+# nothing.  Measured on every chain: a direct `eth_call` to a pool answers HTTP
+# 403, while the same call through the quoter returns a quote.
+# `eth_sendRawTransaction` is not served at all, which is why deployments still
+# go through `networks.py`.  Committing it is the point: a checkout with no
+# `networks.py` routes on fifteen chains.
 SCOPED_KEY = "AskGI4lH8UlFtIRsb5UfRvXOC_8-l9AR8YojRoYgFhqK"
 
 
@@ -212,13 +189,11 @@ CHAINS: dict[str, Chain] = {
             "0x52EA46506B9CC5Ef470C5bf89f17Dc28bB35D85C",   # cDAI/cUSDC/USDT
         ),
         blacklist=(
-            # Curve.fi aDAI/aUSDC/aUSDT.  Aave V2's reserves are frozen, so the
-            # deposit inside `exchange_underlying` reverts while
+            # Curve.fi aDAI/aUSDC/aUSDT.  Aave V2's reserves are frozen, so
+            # the deposit inside `exchange_underlying` reverts while
             # `get_dy_underlying` -- which only runs the invariant over the
             # pool's own balances and never touches Aave -- answers happily.
-            # Verified on a fork: quotes 1,875.46 USDC for 1,875 USDT, reverts
-            # on execution.  Curve's own solver excludes it for the same reason
-            # (curve_solver 0511e53, "Exclude frozen Aave V2 pool").
+            # Curve's own solver excludes it for the same reason.
             "0xDeBF20617708857ebe4F679508E7b7863a8A8EeE",
         ),
         wsteth_pairs=((WSTETH, STETH),),
@@ -318,34 +293,26 @@ CHAINS: dict[str, Chain] = {
     # `lite.LITE_MIN_TVL` is what the loader uses for these instead.
     #
     # Every wrapped native below was derived from the chain's own pool data --
-    # the coin whose symbol is W + the native symbol the API reports -- and
-    # then confirmed by asking the token for its own `symbol()`.  Guessing
-    # these fails silently: a wrong address breaks the native/ERC20 merge and
-    # the router simply never finds routes through it.
+    # the coin whose symbol is W + the native symbol the API reports -- and then
+    # confirmed by asking the token for its own `symbol()`.  Guessing these fails
+    # silently: a wrong address breaks the native/ERC20 merge and the router
+    # never finds routes through it.
     #
     # Six Lite deployments are deliberately absent, each measured:
     #
     # * **fantom** is in wind-down -- 164 of its 321 pools answer neither ABI
-    #   spelling and probing them takes 19 minutes.
+    #   spelling, and probing them takes 19 minutes.
     # * **kava** resolves a dialect for none of its 19 pools, so it yields zero
-    #   arcs.  There is nothing there to route.
-    # * **unichain** and **robinhood** are almost entirely scam and dust pools.
-    #   Unichain has one real venue -- Lido's wstETH secondary market -- and
-    #   everything else is sub-$100 or fake; robinhood's are worse, being built
-    #   to move a price oracle, so quoting them would either revert or rug the
-    #   caller.  Their universes trip the §9.7 conditioning guard, and that is
-    #   the guard working: `fly` pairs a token with 1.1e17 units against SUSHI,
-    #   so `a` spans 1e24 within one pool and no value coordinates can hold
-    #   both.  Nothing here needed fixing -- the answer to a universe of scams
-    #   is not to route it.  Curve is expected to drop robinhood's from the API,
-    #   at which point it can come back.
-    # **etherlink** and **tac** are present but carry `needs_quoter`: they
-    # reject `eth_call` state overrides outright (HTTP 400), and every batched
-    # read goes through the quoter, which off mainnet rides along as an
-    # override.  So balances come back as zeros and the universe looks like a
-    # quiet chain rather than an unreadable one.  They are listed because
-    # `deploy_quoter.py` has to be able to name them -- deploying is the fix --
-    # and flagged so nothing else pretends they work first.
+    #   arcs.
+    # * **unichain** and **robinhood** are almost entirely scam and dust pools,
+    #   and their universes trip the §9.7 conditioning guard -- which is the
+    #   guard working, since `a` spans 1e24 within one `fly` pool.  The answer to
+    #   a universe of scams is not to route it.
+    # * **etherlink** and **tac** are present but carry `needs_quoter`: they
+    #   reject `eth_call` state overrides outright (HTTP 400), and every batched
+    #   read goes through the quoter, which off mainnet rides along as an
+    #   override -- so balances come back as zeros and the universe looks like a
+    #   quiet chain rather than an unreadable one.  Deploying is the fix.
     "avalanche": Chain(
         name="avalanche",
         chain_id=43114,
