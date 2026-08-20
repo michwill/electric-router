@@ -5,23 +5,20 @@ Ported from the verified source of the contracts these pools actually call:
     0xcbff3004a20dbfe2731543aa38599a526e0fd6ee  CurveTricryptoMathOptimized
     the factory's `views_implementation()`      CurveTricryptoViews
 
-It is a separate module from `twocrypto.py` rather than a generalisation of
-it, because almost nothing carries over.  `get_y` is the same analytic *shape*
--- a cubic, a divider ladder, two cube roots -- with entirely different
-coefficients: `a = 10**36/27` against `10**32`, and `b`, `c`, `d` built from
-both of the other two balances instead of one.  The fee is a different
-function too, `reduction_coefficient` over three balances rather than the
-two-coin `K`.  Sharing the code would have meant a parameter on every line.
+A separate module from `twocrypto.py` rather than a generalisation of it, because
+almost nothing carries over.  `get_y` is the same analytic *shape* -- a cubic, a
+divider ladder, two cube roots -- with entirely different coefficients, and the
+fee is a different function too.  Sharing the code would have meant a parameter
+on every line.
 
-What does carry over is the discipline: `_sdiv` for Vyper's truncate-toward-
-zero signed division, an explicit mask where `pow_mod256` wraps, and every
-`assert` in the contract as a raise, so the model refuses wherever the chain
-would revert.
+What does carry over is the discipline: `_sdiv` for Vyper's truncate-toward-zero
+signed division, an explicit mask where `pow_mod256` wraps, and every `assert` in
+the contract as a raise, so the model refuses wherever the chain would revert.
 
-`get_y` falls back to `_newton_y` when the discriminant is not positive, and
-the contract itself notes that the two "can be off by 2 wei or so" -- which is
-why the check that admits a pool compares against the pool's own `get_dy`
-rather than against either routine in isolation.
+`get_y` falls back to `_newton_y` when the discriminant is not positive, and the
+contract itself notes the two "can be off by 2 wei or so" -- which is why the
+check that admits a pool compares against the pool's own `get_dy` rather than
+against either routine in isolation.
 """
 
 from __future__ import annotations
@@ -103,16 +100,16 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
               a_multiplier: int = A_MULTIPLIER) -> int:
     """The fallback `get_y` takes when the discriminant is not positive.
 
-    `check_inputs` adds the bound the 2021 pools apply before iterating --
-    every *other* balance must sit within `[1e16, 1e20]` of `D` -- which the
-    optimized math dropped.  It is a refusal the pool makes, so a model of one
-    of those pools has to make it too.
+    `check_inputs` adds the bound the 2021 pools apply before iterating -- every
+    *other* balance must sit within `[1e16, 1e20]` of `D` -- which the optimized
+    math dropped.  It is a refusal the pool makes, so a model of one of those
+    pools has to make it too.
 
     `a_multiplier` is not a constant across the generations, which is the same
     trap `a_precision` is in stableswap: tricrypto2 and the optimized math use
     10,000, and the original 2021 tricrypto uses **100**.  Taking the wrong one
-    scales `mul1` by a hundred and quotes the pool about twice wrong -- close
-    enough to look like a rounding problem and not be one.
+    quotes the pool about twice wrong -- close enough to look like a rounding
+    problem and not be one.
     """
     scale = a_multiplier // A_MULTIPLIER if a_multiplier >= A_MULTIPLIER else 1
     lo_a = MIN_A * a_multiplier // A_MULTIPLIER
@@ -457,19 +454,18 @@ class TricryptoLP:
     """A tricrypto pool's withdrawal arc, to the wei.
 
     Only `remove_liquidity_one_coin` is modelled here.  Deposits are already
-    exact through the pool's own `calc_token_amount`, which charges the same
-    fee `add_liquidity` does -- measured across every tricrypto pool on
-    Ethereum, view and execution agree to the wei -- so there is nothing for a
-    model to correct and no reason to carry the risk of a second
-    implementation.
+    exact through the pool's own `calc_token_amount`, which charges the same fee
+    `add_liquidity` does -- measured across every tricrypto pool on Ethereum,
+    view and execution agree to the wei -- so there is nothing for a model to
+    correct.
 
     **What this does not model is the admin fee claim.**
-    `remove_liquidity_one_coin` runs `_claim_admin_fees()` before it prices
-    `dy`, and that is a *state* change the pool makes to itself, not part of
-    the withdrawal arithmetic.  It is corrected in `RouteQuoter._quote`, where
-    it applies to the probed path and the verified path alike.  Keeping the two
-    separate is deliberate: this reproduces `calc_withdraw_one_coin`, and that
-    is the thing it can be checked against.
+    `remove_liquidity_one_coin` runs `_claim_admin_fees()` before it prices `dy`,
+    and that is a *state* change the pool makes to itself, not part of the
+    withdrawal arithmetic.  It is corrected in `RouteQuoter._quote`, where it
+    applies to the probed and verified paths alike.  Keeping the two separate is
+    deliberate: this reproduces `calc_withdraw_one_coin`, and that is the thing it
+    can be checked against.
     """
 
     pool: Tricrypto

@@ -1,28 +1,24 @@
 """Execute a route on a fork and report what it actually paid.
 
-Every other check in this system asks the chain a *question*: the quoter walks
-a candidate with chained `staticcall` and the answer that counts is the one
-that comes back.  That is enough for most routes and not enough for three
-kinds, all of which are invisible to a view-only walk:
+Every other check in this system asks the chain a *question*: the quoter walks a
+candidate with chained `staticcall` and the answer that counts is the one that
+comes back.  That is enough for most routes and not enough for three kinds, all
+invisible to a view-only walk:
 
 * **A pool entered twice.**  The second leg quotes against state the first leg
   has already moved, so the quoter's answer is wrong by construction.  This is
-  why `decision 3` forbids it and why `certificate: RESTRICTED` shows up on
+  why `decision 3` forbids it, and why `certificate: RESTRICTED` shows up on
   routes that would obviously be better without the rule.
-* **Multi-port elements.**  Same thing by another name -- one pool, several
-  ports -- which is why every element candidate measured so far comes back
-  unquotable rather than merely worse.
+* **Multi-port elements.**  Same thing by another name -- one pool, several ports
+  -- which is why every element candidate measured comes back unquotable rather
+  than merely worse.
 * **Anything that reverts only when it moves value.**  A paused transfer, a
-  deposit cap, a token with a transfer hook: `get_dy` is happy to price all of
-  them.
+  deposit cap, a token with a transfer hook: `get_dy` prices all of them happily.
 
-So this runs the route for real -- `boa.fork` at the same pinned block,
-`boa.deal` for the input, the executor contract from `contracts/`, and real
-`exchange` / `add_liquidity` / `remove_liquidity_one_coin` calls -- and reports
-the balance that actually arrives.
-
-The number it returns is not a better quote.  It is a different claim: that the
-route is executable at all, and that the quoted figure was honest.
+So this runs the route for real -- `boa.fork` at the same pinned block, the
+executor contract from `contracts/`, and real calls -- and reports the balance
+that actually arrives.  The number is not a better quote; it is a different
+claim: that the route is executable at all, and that the quote was honest.
 """
 
 from __future__ import annotations
@@ -135,16 +131,14 @@ def fork(url: str, block: int, *, prefetch: bool | None = None):
     """Point boa at the chain, at the block the quote was pinned to.
 
     **Prefetch decides whether this takes minutes or hours.**  Without it every
-    storage slot a leg touches is its own `eth_getStorageAt`, and that costs
-    ~33 ms apiece even against a node on the LAN -- the cost is per-request
-    scheduling, not per-slot work, so a pool with a few hundred slots spends
-    ten seconds fetching before it computes anything.  With it, boa asks
-    `debug_traceCall{prestateTracer}` once per message and gets the whole
-    working set in ~0.13 s.
+    storage slot a leg touches is its own `eth_getStorageAt` at ~33 ms apiece even
+    on the LAN -- the cost is per-request scheduling, not per-slot work -- so a
+    pool with a few hundred slots spends ten seconds fetching before it computes
+    anything.  With it, boa asks `debug_traceCall{prestateTracer}` once per
+    message and gets the whole working set in ~0.13 s.
 
-    Not every node serves `debug_*`, and a hosted endpoint generally does not,
-    so this probes rather than assumes: `None` means detect, and a node that
-    will not answer keeps the slow path instead of failing.
+    Not every node serves `debug_*`, so this probes rather than assumes: `None`
+    means detect, and a node that will not answer keeps the slow path.
     """
     import boa
 
@@ -239,18 +233,17 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
     **A native wrapper is minted, not dealt.**  WXDAI is to xDAI what WETH is to
     ETH: its supply is exactly the native balance it holds, and it hands out
     tokens only through payable `deposit()`.  `boa.deal` writes the balance slot
-    directly, which leaves the wrapper owing tokens it has no native behind --
-    and its `totalSupply` is its own native balance rather than a slot, so the
-    supply half fails outright and the fallback below papers over the rest.  A
-    pure swap never notices, which is exactly what makes it dangerous: the run
-    passes and the first route that unwraps fails for reasons that look
-    unrelated.  Native is free to conjure in a fork, so mint it the way any
-    holder would.
+    directly, which leaves the wrapper owing tokens it has no native behind -- and
+    its `totalSupply` is its own native balance rather than a slot, so the supply
+    half fails outright.  A pure swap never notices, which is what makes it
+    dangerous: the run passes and the first route that unwraps fails for reasons
+    that look unrelated.  Native is free to conjure in a fork, so mint it the way
+    any holder would.
 
-    Everything else is dealt.  The supply fallback stays for tokens that pack
-    or compute `totalSupply`, and is recorded rather than silent: leaving supply
-    alone is harmless for an ordinary ERC20 that no pool asks about, and wrong
-    for an LP token, whose withdrawal price is a function of it.
+    Everything else is dealt.  The supply fallback stays for tokens that pack or
+    compute `totalSupply`, and is recorded rather than silent: leaving supply
+    alone is harmless for an ordinary ERC20 that no pool asks about, and wrong for
+    an LP token, whose withdrawal price is a function of it.
     """
     if wrapped and token.address.lower() == wrapped.lower():
         boa.env.set_balance(who, amount + GAS_HEADROOM_WEI)
@@ -270,16 +263,16 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
         return
     except Exception:                              # noqa: BLE001
         pass
-    # **Take it from someone who has it.**  `boa.deal` finds the balance slot
-    # by brute force, and a token that packs its balances or computes them --
-    # gnosis EURe, whose two contracts share one market -- defeats both halves
-    # of that.  A holder does not need to be discovered: the pools in the
-    # route's own universe hold the token by definition, and pranking one is a
-    # real `transfer`, so whatever the token does on the way out happens.
+    # **Take it from someone who has it.**  `boa.deal` finds the balance slot by
+    # brute force, and a token that packs its balances or computes them -- gnosis
+    # EURe, whose two contracts share one market -- defeats both halves of that.
+    # A holder does not need to be discovered: the pools in the route's own
+    # universe hold the token by definition, and pranking one is a real
+    # `transfer`, so whatever the token does on the way out happens.
     #
-    # The pool is left short, which is why this is the fallback and not the
-    # first choice: it moves the very liquidity the route is about to price.
-    # Recorded, so a caller reading a suspiciously good number can see it.
+    # The pool is left short, which is why this is the fallback and not the first
+    # choice: it moves the very liquidity the route is about to price.  Recorded,
+    # so a caller reading a suspiciously good number can see it.
     result.warnings.pop()                          # replaced by the line below
     for holder in holders or ():
         try:

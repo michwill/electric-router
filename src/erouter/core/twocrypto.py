@@ -108,9 +108,9 @@ class Twocrypto:
         from `mid_fee` toward `out_fee`.  The legacy one also does not clamp.
 
         The difference is around a part in ten million of the output -- small
-        enough to look like a rounding bug and far too large to be one.  It
-        was found by reading the deployed source rather than a repository
-        copy, which had only the current form.
+        enough to look like a rounding bug and far too large to be one.  It was
+        found by reading the deployed source rather than a repository copy, which
+        had only the current form.
         """
         total = xp[0] + xp[1]
         if total <= 0:
@@ -135,12 +135,11 @@ class Twocrypto:
     def get_dy_fast(self, i: int, j: int, dx: int) -> int:
         """`get_dy`, solving the invariant in floating point.
 
-        Only the iteration moves: the fee, the price scale and the precisions
-        are a handful of integer operations and stay exactly as the contract
-        does them.  See `cryptoswap.newton_y_fast` for why the float form is
-        a dimensional reduction rather than a transcription -- measured on 68
-        mainnet cryptoswap pools, it tracks the integer path to a worst case
-        of 8e-6 bp.
+        Only the iteration moves: the fee, the price scale and the precisions are
+        a handful of integer operations and stay exactly as the contract does
+        them.  See `cryptoswap.newton_y_fast` for why the float form is a
+        dimensional reduction rather than a transcription -- measured on 68
+        mainnet cryptoswap pools, it tracks the integer path to 8e-6 bp.
         """
         return self._quote(i, j, dx, self._y_fast)
 

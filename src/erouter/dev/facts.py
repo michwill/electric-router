@@ -1,31 +1,27 @@
 """What is true of a chain until someone redeploys something.
 
-Three kinds of fact share this file because they share a lifetime: none of them
-depends on the block, all of them cost execution to learn, and a checkout
-should have them without paying for that.
+These facts share a file because they share a lifetime: none depends on the
+block, all cost execution to learn, and a checkout should have them without
+paying for that.
 
 * **Gas.**  A pool that costs 118,778 to swap through costs about that at every
   block.  See `gas_probe`.
-* **Broken directions.**  An arc that quotes and then reverts -- Aave V2's
-  frozen reserves, Compound V2's paused mint.  Nothing in a pool's state gives
-  these away; only executing finds them, which is exactly why the answer is
-  worth storing rather than rediscovering.
-* **Wrapper capability.**  Whether a lending token can still be minted, still
-  be redeemed, or both.  Deprecated protocols stop taking deposits long before
-  they stop honouring withdrawals, so this is per direction, not per protocol.
+* **Broken directions.**  An arc that quotes and then reverts -- Aave V2's frozen
+  reserves, Compound V2's paused mint.  Nothing in a pool's state gives these
+  away; only executing finds them.
+* **Wrapper capability.**  Whether a lending token can still be minted, still be
+  redeemed, or both.  Deprecated protocols stop taking deposits long before they
+  stop honouring withdrawals, so this is per direction, not per protocol.
 * **Minimum-out risk.**  How often a pool's rate moves further than its own
-  slippage bound inside a couple of minutes, which is how often a route
-  through it reverts.  Set by the pool's fee against its own volatility, and
-  both hold still for months.  See `revert_risk`.
+  slippage bound inside a couple of minutes, which is how often a route through
+  it reverts.  See `revert_risk`.
 * **Wide-bound pools.**  The handful that trade a moving pair on a stablecoin
-  fee, so a fraction of that fee is not a bound anything could execute
-  against.  A list rather than a rule: a fee and a pair are both facts about a
-  deployment, and a list is auditable in a diff.
+  fee, so a fraction of that fee is not a bound anything could execute against.
+  A list rather than a rule, because a list is auditable in a diff.
 
 Slot lists and bytecode stay in `state_cache`, which is gzipped because it
-carries megabytes of code.  Facts belong in plain JSON: it is three orders of
-magnitude smaller, and a committed file a human can read in a diff is worth
-more than the bytes saved.  One command builds both.
+carries megabytes of code.  Facts belong in plain JSON: three orders of magnitude
+smaller, and readable in a diff.  One command builds both.
 """
 
 from __future__ import annotations
@@ -310,20 +306,18 @@ class FactsCache:
         return changed
 
     def risk_table(self) -> RiskTable:
-        """The pure-core view: `(address, i, j) -> probability`, and nothing
-        else.
+        """The pure-core view: `(address, i, j) -> probability`, and nothing else.
 
         Every pool also gets a `(-1, -1)` entry from the worst of its own arcs,
         which is what a direction the sweep never sampled inherits -- the same
-        specific-to-general walk `GasTable` does, erring high because an
-        unsampled pair of a pool we know is not evidence of safety.
+        specific-to-general walk `GasTable` does, erring high because an unsampled
+        pair of a pool we know is not evidence of safety.
 
-        A pool the sweep never saw at all -- one that does not answer `fee()`,
-        so it has no bound to measure against -- falls to the table's default,
-        raised here to the measured 75th percentile if that is higher than the
-        constant.  Not the upper decile: the distribution is bimodal, and its
-        top tenth is the crypto pools, which would charge 120 bp for a gap in
-        our own sampling rather than for anything about the pool.
+        A pool the sweep never saw at all falls to the table's default, raised
+        here to the measured 75th percentile if that is higher than the constant.
+        Not the upper decile: the distribution is bimodal, and its top tenth is
+        the crypto pools, which would charge 120 bp for a gap in our own sampling
+        rather than for anything about the pool.
         """
         arcs: dict[tuple[str, int, int], float] = {}
         worst: dict[str, float] = {}
