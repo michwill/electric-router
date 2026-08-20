@@ -58,33 +58,24 @@ def merge_candidates(chain: Chain, facts=None) -> list[str]:
     """Which vaults are worth *trying* to merge, from measurement where there is
     any.
 
-    R5 gates merging on an allowlist because linearity says nothing about
-    whether you can get back out: pufETH reports `asset = WETH`, converts with
-    no error and caps at `2**256-1`, yet redeems through a queue.  Merging it
-    would declare it equal to WETH at NAV and mint the market's discount from
-    nothing.  `maxRedeem` cannot answer either -- it is per-owner and returns 0
-    for an address holding no shares.
+    R5 gates merging on an allowlist because linearity says nothing about whether
+    you can get back out: pufETH reports `asset = WETH`, converts with no error
+    and caps at `2**256-1`, yet redeems through a queue.  Merging it would declare
+    it equal to WETH at NAV and mint the market's discount from nothing.
+    `maxRedeem` cannot answer either -- it is per-owner and returns 0 for an
+    address holding no shares.
 
-    Executing both directions can answer it, and `data/facts` now does, so the
-    list stops being a judgement and becomes a measurement.  It is still an
-    allowlist -- a vault has to earn its way on by redeeming, not merely by
-    failing to look suspicious -- but nobody maintains it, and a vault that
-    stops honouring redemptions falls off at the next facts build rather than
-    when someone notices.
+    Executing both directions can, and `data/facts` does, so the list is a
+    measurement rather than a judgement.  The hand-written list stays as an
+    addition, not a replacement: a vault the harness could not test is absent from
+    the facts, and absent must not mean refused.
 
-    The hand-written list stays as an addition, not a replacement: a vault the
-    harness could not test is absent from the facts, and absent must not mean
-    refused.  Measurement can only widen this, never narrow it below what a
-    human vouched for.
-
-    And `oneway_vaults` always wins.  A measured redemption is one redemption,
-    of one size, at one block, by one holder -- it is not proof that the exit
-    is open.  pufETH proves the point: this probe found its `redeem` answering
-    and would have merged it, which is precisely the case R5 exists to forbid,
-    because the way out is a withdrawal queue and a merge claims there is none.
-    Measurement may say "this looks fine"; only a human may say "and I know
-    why it is fine".  So the deny list is not a fallback for what measurement
-    misses, it is a veto over what measurement is not competent to judge.
+    And `oneway_vaults` always wins.  A measured redemption is one redemption, of
+    one size, at one block, by one holder -- not proof that the exit is open.
+    This probe found pufETH's `redeem` answering and would have merged it, which
+    is precisely the case R5 exists to forbid.  Measurement may say "this looks
+    fine"; only a human may say "and I know why it is fine".  So the deny list is
+    a veto over what measurement cannot judge, not a fallback for what it misses.
     """
     hand = [v.lower() for v in chain.erc4626_allowlist]
     wrappers = getattr(facts, "wrappers", None) or {}
@@ -141,13 +132,11 @@ def build_node_map(
 
     # LP tokens are deliberately *not* registered here.  A pool's LP is a node
     # only when some other pool trades it -- 3Crv, crvFRAX, sbtcCrv, gnosis's
-    # x3CRV -- and `build_arcs` then finds it already present.
-    #
-    # Registering all of them instead makes an arc pair per coin for every pool
-    # on the chain, mostly to tokens nothing else trades: 759 arcs became 2,020
-    # on mainnet, and crvUSD -> sDOLA at $2M went from 1,419,819 sDOLA to
-    # 1,136,396 in 2.2x the time.  A dead-end node cannot improve a route, but
-    # it can and did drag the reference-price fit and the solver with it.
+    # x3CRV -- and `build_arcs` then finds it already present.  Registering all of
+    # them instead makes an arc pair per coin for every pool on the chain, mostly
+    # to tokens nothing else trades: 759 arcs became 2,020 on mainnet, and
+    # crvUSD -> sDOLA at $2M lost 20% in 2.2x the time.  A dead-end node cannot
+    # improve a route, but it can and did drag the price fit and the solver.
 
     # --- native wrapper: 1:1, no probing needed --------------------------
     wrapped = chain.wrapped.lower()
@@ -195,15 +184,13 @@ def _merge_wsteth(
 ) -> None:
     """Merge wstETH into stETH -- lossless, unbounded, and exactly linear.
 
-    Measured on mainnet at block 25,734,769: the rate is 1.241440951 stETH per
-    wstETH, `getStETHByWstETH` is linear to 1.3e-19 across eight decades, and a
-    1 stETH round trip loses 1 wei to integer rounding.  There is no deposit
-    cap, no withdrawal queue and no cooldown -- the three things that disqualify
-    pufETH and sUSDe under R5 -- so it is a short circuit in value coordinates.
+    Measured: `getStETHByWstETH` is linear to 1.3e-19 across eight decades, and a
+    1 stETH round trip loses 1 wei to integer rounding.  No deposit cap, no
+    withdrawal queue, no cooldown -- the three things that disqualify pufETH and
+    sUSDe under R5 -- so it is a short circuit in value coordinates.
 
-    Not merging it is expensive rather than merely incomplete: without the
-    merge, wstETH cannot reach the deep ETH/stETH pool, and 50 wstETH -> WETH
-    quoted 10.7% below NAV against curve_solver, which does model the wrap.
+    Not merging it is expensive rather than merely incomplete: wstETH cannot then
+    reach the deep ETH/stETH pool, and 50 wstETH -> WETH quoted 10.7% below NAV.
     """
     calls: list[Call] = []
     for token, _canonical in pairs:
@@ -377,23 +364,19 @@ def discover_aliases(pools: list[PoolSpec], nodes: NodeMap,
     Gnosis EURe is the case this exists for.  Its two contracts report the same
     `totalSupply` to the wei and the same `balanceOf` for every holder tried --
     holding one *is* holding the other -- so treating them as separate nodes
-    splits a single market: 74k of EURe in one pool and 172k in another looked
-    like two thin markets near par instead of one 247k market.  It is also why
-    `--to EURe` had to pick a side and why USDC.e could not reach it.
+    splits a single market into two thin ones near par, and is why `--to EURe`
+    had to pick a side and USDC.e could not reach it.
 
     Candidates are pairs sharing a symbol, because that is what an alias looks
-    like from outside and it keeps this to a handful of calls.  Evidence is
-    equal decimals, equal supply, and equal balances at several independent
-    holders -- the pools themselves, which are exactly the accounts whose
-    balances the router is about to reason about.
+    like from outside and it keeps this to a handful of calls.  Evidence is equal
+    decimals, equal supply, and equal balances at several independent holders --
+    the pools themselves, which are exactly the accounts the router is about to
+    reason about.
 
-    **These are token reads, so they must not come from the local EVM.**  It
-    holds pool storage; an ERC20 it never loaded answers `totalSupply` with
-    zero, the "a supply of nothing agrees with everything" guard below
-    correctly refuses to merge on that, and the alias is silently not found.
-    Which is how gnosis EURe stayed two nodes after this function was written
-    to join them -- and the third time the same zero has been believed
-    somewhere in this pipeline, after `read_balances` and `lp_decimals`.
+    **These are token reads, so they must not come from the local EVM.**  It holds
+    pool storage; an ERC20 it never loaded answers `totalSupply` with zero, the "a
+    supply of nothing agrees with everything" guard below correctly refuses to
+    merge on that, and the alias is silently not found.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
@@ -447,26 +430,21 @@ def mintable_vaults(nodes: NodeMap, client: QuoterClient,
     """Every token in the graph that mints itself from another token in it.
 
     Minting is not the same claim as merging, and only the second one needs a
-    human.  A merge asserts the exit is open and unbounded, which is why R5
-    keeps it on an allowlist -- pufETH is perfectly linear and redeems through
-    a queue.  A *deposit* arc asserts only what the vault will do on request:
-    take the asset, hand back shares, at a rate the quoter reads and the
-    on-chain verification adjudicates.  So this one can be discovered.
+    human.  A merge asserts the exit is open and unbounded, which is why R5 keeps
+    it on an allowlist -- pufETH is perfectly linear and redeems through a queue.
+    A *deposit* arc asserts only what the vault will do on request: take the
+    asset, hand back shares, at a rate the quoter reads and the on-chain
+    verification adjudicates.  So this one can be discovered.
 
     Which matters, because the hand-written list is short and the universes are
-    not.  Measured on mainnet: nine vaults modelled, sixteen ignored, eleven of
-    those mintable from an asset already in the graph -- ynUSDx, ynRWAx and
-    srRoyUSDC from USDC, ynETHx from WETH, and so on.  Fraxtal's sdUSD was the
-    whole of that chain's vault coverage, missing.  A token nothing mints can
-    only be reached by buying it in a pool, which is how crvUSD -> sDOLA at $5M
-    lost 16% to a route that minted instead of bought.
+    not: on mainnet, eleven ignored vaults are mintable from an asset already in
+    the graph, and fraxtal's sdUSD was the whole of that chain's vault coverage.
+    A token nothing mints can only be reached by buying it in a pool, which cost
+    crvUSD -> sDOLA at $5M 16%.
 
-    A vault already merged with its asset falls out downstream rather than
-    here: the two share a node, and the caller skips an arc whose ends are the
-    same node.
-
-    `asset()` cannot change, so the answer is cached per chain and a warm
-    universe costs nothing.
+    A vault already merged with its asset falls out downstream: the two share a
+    node, and the caller skips an arc whose ends are the same node.  `asset()`
+    cannot change, so the answer is cached per chain.
     """
     from .cache import TokenFactsCache
 
@@ -504,20 +482,18 @@ def build_transmuter_arcs(
     A transmuter holds a reserve of one token and mints the other, so it is a
     wrapper with a real floor under it -- gnosis converts USDC.e to USDC at
     exactly 1:1 for as long as its 10.04M USDC lasts.  Routing that hop through
-    pools instead cost 55 bp on a $100,000 trade, which is the whole of our gap
-    to curve_solver on that pair.
+    pools instead cost 55 bp on a $100,000 trade.
 
-    Not a merge, for the same reason a vault is not: a merge asserts the exit
-    is open and unbounded, and this one is bounded by a balance anyone can
-    read.  So: `a = 1`, `B = 0`, and a cap from the adapter's own holdings.
+    Not a merge, for the same reason a vault is not: a merge asserts the exit is
+    open and unbounded, and this one is bounded by a balance anyone can read.
+    So: `a = 1`, `B = 0`, and a cap from the adapter's own holdings.
 
     **Quoted as a wrap, which is exactly right and not yet executable.**  The
-    deployed quoter answers `WRAP_NATIVE` and `UNWRAP_NATIVE` with `dx`
-    unchanged and no call, which is what a 1:1 conversion *is*, so the verified
-    number is correct today.  An executor would need a kind of its own --
-    the adapter takes `deposit(uint256)`, not WETH's payable `deposit()` --
-    and that is a contract change, so the adapter address rides on the leg's
-    target and note until there is one.
+    deployed quoter answers `WRAP_NATIVE` and `UNWRAP_NATIVE` with `dx` unchanged
+    and no call, which is what a 1:1 conversion *is*, so the verified number is
+    correct today.  An executor would need a kind of its own -- the adapter takes
+    `deposit(uint256)`, not WETH's payable `deposit()` -- so the adapter address
+    rides on the leg's target and note until there is one.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
@@ -562,14 +538,12 @@ def build_transmuter_arcs(
         ):
             held_out, mints_out, allowance = side[token_out]
             held_in = side[token_in][0]
-            # Which of the three the cap comes from is a real difference, so
-            # it is asked rather than inferred from a zero balance.  Gnosis's
-            # USDCTransmuter *mints* USDC.e against USDC deposited -- it holds
-            # no USDC.e at all -- and burns USDC.e to pay USDC back out of a
-            # reserve.  Reading the empty side as "no capacity" and falling
-            # back on the opposite reserve understated that direction sevenfold
-            # (10.3M against a 77.5M mint allowance); reading it as unbounded
-            # would invent a route the moment Circle revoked the allowance.
+            # Which of the three the cap comes from is a real difference, so it
+            # is asked rather than inferred from a zero balance.  Gnosis's
+            # USDCTransmuter *mints* USDC.e against USDC deposited and holds none
+            # of it.  Reading the empty side as "no capacity" understated that
+            # direction sevenfold; reading it as unbounded would invent a route
+            # the moment Circle revoked the allowance.
             if mints_out and allowance:
                 reserve, decimals = allowance, nodes.decimals(token_out)
             elif held_out:
@@ -604,23 +578,21 @@ def build_stake_arcs(
 ) -> list[PoolArc]:
     """One-way instant conversions, as capped linear arcs.
 
-    A merge is bidirectional by definition -- one node, zero resistance both
-    ways -- so minting cannot be one.  Lido pays 1 stETH per ETH instantly but
+    A merge is bidirectional by definition -- one node, zero resistance both ways
+    -- so minting cannot be one.  Lido pays 1 stETH per ETH instantly but
     withdrawal is a queue; sUSDe mints on demand but redemption has a seven-day
     cooldown; pufETH the same with a queue.  Merging any of them would let the
     router unstake for free and emit routes that cannot execute.
 
     They are exactly the §2.3 clamped-arc shape instead: `a` = the mint rate,
-    `B = 0` (genuinely linear, not a chord approximation), and a finite cap.
-    The cap is not decoration -- an uncapped linear arc with `eps < 0` gives
-    unbounded flow (§2.3 rule 2), and `eps < 0` is precisely what happens when
-    the token trades above NAV, which is when minting is attractive.
+    `B = 0` (genuinely linear, not a chord approximation), and a finite cap.  The
+    cap is not decoration -- an uncapped linear arc with `eps < 0` gives unbounded
+    flow (§2.3 rule 2), and `eps < 0` is precisely what happens when the token
+    trades above NAV, which is when minting is attractive.
 
-    Measured on the ETH/stETH pool at block 25,734,769: the pool beats minting
-    by 0.7 bp at 1 ETH and 0.2 bp at 1,000, then loses by 2.1 bp at 5,000,
-    48.5 bp at 20,000 and 7,803 bp at 100,000.  Minting is a hard floor at
-    exactly 1:1, and it binds at the sizes where the quadratic model is least
-    trustworthy.
+    Minting is a hard floor at exactly 1:1, and it binds at the sizes where the
+    quadratic model is least trustworthy: measured against the ETH/stETH pool, the
+    pool wins below ~1,000 ETH and loses by 48.5 bp at 20,000.
 
     `convex_flag` stays False: these arcs are exactly linear, so §5.5's
     certificate is still valid over them.  `clamped` is True because the cap
@@ -686,8 +658,7 @@ def build_stake_arcs(
         # Dividing by the vault's unit is only right when the two agree, which
         # every hand-listed vault happened to do and no discovered one need:
         # ynUSDx is 18-decimal shares over 6-decimal USDC, and read that way it
-        # priced at 917,882,555,091 shares per USDC, which the solver reads as
-        # free money.
+        # priced at 917,882,555,091 shares per USDC -- free money, to a solver.
         rate = rate_ans.uint() / 10 ** nodes.decimals(asset)  # assets per share
         if rate <= 0:
             continue
@@ -727,27 +698,26 @@ def build_lending_arcs(
 ) -> list[PoolArc]:
     """Leaving a lending wrapper, where the protocol still allows it.
 
-    Curve's lending pools trade wrapped tokens -- cDAI against cUSDC -- and the
+    Curve's lending pools trade wrapped tokens -- cDAI against cUSDC -- with the
     underlying only reachable through `exchange_underlying`, which on both
-    surviving deployments reverts: Compound V2 answers "mint is paused" and
-    Aave V2's reserves are frozen.  Doing the conversion *outside* the pool is
-    the same trade in three steps, and the step that fails is the deposit, not
-    the withdrawal.
+    surviving deployments reverts: Compound V2 answers "mint is paused" and Aave
+    V2's reserves are frozen.  Doing the conversion *outside* the pool is the same
+    trade in three steps, and the step that fails is the deposit, not the
+    withdrawal.
 
     So a redemption is its own arc.  That makes `USDT -> cDAI -> DAI` routable
-    through a pool whose own `exchange_underlying` cannot run, and it is why
-    these are arcs rather than node merges: a merge is symmetric and would
-    claim the mint direction too.
+    through a pool whose own `exchange_underlying` cannot run, and it is why these
+    are arcs rather than node merges: a merge is symmetric and would claim the
+    mint direction too.
 
     Linear, like the mint arcs above -- `underlying = cTokens * rate` with the
     rate carrying the decimal difference -- so `B = 0` and the §5.5 certificate
-    survives them.  The cap is the market's own cash: redemption pays out of
-    it, and an uncapped linear arc with `eps < 0` gives unbounded flow (§2.3
-    rule 2).
+    survives them.  The cap is the market's own cash: redemption pays out of it,
+    and an uncapped linear arc with `eps < 0` gives unbounded flow (§2.3 rule 2).
 
-    `facts` is the committed capability table.  A direction absent from it is
-    not built, which is how a paused mint stays out of the graph without a
-    blacklist and how it would return on its own if the protocol reopened.
+    `facts` is the committed capability table.  A direction absent from it is not
+    built, which is how a paused mint stays out of the graph without a blacklist
+    and how it would return on its own if the protocol reopened.
     """
     wrappers = getattr(facts, "wrappers", {}) or {}
     if not wrappers:
