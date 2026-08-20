@@ -1,33 +1,26 @@
 """A quoter that computes stableswap probes instead of asking for them.
 
-Every derivative in this router is measured, which is the right default: a
-pool's behaviour is a property of its deployed code, and reading it is the only
-way to be sure.  But for stableswap we can do better than measure -- the
-invariant is known, the parameters are readable, and `core/stableswap.py`
-reproduces `get_dy` to the wei.  Computing it is then both exact at any size
-and free, which matters twice over:
-
-* the quadratic stops being asked to describe a curve at 80% of a reserve,
-  which is where it produced a candidate returning 0.3% of the input;
-* the probes for those pools stop being sent at all, and the probe batch is
-  the router's dominant cost.
+Every derivative in this router is measured, which is the right default: a pool's
+behaviour is a property of its deployed code.  But for stableswap the invariant
+is known, the parameters are readable, and `core/stableswap.py` reproduces
+`get_dy` to the wei.  Computing it is then both exact at any size and free, which
+matters twice over: the quadratic stops being asked to describe a curve at 80% of
+a reserve, and the probes for those pools stop being sent at all.
 
 Everything else -- CryptoSwap, LLAMMA, wrappers, any pool whose parameters did
 not reproduce its own quote -- goes to the wire exactly as before.  This is a
 front for `QuoterClient`, not a replacement.
 
 `quote_routes` is intercepted too, but only for a route whose *every* leg is a
-pool the gate admitted.  That is a narrower claim than it looks: the gate's
-whole job is to establish that this arithmetic and the pool's own `get_dy`
-return the same integer, so executing such a route is a round trip spent
-confirming what is already known.  §7's "the final answer must come from the
-chain" is satisfied where it binds -- the transaction carries a minimum-out and
-the chain adjudicates it at submission, which is the only verification that
-survives contact with a moving block anyway.
+pool the gate admitted.  That is narrower than it looks: the gate's whole job is
+to establish that this arithmetic and the pool's own `get_dy` return the same
+integer.  §7's "the final answer must come from the chain" is satisfied where it
+binds -- the transaction carries a minimum-out and the chain adjudicates it at
+submission.
 
 A route with one leg this cannot serve goes to the chain whole.  Half an answer
-from a model and half from execution would be worse than either, because
-nothing downstream could tell which half it was reading.
+from a model and half from execution would be worse than either, because nothing
+downstream could tell which half it was reading.
 """
 
 from __future__ import annotations
@@ -66,17 +59,14 @@ class _Withdraw:
 class _Deposit:
     """A single-sided deposit: `i` is the coin paid in, `dx` the amount.
 
-    Priced by what `add_liquidity` mints, **not** by `calc_token_amount`.
-    The getter is fee-free on the legacy pools by its own admission -- its
-    docstring says it is "needed to prevent front-running, not for precise
-    calculations" -- so quoting a deposit with it promises a mint the
-    deposit does not pay.  The quoter contract has no choice but to call the
-    getter; here there is a choice, and the executed number is the right one
-    to route on.
+    Priced by what `add_liquidity` mints, **not** by `calc_token_amount`.  The
+    getter is fee-free on the legacy pools by its own admission, so quoting a
+    deposit with it promises a mint the deposit does not pay.  The quoter contract
+    has no choice but to call the getter; here there is a choice.
 
-    This is deliberately a disagreement with the chain-delegated path, which
-    still gets the getter's answer for a pool with no LP model.  The two are
-    not equally right.
+    So this deliberately disagrees with the chain-delegated path, which still gets
+    the getter's answer for a pool with no LP model.  The two are not equally
+    right.
     """
 
     __slots__ = ("lp",)
@@ -118,13 +108,11 @@ def _price(model, i: int, j: int, dx: int) -> int:
     """`get_dy`, through the model's float path when it has one.
 
     The integer arithmetic is what admits a pool -- `stable_params` compares it
-    against the chain wei for wei, and a wrong rate shows up as a one-wei
-    disagreement.  It is not what a quote needs.  Pricing runs thousands of
-    times per route (2,168 `d` and 2,189 `solve_y` in one warm quote) and is
-    ranking candidates whose differences are basis points, while the float form
-    was measured on 263 mainnet stableswaps to be out by at most 5.4e-4 bp.
-
-    A model without a fast path simply answers in integers.
+    against the chain wei for wei -- but it is not what a quote needs.  Pricing
+    runs thousands of times per route and is ranking candidates whose differences
+    are basis points, while the float form was measured on 263 mainnet stableswaps
+    to be out by at most 5.4e-4 bp.  A model without a fast path answers in
+    integers.
     """
     fast = getattr(model, "get_dy_fast", None)
     return fast(i, j, dx) if fast is not None else model.get_dy(i, j, dx)
@@ -150,10 +138,10 @@ class ExactQuoterClient:
         #: Deposits and withdrawals, for pools whose swap model was admitted
         #: and whose LP arithmetic then reproduced its own answers too.
         self.lp = lp
-        #: Cryptoswap withdrawals, same admission rule as `lp`.  Separate
-        #: because the arithmetic is a different invariant, and because a
-        #: cryptoswap pool has no deposit model -- its own `calc_token_amount`
-        #: already charges what `add_liquidity` charges.
+        #: Cryptoswap withdrawals, same admission rule as `lp`.  Separate because
+        #: the arithmetic is a different invariant, and because a cryptoswap pool
+        #: has no deposit model -- its own `calc_token_amount` already charges
+        #: what `add_liquidity` charges.
         self.crypto_lp = crypto_lp
         self.enabled = enabled
         #: `(pool, kind, i, j) -> model`, cleared whenever the models are
@@ -172,14 +160,13 @@ class ExactQuoterClient:
     def refresh_at(self, block: int) -> int:
         """Rebuild the models if the chain moved out from under them.
 
-        Every model freezes the storage it was built from, so it is only valid
-        at that block -- correct today because the transport pins one block for
-        the life of a process, and wrong the moment a live provider is handed
-        in instead.  `pipeline.route` calls this whenever it sees the block
-        move; it is a no-op when nothing has.
+        Every model freezes the storage it was built from, so it is only valid at
+        that block -- correct today because the transport pins one block for the
+        life of a process, and wrong the moment a live provider is handed in
+        instead.  `pipeline.route` calls this whenever it sees the block move.
 
-        A rebuild that raises leaves the previous models in place and says so
-        by re-raising: quoting the wrong block is worse than not quoting.
+        A rebuild that raises leaves the previous models in place and re-raises:
+        quoting the wrong block is worse than not quoting.
         """
         if not block or block == self.models_block or self._rebuild is None:
             return 0
@@ -211,10 +198,10 @@ class ExactQuoterClient:
     def probe(self, probes):
         """Compute the stableswap probes; send the rest.
 
-        Order is preserved by filling the computed slots in place and asking
-        the inner client only for the holes, so a caller cannot tell which
-        answers came from where -- which is the point, since everything
-        downstream is entitled to assume one consistent source.
+        Order is preserved by filling the computed slots in place and asking the
+        inner client only for the holes, so a caller cannot tell which answers
+        came from where -- which is the point, since everything downstream is
+        entitled to assume one consistent source.
         """
         if not self.enabled or not self.exact:
             self.stats.delegated += len(probes)
@@ -275,11 +262,9 @@ class ExactQuoterClient:
         """The model that can answer for this pool and direction, if any.
 
         Memoised.  The answer is a function of `(pool, kind, i, j)` and the
-        models, which only change at `refresh_at`, but finding it walks a
-        chain of kind tests and dict lookups and allocates a fresh
-        `_Withdraw`/`_Deposit` wrapper each time.  Measured on a warm quote,
-        `_price` cost 8.1 us a call against 1.8 us of arithmetic underneath it,
-        over 2,909 calls -- the lookup was most of the price of pricing.
+        models, which only change at `refresh_at`, but finding it walks a chain of
+        kind tests and allocates a fresh wrapper each time -- measured, the lookup
+        was most of the price of pricing.
         """
         key = (pool, kind, i, j)
         try:
@@ -343,18 +328,14 @@ class ExactQuoterClient:
     def quote_routes(self, routes, amounts_in, dst_slots):
         """Walk the routes we can evaluate; send the rest to the chain.
 
-        Verifying a route used to mean executing it, which is why the local EVM
-        warms storage for every pool in the universe.  For a pool admitted by
-        the wei-exact gate that is a round trip to be told what the arithmetic
-        here already knows, so those routes are walked with `core/walk.py` --
-        the same accumulator the contract runs, so the two agree by
-        construction rather than by luck.
+        For a pool admitted by the wei-exact gate, executing a route is a round
+        trip to be told what the arithmetic here already knows, so those routes
+        are walked with `core/walk.py` -- the same accumulator the contract runs,
+        so the two agree by construction rather than by luck.
 
-        A route with a single leg this cannot serve -- a wrapper, an LP
-        deposit, a pool still being probed -- goes to the chain whole.  Mixing
-        the two inside one route would be worse than either: half the answer
-        would come from a model and half from execution, and nothing downstream
-        could tell which.
+        A route with a single leg this cannot serve -- a wrapper, an LP deposit, a
+        pool still being probed -- goes to the chain whole.  Mixing the two inside
+        one route would be worse than either.
         """
         if not self.enabled:
             return self.client.quote_routes(routes, amounts_in, dst_slots)
@@ -370,10 +351,10 @@ class ExactQuoterClient:
                 if reused:
                     # A route that enters a pool twice must be walked here or
                     # dropped.  The chain cannot price it: `quote_routes` is
-                    # static calls, so its second leg reads the pool before
-                    # the first one touched it and answers too well.  Sending
-                    # it would turn "we cannot price this" into a number that
-                    # beats every honest candidate.
+                    # static calls, so its second leg reads the pool before the
+                    # first one touched it and answers too well -- turning "we
+                    # cannot price this" into a number that beats every honest
+                    # candidate.
                     out[k] = 0
                 else:
                     holes.append(k)
@@ -406,12 +387,11 @@ class ExactQuoterClient:
     def reentrant_pools(self) -> frozenset:
         """Pools whose state a second leg can be priced against.
 
-        Stableswap only, and only where `admin_fee` was readable: `D` comes
-        from the balances there, so the pool after a trade is `exchange`'s
-        business and nothing is stored that we would have to guess.  A
-        cryptoswap keeps `D` and `price_scale` in storage and moves both in
-        `tweak_price` on a real exchange, so advancing one by adjusting
-        balances would be wrong in a way no gate here would catch.
+        Stableswap only, and only where `admin_fee` was readable: `D` comes from
+        the balances there, so the pool after a trade is `exchange`'s business and
+        nothing is stored that we would have to guess.  A cryptoswap keeps `D` and
+        `price_scale` in storage and moves both in `tweak_price`, so advancing one
+        by adjusting balances would be wrong in a way no gate here would catch.
         """
         got = self._reentrant
         if got is None:
@@ -435,16 +415,14 @@ class ExactQuoterClient:
     def _stateful_leg(self, legs):
         """A `quote_leg` that carries each reused pool forward as it goes.
 
-        `walk_route` calls this in leg order, which is the order an executor
-        would run them in, so advancing as we go is the same arithmetic the
-        chain would perform.  Only pools that actually appear twice are
-        advanced -- the rest keep the fast float path, since a route that
-        touches every pool once has nothing to carry.
+        `walk_route` calls this in leg order, which is the order an executor would
+        run them in, so advancing as we go is the same arithmetic the chain would
+        perform.  Only pools that actually appear twice are advanced.
 
         The advanced leg is priced by `exchange` rather than `_price`, so the
-        number returned and the state left behind come from one computation.
-        That costs the integer path on those legs, which is the right trade:
-        they are the legs whose answer depends on getting the state right.
+        number returned and the state left behind come from one computation.  That
+        costs the integer path on those legs, which is the right trade: they are
+        the legs whose answer depends on getting the state right.
         """
         remaining: dict[str, int] = {}
         for leg in legs:
@@ -459,12 +437,11 @@ class ExactQuoterClient:
         def carried(key: str):
             """`(pool, lp)` as this pool now stands, or `(None, base)`.
 
-            One place decides what "now" means, because two disagreed.  The
-            supply and the balances move on different legs -- a deposit mints
-            and moves both, a swap moves only the balances -- so reading each
-            from wherever it happened to be lying around gave a withdrawal
-            the *pre-deposit* supply to burn against, and a deposit the
-            *pre-swap* balances to price into.
+            One place decides what "now" means, because two disagreed.  The supply
+            and the balances move on different legs -- a deposit mints and moves
+            both, a swap moves only the balances -- so reading each from wherever
+            it was lying around gave a withdrawal the *pre-deposit* supply to burn
+            against, and a deposit the *pre-swap* balances to price into.
             """
             base = self.lp.get(key) if self.lp is not None else None
             moved = state.get(key)
