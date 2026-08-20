@@ -2,35 +2,33 @@
 
 Admitting a pool is expensive and the answer barely changes.  The gate quotes
 each candidate six times and compares against arithmetic, which is 2,300 calls
-across the universe -- and what it establishes is that a pool's *code*
-implements the maths we think it does.  Curve pools are not upgradeable, so
-that verdict is good until either side of the comparison changes.
+across the universe -- and what it establishes is that a pool's *code* implements
+the maths we think it does.  Curve pools are not upgradeable, so that verdict is
+good until either side of the comparison changes.
 
-What it saves is the gate and nothing else.  It does *not* let the local EVM
-skip those pools' storage: they are computed from that same storage, so
-skipping the sweep relocates the read onto the wire rather than removing it --
-measured, and it turned startup into minutes.  See `tests/test_startup_cost.py`.
+What it saves is the gate and nothing else.  It does *not* let the local EVM skip
+those pools' storage: they are computed from that same storage, so skipping the
+sweep relocates the read onto the wire rather than removing it -- measured, and
+it turned startup into minutes.  See `tests/test_startup_cost.py`.
 
 **What voids a verdict.**  Anything that changes either side of the comparison:
 
 * the maths on our side -- hence `fingerprint`, over the source of every module
   that participates.  Edit `core/stableswap.py` and every stableswap verdict on
-  every chain is discarded, which is the behaviour you want the day a rounding
-  fix changes one pool in a thousand.
+  every chain is discarded.
 * the parameters on the pool's side.  These are *not* cached: `A`, `gamma`, the
   fee terms, the ramp state and the balances are re-read every run, and a pool
   mid-ramp is refused there as before.  The verdict records which invariant and
   which variant matched, never the numbers.
 
 **What it does not protect against** is a pool whose behaviour changes without
-its code or its readable parameters changing -- an external fee policy, say.
-Those are excluded at build time rather than trusted here: a twocrypto pool
-with a `POLICY` contract is refused before the gate, because its fee can vary
-with trade size and one probe would agree at the size it was taken.
+its code or its readable parameters changing.  Those are excluded at build time
+rather than trusted here: a twocrypto pool with a `POLICY` contract is refused
+before the gate, because its fee can vary with trade size and one probe would
+agree at the size it was taken.
 
-`trust` takes a `resample` set so a caller can force pools back through the
-gate.  Nothing passes one today; it is there for a scheduled audit, and saying
-so is better than implying a check that does not run.
+`trust` takes a `resample` set so a caller can force pools back through the gate.
+Nothing passes one today; it is there for a scheduled audit.
 """
 
 from __future__ import annotations
@@ -100,19 +98,15 @@ class ExactCache:
     #: Pools that failed, keyed by the balances they failed at.
     #:
     #: The reason is not written -- that is what churned the file -- but the
-    #: *fact* is, because re-deriving it costs a probe per size per direction
-    #: on every run.  Once the verdicts are warm those probes are the entire
-    #: remaining gate: measured at 94 of 94, all of them on pools that will
-    #: never pass.
+    #: *fact* is, because re-deriving it costs a probe per size per direction on
+    #: every run.  Once the verdicts are warm those probes are the entire
+    #: remaining gate, and all of them are on pools that will never pass.
     #:
-    #: Keyed by balances because that is what makes forgetting automatic.  A
-    #: pool that answers nothing is empty or holds dust, and a pool in that
-    #: state does not trade, so its balances sit still and the record stays
-    #: valid without being refreshed.  The moment someone deposits, the key
-    #: stops matching and it is checked again -- which is exactly when the
-    #: answer might have changed.  A pool that merely disagreed is covered by
-    #: the same key for the same reason, and by the maths fingerprint above
-    #: for the other reason it might start passing.
+    #: Keyed by balances because that is what makes forgetting automatic.  A pool
+    #: that answers nothing is empty or holds dust, and a pool in that state does
+    #: not trade, so its balances sit still and the record stays valid without
+    #: being refreshed.  The moment someone deposits, the key stops matching and
+    #: it is checked again -- which is exactly when the answer might have changed.
     unquotable: dict[str, str] = field(default_factory=dict)
     #: Refusals learned *this run*, held back until `save` can see how many
     #: there were.  See `MASS_REFUSAL_SHARE`.
@@ -147,22 +141,19 @@ class ExactCache:
     def save(self) -> None:
         """Persist, unless this run looks like an outage rather than a survey.
 
-        A refusal is cached so the next run does not re-probe a pool that
-        holds dust -- worth real time, since it is a probe per size per
-        direction.  But the same code path records a pool the endpoint simply
-        declined to answer for, and *that* is worth nothing and costs a great
-        deal: measured, a rebuild that lost 58 of 266 stableswap models to one
-        bad batch made every later quote send 6 routes to the chain instead of
-        0, which fired a 182 ms confirmation and took the routing stages from
-        202 ms to 369 ms.  The entries lapse when balances move, so it heals --
-        slowly, while every quote pays.
+        A refusal is cached so the next run does not re-probe a pool that holds
+        dust.  But the same code path records a pool the endpoint simply declined
+        to answer for, and *that* is worth nothing and costs a great deal:
+        measured, a rebuild that lost 58 of 266 stableswap models to one bad batch
+        made every later quote send 6 routes to the chain instead of 0, taking the
+        routing stages from 202 ms to 369 ms.  The entries lapse when balances
+        move, so it heals -- slowly, while every quote pays.
 
-        Mass failure is the signal.  Pools do not empty in concert; endpoints
-        fail in batches.  So a run that refuses more than a share of everything
-        it holds a verdict on is describing the endpoint, and its refusals are
-        dropped rather than written.  `warmcache` already refuses to cache its
-        own failure this way ("learned no slots; not marking these pools as
-        known"); this is the same rule for the same reason.
+        Mass failure is the signal.  Pools do not empty in concert; endpoints fail
+        in batches.  So a run that refuses more than a share of everything it
+        holds a verdict on is describing the endpoint, and its refusals are
+        dropped rather than written.  `warmcache` already refuses to cache its own
+        failure this way; this is the same rule for the same reason.
         """
         keep = dict(self.pending_unquotable)
         total = len(self.verdicts) + len(keep)

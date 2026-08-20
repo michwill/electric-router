@@ -5,19 +5,17 @@ whether the coins exist, whether the protocol beneath will take a deposit, or
 whether anyone paused anything -- so a quote can be a faithful reading of a
 fiction.  Three shapes of that, all live on mainnet today:
 
-* **Frozen reserves.**  Aave V2's pool quotes 9,996 USDC for 10k DAI and
-  reverts, because `exchange_underlying` has to deposit into a frozen reserve.
-* **Paused mint.**  Compound V2 answers "mint is paused" to the same move,
-  while `USDT->DAI` through the same family executes -- that direction only
-  *redeems* on the way out.
+* **Frozen reserves.**  Aave V2's pool quotes 9,996 USDC for 10k DAI and reverts,
+  because `exchange_underlying` has to deposit into a frozen reserve.
+* **Paused mint.**  Compound V2 answers "mint is paused" to the same move, while
+  `USDT->DAI` through the same family executes -- that direction only *redeems*.
 * **Retired tokens.**  sUSD/sUSDe quoted 6.5x and reverted with "sUSD retired".
   `check_reserves_are_real` catches that one from the balances; the other two
   leave no trace in state at all.
 
 None of it is visible without executing, and none of it changes between blocks,
-which is exactly the shape of a fact worth storing.  So this runs when the
-facts file is built and the router reads the answer -- no probing on the route
-path, where a slow node would be paying for it.
+which is the shape of a fact worth storing.  So this runs when the facts file is
+built and the router reads the answer.
 
 Deprecated protocols stop taking deposits long before they stop honouring
 withdrawals, so capability is recorded per direction.  That is what lets a
@@ -85,16 +83,15 @@ def refused_by_protocol(exc: Exception) -> bool:
     """Did the contract say no, or did the harness fail to ask?
 
     revm reports the two differently and the difference is the whole verdict.
-    `Revert {...}` and `Halt {...}` come from executing the contract -- that is
-    a refusal.  `Transaction(...)` is rejected before execution begins, and the
-    ones seen here are entirely about the caller: `RejectCallerWithCode` is
-    EIP-3607 refusing to let an account with code send a transaction, which is
-    what impersonating a pool asks for, and `LackOfFundForMaxFee` is an unfunded
-    caller.  Neither says anything about the token.
+    `Revert {...}` and `Halt {...}` come from executing the contract -- that is a
+    refusal.  `Transaction(...)` is rejected before execution begins, and the ones
+    seen here are entirely about the caller: `RejectCallerWithCode` is EIP-3607
+    refusing an account with code, which is what impersonating a pool asks for,
+    and `LackOfFundForMaxFee` is an unfunded caller.  Neither says anything about
+    the token.
 
     Recording those as refusals is how thirteen vaults came to be marked
-    unredeemable in one run -- and `redeem: false` is what gates a merge, so
-    that mistake is expensive in exactly one direction.
+    unredeemable in one run -- and `redeem: false` is what gates a merge.
     """
     # boa raises `BoaError` precisely when the contract call failed, and its
     # message is a formatted trace that contains the word "revert" nowhere.
@@ -164,16 +161,15 @@ def try_wrapper(evm, funder: Funder, *, token: str, underlying: str, family: str
         with contextlib.suppress(Exception):
             evm.revert(snapshot)
 
-    # Redemption is tested on shares that already exist.  Minting some first
-    # and redeeming those would be a different question with the same shape:
-    # a vault with a cooldown refuses a share minted a moment ago while
-    # honouring one an owner has held for a week, so fresh shares manufacture
-    # refusals that no real holder would meet.  A pool's reserves have been
-    # sitting there, which is exactly the position a router would redeem from.
+    # Redemption is tested on shares that already exist.  Minting some first and
+    # redeeming those would be a different question with the same shape: a vault
+    # with a cooldown refuses a share minted a moment ago while honouring one an
+    # owner has held for a week, so fresh shares manufacture refusals no real
+    # holder would meet.  A pool's reserves have been sitting there, which is
+    # exactly the position a router would redeem from.
     #
-    # No approval is needed to burn your own: ERC4626's `redeem` takes an owner
-    # and a cToken's burns the caller's balance, so becoming the holder is the
-    # whole trick.
+    # No approval is needed to burn your own, so becoming the holder is the whole
+    # trick.
     snapshot = evm.snapshot()
     try:
         caller, shares = "", 0
@@ -208,15 +204,14 @@ def try_wrapper(evm, funder: Funder, *, token: str, underlying: str, family: str
 def discover_wrappers(pools, client) -> list[tuple[str, str, str]]:
     """Every coin that wraps another token, found by asking rather than listing.
 
-    Mintability and redeemability are properties of a *token*, not of a pool or
-    a swap, and the asymmetry is everywhere once looked for: Compound's mint is
-    paused while redeem works, Aave's reserves are frozen, sUSDe mints on
-    demand and redeems on a seven-day cooldown, pufETH redeems through a queue,
-    sfrxUSD reports `maxDeposit == 0`.  E8 found thirty-one linear ERC4626
-    tokens and concluded that linearity says nothing about whether you can get
-    back out -- which is why merging them is gated on a hand-written allowlist.
+    Mintability and redeemability are properties of a *token*, not of a pool or a
+    swap, and the asymmetry is everywhere once looked for: Compound's mint is
+    paused while redeem works, Aave's reserves are frozen, sUSDe mints on demand
+    and redeems on a seven-day cooldown, pufETH redeems through a queue, sfrxUSD
+    reports `maxDeposit == 0`.  E8 found thirty-one linear ERC4626 tokens and
+    concluded that linearity says nothing about whether you can get back out.
 
-    Executing both directions answers what that allowlist is guessing at, so
+    Executing both directions answers what the merge allowlist is guessing at, so
     the discovery has to be universal: every coin of every pool at every index,
     not a list someone maintains.
 
@@ -254,9 +249,8 @@ def discover_wrappers(pools, client) -> list[tuple[str, str, str]]:
 # revm refuses a caller that has code (EIP-3607), and every holder of these
 # tokens is a pool, so borrowing from one is impossible there -- which left 19
 # redemptions untestable.  boa's fork env has no such rule: `prank` makes any
-# address the sender, including a contract.  It is slower than revm, which is
-# why quoting does not use it, but this runs once per facts build over a few
-# dozen tokens and buys the verdicts revm cannot reach.
+# address the sender, including a contract.  Slower than revm, which is why
+# quoting does not use it, but this runs once per facts build.
 
 MINIMAL_ERC20 = """[
   {"name":"balanceOf","type":"function","stateMutability":"view",

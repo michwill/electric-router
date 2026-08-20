@@ -41,24 +41,16 @@ DEFAULT_BATCH = 500
 # "batch limit 100 exceeded (can increase by --rpc.batch.limit)" -- Erigon, and
 # geth phrases it the same way.  Parsed so the ceiling is learned once.
 _BATCH_LIMIT = re.compile(r"batch limit (\d+) exceeded")
-# Concurrent HTTP streams for independent calls.  One stream does not fill a
-# slow uplink: three 600-probe chunks measured 3,979 ms serial, 2,334 ms at
-# once.  Kept modest so a public endpoint does not read it as abuse.
+# Concurrent HTTP streams for independent calls.  One stream does not fill a slow
+# uplink: three 600-probe chunks measured 3,979 ms serial, 2,334 ms at once.
+# Kept modest so a public endpoint does not read it as abuse.
 #
-# Eight rather than four because the win is consistency, not throughput.  Six
-# runs of `prepare` (~5,600 probes in 600-probe chunks) measured, in ms:
-#
-#     streams    min   median   spread
-#           2  1,498    1,666    1,444
-#           4    990    1,262      707
-#           8  1,059    1,156      499
-#          16    972    1,005      437
-#
-# The *minimum* barely moves past four -- the node is execution-bound on a
-# batch that large, so more sockets buy no extra work done.  What they buy is a
-# tighter distribution.  Sixteen is better still and is what `local_evm` uses
-# for its own sweep of thousands of tiny reads, but that is a burst against a
-# node someone chose; this default is what every endpoint sees.
+# Eight rather than four because the win is consistency, not throughput.  Over
+# six runs of `prepare`, the *minimum* barely moves past four -- the node is
+# execution-bound on a batch that large -- while the spread halves.  Sixteen is
+# better still and is what `local_evm` uses for its own sweep of thousands of
+# tiny reads, but that is a burst against a node someone chose; this default is
+# what every endpoint sees.
 DEFAULT_STREAMS = 8
 MAX_BATCH_BYTES = 16 << 20
 
@@ -243,18 +235,17 @@ class JsonRpcTransport:
             params.append(overrides)
         return _to_bytes(self.fetch("eth_call", params))
 
-    #: JSON-RPC batch ceiling.  Erigon rejects the *whole* batch when it is
-    #: over the limit rather than truncating it, so an unchunked call returns
-    #: nothing at all -- and `_answer` turns "nothing" into a failed answer,
-    #: which every caller is entitled to read as "this contract does not
-    #: implement that method".
+    #: JSON-RPC batch ceiling.  Erigon rejects the *whole* batch when it is over
+    #: the limit rather than truncating it, so an unchunked call returns nothing
+    #: at all -- and `_answer` turns "nothing" into a failed answer, which every
+    #: caller is entitled to read as "this contract does not implement that
+    #: method".
     #
-    # Measured against this node on 378 `stored_rates()` calls: 378 in one
-    # batch yielded 0 usable answers, 200 yielded 0, 100 yielded 61, and the
-    # same 378 chunked by 50 yielded the correct 197.  It is also *flaky* --
-    # the same 378-call batch answered on one run and not the next -- so the
-    # symptom was rate-bearing stableswap pools silently falling back to
-    # decimals-only rates and being rejected as if their maths were wrong.
+    # Measured on 378 `stored_rates()` calls: 378 in one batch yielded 0 usable
+    # answers, 100 yielded 61, and the same 378 chunked by 50 yielded the correct
+    # 197.  It is also *flaky*, so the symptom was rate-bearing stableswap pools
+    # silently falling back to decimals-only rates and being rejected as if their
+    # maths were wrong.
     BATCH_LIMIT = 50
 
     def call_many(self, calls: list[Call], *, overrides: dict | None = None) -> list[Answer]:
@@ -338,9 +329,8 @@ class JsonRpcTransport:
 
         `concurrent` issues the chunks on separate connections.  It matters
         whenever the node caps a batch well below the work in hand: a storage
-        sweep of 4,071 slots is 42 chunks at the usual 100-per-batch ceiling,
-        and in sequence those round trips dominate everything -- 7.5 s to read
-        state that the quoter can *simulate* 5,600 swaps against in 4 s.
+        sweep of 4,071 slots is 42 chunks at the usual ceiling, and in sequence
+        those round trips dominate everything.
         """
         out: list[Any] = [None] * len(payloads)
         spans = list(_chunks(payloads, self.batch_size))
@@ -411,12 +401,11 @@ class JsonRpcTransport:
         a node may cap by payload size or by method, and a ceiling learned from
         `eth_blockNumber` would not survive contact with a storage sweep.
 
-        Remembered between runs, because measuring it costs 1.2 s of a cold
-        start and the answer is a property of the endpoint rather than of the
-        block.  A remembered ceiling that is too high is not dangerous: the
-        batch is rejected, `_learn_batch_limit` reads the real cap out of the
-        error and lowers it, and the entry is dropped so the next run measures
-        again.  One that is too low only costs an extra round trip.
+        Remembered between runs, because measuring it costs 1.2 s of a cold start
+        and the answer is a property of the endpoint rather than of the block.  A
+        remembered ceiling that is too high is not dangerous: the batch is
+        rejected, `_learn_batch_limit` reads the real cap out of the error and
+        lowers it, and the entry is dropped so the next run measures again.
         """
         if self._batch_ceiling is not None:
             return self._batch_ceiling
