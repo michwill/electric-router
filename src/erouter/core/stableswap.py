@@ -1,29 +1,26 @@
 """Stableswap, evaluated exactly from its own parameters (§11.3).
 
-The quadratic in `calibrate.py` is the right model for choosing *which* pools
-and *what split* -- both are first-order-flat at the optimum, so an
-`O(theta^2)` curve error does not move them.  It is the wrong model for what a
-pool pays at a size approaching its own reserves, and sampling closer does not
-rescue it: a secant fitted at trade size still describes the chord of something
-that is not a parabola.  Measured on crvUSD -> sDOLA at $2M, the candidate
-family's own cheapest path returned 0.3% of the expected output.
+The quadratic in `calibrate.py` is the right model for choosing *which* pools and
+*what split* -- both are first-order-flat at the optimum, so an `O(theta^2)` curve
+error does not move them.  It is the wrong model for what a pool pays at a size
+approaching its own reserves, and sampling closer does not rescue it: a secant
+fitted at trade size still describes the chord of something that is not a
+parabola.
 
 So read `A`, the fee, the balances and the rates and evaluate the pool's own
-invariant.  Exact at any size, no probes once the parameters are in hand.
+invariant.  Exact at any size, no probes once the parameters are in hand.  Third
+way of knowing a curve here: `calibrate.py` fits two derivatives for the convex
+program, `curves.py` interpolates `x/f(x)` through probes for any pool at all,
+and this is the pool's own arithmetic -- exact, but stableswap only.
 
-Third way of knowing a curve here: `calibrate.py` fits two derivatives for the
-convex program, `curves.py` interpolates `x/f(x)` through probes for any pool
-at all, and this is the pool's own arithmetic -- exact, but stableswap only.
-
-Two dialects, and the difference is not cosmetic.  **legacy** stores `A`
-unscaled and takes the fee after converting to token units.  **ng** stores
+Two dialects, and the difference is not cosmetic.  **legacy** stores `A` unscaled
+and takes the fee after converting to token units.  **ng** stores
 `A * A_PRECISION`, takes the fee in `xp` units before converting, and scales it
 with how far off peg the balances are -- so a badly imbalanced pool charges
-several times its nominal fee, which is exactly the regime a large trade
-creates.
+several times its nominal fee, which is exactly the regime a large trade creates.
 
-Integer arithmetic with floor division throughout, because the point is to
-agree with the contracts to the wei.
+Integer arithmetic with floor division throughout, because the point is to agree
+with the contracts to the wei.
 """
 
 from __future__ import annotations
@@ -38,10 +35,9 @@ A_PRECISION = 100
 #: Newton's method in the contracts is capped at 255 and asserted to converge.
 MAX_ITER = 255
 
-#: Where the float iterations stop.  The integer ones stop at `|delta| <= 1`
-#: wei, which has no floating-point analogue; this is the relative equivalent,
-#: two orders inside double precision so the loop converges rather than
-#: chattering on the last bit.
+#: Where the float iterations stop.  The integer ones stop at `|delta| <= 1` wei,
+#: which has no floating-point analogue; this is the relative equivalent, two
+#: orders inside double precision so the loop converges rather than chattering.
 _FAST_TOL = 1e-14
 
 
@@ -53,13 +49,12 @@ def solve_y(amp: int, a_precision: int, xp: list[int], d: int,
             i: int, j: int, x: int) -> int:
     """The `j` balance restoring the invariant when `i` holds `x`.
 
-    Module level because two different pool families run exactly this
-    iteration.  `CurveStableSwapNG` is the obvious one; the other is
-    twocrypto-ng's `StableswapMath`, which the same factory deploys as an "FX
-    Swap" -- cryptoswap machinery (price scale, dynamic fee, EMA oracle) around
-    a stableswap invariant.  Its only difference is `A_MULTIPLIER = 10000`
-    where stableswap-ng uses `A_PRECISION = 100`, which is what `a_precision`
-    already parameterises, so the two share this rather than a copy of it.
+    Module level because two pool families run exactly this iteration:
+    `CurveStableSwapNG`, and twocrypto-ng's `StableswapMath`, which the same
+    factory deploys as an "FX Swap" -- cryptoswap machinery (price scale, dynamic
+    fee, EMA oracle) around a stableswap invariant.  Its only difference is
+    `A_MULTIPLIER = 10000` where stableswap-ng uses `A_PRECISION = 100`, which
+    `a_precision` already parameterises.
     """
     n = len(xp)
     ann = amp * n
@@ -91,15 +86,14 @@ def solve_y(amp: int, a_precision: int, xp: list[int], d: int,
 class StableSwap:
     """One pool's state, enough to evaluate `get_dy` exactly.
 
-    `rates` are the 1e18-scaled multipliers that take a raw balance into the
+    `rates` are the 1e18-scaled multipliers taking a raw balance into the
     common-precision `xp` space: `10**(36 - decimals)` for a legacy pool's
     `RATES`, `stored_rates()` for ng (which folds in an LST's exchange rate as
     well as its decimals).  Passing them explicitly means this module never has
     to know which of the two it is looking at.
 
     `amp` is whatever `A_precise()`/`A()` returned *together with* the matching
-    `a_precision`, so a caller reading either spelling can describe the pool
-    without converting and losing a digit.
+    `a_precision`, so either spelling describes the pool without losing a digit.
     """
 
     balances: tuple[int, ...]
@@ -112,32 +106,26 @@ class StableSwap:
     #: ng takes the fee in `xp` space; legacy takes it in token space.
     fee_on_xp: bool = True
     #: The share of the fee that leaves the pool for the DAO.  Only `exchange`
-    #: needs it -- `get_dy` is the trader's side and never sees it -- but the
-    #: pool keeps `fee - admin_fee` and that is the part which changes the next
-    #: quote, so a model that advanced its own state without it would drift.
+    #: needs it -- `get_dy` is the trader's side -- but the pool keeps
+    #: `fee - admin_fee` and that is the part which changes the next quote.
     #: `-1` means "not read", and `exchange` refuses rather than assuming zero:
     #: assuming zero leaves too much in the pool and flatters the second leg.
     admin_fee: int = -1
     #: Whether the pool rounds its output down by a wei.  The ng generation
-    #: computes `dy = xp[j] - y - 1`; the 2020 lending pools compute
-    #: `dy = xp[j] - y` and keep the wei.  It is one wei, and one wei is the
-    #: whole difference between a model that is admitted and one that is not.
+    #: computes `dy = xp[j] - y - 1`; the 2020 lending pools keep the wei.  One
+    #: wei is the whole difference between a model admitted and one that is not.
     subtract_one: bool = True
     #: Lazily filled by `xp` / `xp_float`.  Not part of the value: the pool is
     #: frozen at a block, so these are a function of it rather than more state.
-    #:
-    #: `init=False` is what keeps them safe.  With it, `dataclasses.replace`
+    #: `init=False` is what keeps them safe -- with it, `dataclasses.replace`
     #: leaves them at `None` on the copy; without it, replacing the balances
-    #: would carry the old `xp` across and quote the new pool with the old
-    #: reserves.  Nothing does that today, which is exactly why it is worth
-    #: closing now rather than discovering later.
+    #: would carry the old `xp` across and quote the new pool with old reserves.
     _xp: list[int] | None = field(default=None, init=False, compare=False, repr=False)
     _xpf: list[float] | None = field(default=None, init=False, compare=False,
                                      repr=False)
     #: The pool's own constants, as floats, so the quote path stops converting
-    #: them.  `rates` reach 1e30 and `amp` is read twice a call; every one of
-    #: those is a big-integer-to-double conversion at ~47 ns, and a quote makes
-    #: thousands.  See `_constants`.
+    #: them: `rates` reach 1e30, every conversion is a big-integer-to-double at
+    #: ~47 ns, and a quote makes thousands.  See `_constants`.
     _consts: tuple | None = field(default=None, init=False, compare=False,
                                   repr=False)
 
@@ -148,9 +136,8 @@ class StableSwap:
     def xp(self) -> list[int]:
         """Balances in the common-precision space.
 
-        Cached: the pool is frozen at a block, so this is a constant, and it
-        was being recomputed on every quote -- 1.14 us of integer rescaling
-        against 1.64 us for the invariant it feeds, over ~3,000 calls a route.
+        Cached: the pool is frozen at a block, so this is a constant, and it was
+        being recomputed on every one of ~3,000 calls a route.
         """
         got = self._xp
         if got is None:
@@ -163,8 +150,7 @@ class StableSwap:
         """`(amp, a_precision, rates, PRECISION / rates)`, all as floats.
 
         The quote path multiplies and divides by these on every call and they
-        never change: the pool is frozen at a block.  Converting `rates[j]`
-        from a 1e30 integer costs about what the division it feeds does.
+        never change: the pool is frozen at a block.
         """
         got = self._consts
         if got is None:
@@ -177,11 +163,9 @@ class StableSwap:
     def dynamic_fee_fast(self, xpi: float, xpj: float) -> float:
         """`dynamic_fee`, without squaring a 1e24 integer into a 1e48 one.
 
-        The integer form computes `(xpi + xpj) ** 2` and two products of the
-        same magnitude, which is 160-bit arithmetic on every quote.  In floats
-        the same expression is three multiplications; the fee it produces is
-        the same to a part in 1e12, which is a part in 1e12 of a four
-        basis-point fee.
+        The integer form is 160-bit arithmetic on every quote; in floats the same
+        expression is three multiplications, and the fee agrees to a part in 1e12
+        -- of a four basis-point fee.
         """
         multiplier = self.offpeg_fee_multiplier
         if multiplier <= FEE_DENOMINATOR:
@@ -246,10 +230,9 @@ class StableSwap:
         """The fee this pool charges at that imbalance (ng only).
 
         `4 xi xj / (xi + xj)^2` is 1 at peg and falls toward 0 as the two sides
-        diverge, so the fee rises from `fee` toward `offpeg_fee_multiplier`
-        times it.  A pool the trade has pushed off peg charges more for the
-        privilege, which is the term that matters exactly when the trade is
-        large enough to do the pushing.
+        diverge, so the fee rises from `fee` toward `offpeg_fee_multiplier` times
+        it -- the term that matters exactly when the trade is large enough to do
+        the pushing.
         """
         multiplier = self.offpeg_fee_multiplier
         if multiplier <= FEE_DENOMINATOR:
@@ -281,22 +264,21 @@ class StableSwap:
     def exchange(self, i: int, j: int, dx: int) -> tuple[int, "StableSwap"]:
         """`(dy, the pool after the trade)` -- what `exchange` would leave.
 
-        A view-only chained quoter cannot see its own earlier leg, which is
-        the whole reason a route may not touch a pool twice (decision 3).  It
-        is a limitation of *asking the chain*, not of the arithmetic: for a
-        pool the wei-exact gate admitted, the state after a trade is as
-        computable as the trade itself, and stableswap makes it easy because
-        `D` is derived from the balances rather than stored.
+        A view-only chained quoter cannot see its own earlier leg, which is why a
+        route may not touch a pool twice (decision 3).  That is a limitation of
+        *asking the chain*, not of the arithmetic: for a pool the wei-exact gate
+        admitted, the state after a trade is as computable as the trade itself,
+        and stableswap makes it easy because `D` is derived from the balances
+        rather than stored.
 
-        The update is the contract's own, and the admin fee is the part worth
-        being careful about:
+        The update is the contract's own:
 
             balances[i] = balances[i] + dx
             balances[j] = balances[j] - dy - dy_admin_fee
 
-        so the pool keeps the LP's share of the fee and loses the DAO's.  A
-        model that skipped `dy_admin_fee` would leave the pool richer than it
-        is and quote the next leg through it too well.
+        so the pool keeps the LP's share of the fee and loses the DAO's.  Skipping
+        `dy_admin_fee` would leave the pool richer than it is and quote the next
+        leg through it too well.
         """
         if self.admin_fee < 0:
             raise StableSwapError("admin_fee unknown; cannot advance state")
@@ -332,9 +314,8 @@ class StableSwap:
     def get_dy_fast(self, i: int, j: int, dx: int) -> int:
         """`get_dy`, priced in floating point.
 
-        Same algebra, same fee, same rates -- only the invariant iterations
-        move to `f64`.  See the note above `d_fast`: this is the path a quote
-        takes, the integer one is what admits the pool in the first place.
+        Same algebra, same fee, same rates -- only the invariant iterations move
+        to `f64`.  See the note above `d_fast`.
         """
         if dx <= 0:
             return 0
@@ -362,14 +343,12 @@ class StableSwap:
 # reproduces the chain exactly, and a wrong rate shows up as a one-wei
 # disagreement.  Keep it for that.
 #
-# But a quote calls this thousands of times -- 2,168 `d` and 2,189 `solve_y` in
-# one warm crvUSD->sDOLA -- and there the last wei buys nothing.  Measured
-# against the integer path on 1,052 (pool, size) samples over 263 mainnet
-# stableswaps, the float form is out by a median of 2e-9 bp and a worst case of
-# 5.4e-4 bp: below the tick of any token, far inside `STALE_TOL_BP`, and orders
-# of magnitude below the spread between the candidates it has to rank.  It runs
-# 2.5x faster in Python, and it ports to Rust as plain `f64` -- no u256, and
-# native in wasm.
+# But a quote calls this thousands of times, and there the last wei buys nothing.
+# Measured over 1,052 (pool, size) samples on 263 mainnet stableswaps, the float
+# form is out by a median of 2e-9 bp and a worst case of 5.4e-4 bp -- below the
+# tick of any token, far inside `STALE_TOL_BP`, and orders of magnitude below the
+# spread between the candidates it has to rank.  It runs 2.5x faster in Python,
+# and ports to Rust as plain `f64`: no u256, and native in wasm.
 #
 # So: integers decide whether a model may be used, floats price with it.
 
@@ -431,15 +410,13 @@ def solve_y_d(amp: int, a_precision: int, xp: list[int], d: int, i: int,
               n: int) -> int:
     """`get_y_D`: balance `i` when `D` is reduced to `d`, the others held.
 
-    A different question from `solve_y`, which asks what `i` becomes when
-    another balance changes at constant `D`.  Here `D` itself moves -- which is
-    what a single-sided deposit or withdrawal does -- and the same quadratic is
-    iterated with `c` and `b` built from the *target* `D`.
+    A different question from `solve_y`, which asks what `i` becomes when another
+    balance changes at constant `D`.  Here `D` itself moves -- which is what a
+    single-sided deposit or withdrawal does -- and the same quadratic is iterated
+    with `c` and `b` built from the *target* `D`.
 
-    Ported from the deployed 3pool
-    (`0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7`), generalised over
-    `A_PRECISION`: the pools that predate it have `a_precision == 1`, which
-    makes every scaling term below vanish exactly as in the original.
+    Generalised over `A_PRECISION`: the pools that predate it have
+    `a_precision == 1`, which makes every scaling term below vanish.
     """
     ann = amp * n
     c = d
@@ -467,9 +444,8 @@ def solve_y_d_fast(amp: float, a_precision: float, xp: list[float], d: float,
                    i: int, n: int) -> float:
     """`get_y_D`, in floating point.
 
-    Same quadratic as `solve_y_d`, same `c` and `b` built from the target `D`;
-    balances and `D` are dollars, so the `a_precision` scalings ride along
-    unchanged and nothing needs a 1e18.
+    Same quadratic, same `c` and `b` built from the target `D`; balances and `D`
+    are dollars, so the `a_precision` scalings ride along unchanged.
     """
     ann = amp * n
     c = d
@@ -543,23 +519,20 @@ class StableSwapLP:
     def add_liquidity(self, amounts: list[int]) -> tuple[int, "StableSwapLP"]:
         """`(LP minted, the pool after)` -- what `add_liquidity` really does.
 
-        Not the same number as `calc_token_amount`, and the gap is the point.
-        That getter is fee-free on the legacy pools by its own admission
-        ("needed to prevent front-running, not for precise calculations"), so
-        it over-states a deposit; this charges the imbalance fee the deposit
-        actually pays:
+        Not the same number as `calc_token_amount`, and the gap is the point:
+        that getter is fee-free on the legacy pools by its own admission, so it
+        over-states a deposit.  This charges the imbalance fee actually paid:
 
             fee_i     = fee * N / (4(N-1)) * |ideal_i - new_i|
             minted    = supply * (D(new - fees) - D0) / D0
             stored_i  = new_i - fee_i * admin_fee / FEE_DENOMINATOR
 
-        Two different subtractions, which is the part worth reading twice.
-        The *mint* is computed against balances less the whole fee, so the
-        depositor pays all of it; the pool *keeps* all but the DAO's share, so
-        the balances left behind are higher than the ones the mint was priced
-        from.  Using one figure for both -- the obvious simplification --
-        would leave the pool poorer than it is and misprice every later leg
-        through it.
+        Two different subtractions, which is the part worth reading twice.  The
+        *mint* is priced against balances less the whole fee, so the depositor
+        pays all of it; the pool *keeps* all but the DAO's share, so the balances
+        left behind are higher than the ones the mint was priced from.  Using one
+        figure for both would leave the pool poorer than it is and misprice every
+        later leg through it.
 
         A pool with no supply yet is refused rather than guessed: the first
         deposit sets the price of the pool and takes a different branch.
@@ -578,10 +551,9 @@ class StableSwapLP:
     def calc_token_amount_charged(self, amounts: list[int]) -> int:
         """What a deposit actually mints -- the imbalance fee included.
 
-        `calc_token_amount` is the *getter*, and on the legacy pools the
-        getter is fee-free by its own admission, so it over-states every
-        deposit it is asked about.  This is the number `add_liquidity`
-        returns, and it needs no `admin_fee` to compute: the DAO's share
+        `calc_token_amount` is the *getter*, fee-free on the legacy pools, so it
+        over-states every deposit it is asked about.  This is the number
+        `add_liquidity` returns, and it needs no `admin_fee`: the DAO's share
         changes what the pool keeps, never what the depositor is handed.
         """
         return self._deposit(amounts)[0]
@@ -589,11 +561,9 @@ class StableSwapLP:
     def _deposit(self, amounts: list[int]) -> tuple[int, list[int], list[int]]:
         """`(minted, fee per coin, balances before the fee is split)`.
 
-        The mint is priced against balances less the *whole* fee -- the
-        depositor pays all of it -- while the pool keeps all but the DAO's
-        share.  Two different subtractions off one figure, which is the part
-        worth reading twice, and the reason this returns the pieces rather
-        than a pool.
+        The mint is priced against balances less the *whole* fee -- the depositor
+        pays all of it -- while the pool keeps all but the DAO's share.  Two
+        subtractions off one figure, which is why this returns the pieces.
         """
         if self.total_supply <= 0:
             raise StableSwapError("no supply")
