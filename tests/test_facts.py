@@ -1,11 +1,11 @@
 """Facts that hold until someone redeploys something.
 
 Gas figures, arcs that quote and then revert, and whether a lending wrapper can
-still be entered or only left -- none of it depends on the block, all of it
-costs execution to learn, and the route path must never pay for it.  This is
-about the storage keeping its promises: that a recovered pool stops being
-banned, that a pool with one working direction is not thrown away for the sake
-of a broken one, and that a chain stub cannot crash the lookup.
+still be entered or only left -- none of it depends on the block, all of it costs
+execution to learn, and the route path must never pay for it.  These are about
+the storage keeping its promises: a recovered pool stops being banned, a pool
+with one working direction is not thrown away for a broken one, and a chain stub
+cannot crash the lookup.
 """
 
 from __future__ import annotations
@@ -92,10 +92,10 @@ def test_a_chain_stub_cannot_crash_the_lookup():
 
 def test_a_recorded_revert_never_drops_a_pool(tmp_path, monkeypatch):
     """A broken direction is not a broken pool, and the difference is not
-    academic: an earlier version of this dropped any pool with a revert and no
-    recorded gas figure, which is every pool no route happened to choose.  It
-    would have deleted both Compound pools -- whose `exchange_underlying`
-    reverts while their cDAI/cUSDC arcs are routed through daily.
+    academic: an earlier version dropped any pool with a revert and no recorded
+    gas figure, which is every pool no route happened to choose.  It would have
+    deleted both Compound pools -- whose `exchange_underlying` reverts while
+    their cDAI/cUSDC arcs are routed through daily.
 
     Pool-level removal belongs to the hand-written blacklist, where a human
     decided it.  Nothing probed removes a pool on its own.

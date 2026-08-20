@@ -1,11 +1,10 @@
 """The three-coin cryptoswap, ported from the deployed math.
 
-A separate module from `twocrypto` rather than a generalisation: `get_y` is
-the same analytic shape with entirely different coefficients (`a = 10**36/27`
-against `10**32`, and `b`/`c`/`d` built from both other balances), and the fee
-is `reduction_coefficient` over three balances rather than the two-coin `K`.
-
-These parameters were read from `TricryptoUSDC` on mainnet.
+A separate module from `twocrypto` rather than a generalisation: `get_y` is the
+same analytic shape with entirely different coefficients (`a = 10**36/27` against
+`10**32`, and `b`/`c`/`d` built from both other balances), and the fee is
+`reduction_coefficient` over three balances rather than the two-coin `K`.  These
+parameters were read from `TricryptoUSDC` on mainnet.
 """
 
 from __future__ import annotations
@@ -140,10 +139,9 @@ def test_the_a_multiplier_is_not_a_constant_across_generations():
     """`A_MULTIPLIER` is 10,000 for the optimized math and **100** for the
     original 2021 tricrypto -- the same trap `a_precision` is in stableswap.
 
-    Taking the wrong one scales `mul1` by a hundred, which quotes the pool
-    about twice wrong: close enough to read as a rounding problem and not be
-    one.  Verified against the deployed 0x80466c64, whose `A()` returns
-    `A_precise() / 100`.
+    Taking the wrong one scales `mul1` by a hundred, which quotes the pool about
+    twice wrong: close enough to read as a rounding problem and not be one.
+    Verified against the deployed 0x80466c64, whose `A()` returns `A_precise()/100`.
     """
     from erouter.core.tricrypto import A_MULTIPLIER, _newton_y
 

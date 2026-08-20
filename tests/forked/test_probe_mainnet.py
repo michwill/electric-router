@@ -45,11 +45,10 @@ def threepool(prepared):
 def _fit(client, pool, i, j, *, theta=0.01):
     """Calibrate one direction at a realistic size, from the pool's own reserves.
 
-    The tangent probe is sized off the *reserve*, not off `d_bar`, which is
-    what `plan_deltas` does.  It matters: `a` is a ratio of integers, so a
-    tangent probe worth 0.13 DAI yields only ~5 significant digits of a
-    6-decimal output and `a` inherits ~1e-5 of truncation error, while 1e-6 of
-    the reserve (~27 DAI here) gives ~8 digits.
+    The tangent probe is sized off the *reserve*, not off `d_bar`.  It matters:
+    `a` is a ratio of integers, so a tangent probe worth 0.13 DAI yields only ~5
+    significant digits of a 6-decimal output, while 1e-6 of the reserve (~27 DAI
+    here) gives ~8.
     """
     reserve = pool.balances[i]
     d = int(reserve * theta)
@@ -67,15 +66,13 @@ def _fit(client, pool, i, j, *, theta=0.01):
 def test_gamma_live_equals_the_declared_fee(rpc, quoter_client, threepool):
     """§2.6: `sqrt(a_f * a_r)` reads the pool's current fee off two probes.
 
-    No fee parameters, no `k` computation, no ABI knowledge of the fee law --
-    and it is checked against a completely independent on-chain source, so it
-    fails if anything in ABI dispatch, decimals, probe sizing or calibration is
-    wrong.
+    No fee parameters, no `k` computation, no ABI knowledge of the fee law -- and
+    it is checked against a completely independent on-chain source, so it fails
+    if anything in ABI dispatch, decimals, probe sizing or calibration is wrong.
 
-    Tolerance note: `a` is a ratio of integers, so its precision is bounded by
-    the *output* token's decimals.  A 1e-6 probe into a 6-decimal reserve gives
-    ~8 significant digits, i.e. ~1e-7 in `a`.  That is 0.001 bp -- orders of
-    magnitude below any real fee, so it cannot change a routing decision.
+    Tolerance: `a` is a ratio of integers, so its precision is bounded by the
+    *output* token's decimals -- ~1e-7 in `a`, i.e. 0.001 bp, orders of magnitude
+    below any real fee.
     """
     fee = decode_uint(rpc.call(THREEPOOL, encode_call("fee()")))
     expected = 1.0 - fee / FEE_DENOMINATOR
@@ -165,10 +162,9 @@ def test_a_deep_pool_probed_too_small_clamps_rather_than_lying(quoter_client, th
     """Curvature below the integer noise floor is reported as zero, not faked.
 
     Probed at 4 bp of a $160M pool, 3pool is linear to the precision available.
-    The fit then clamps to the admissible `B = 0` limit -- with a mandatory
-    finite cap, so the arc is bottomless only up to the size actually probed.
-    That is the correct answer at that size, and §12.1's theta check is what
-    escalates if the route ever wants more than the cap.
+    The fit clamps to the admissible `B = 0` limit -- with a mandatory finite cap,
+    so the arc is bottomless only up to the size actually probed.  §12.1's theta
+    check is what escalates if the route ever wants more.
     """
     fit = _fit(quoter_client, threepool, 0, 1, theta=0.0004)
     if not fit.clamped:

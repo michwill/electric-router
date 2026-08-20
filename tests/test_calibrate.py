@@ -44,11 +44,11 @@ def test_secant_fit_recovers_cpmm_parameters():
 def test_eta_is_the_family_fingerprint():
     """`eta = f' f''' / (f'')^2` is 3/2 for constant product, identically.
 
-    §2.4: `f''' = 3(f'')^2 / (2f')` for the whole constant-product family, so
-    eta is a family fingerprint rather than a fitted quantity.  The ladder
-    estimates it by divided differences, so it converges to 3/2 as the ladder
-    tightens -- and a value outside (1, 2), or one that moves with delta, means
-    a non-smooth feature is nearby and the arc should be split (§12.2).
+    §2.4: `f''' = 3(f'')^2 / (2f')` for the whole family, so eta is a fingerprint
+    rather than a fitted quantity.  The ladder estimates it by divided
+    differences, so it converges to 3/2 as the ladder tightens -- and a value
+    outside (1, 2), or one that moves with delta, means a non-smooth feature is
+    nearby and the arc should be split (§12.2).
     """
     pool = CPMM(x_out=5_000_000.0, y_in=5_000_000.0, fee=0.0)
 
@@ -100,10 +100,10 @@ def test_clamp_is_an_upper_bound_and_the_tangent_variant_is_not():
     """The §13.1 test that is invisible without checking both variants.
 
     Clamping B to 0 while keeping a = f'(0) leaves the *tangent*, which on a
-    convex piece lies BELOW the curve -- an under-estimate that makes the
-    solver silently skip the arc.  The chord is exact at both endpoints and
-    above the curve in between, so it is a valid concave majorant: an upper
-    bound cannot prune the true optimum.
+    convex piece lies BELOW the curve -- an under-estimate that makes the solver
+    silently skip the arc.  The chord is exact at both endpoints and above the
+    curve between, so it is a valid concave majorant: an upper bound cannot
+    prune the true optimum.
     """
     arc = ConvexArc(a0=1.0, c=1e-3, cap=500.0)
     xs, ys = ladder(arc, [1e-3, 50.0, 150.0, 300.0, 500.0])
@@ -316,13 +316,11 @@ def test_a_saturating_quote_becomes_a_capped_arc():
     """`get_dy` that stops rising is a wall, not a curve.
 
     Measured on a LLAMMA WETH market: `get_dy` returned 11.472806 crvUSD for
-    every input from 0.039 WETH to 38.7, a thousandfold range, because only
-    that much crvUSD stood in reachable bands.  Fitting through those points
-    reads the marginal rate as 296 crvUSD/WETH when it is nearer 1,900, and
-    §4's log-price fit then drags the whole reference frame with it.
-
-    The arc is still perfectly routable up to the wall -- that is what `cap`
-    is for (§2.3 rule 2), and a clamped arc must have a finite one.
+    every input from 0.039 WETH to 38.7, a thousandfold range, because only that
+    much crvUSD stood in reachable bands.  Fitting through those points reads the
+    marginal rate as 296 crvUSD/WETH when it is nearer 1,900, and §4's log-price
+    fit then drags the whole reference frame with it.  The arc is still routable
+    up to the wall -- that is what `cap` is for (§2.3 rule 2).
     """
     deltas = [0.000387, 0.038737, 0.387368, 3.873677, 38.736766]
     quotes = [0.508730, 11.472806, 11.472806, 11.472806, 11.472806]
@@ -355,15 +353,14 @@ def test_a_healthy_curve_is_not_mistaken_for_a_wall():
 def test_a_repeated_ladder_node_is_not_a_wall():
     """The same probe twice is one probe, not evidence of saturation.
 
-    `merge` drops duplicate ladder nodes, but it keys on exact integer wei
-    while the refine pass computes its sizes as floats -- so a refined node
-    landing on a grid node arrives a few wei off and survives.  The wall test
-    then compares two quotes for the same size, sees no increase, and clamps.
+    `merge` drops duplicate ladder nodes, but it keys on exact integer wei while
+    the refine pass computes its sizes as floats -- so a refined node landing on
+    a grid node arrives a few wei off and survives.  The wall test then compares
+    two quotes for the same size, sees no increase, and clamps.
 
-    Measured on tac, WTAC->USDT, where the ladder carried 3,026.306608 twice:
-    the arc was capped at a tenth of the trade, the only path out of WTAC could
-    no longer carry it, and the CLI reported "src not connected to dst" for a
-    swap the pool quotes happily.
+    Measured on tac, WTAC->USDT: the arc was capped at a tenth of the trade, the
+    only path out of WTAC could no longer carry it, and the CLI reported "src
+    not connected to dst" for a swap the pool quotes happily.
     """
     # 3,026.306608... twice, a few wei apart, exactly as the ladder built it.
     deltas = [1513.153304, 3026.306608, 3026.3066080001, 6052.613217, 302630.660842]
@@ -400,11 +397,10 @@ def test_output_rounding_is_not_increasing_returns():
     """A coarse output token must not make a healthy pool look convex.
 
     Mainnet 3Crv -> GUSD, verbatim from the coarse pass.  GUSD has *two*
-    decimals, so each quote is rounded down by up to 0.01, and at the small
-    node that is 1.5e-4 of the rate -- which propagates into `a` and fakes a
-    curvature of -2.9e-8 against a noise floor of 4.8e-8.  Clamping on that
-    evidence capped the arc at the largest size probed and made $10,000 of a
-    pool holding 393,473 GUSD unroutable.
+    decimals, so each quote is rounded down by up to 0.01, and at the small node
+    that is 1.5e-4 of the rate -- which propagates into `a` and fakes a curvature
+    of -2.9e-8 against a noise floor of 4.8e-8.  Clamping on that evidence made
+    $10,000 of a pool holding 393,473 GUSD unroutable.
     """
     deltas = [64.823756, 6482.375563]
     quotes = [67.330000, 6733.620000]

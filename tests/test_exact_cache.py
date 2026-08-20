@@ -1,25 +1,24 @@
 """A remembered verdict must never be believed harder than a fresh one.
 
 The cache exists so a pool that has already reproduced its own `get_dy` is not
-made to prove it again: 2,406 gate probes down to 84.  That is all it saves --
-it does *not* let the warm skip those pools, which are computed from the very
+made to prove it again: 2,406 gate probes down to 84.  That is all it saves -- it
+does *not* let the warm skip those pools, which are computed from the very
 storage the sweep fetches (see `test_startup_cost.py`).
 
 A wrong verdict would be believed silently, so the properties worth pinning are
 the ones that keep it honest:
 
-* editing the maths discards every verdict, because the verdict is a claim
-  about *this* arithmetic agreeing with the chain;
+* editing the maths discards every verdict, because the verdict is a claim about
+  *this* arithmetic agreeing with the chain;
 * a verdict is matched against the variants actually built this run, never used
-  to construct one -- so a remembered variant that is no longer on offer falls
-  back to the gate instead of being resurrected.
+  to construct one.
 
 The second is not hypothetical.  On the production endpoint `stored_rates()` is
 refused, so a rate-bearing pool cannot build its `reported` variant at all.  If
-its cached verdict were trusted it would be admitted with decimals-only rates
-and quote sUSDe as worth exactly one DOLA -- a factor of 1.2427.  Instead the
-verdict finds no match, the pool is gated, it fails, and it stays in the set
-that gets warmed and read properly.
+its cached verdict were trusted it would be admitted with decimals-only rates and
+quote sUSDe as worth exactly one DOLA -- a factor of 1.2427.  Instead the verdict
+finds no match, the pool is gated, it fails, and it stays in the set that gets
+warmed and read properly.
 """
 
 from __future__ import annotations
@@ -103,10 +102,10 @@ def test_verdicts_survive_a_round_trip(tmp_path: Path):
 def test_refusals_are_never_written(tmp_path: Path):
     """The file is committed, so it must change only when a verdict does.
 
-    A refusal reason carries the mismatching wei, which moves with the block,
-    so persisting it rewrote the file on every route -- a dirty working tree
-    after running a read-only command.  Nothing reads them back: a pool absent
-    from `verdicts` is re-gated either way.
+    A refusal reason carries the mismatching wei, which moves with the block, so
+    persisting it rewrote the file on every route -- a dirty working tree after a
+    read-only command.  Nothing reads them back: a pool absent from `verdicts` is
+    re-gated either way.
     """
     cache = ExactCache.load(1, "ethereum", tmp_path)
     cache.record(POOL, STABLE)
@@ -155,10 +154,9 @@ def test_the_fingerprint_is_stable_and_not_empty():
 def test_a_failure_is_remembered_against_the_balances_it_happened_at(tmp_path):
     """The fact is written; the reason is not.
 
-    Re-deriving "this pool answers nothing" costs a probe per size per
-    direction on every run.  Once the verdicts are warm those probes are the
-    entire remaining gate -- measured at 94 of 94, all on pools that never
-    pass.
+    Re-deriving "this pool answers nothing" costs a probe per size per direction
+    on every run.  Once the verdicts are warm those probes are the entire
+    remaining gate -- measured at 94 of 94, all on pools that never pass.
     """
     cache = ExactCache(chain_id=1, path=tmp_path / "c.json")
     cache.refuse("0xAA", "would not quote", balances=[0, 0])
@@ -175,8 +173,8 @@ def test_a_deposit_makes_the_pool_worth_checking_again(tmp_path):
 
     A pool that answers nothing is empty, and an empty pool does not trade, so
     its balances sit still and the record stays valid without being refreshed.
-    The moment someone deposits, the key stops matching -- which is exactly
-    when the answer might have changed.
+    The moment someone deposits the key stops matching -- exactly when the answer
+    might have changed.
     """
     cache = ExactCache(chain_id=1, path=tmp_path / "c.json")
     cache.refuse("0xAA", "would not quote", balances=[0, 0])

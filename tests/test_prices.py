@@ -189,13 +189,11 @@ def test_a_contradictory_arc_pair_is_muted_in_the_fit():
     """A pool whose two directions disagree must not set the price frame.
 
     §4 fits log-prices by weighted least squares, so one arc claiming WETH is
-    worth 296 crvUSD drags the whole frame -- and the frame sets `eps` and `G`
-    for *every* arc, not only the liar.  `a_f * a_r` is `Gamma_live^2` and sits
-    just under 1 for any symmetric-fee CFMM; measured on mainnet LLAMMA
-    markets, which quote from whichever band is live, it is 0.0006.
-
-    §12.2c already guards the other side of this (`a_f * a_r < 1`, no free
-    lunch).  This is the same invariant read downward.
+    worth 296 crvUSD drags the whole frame -- and the frame sets `eps` and `G` for
+    *every* arc, not only the liar.  `a_f * a_r` is `Gamma_live^2` and sits just
+    under 1 for any symmetric-fee CFMM; on mainnet LLAMMA markets, which quote
+    from whichever band is live, it is 0.0006.  §12.2c guards the other side of
+    this (`a_f * a_r < 1`); this is the same invariant read downward.
     """
     from erouter.core.prices import MUTED_WEIGHT, price_fit_weights
 

@@ -69,17 +69,15 @@ def test_legs_are_topologically_ordered(usdc_weth):
 def test_bps_groups_are_contiguous_and_end_with_a_sweep(usdc_weth):
     """`bps` is a share of the balance snapshotted when a group opens.
 
-    The contract re-snapshots on *every* change of `src_slot`
-    (`if src != cur: cur = src; base = bal[src]`), so a slot being drained
-    again later is not by itself wrong -- the second group simply measures
+    The contract re-snapshots on *every* change of `src_slot`, so a slot being
+    drained again later is not by itself wrong -- the second group measures
     against whatever is there by then.  What would be wrong is a group whose
     `bps` were computed against the node's whole arrival but which opens on a
     partly drained slot, and that can only happen to a group carrying `bps`.
 
-    A pure sweep is immune: `bps == 0` takes `bal[src]`, not `base`.  A node
-    that both receives and sends a non-canonical token legitimately produces
-    exactly that shape -- fold ETH into the hub, hand part of it back, draw the
-    rest -- so requiring outright adjacency failed on correct routes.
+    A pure sweep is immune: `bps == 0` takes `bal[src]`, not `base`.  A node that
+    both receives and sends a non-canonical token legitimately produces exactly
+    that shape, so requiring outright adjacency failed on correct routes.
     """
     legs = usdc_weth.route.legs
     groups: list[list] = []
@@ -166,17 +164,14 @@ def test_routing_between_merged_tokens_converts(universe, quoter_client):
     """They are one node, so the merge itself is the route.
 
     This used to be refused outright -- two addresses on one node have no arc
-    between them, so the solver had nothing to do and said so.  `7a02663`
-    changed the contract: a merged pair quotes the conversion instead, because
-    "there is no arc" is a statement about the graph and not an answer to the
-    question the caller asked.  The test kept asserting the refusal, so it went
-    red the moment the behaviour improved.
+    between them.  `7a02663` changed the contract: a merged pair quotes the
+    conversion instead, because "there is no arc" is a statement about the graph
+    and not an answer to the question the caller asked.
 
     What is worth pinning is the shape of the answer: one leg, the vault's own
     `previewDeposit`, and a rate that is the vault's rather than 1:1 -- scrvUSD
-    is worth more than crvUSD, so fewer shares come back than assets went in,
-    and a route that returned the input unchanged would mean the merge had
-    quietly become an alias.
+    is worth more than crvUSD, so a route returning the input unchanged would
+    mean the merge had quietly become an alias.
     """
     specs, nodes, _ = universe
     if not nodes.has(SCRVUSD):

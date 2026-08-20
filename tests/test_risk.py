@@ -3,10 +3,9 @@
 The router nets off what a route costs to attempt: gas, plus the chance one of
 its minimum-outs -- each a fraction of its pool's fee -- has been overtaken by
 the time the transaction is mined a minute or two later.  A failure costs a
-resubmission rather than the trade, so that second term is a fraction of a
-basis point; the tests below fix its *size*, not only its sign, because the
-size is the whole argument.  Two halves: the table (`core/risk.py`) and the
-estimator that fills it (`dev/revert_risk.py`).
+resubmission rather than the trade, so that second term is a fraction of a basis
+point; the tests below fix its *size*, not only its sign, because the size is
+the whole argument.  Two halves: the table and the estimator that fills it.
 """
 
 from __future__ import annotations

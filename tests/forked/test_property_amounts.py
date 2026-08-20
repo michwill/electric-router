@@ -1,19 +1,16 @@
 """Property-based fuzzing over trade size, against the brute-force baselines.
 
 The fixed case list in `test_no_worse_than_naive.py` checks sizes a person
-thought of.  The interesting failures are the ones nobody thought of: the
-wstETH regression that motivated the two-step floor only appeared above a size
+thought of.  The interesting failures are the ones nobody thought of: the wstETH
+regression that motivated the two-step floor only appeared above a size
 threshold, and was invisible one decade lower.  So the size is drawn instead.
 
-This is affordable because of how the probe grid is built.  Every ladder node
-is a *fraction of a pool's reserves*, so the derivative measurement does not
-depend on the amount being routed at all -- one warm snapshot serves every
-draw, every pair and every size.  Only candidate verification is
-amount-dependent, and that is one round trip per new example.  Pin
-`EROUTER_BLOCK` and the second run is fully offline.
+This is affordable because every ladder node is a *fraction of a pool's
+reserves*, so the derivative measurement does not depend on the amount being
+routed -- one warm snapshot serves every draw, pair and size.  Only candidate
+verification is amount-dependent, one round trip per new example.
 
-Amounts are drawn log-uniformly: the failures live at the ends, where the trade
-is either dust or several times the depth of the whole universe, and a uniform
+Amounts are drawn log-uniformly: the failures live at the ends, and a uniform
 draw over 8 decades would put essentially every example in the top one.
 """
 
@@ -142,8 +139,7 @@ def test_output_is_monotone_in_input(universe, quoter_client, wei):
 
     Not a statement about AMMs -- where it is trivially true -- but about the
     *router*, which re-solves from scratch at every size and could in principle
-    pick a worse family of candidates for the larger trade.  That failure would
-    be invisible to a fixed-size test and infuriating to a user.
+    pick a worse family of candidates for the larger trade.
     """
     small = _route(universe, quoter_client, "USDC", "USDT", wei).verified_out or 0
     large = _route(universe, quoter_client, "USDC", "USDT", 2 * wei).verified_out or 0

@@ -324,11 +324,10 @@ def test_kcl_tolerance_does_not_tighten_without_limit_as_the_trade_shrinks():
 
     The solve runs in units scaled by `g_scale`, so its roundoff is absolute
     there and is multiplied by `g_scale` on the way out.  Expressed purely as a
-    fraction of `Psi`, the gate therefore tightens without limit as `Psi`
-    falls: measured on mainnet USDC->USDT, `g_scale = 1.5e6` turned a clean
-    1e-11 solve into a 4.7e-5 relative residual at $1 and 3.8e-11 at $100k --
-    identical routing, and every trade under a few hundred dollars was rejected
-    outright with "flow conservation is violated".
+    fraction of `Psi`, the gate therefore tightens without limit as `Psi` falls:
+    on mainnet USDC->USDT, `g_scale = 1.5e6` turned a clean 1e-11 solve into a
+    4.7e-5 relative residual at $1 -- identical routing, and every trade under a
+    few hundred dollars rejected with "flow conservation is violated".
     """
     from erouter.core.pipeline import _kcl_tolerance
 
@@ -352,15 +351,14 @@ def test_kcl_tolerance_does_not_tighten_without_limit_as_the_trade_shrinks():
 def test_a_stale_warm_start_cannot_decide_feasibility():
     """A previous size's support must not make a larger size unroutable.
 
-    An interactive session prepares once and quotes many sizes through the
-    same `Prepared`, carrying each solve's support into the next as `A0`.
-    Reproduced on mainnet crvUSD -> sDOLA: $100 routes, its support is a
-    single arc, and $2,000,000 through that same `Prepared` then failed with
-    "src not connected to dst through the active set" -- a pair the very same
-    process had just routed.  The arc caps out at the larger size, moves to the
-    upper-bounded set, and leaves the active set with nothing joining src to
-    dst.  Column generation's widening cannot rescue it: that widens the column
-    set, which was never the restriction.
+    An interactive session prepares once and quotes many sizes through the same
+    `Prepared`, carrying each solve's support into the next as `A0`.  Reproduced
+    on mainnet crvUSD -> sDOLA: $100 routes on a single arc, and $2,000,000
+    through that same `Prepared` then failed with "src not connected to dst
+    through the active set".  The arc caps out at the larger size, moves to the
+    upper-bounded set, and leaves the active set with nothing joining src to dst;
+    column generation cannot rescue it, since it widens the column set, which was
+    never the restriction.
 
     Here: a cheap arc capped well below the trade, and a dearer uncapped one.
     Warm-started from the cheap arc alone, the solve has to reach the other.

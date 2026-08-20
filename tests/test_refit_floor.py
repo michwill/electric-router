@@ -5,10 +5,9 @@ points and divides by `d^2`.  `a` is a fitted tangent, so at small `d` the
 numerator *is* `a`'s error -- sign included -- and a negative `B` takes the
 zero-curvature branch, clamping the arc to a cap of `d`.
 
-Measured on mainnet USDC -> crvUSD at $5M: the crvUSD/USDC pool's realised
-delta was 3 USDC against a `calib_delta` of 1,000,000, `B` came out -7.2e-08
-against a true 5e-10, and the best pool for the pair was left admissible for
-three dollars of flow.
+Measured on mainnet USDC -> crvUSD at $5M: the crvUSD/USDC pool's realised delta
+was 3 USDC against a `calib_delta` of 1,000,000, `B` came out -7.2e-08 against a
+true 5e-10, and the best pool for the pair was left admissible for three dollars.
 """
 
 from __future__ import annotations
@@ -134,8 +133,7 @@ def test_a_delta_far_below_the_measured_range_is_not_probed_at_all():
     At dust sizes the pool's own arithmetic stops being meaningful, so the
     numerator can be large in relative terms while being nonsense -- the
     signal-to-noise floor cannot catch that one.  Measured on crvUSD/USDT: a
-    realised delta of 0.4 against a `calib_delta` of 3.9M read `B = 1.73` on a
-    $45M pool.
+    realised delta of 0.4 against a `calib_delta` of 3.9M read `B = 1.73`.
     """
     a = arc(calib_delta=3_898_337.0)
     chain = Chain()

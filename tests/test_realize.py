@@ -313,11 +313,10 @@ def test_a_deposit_and_a_swap_on_one_pool_conflict():
     """A deposit mutates the pool too, so decision 3 has to cover it.
 
     `add_liquidity` and `remove_liquidity_one_coin` change the balances every
-    later quote is computed from, exactly as `exchange` does -- and a view-only
-    chained quote cannot see its own earlier leg either way.  The rule keys on
-    the pool, and an LP leg targets the pool contract, so this holds without a
-    special case; the test is here because "without a special case" is the part
-    that could quietly stop being true.
+    later quote is computed from, exactly as `exchange` does.  The rule keys on
+    the pool and an LP leg targets the pool contract, so this holds without a
+    special case -- the test is here because "without a special case" is the
+    part that could quietly stop being true.
     """
     nodes = base_nodes()
     nodes.add_token(LP_TOKEN, "poolLP", 18)
@@ -342,11 +341,10 @@ def test_realize_rejects_an_empty_flow():
 def test_a_route_ending_in_native_eth_wraps_at_the_destination():
     """The destination node had no outgoing arcs, so the hub fold was skipped.
 
-    A pool that pays out the ETH sentinel then deposited into the ETH slot
-    while the caller asked for WETH; the quoter read the WETH slot, found
-    nothing, and the whole candidate came back "reverted".  On mainnet that
-    silently removed both large ETH/stETH pools from stETH->WETH and left a
-    shallow factory pool paying half.
+    A pool that pays out the ETH sentinel then deposited into the ETH slot while
+    the caller asked for WETH; the quoter read the WETH slot, found nothing, and
+    the whole candidate came back "reverted".  On mainnet that silently removed
+    both large ETH/stETH pools from stETH->WETH.
     """
     nodes = merged_nodes()
     arcs = [arc(POOL_A, USDC, ETH, nodes, a=1 / 1890.0)]
@@ -392,15 +390,12 @@ def test_arrival_in_the_destination_token_skips_the_hub_round_trip():
     """A leg that already pays `dst_token` must not fold to the hub and back.
 
     `realize` converts everything arriving at a merged node into the node's
-    canonical token, then converts out to whatever the caller asked for.  That
-    is right when they differ and pure waste when they do not: measured on
-    USDC->sUSDS, pools paying sUSDS directly produced a route ending
-    `... REDEEM sUSDS->USDS, DEPOSIT USDS->sUSDS`, two legs and two lots of
-    integer rounding to arrive where it already was.
-
-    The mirror of the ETH-sentinel bug in
-    `test_native_destination_folds_through_the_hub`: there the fold was missing
-    and had to be added, here it fires when it should not.
+    canonical token, then converts out to whatever the caller asked for -- right
+    when they differ, pure waste when they do not.  On USDC->sUSDS, pools paying
+    sUSDS directly produced a route ending `... REDEEM sUSDS->USDS, DEPOSIT
+    USDS->sUSDS`: two legs and two lots of integer rounding to arrive where it
+    already was.  The mirror of the ETH-sentinel bug below, where the fold was
+    missing and had to be added.
     """
     import math
 
@@ -438,11 +433,10 @@ def test_arrival_in_the_destination_token_skips_the_hub_round_trip():
 def test_a_node_that_receives_and_sends_one_token_does_not_round_trip():
     """USDC->ETH then ETH->crvUSD must not wrap and immediately unwrap.
 
-    The canonical token is an arbitrary label; what matters is which member
-    the legs want.  Hubbing on WETH regardless emitted `ETH->WETH, WETH->ETH`
-    between the two swaps -- two legs and two lots of integer rounding to end
-    where it started, and the reason one slot ended up drained by two
-    non-adjacent groups.
+    The canonical token is an arbitrary label; what matters is which member the
+    legs want.  Hubbing on WETH regardless emitted `ETH->WETH, WETH->ETH` between
+    the two swaps -- two legs and two lots of rounding to end where it started,
+    and the reason one slot ended up drained by two non-adjacent groups.
     """
     nodes = merged_nodes()
     arcs = [
@@ -520,13 +514,11 @@ def test_a_mixed_node_still_funnels_through_one_slot():
 
 # ------------------------------------------------------ aliases share a slot
 #
-# Gnosis has two EURe contracts over one balance -- same `totalSupply` to the
-# wei, same `balanceOf` for every holder -- so `discover_aliases` merges them
-# into one node and no conversion leg exists between them, because there is
-# nothing to execute.  Giving them a slot each meant the legs delivered into
-# one accumulator and the route read the other, so the quoter returned 0 and a
-# working route was dropped as reverting.  On WXDAI->EURe that silently threw
-# away the entire USDC.e side of the market.
+# Gnosis has two EURe contracts over one balance, so `discover_aliases` merges
+# them into one node and no conversion leg exists between them.  Giving them a
+# slot each meant the legs delivered into one accumulator and the route read the
+# other, so the quoter returned 0 and a working route was dropped as reverting.
+# On WXDAI->EURe that silently threw away the entire USDC.e side of the market.
 
 EURE_1 = "0x" + "e1" * 20
 EURE_2 = "0x" + "e2" * 20

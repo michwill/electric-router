@@ -1,13 +1,12 @@
 """The FX Swap: a stableswap invariant inside cryptoswap's machinery.
 
-`TwocryptoFactory` deploys two pools that are indistinguishable by type, name
-or coins -- cryptoswap proper, and this.  They differ only in the math contract
-each holds as an immutable, so the wrapper below is shared and only `get_y`
-changes.
+`TwocryptoFactory` deploys two pools that are indistinguishable by type, name or
+coins -- cryptoswap proper, and this.  They differ only in the math contract each
+holds as an immutable, so the wrapper below is shared and only `get_y` changes.
 
 These vectors were read from mainnet at block 25,777,xxx; the model reproduces
-`get_dy` to the wei in both directions and from 1% to 10x of a balance, which
-is what the reader's self-check demands before it will use one.
+`get_dy` to the wei in both directions and from 1% to 10x of a balance, which is
+what the reader's self-check demands before it will use one.
 """
 
 from __future__ import annotations
@@ -100,10 +99,10 @@ def test_both_directions_quote():
 def test_the_float_quote_tracks_the_integer_one(frac):
     """`get_dy_fast` is the same trade, solved in dollars instead of wei.
 
-    The integer path is the contract and is what the admission gate checks.
-    This one prices with it, and has to agree far inside any tick that could
-    reorder two candidates -- measured on 68 mainnet cryptoswap pools, the
-    worst case at realistic sizes is 8e-6 bp.
+    The integer path is the contract and is what the admission gate checks.  This
+    one prices with it, and has to agree far inside any tick that could reorder
+    two candidates -- on 68 mainnet cryptoswap pools, the worst case at realistic
+    sizes is 8e-6 bp.
     """
     p = pool()
     dx = int(p.balances[0] * frac)
@@ -150,10 +149,9 @@ def test_a_policy_that_charges_nothing_leaves_the_native_fee_curve():
     The pool's own source says so at the call site -- "if policy returns 0 we
     fallback to pool's internal logic" -- and the Yield Basis policy returns 0
     unconditionally, because it steers the price scale rather than the fee.
-    Rejecting every pool that merely *has* a policy therefore dropped a $57M
-    pool that our own arithmetic reproduces to the wei.
-
-    The rule is what the policy charges, not whether one exists.
+    Rejecting every pool that merely *has* a policy therefore dropped a $57M pool
+    that our own arithmetic reproduces to the wei.  The rule is what the policy
+    charges, not whether one exists.
     """
     p = pool(stable=True)
     xp = [10**21, 10**21]
@@ -166,19 +164,15 @@ def test_a_policy_that_charges_nothing_leaves_the_native_fee_curve():
 # --------------------------------------------------- the two inline spellings
 #
 # `Curve EURe-3Crv` on Gnosis, `0x056C6C5e684CeC248635eD86033378Cc444459B0`,
-# read at block 47,805,120.  It is the inline-Newton generation -- the loop
-# lives in the pool, not in a math contract -- compiled by Vyper 0.3.3, which
-# rewrote `mul2` with the unsafe helpers as
+# read at block 47,805,120.  It is the inline-Newton generation -- the loop lives
+# in the pool, not in a math contract -- compiled by Vyper 0.3.3, which rewrote
+# `mul2` with the unsafe helpers as
 #
 #     mul2 = unsafe_div(10**18 + (2 * 10**18) * K0, _g1k0)
 #
-# where 0.3.1 had written `10**18 + (2 * 10**18) * K0 / _g1k0`.  Moving the
-# `10**18` inside the division is a real difference in deployed code, not a
-# transcription slip: 41 mainnet pools take the first spelling and this one
-# takes the second.  Newton damps the ~1e18-in-2e20 gap down to 4e-10 in the
-# answer -- small enough to read as rounding, far too large to be it -- so
-# without the variant the pool misses the wei-exact gate and goes unmodelled,
-# which costs a network round trip on every quote that crosses it.
+# where 0.3.1 had written `10**18 + (2 * 10**18) * K0 / _g1k0`.  41 mainnet pools
+# take the first spelling and this one takes the second; see
+# `core/cryptoswap._newton_y` for why the 4e-10 difference is not rounding.
 EURE_3CRV = dict(
     balances=(168024079489927527752180, 182559895614877999742329),
     precisions=(1, 1),
@@ -236,11 +230,9 @@ def test_the_inline_generation_applies_its_own_bounds():
     """`K0_i` outside `[1e16*N, 1e20*N]` reverts on chain, so it must here.
 
     The inline pools state the window on `K0_i`, which carries the `N_COINS`
-    factor that the optimized math's `frac` does not -- so it is twice as
-    wide at both ends, and reusing the wrong one would quote sizes the pool
-    refuses.  `k0_i` below is 1.5e16: inside the optimized window, outside
-    the inline one, so the two generations must disagree here or the flag is
-    doing nothing.
+    factor the optimized math's `frac` does not -- so it is twice as wide at both
+    ends, and reusing the wrong one would quote sizes the pool refuses.  `k0_i`
+    below is 1.5e16: inside the optimized window, outside the inline one.
     """
     from erouter.core.cryptoswap import CryptoSwapError, _newton_y
 

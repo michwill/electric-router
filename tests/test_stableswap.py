@@ -1,15 +1,14 @@
 """`core.stableswap` against the contracts, to the wei (§11.3).
 
-The module exists to agree with the chain exactly, so the test is the
-difference against it.  These vectors were read from mainnet at block
-25,770,648 -- balances, `A`, fee, `offpeg_fee_multiplier`, `stored_rates`, and
-what `get_dy` returned for each -- so the check needs no node.
+The module exists to agree with the chain exactly, so the test is the difference
+against it.  These vectors were read from mainnet at block 25,770,648 --
+balances, `A`, fee, `offpeg_fee_multiplier`, `stored_rates`, and what `get_dy`
+returned for each -- so the check needs no node.
 
-Both dialects and both fee conventions are represented, because the difference
-is not cosmetic: 3pool takes its fee after converting back to token units and
-is off by a wei the other way round, and two of these pools charge a *dynamic*
-fee that rises as the trade pushes them off peg -- the term that matters most
-at exactly the sizes the quadratic model handles worst.
+Both dialects and both fee conventions are represented: 3pool takes its fee
+after converting back to token units and is off by a wei the other way round,
+and two of these pools charge a *dynamic* fee that rises as the trade pushes
+them off peg -- the term the quadratic model handles worst.
 """
 
 from __future__ import annotations
@@ -168,14 +167,11 @@ def test_replacing_a_balance_does_not_carry_the_old_reserves():
 # ----------------------------------------------------- advancing the state
 #
 # A route may not touch a pool twice (decision 3) because a view-only chained
-# quoter cannot see its own earlier leg.  That is a limit of *asking the
-# chain*, not of the arithmetic: for a pool the wei-exact gate admitted, the
-# state after a trade is as computable as the trade itself.  Measured on
-# gnosis WXDAI->EURe at 100,000, splitting across two branches that both enter
-# the 3pool -- one depositing, one swapping -- returns 81,321 EURe against
-# 66,074 for the single branch the rule permits, and the interaction between
-# the two legs costs 1.5 bp of that.  So the update below is worth getting
-# exactly right.
+# quoter cannot see its own earlier leg.  That is a limit of *asking the chain*,
+# not of the arithmetic: for a pool the wei-exact gate admitted, the state after
+# a trade is as computable as the trade itself.  On gnosis WXDAI->EURe at
+# 100,000, splitting across two branches that both enter the 3pool returns
+# 81,321 EURe against 66,074 for the single branch the rule permits.
 
 GNOSIS_3POOL = dict(
     balances=(142638 * 10**18, 153563 * 10**6, 246110 * 10**6),

@@ -1,21 +1,18 @@
 """§11.2 / §13.1 -- the chord test, "the reason §6.3 exists".
 
 The spec's own instance is a CryptoSwap-NG twocrypto plus a v3 lane at budget
-54,841, with exact expected outputs.  Those numbers come from the *CryptoSwap-NG
-split math* lemma set, which is not in this repository, so they cannot be
-reproduced here honestly.  What is reproduced is the mechanism they demonstrate,
-which is what a regression test has to protect:
+54,841, with exact expected outputs.  Those numbers come from the CryptoSwap-NG
+split math lemma set, which is not in this repository, so they cannot be
+reproduced here honestly.  What is reproduced is the mechanism:
 
     A flagged (non-concave) arc is modelled by its concave envelope -- a chord.
     The chord's optimum sits at a *different ratio* than the true curve's.  And
-    critically, the active set is IDENTICAL across those allocations: the same
-    two arcs carry flow either way.  So no amount of active-set diversity can
-    find the difference; only varying the *ratio* can, which is exactly what
-    pin-and-resolve does.
+    critically, the active set is IDENTICAL across those allocations, so no
+    amount of active-set diversity can find the difference; only varying the
+    *ratio* can, which is exactly what pin-and-resolve does.
 
-The test is written so that deleting the pin sweep makes it fail.  Without that,
-it would fail silently -- which the spec calls the worst failure mode in the
-system.
+The test is written so that deleting the pin sweep makes it fail.  Without that
+it would fail silently -- the worst failure mode in the system.
 """
 
 from __future__ import annotations

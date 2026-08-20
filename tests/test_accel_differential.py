@@ -1,19 +1,16 @@
 """The Rust solve must be the Python solve, and both must be optimal.
 
-Two comparisons, and they answer different questions:
+Two comparisons, answering different questions:
 
-* **against Python** -- the port has to reproduce the reference, including
-  which of several optimal bases it reaches, because a quote must be the same
-  answer in CPython, in Pyodide and in a Web Worker.  Tie-breaking is part of
-  the contract: steepest-edge ties go to the lowest index, matching numpy's
-  `argmax`, and a pivot sequence that differs will eventually surface as a
-  different route.
-* **against OSQP** -- which shares no code with either, so it can catch a
-  mistake the port faithfully copied from the original (§13.3).
+* **against Python** -- the port has to reproduce the reference, including which
+  of several optimal bases it reaches, because a quote must be the same answer in
+  CPython, in Pyodide and in a Web Worker.  Tie-breaking is part of the contract:
+  steepest-edge ties go to the lowest index, matching numpy's `argmax`.
+* **against OSQP** -- which shares no code with either, so it can catch a mistake
+  the port faithfully copied from the original (§13.3).
 
-Skipped, not failed, when the extension is absent: `erouter.core` is required
-to work without it, so a checkout with no Rust toolchain still has a green
-suite.
+Skipped, not failed, when the extension is absent: `erouter.core` is required to
+work without it.
 """
 
 from __future__ import annotations
@@ -142,11 +139,10 @@ def test_random_graphs_agree(seed):
 
 # --------------------------------------------------------- the hard paths
 #
-# Everything above converges in a handful of pivots, which is exactly what a
-# hand-written case list produces and exactly what the interesting code never
-# runs.  A real $20M quote reaches `maxit`, cycles under Bland's rule and
-# returns PARTIAL; the port disagreed with the reference on all three while
-# passing every test above.  These force them.
+# Everything above converges in a handful of pivots, which is what a hand-written
+# case list produces and what the interesting code never runs.  A real $20M quote
+# reaches `maxit`, cycles under Bland's rule and returns PARTIAL; the port
+# disagreed with the reference on all three while passing every test above.
 
 
 def crowded(n_lanes=14, seed=3):
@@ -229,12 +225,11 @@ def test_the_gas_screen_agrees(gas):
 def test_a_warm_start_of_indices_is_the_same_warm_start():
     """`A0` may be indices, and `Solution.active` is exactly that.
 
-    The bridge used to run `np.asarray(a0, bool)` over it, which maps
-    `[3, 17]` to `[True, True]` -- a mask over the wrong arcs and the wrong
-    length.  The Rust solve then started from a basis the Python solve never
-    chose, and every real-graph comparison was measuring that rather than the
-    port: of 54 problems taken off a live quote, only 8 agreed on the pivot
-    count.
+    The bridge used to run `np.asarray(a0, bool)` over it, which maps `[3, 17]`
+    to `[True, True]` -- a mask over the wrong arcs and the wrong length.  The
+    Rust solve then started from a basis the Python solve never chose, and every
+    real-graph comparison was measuring that rather than the port: of 54 problems
+    taken off a live quote, only 8 agreed on the pivot count.
     """
     g = crowded()
     cold = active_set_solve(g, 0, 1, 1.0)

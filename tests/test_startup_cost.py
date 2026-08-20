@@ -6,19 +6,15 @@ Two regressions live here, both found by running the CLI rather than a script.
 fee terms, `D`, the balances -- which is the same storage the local EVM's warm
 already fetches in one batched sweep.  Building them *before* the local EVM
 exists does not avoid that read; it moves it to several hundred per-pool getter
-calls over the network.  Measured, that turned a 3.3 s sweep into minutes:
-`route --chain ethereum --from crvUSD --to sDOLA` never finished initialising.
-It looked like a win on the private node (5-8 s) because a fast endpoint hides
-request count, which is the same trap as debugging on `--private`.
+calls over the network.  Measured, that turned a 3.3 s sweep into minutes.  It
+looked like a win on the private node because a fast endpoint hides request
+count, which is the same trap as debugging on `--private`.  So the order is
+load-bearing, and this asserts it structurally -- there is no cheap way to assert
+"startup is fast" and every expensive way needs a chain.
 
-So the order is load-bearing, and this asserts it structurally, because there
-is no cheap way to assert "startup is fast" and every expensive way needs a
-chain.
-
-**The gate.**  What the verdict cache is actually worth is not re-asking a
-question already answered: 2,406 probes down to 84.  That saving is what has to
-survive, and it is independent of the ordering -- so it is checked directly, by
-counting what the builder asks for when every pool is already known.
+**The gate.**  What the verdict cache is worth is not re-asking a question
+already answered: 2,406 probes down to 84.  That saving is independent of the
+ordering, so it is checked directly.
 """
 
 from __future__ import annotations

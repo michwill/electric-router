@@ -9,26 +9,21 @@ places, both found by this script and neither visible any other way:
   `fee*n/(4(n-1))` on each coin's imbalance; the view does not.  Up to 22 bp.
 * **`remove_liquidity_one_coin` claims admin fees first.**  It runs
   `_claim_admin_fees()` before pricing `dy`, which dilutes or shrinks the pool;
-  `calc_withdraw_one_coin` prices against the pool as it stands.  Up to 264 bp,
-  measured on a pool nobody had touched in months.
+  `calc_withdraw_one_coin` prices against the pool as it stands.  Up to 264 bp.
 
 Both paths run **on the same fork, inside one anchor, after funding**, so they
 see byte-identical state.  That matters most for withdrawals: dealing LP tokens
-moves `totalSupply`, so a view read over the wire against an execution on a
-dealt fork would disagree for a reason that has nothing to do with the pool.
-
-The quoter compiled here is the one production verification uses, so a gap this
-prints is a gap in the number we publish.
+moves `totalSupply`.  The quoter compiled here is the one production
+verification uses, so a gap this prints is a gap in the number we publish.
 
     uv run python scripts/verify_execution.py                    # every chain
     uv run python scripts/verify_execution.py ethereum gnosis
     uv run python scripts/verify_execution.py ethereum --size 0.05
     uv run python scripts/verify_execution.py ethereum --pool 0xbEbc...
 
-Exits non-zero when anything exceeds `--tolerance`, so it can gate a change.
-Forking needs an unrestricted endpoint, so this reads `networks.py` rather than
-the committed scoped one -- the scoped key serves only whitelisted contracts
-and boa's first `eth_chainId` gets a 500.
+Exits non-zero when anything exceeds `--tolerance`.  Forking needs an
+unrestricted endpoint, so this reads `networks.py` rather than the committed
+scoped one -- the scoped key serves only whitelisted contracts.
 """
 
 from __future__ import annotations

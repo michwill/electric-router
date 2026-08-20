@@ -1,22 +1,19 @@
 """Deposits and withdrawals, on the invariant the swap models already run.
 
-An LP arc asks a different question of the same curve: not "what does `i`
-become when `j` moves at constant `D`" but "what does `i` become when `D`
-itself moves".  That is `solve_y_d`, and the two conventions around it are
-easy to assume wrongly -- so they were read off the deployed 3pool
-(`0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7`) rather than guessed:
+An LP arc asks a different question of the same curve: not "what does `i` become
+when `j` moves at constant `D`" but "what does `i` become when `D` itself moves".
+That is `solve_y_d`, and the two conventions around it were read off the deployed
+3pool (`0xbEbc44782C7dB0a1A60Cb6fe97d0b483032FF1C7`) rather than guessed:
 
-* `calc_token_amount` charges **no fee**.  Its own docstring says it is
-  "needed to prevent front-running, not for precise calculations".
+* `calc_token_amount` charges **no fee**.  Its own docstring says it is "needed
+  to prevent front-running, not for precise calculations".
 * `calc_withdraw_one_coin` charges `fee * N / (4 * (N - 1))` on each coin's
-  *imbalance against the ideal*, not on the output, and then returns one wei
-  less "to account for rounding errors".
+  *imbalance against the ideal*, not on the output, then returns one wei less.
 
 Against mainnet, four of the five pools carrying LP arcs reproduce their own
 `calc_withdraw_one_coin` to the wei.  The fifth is stableswap-ng, which charges
 its dynamic per-coin fee instead of the flat one -- off by 1,631 wei on a
-575,757,635 withdrawal, which is what a fee convention looks like and not what
-a broken solver looks like.
+575,757,635 withdrawal, which is a fee convention and not a broken solver.
 """
 
 from __future__ import annotations
@@ -115,12 +112,11 @@ def test_the_float_withdrawal_tracks_the_integer_one(frac):
 
 # ------------------------------------------------- what a deposit really pays
 #
-# `calc_token_amount` is fee-free on the legacy pools by its own admission --
-# "needed to prevent front-running, not for precise calculations" -- so it
-# over-states every deposit.  Measured on the gnosis 3pool, a $100,000
-# single-sided deposit quotes 1.7 bp better than it executes.  `add_liquidity`
-# is the executable number, and the pool it leaves behind is what a second leg
-# through that pool must be priced against.
+# `calc_token_amount` is fee-free on the legacy pools by its own admission, so it
+# over-states every deposit: on the gnosis 3pool, a $100,000 single-sided deposit
+# quotes 1.7 bp better than it executes.  `add_liquidity` is the executable
+# number, and the pool it leaves behind is what a second leg must be priced
+# against.
 
 GNOSIS_3POOL = dict(
     balances=(142638 * 10**18, 153563 * 10**6, 246110 * 10**6),

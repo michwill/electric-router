@@ -1,15 +1,13 @@
 """Route a real pair on every chain, through the CLI, and report what happened.
 
 "Supported" is a claim about a chain's endpoint, its API and its pools all
-working together, and the only way to hold it is to route.  So this picks a
-pair the chain actually has -- the two deepest coins of its deepest pool,
-sized to a fraction of the reserve so impact stays sane -- and shells out to
-`erouter route` exactly as a user would, one chain at a time.
+working together, and the only way to hold it is to route.  So this picks a pair
+the chain actually has -- the two deepest coins of its deepest pool, sized to a
+fraction of the reserve -- and shells out to `erouter route` as a user would.
 
-It drives the CLI rather than the library on purpose.  Everything this is meant
-to catch (a missing `--chain` entry, a symbol that will not resolve, an
-argparse crash, a chain with no state cache) lives in the CLI and is invisible
-to a library-level test.
+It drives the CLI rather than the library on purpose: everything this is meant to
+catch (a missing `--chain` entry, a symbol that will not resolve, an argparse
+crash, a chain with no state cache) lives in the CLI.
 
     uv run python scripts/route_sweep.py [chain ...]
 """
@@ -42,15 +40,12 @@ TIMEOUT_S = 600
 
 #: Named cases, on top of the pair discovered per chain.
 #
-# The discovered pair is one hop through the deepest pool at a thousandth of
-# its reserve, which is a liveness check and nothing more.  It cannot catch a
+# The discovered pair is one hop through the deepest pool at a thousandth of its
+# reserve, which is a liveness check and nothing more.  It cannot catch a
 # regression in *routing*, and did not: enumerating LP arcs for every pool cost
-# crvUSD -> sDOLA at $2M twenty per cent of its output while every row here
-# stayed green, because none of them was big enough to need more than one pool.
-#
-# So each entry names a trade whose answer depends on the router choosing well.
-# Keyed by chain; a symbol that does not resolve on the day is skipped rather
-# than failing the sweep, since the universes move.
+# crvUSD -> sDOLA at $2M twenty per cent of its output while every row stayed
+# green.  So each entry below names a trade whose answer depends on the router
+# choosing well.  A symbol that does not resolve on the day is skipped.
 NAMED_CASES: dict[str, tuple[tuple[str, str, str], ...]] = {
     "ethereum": (
         ("crvUSD", "sDOLA", "2000000"),    # multi-hop, and the regression above
@@ -66,16 +61,15 @@ NAMED_CASES: dict[str, tuple[tuple[str, str, str], ...]] = {
 def reserves(rpc, chain, pool) -> list[int]:
     """What each coin contract says the pool holds, asked through the quoter.
 
-    `PoolSpec.balances` is empty at load time -- it is filled by the probe
-    stage, which is exactly the machinery this script is trying not to build --
-    and sizing every chain at "0.001 token" instead would be dust in one pool
-    and the whole reserve in another.
+    `PoolSpec.balances` is empty at load time -- it is filled by the probe stage,
+    which is exactly the machinery this script is trying not to build -- and
+    sizing every chain at "0.001 token" would be dust in one pool and the whole
+    reserve in another.
 
     These went out as direct `eth_call`s until the scoped endpoint became the
-    default and answered every one of them HTTP 403, which is what it is for.
-    Routing them through the quoter's `raw_batch` is what the router itself
-    does, so the harness now needs exactly the rights production needs -- and
-    would catch it if that stopped being true.
+    default and answered every one HTTP 403.  Routing them through the quoter's
+    `raw_batch` is what the router itself does, so the harness needs exactly the
+    rights production needs.
     """
     calls = [Call(coin.address, encode_call("balanceOf(address)", pool.address))
              for coin in pool.coins]

@@ -2,12 +2,10 @@
 
 Deliberately dumb: no model, no calibration, no solver, no reference prices --
 just quote every pool and every two-pool chain and take the best.  That makes
-them an independent check rather than a re-run of the same logic, which is the
-whole point of a differential test.
+them an independent check rather than a re-run of the same logic.
 
-Both are *lower bounds* on what is achievable.  The router splits, so it should
-usually beat them; it must never be worse, because anyone comparing by hand
-would find these in a minute.
+Both are *lower bounds*.  The router splits, so it should usually beat them; it
+must never be worse, because anyone comparing by hand would find these.
 """
 
 from __future__ import annotations

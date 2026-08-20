@@ -3,21 +3,18 @@
 
 Curve's solver answers from a periodically-warmed snapshot rather than from
 chain head, so the first thing this does is ask it which block it is on and pin
-our side there.  Without that the comparison measures its snapshot age:
-measured, the snapshot has run 4-11 blocks behind head, worth 1.8-27.7 bp on
-ETH pairs and always in the direction of flattering us.  A row whose block
-moved under it is dropped rather than reported.
+our side there.  Without that the comparison measures its snapshot age: measured,
+the snapshot has run 4-11 blocks behind head, worth 1.8-27.7 bp on ETH pairs and
+always in the direction of flattering us.  A row whose block moved under it is
+dropped rather than reported.
 
 The hosted deployment serves one host per chain -- `ethereum`, `arbitrum`,
-`gnosis`, `base`, `optimism` at `<chain>.router.curve.finance` -- and those
-five are the whole comparable set; the other ten chains this router covers have
-nothing to compare against.
+`gnosis`, `base`, `optimism` at `<chain>.router.curve.finance` -- and those five
+are the whole comparable set.
 
 Pairs come from each chain's own universe rather than a hardcoded list, so a
-chain whose pools move does not quietly stop being tested: `chain.stables` is
-already the curated "these hold a peg" set, and stable-to-stable is where a
-difference means routing rather than freshness.  One volatile pair per chain is
-quoted too, marked `*` and excluded from the tally.
+chain whose pools move does not quietly stop being tested.  One volatile pair per
+chain is quoted too, marked `*` and excluded from the tally.
 
     python scripts/compare_curve.py [--chain all|ethereum|...] [--sizes 10000,100000]
 """
@@ -129,10 +126,9 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
         """Our side, at *their* block.
 
         Rebuilt whenever the snapshot moves, which on mainnet is most rows: a
-        12-second block against several seconds per quote means a single pin
-        for the whole chain would reject nearly everything.  Balances are the
-        part that must be re-read; the pool list and dialects are not
-        block-sensitive.
+        12-second block against several seconds per quote means a single pin for
+        the whole chain would reject nearly everything.  Balances are the part
+        that must be re-read; the pool list and dialects are not block-sensitive.
         """
         if bound["block"] == block:
             return bound

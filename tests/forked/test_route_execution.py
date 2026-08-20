@@ -1,23 +1,21 @@
 """Are the routes we hand out actually executable?
 
-Everything else here asks the chain a question.  `quote_routes` walks a
-candidate with chained `staticcall` and the number that comes back is the
-verdict -- which is exact for a route that touches each pool once, and
-structurally blind for the three cases that matter most:
+Everything else here asks the chain a question.  `quote_routes` walks a candidate
+with chained `staticcall` and the number that comes back is the verdict -- exact
+for a route that touches each pool once, and structurally blind for the three
+cases that matter most:
 
-* a pool entered twice, where leg two quotes against state leg one already
-  moved -- the reason `decision 3` exists and the reason good routes come back
-  labelled `certificate: RESTRICTED`;
-* multi-port elements, which are the same thing under another name;
+* a pool entered twice, where leg two quotes against state leg one already moved
+  -- the reason `decision 3` exists and the reason good routes come back labelled
+  `certificate: RESTRICTED`;
+* multi-port elements, the same thing under another name;
 * anything that reverts only when value really moves -- a paused transfer, a
   deposit cap, a transfer hook.  `get_dy` prices all of them happily.
 
-So these run the winner for real: `boa.fork` at the same pinned block, the
-input funded, and genuine `exchange` / `add_liquidity` /
-`remove_liquidity_one_coin` / `deposit` calls through `contracts/RouteExecutor.vy`.
-
-The claim is not that execution is a better quote.  It is that the route runs
-at all, and that the figure we published was honest.
+So these run the winner for real: `boa.fork` at the same pinned block, the input
+funded, and genuine calls through `contracts/RouteExecutor.vy`.  The claim is not
+that execution is a better quote, but that the route runs at all and the figure
+we published was honest.
 """
 
 from __future__ import annotations

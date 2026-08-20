@@ -5,25 +5,23 @@ is what makes the second quote fast: probes, calibration and the reference-price
 fit are functions of (universe, block), not of the amount.  Anything *else* that
 survives from one quote to the next makes the answer a function of history, and
 that is invisible from the outside -- both answers are real routes, verified on
-chain, and the only symptom is that whichever ran second looks like a
-regression.
+chain, and the only symptom is that whichever ran second looks like a regression.
 
 It has happened twice.  §8's refit used to re-anchor `B` from a ladder carrying
 the previous quote's probe sizes (26 bp on USDC->CRV $100k).  Then the previous
 quote's active set was carried forward as a warm start, which changed which
-candidates the truncated re-solves could reach at all: crvUSD -> sDOLA at block
-25,770,648 returned 1,415,273.115793 alone and 1,419,036.382808 after a $100k
-quote in the same session, 26.5 bp apart.
+candidates the truncated re-solves could reach at all: crvUSD -> sDOLA returned
+1,415,273.115793 alone and 1,419,036.382808 after a $100k quote in the same
+session, 26.5 bp apart.
 
-Both were found by hand, one pair at a time.  This states the property instead:
+Both were found by hand.  This states the property instead:
 
     for any sequence of quotes ending in X, the answer to X is the answer X
     gets alone.
 
-The quoter here is synthetic and deterministic.  It is deliberately *not* a
-model of Curve's arithmetic -- the property under test is invariance, so all it
-has to be is a pure function of (legs, amount), which makes any difference
-between two runs attributable to state the router carried.
+The quoter here is synthetic and deliberately *not* a model of Curve's
+arithmetic -- the property under test is invariance, so all it has to be is a
+pure function of (legs, amount).
 """
 
 from __future__ import annotations
@@ -52,12 +50,11 @@ DECIMALS = 18
 UNIT = 10**DECIMALS
 #: Big enough that the candidate families truncate.
 #
-# That is not incidental -- it is the whole reason the leak existed.  With a
-# handful of arcs every re-solve runs to completion and the starting basis
-# cannot matter, so a small universe makes this test pass on code that has the
-# bug.  Checked: against the commit before the fix, twelve arcs pass and this
-# fails.  `max_candidates`, `CANDIDATE_PIVOTS` and the leg limit all have to be
-# reachable for a warm start to be able to change the answer.
+# That is the whole reason the leak existed: with a handful of arcs every
+# re-solve runs to completion and the starting basis cannot matter, so a small
+# universe makes this test pass on buggy code.  Checked against the commit
+# before the fix -- twelve arcs pass, this fails.  `max_candidates`,
+# `CANDIDATE_PIVOTS` and the leg limit all have to be reachable.
 N_TOKENS = 18
 TOKENS = [("0x" + f"{k:02x}" * 20, f"T{k}") for k in range(N_TOKENS)]
 
@@ -265,11 +262,10 @@ def _state(prepared) -> dict:
     """Everything on a `Prepared` that could steer a later quote.
 
     The property above can only catch a leak that changes the answer *on this
-    universe*, and a convex solve that runs to completion is start-independent
-    by construction -- which is exactly why the mainnet leak survived a small
-    synthetic test.  This asks the structural question instead: after a quote,
-    is the preparation the same object it was before?  A leak is then caught
-    whether or not it happened to move a number.
+    universe*, and a convex solve that runs to completion is start-independent by
+    construction -- which is why the mainnet leak survived a small synthetic
+    test.  This asks the structural question instead: after a quote, is the
+    preparation the same object it was before?
     """
     from dataclasses import fields
 
