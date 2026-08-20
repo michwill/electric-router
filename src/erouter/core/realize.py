@@ -116,15 +116,14 @@ def topological_nodes(tau: np.ndarray, sig: np.ndarray, n_nodes: int) -> list[in
 def cancel_cycles(
     tau: np.ndarray, sig: np.ndarray, psi: np.ndarray, tol: float = 1e-12
 ) -> tuple[np.ndarray, int]:
-    """Remove circulation from a flow, leaving the same net source-to-sink delivery.
+    """Remove circulation from a flow, leaving the same net delivery.
 
-    A cycle appears when the model believes some loop has negative total `eps`
-    -- free arbitrage.  §5.3 treats that as real and worth absorbing, but a
-    router cannot *execute* a circulation as part of a one-way trade: it would
-    need capital it does not have, and the quoter walks a DAG.  Cancelling the
-    circulation leaves the delivered amount unchanged and can only lower the
-    modelled output (the loop was claimed to be profitable), which is the
-    conservative direction.
+    A cycle appears when the model believes some loop has negative total `eps` --
+    free arbitrage.  §5.3 treats that as real and worth absorbing, but a router
+    cannot *execute* a circulation as part of a one-way trade: it would need
+    capital it does not have, and the quoter walks a DAG.  Cancelling leaves the
+    delivered amount unchanged and can only lower the modelled output, which is
+    the conservative direction.
 
     Returns the acyclic flow and the number of cycles removed.
     """
@@ -146,15 +145,13 @@ def cancel_cycles(
             break
         arcs = live[cycle]
         flow[arcs] -= flow[arcs].min()
-        # Only the cycle's own arcs.  `flow[flow <= tol] = 0` looks like the
-        # same statement and is not: `<= tol` catches every *negative* entry in
-        # the whole vector, and a negative flow is real flow in the reverse
+        # Only the cycle's own arcs.  `flow[flow <= tol] = 0` looks like the same
+        # statement and is not: `<= tol` catches every *negative* entry in the
+        # whole vector, and a negative flow is real flow in the reverse
         # direction, not dust.  An active-set solve that stopped early leaves
-        # those behind, and zeroing one strands exactly its magnitude at both
-        # of its endpoints -- conservation held to 3.2e-10 coming out of the
-        # solve and to 8.4e-03 coming out of here, on a single arc carrying
-        # -0.1304 of a Psi of 15.52.  §12.4 then refused the route, correctly,
-        # for damage done after the solve was finished.
+        # those behind, and zeroing one strands exactly its magnitude at both of
+        # its endpoints -- which §12.4 then refuses, correctly, for damage done
+        # after the solve was finished.
         settled = arcs[flow[arcs] <= tol]
         flow[settled] = 0.0
         removed += 1
@@ -162,16 +159,13 @@ def cancel_cycles(
 
 
 # A branch carrying less than this share of what leaves its node cannot change
-# the answer, but it can still destroy it.  Measured on rETH->WETH: the best
-# candidate by 87 bp put 7e-6 of one node into frxETH->crvUSD, which then fed
-# six more legs -- crvUSD->scrvUSD->ynUSDx->ynRWAx->USDC->WETH -- each carrying
-# an amount that rounded to zero.  One of them quoted zero on a zero input, the
-# quoter aborted the whole route, and the candidate was dropped as "reverted"
-# in favour of one paying 57.42 instead of 57.97.
+# the answer, but it can still destroy it: measured on rETH->WETH, a branch
+# holding 7e-6 of one node fed six more legs, each carrying an amount that
+# rounded to zero, and one of them quoting zero aborted the whole route.
 #
 # `MIN_FLOW_FRACTION` in candidates.py does not catch this: it screens an arc's
-# flow against the *whole trade*, while a branch can be a meaningful share of
-# Psi and still be a rounding error at the node it leaves from.
+# flow against the *whole trade*, while a branch can be a meaningful share of Psi
+# and still be a rounding error at the node it leaves from.
 DUST_SHARE = 1e-4
 
 
@@ -190,19 +184,18 @@ def prune_dust(
     Two rules, applied together until the flow stops changing:
 
     * a branch carrying less than `share` of its node's outflow is dust;
-    * an arc no longer on any src->dst path goes with it, which is what
-      removes the orphaned tail rather than leaving legs quoting on nothing.
+    * an arc no longer on any src->dst path goes with it, which is what removes
+      the orphaned tail rather than leaving legs quoting on nothing.
 
     The dropped value is not lost.  The quoter splits a node by share of the
     balance actually sitting in its slot and the last leg of a group sweeps the
-    remainder, so removing a branch hands its flow to its siblings -- and at
-    the optimum those siblings are priced within a hair of it (§6.1), so the
-    cost is second order in an amount already below 1 bp of the node.
+    remainder, so removing a branch hands its flow to its siblings -- and at the
+    optimum those siblings are priced within a hair of it (§6.1).
 
-    This *does* leave KCL violated by up to `share` at the pruned node, which
-    is deliberate and belongs strictly after §12.4's check on the solved flow:
-    the invariant is about what the solver produced, and this is about what the
-    quoter can survive.  Returns the pruned flow and the number of arcs cut.
+    This *does* leave KCL violated by up to `share` at the pruned node, which is
+    deliberate and belongs strictly after §12.4's check: the invariant is about
+    what the solver produced, and this is about what the quoter can survive.
+    Returns the pruned flow and the number of arcs cut.
     """
     flow = np.array(psi, dtype=float)
     if flow.size == 0:
@@ -223,8 +216,8 @@ def prune_dust(
         removed += int(np.count_nonzero(doomed))
     # Pruning may not decide there is no route.  If the trade no longer reaches
     # the destination, the criterion was wrong for this flow and the original
-    # stands -- a reverting candidate is adjudicated by the quoter, an empty
-    # one never gets that far.
+    # stands -- a reverting candidate is adjudicated by the quoter, an empty one
+    # never gets that far.
     if not (flow[sig == dst] > tol).any():
         return np.array(psi, dtype=float), 0
     return flow, removed
@@ -325,15 +318,13 @@ def realize(
     def slot(token: str) -> int:
         """The accumulator this token's balance lands in.
 
-        Aliases share one.  Two addresses over a single balance -- gnosis's
-        two EURe contracts report the same `totalSupply` to the wei and the
-        same `balanceOf` for every holder -- have no conversion leg between
-        them, because there is nothing to execute.  Giving them a slot each
-        meant the legs delivered into one and the route read the other, so a
-        perfectly good route quoted zero and was dropped as reverting: on
-        gnosis WXDAI->EURe that silently discarded the whole USDC.e side of
-        the market.  Only aliases collapse; a vault or a native wrapper still
-        needs its own slot, because a leg converts between them.
+        Aliases share one.  Two addresses over a single balance -- gnosis's two
+        EURe contracts report the same `totalSupply` to the wei and the same
+        `balanceOf` for every holder -- have no conversion leg between them,
+        because there is nothing to execute.  Giving them a slot each meant the
+        legs delivered into one and the route read the other.  Only aliases
+        collapse; a vault or a native wrapper still needs its own slot, because a
+        leg converts between them.
         """
         key = token.lower()
         conversion = nodes.conversion.get(key)
@@ -386,18 +377,15 @@ def realize(
         #
         # The canonical token is an arbitrary label -- what matters is which
         # member the legs want.  Defaulting to it round-trips a node whose flow
-        # both arrives *and* leaves as the same non-canonical token: USDC->ETH
-        # then ETH->crvUSD realised as `ETH->WETH, WETH->ETH` between them, two
-        # legs and two lots of integer rounding to end where it started.  It is
-        # the same waste the destination tail below already avoids, and it is
-        # what makes one slot drained by two non-adjacent groups.
+        # both arrives *and* leaves as the same non-canonical token, two legs and
+        # two lots of integer rounding to end where it started.
         #
-        # Only when the whole node agrees, and only when everything arriving
-        # can reach the new hub in one hop -- every conversion is defined
-        # against the canonical, so a second non-canonical arrival would need
-        # two.  Left alone for the destination, whose tail is keyed to the
-        # canonical, and for mixed nodes, where funnelling through one slot is
-        # what makes the `bps` split well defined.
+        # Only when the whole node agrees, and only when everything arriving can
+        # reach the new hub in one hop -- every conversion is defined against the
+        # canonical, so a second non-canonical arrival would need two.  Left
+        # alone for the destination, whose tail is keyed to the canonical, and
+        # for mixed nodes, where funnelling through one slot is what makes the
+        # `bps` split well defined.
         hub = canonical
         if outgoing and node != destination:
             wanted = {arcs[k].token_in.lower() for k in outgoing}
@@ -417,17 +405,13 @@ def realize(
             # The destination has no outgoing arcs, so skipping it here left a
             # route that ends in native ETH depositing into the ETH slot while
             # the caller asked for WETH -- the quoter then reads the WETH slot,
-            # finds nothing, and the whole candidate reads as "reverted".  That
-            # silently removed both big ETH/stETH pools from stETH->WETH and
-            # left a shallow factory pool paying half.
+            # finds nothing, and the whole candidate reads as "reverted".
             if not outgoing and node != destination:
                 continue
             # Flow that already arrives *as the token the caller asked for* is
             # finished.  Folding it into the hub only for the destination tail
-            # below to convert it straight back is a wasted round trip: two
-            # legs and two lots of integer rounding to end where it started.
-            # Measured on USDC->sUSDS, where pools pay sUSDS directly and the
-            # route ended `... REDEEM sUSDS->USDS, DEPOSIT USDS->sUSDS`.
+            # below to convert it straight back is two legs and two lots of
+            # integer rounding to end where it started.
             if node == destination and not outgoing and token == dst_lower:
                 continue
             # Every conversion is defined against the canonical, so folding
@@ -456,15 +440,13 @@ def realize(
         group: list[tuple[int, int]] = []  # (arc index, destination slot)
         for k in outgoing:
             token_in = arcs[k].token_in.lower()
-            # Compare *slots*, not addresses.  An alias is a second address
-            # over one balance -- gnosis's two EURe contracts report the same
-            # `balanceOf` for every holder -- so `slot` deliberately collapses
-            # it onto the canonical, and an arc drawing on the alias is already
-            # drawing on the hub.  Testing the address instead sent it down the
-            # spoke path, where the conversion leg it then built moved slot 0
-            # to slot 0 and `Leg` refused it outright: EURe -> USDC on gnosis
-            # died with "leg must move between slots (got 0)".  The fold above
-            # skips aliases for the same reason, in as many words.
+            # Compare *slots*, not addresses.  An alias is a second address over
+            # one balance, so `slot` deliberately collapses it onto the
+            # canonical, and an arc drawing on the alias is already drawing on
+            # the hub.  Testing the address instead sent it down the spoke path,
+            # where the conversion leg it then built moved slot 0 to slot 0 and
+            # `Leg` refused it outright.  The fold above skips aliases for the
+            # same reason.
             if slot(token_in) == slot(hub):
                 group.append((k, -1))
             else:
@@ -472,14 +454,12 @@ def realize(
                 group.append((k, spoke))
                 spokes.append((k, spoke))
 
-        # A pool may only be entered twice if everything before its final leg
-        # can be advanced past, so put the legs we cannot advance past last.
-        # Both legs of the measured gnosis split leave the same node, so they
-        # land in this one group and this is the whole of the ordering: it
-        # swaps through the 3pool and then deposits into it.  Emitted the
-        # other way round the route is correct but unquotable, and
-        # `check_one_arc_per_pool` would refuse it -- which is how it behaved
-        # before this sort, and why the split never survived.
+        # A pool may only be entered twice if everything before its final leg can
+        # be advanced past, so put the legs we cannot advance past last.  Both
+        # legs of the gnosis split leave the same node, so they land in this one
+        # group and this is the whole of the ordering: it swaps through the 3pool
+        # and then deposits into it.  Emitted the other way round the route is
+        # correct but unquotable, and `check_one_arc_per_pool` would refuse it.
         if _reused_pools(arcs):
             reused = _reused_pools(arcs)
             group.sort(key=lambda item: (arcs[item[0]].pool.lower() in reused
@@ -513,10 +493,9 @@ def realize(
     dst_node = nodes.node(dst_token)
     dst_canonical = nodes.canonical_of[dst_node]
     # Only convert out of the hub if anything actually landed in it.  Arrivals
-    # already in `dst_token` now bypass the fold above, so when *every* leg
-    # pays the requested token the hub is empty and this leg would move zero --
-    # harmless in the quoter, which skips a zero-dx leg, but it still spends
-    # one of the caller's legs and shows up in the diagram.
+    # already in `dst_token` bypass the fold above, so when *every* leg pays the
+    # requested token the hub is empty and this leg would move zero -- harmless
+    # in the quoter, but it still spends one of the caller's legs.
     arriving = {
         arcs[k].token_out.lower() for k in range(len(arcs)) if arcs[k].sigma == dst_node
     }
@@ -614,17 +593,15 @@ def conversion_route(
 ) -> RealizedRoute:
     """The route between two tokens of the *same* node: the conversion itself.
 
-    Merging is what lets the solve treat crvUSD and scrvUSD, or ETH and WETH,
-    as one place -- and it also means there is no arc between them and nothing
-    for the graph to find.  Asking for one used to be an error, which is right
-    about the model and wrong about the question: crvUSD -> scrvUSD is a real
-    trade a user can make, it just happens to be a deposit rather than a swap.
+    Merging is what lets the solve treat crvUSD and scrvUSD, or ETH and WETH, as
+    one place -- and it also means there is no arc between them and nothing for
+    the graph to find.  Asking for one used to be an error, which is right about
+    the model and wrong about the question: crvUSD -> scrvUSD is a real trade,
+    it just happens to be a deposit rather than a swap.
 
-    Every conversion is defined against the node's canonical token, so the
-    general answer is at most two legs -- in to the canonical, out to the
-    target -- and often one, because one side usually *is* the canonical.  An
-    ALIAS pair emits none: holding one is holding the other (Gnosis EURe), so
-    the route is empty and the output is the input.
+    Every conversion is defined against the node's canonical token, so the answer
+    is at most two legs -- in to the canonical, out to the target -- and often
+    one.  An ALIAS pair emits none: holding one is holding the other.
     """
     src, dst = src_token.lower(), dst_token.lower()
     canonical = nodes.canonical(src)
@@ -664,21 +641,18 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
     """Replay the legs the way the quoter will, to fill in modelled amounts.
 
     The *routing* matches the contract exactly -- same group snapshot, same
-    `bps`-of-base arithmetic, same order -- so the split the diagram shows is
-    the split the quoter will be asked to confirm.
+    `bps`-of-base arithmetic, same order -- so the split the diagram shows is the
+    split the quoter will be asked to confirm.
 
-    The *amounts* are the model's, not the chain's, and deliberately so.  Each
-    leg keeps the ratio its arc was calibrated at, rescaled linearly to
-    whatever actually arrives, which is a straight line through a curve: worst
-    measured drift against a stateful walk of the same legs is 0.135 bp on
-    mainnet crvUSD -> sDOLA and 2.78 bp on gnosis WXDAI -> EURe.
+    The *amounts* are the model's, not the chain's, and deliberately so.  Each leg
+    keeps the ratio its arc was calibrated at, rescaled linearly to whatever
+    arrives, which is a straight line through a curve: worst measured drift
+    against a stateful walk of the same legs is 2.78 bp.
 
-    Pricing these legs from the exact models instead would make them agree with
-    the chain and would destroy the one number that makes the loss ledger worth
-    reading: `verified - modelled` is a measurement of the model, so a
-    `modelled_out` computed from the exact models would report its own accuracy
-    as zero.  The renderer says which is which, and that is the right place for
-    the distinction to live.
+    Pricing these legs from the exact models instead would destroy the one number
+    that makes the loss ledger worth reading: `verified - modelled` measures the
+    model, so a `modelled_out` computed from the exact models would report its own
+    accuracy as zero.
     """
     balances: dict[int, int] = {0: route.amount_in}
     current = None
@@ -717,12 +691,10 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
     return balances.get(route.dst_slot, 0)
 
 
-# Paths are display-only, and there can be exponentially many of them: the
-# walk below is a DAG enumeration, so a route 16 legs deep that branches three
-# ways at each node has tens of millions.  Measured on crvUSD->sDOLA at 5M once
-# the savings vaults were merged, this never returned -- §11.6 warns that path
-# enumeration is exponential, and it is just as true in the presentation layer
-# as in the solver.
+# Paths are display-only, and there can be exponentially many of them: the walk
+# below is a DAG enumeration, so a route 16 legs deep branching three ways at
+# each node has tens of millions.  §11.6 warns that path enumeration is
+# exponential, and it is just as true in the presentation layer as in the solver.
 MAX_DISPLAY_PATHS = 64
 
 
@@ -774,16 +746,13 @@ def _reused_pools(arcs: list[PoolArc]) -> set[str]:
     return {pool for pool, count in seen.items() if count > 1}
 
 
-#: The leg kinds whose effect on a pool the models can reproduce.  A swap
-#: moves two balances by amounts `StableSwap.exchange` computes exactly, and a
-#: deposit is `StableSwapLP.add_liquidity` -- which charges the imbalance fee
-#: `calc_token_amount` explicitly does not ("needed to prevent front-running,
-#: not for precise calculations") and keeps all of it but the DAO's share.
-#: A *withdrawal* is still not here: `calc_withdraw_one_coin` has the fee but
-#: `remove_liquidity_one_coin`'s effect on the supply has not been read off
-#: the deployed source, and guessing it is exactly what this list exists to
-#: prevent.  Whether a given pool has the models to do any of it is the
-#: quoting client's business, not this list's.
+#: The leg kinds whose effect on a pool the models can reproduce.  A swap moves
+#: two balances by amounts `StableSwap.exchange` computes exactly, and a deposit
+#: is `StableSwapLP.add_liquidity` -- which charges the imbalance fee
+#: `calc_token_amount` explicitly does not, and keeps all but the DAO's share.
+#: A *withdrawal* is still not here: `remove_liquidity_one_coin`'s effect on the
+#: supply has not been read off the deployed source, and guessing it is what this
+#: list exists to prevent.
 ADVANCEABLE = (ArcKind.SWAP_STABLE, ArcKind.DEPOSIT_FIXED,
                ArcKind.DEPOSIT_DYN, ArcKind.DEPOSIT_FIXED_NOFLAG)
 
@@ -793,18 +762,17 @@ def check_one_arc_per_pool(route: RealizedRoute,
     """Decision 3: a pool may appear at most once -- unless it can be advanced.
 
     Deposits and withdrawals mutate pool state and a view-only chained quoter
-    cannot see its own earlier leg, so two arcs of the same pool would be
-    quoted against stale state.  That is a limit of *asking the chain*, not of
-    the arithmetic: `reentrant` names the pools whose state the caller can
-    compute forward, and for those a second leg is priced against the pool the
-    first one left behind.
+    cannot see its own earlier leg, so two arcs of the same pool would be quoted
+    against stale state.  That is a limit of *asking the chain*, not of the
+    arithmetic: `reentrant` names the pools whose state the caller can compute
+    forward, and for those a second leg is priced against the pool the first one
+    left behind.
 
-    Two conditions, and the second is the subtle one.  Every leg **but the
-    last** on such a pool must be a kind we can advance past, because only the
-    legs with something after them need the pool moved.  That is what lets the
-    measured gnosis split work: it swaps through the 3pool and then deposits
-    into it, and the deposit -- which we could not advance past -- is last.
-    Reverse the order and this refuses it, correctly.
+    Two conditions, and the second is the subtle one.  Every leg **but the last**
+    on such a pool must be a kind we can advance past, because only the legs with
+    something after them need the pool moved.  That is what lets the gnosis split
+    work -- it swaps through the 3pool and then deposits into it, and the deposit
+    is last.  Reverse the order and this refuses it, correctly.
 
     Returns the offending pool addresses.
     """
