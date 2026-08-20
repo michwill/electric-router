@@ -97,6 +97,11 @@ class PoolSpec:
     # reports above.  Filled alongside `balances` because it rides the same
     # batch; see `check_reserves_are_real` for why the difference matters.
     held: tuple[int, ...] = ()
+    # `add_liquidity` is allowlisted and the allowlist is switched on, so a
+    # deposit reverts for everyone but its members.  A flag an admin can flip,
+    # not a property of the code, so it is read per block like a balance --
+    # `dev.universe.resolve_deposit_gates`.  Swaps and withdrawals are unaffected.
+    deposit_gated: bool = False
     extra: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------ metadata

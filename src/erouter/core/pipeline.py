@@ -222,9 +222,13 @@ def build_arcs(
         for k in range(pool.n_coins):
             if k >= len(pool.balances) or pool.balances[k] <= 0:
                 continue
-            offer(deposit, k, 0, pool.balances[k],
-                  pool.coins[k].decimals, pool.lp_decimals,
-                  reserve_out=pool.lp_supply)
+            # `calc_token_amount` answers for anyone; `add_liquidity` does not
+            # when the pool's allowlist is on, so offering the arc would quote a
+            # deposit that reverts on execution.  Withdrawals stay.
+            if not pool.deposit_gated:
+                offer(deposit, k, 0, pool.balances[k],
+                      pool.coins[k].decimals, pool.lp_decimals,
+                      reserve_out=pool.lp_supply)
             if withdraw is not None:
                 offer(withdraw, 0, k, pool.lp_supply,
                       pool.lp_decimals, pool.coins[k].decimals,

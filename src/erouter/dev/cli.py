@@ -745,6 +745,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         load_pools,
         read_balances,
         resolve_dialects,
+        resolve_deposit_gates,
         resolve_lp_tokens,
     )
     from .wrappers import (
@@ -817,6 +818,11 @@ def cmd_route(args: argparse.Namespace) -> int:
     with _boot("lp tokens"):
         resolve_lp_tokens(load.pools, reader, chain.chain_id,
                           token_client=client)
+    with _boot("deposit gates"):
+        gated = resolve_deposit_gates(load.pools, reader)
+    if gated:
+        print(f"{WARN} {gated} pool(s) allowlist add_liquidity; their deposit "
+              f"arcs are withheld, withdrawals are not")
     for warning in decimals_fixed:
         print(f"{WARN} {warning}")
     with _boot("reserves"):

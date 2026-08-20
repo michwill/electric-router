@@ -240,10 +240,14 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
     that look unrelated.  Native is free to conjure in a fork, so mint it the way
     any holder would.
 
-    Everything else is dealt.  The supply fallback stays for tokens that pack or
-    compute `totalSupply`, and is recorded rather than silent: leaving supply
-    alone is harmless for an ordinary ERC20 that no pool asks about, and wrong for
-    an LP token, whose withdrawal price is a function of it.
+    Everything else is dealt, and **the supply is left alone**.  That ordering is
+    the whole point: minting shares an LP token's pool has no assets behind
+    dilutes it, and a withdrawal is priced off `totalSupply`.  Measured on gnosis
+    USDCe/EURe, adjusting supply to deal 1% of the LP moved the virtual price from
+    1.000205 to 0.990302 and `remove_liquidity_one_coin` refused its own state
+    with "virtual price decreased"; leaving it alone reproduces the view to the
+    wei.  Adjusting is the fallback for a token that packs or computes its balance
+    slot, and is recorded rather than silent.
     """
     if wrapped and token.address.lower() == wrapped.lower():
         boa.env.set_balance(who, amount + GAS_HEADROOM_WEI)
@@ -251,15 +255,16 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
             boa.loads_abi(WRAPPED_ABI).at(token.address).deposit(value=amount)
         return
     try:
-        boa.deal(token, who, amount)
+        boa.deal(token, who, amount, adjust_supply=False)
         return
     except Exception as exc:                       # noqa: BLE001
         first = str(exc)
         result.warnings.append(
-            f"total supply left unadjusted for {token.address}: {exc}"[:200]
+            f"balance slot not found for {token.address}, adjusting supply "
+            f"instead -- an LP token priced this way is diluted: {exc}"[:200]
         )
     try:
-        boa.deal(token, who, amount, adjust_supply=False)
+        boa.deal(token, who, amount)
         return
     except Exception:                              # noqa: BLE001
         pass

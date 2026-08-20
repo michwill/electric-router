@@ -767,3 +767,35 @@ def arc_refs(pools: list[PoolSpec]):
                 )
             )
     return refs
+
+
+#: The Twocrypto allowlist stores its own on/off switch under the zero address.
+DEPOSIT_GATE_FLAG = "0x" + "00" * 20
+
+
+def resolve_deposit_gates(pools: list[PoolSpec], client: QuoterClient) -> int:
+    """Mark pools whose `add_liquidity` is allowlisted, in one batched read.
+
+    Twocrypto carries `lp_allowlist`, and when the switch under the zero address
+    is on, `add_liquidity` asserts `lp_allowlist[msg.sender]` and refuses
+    everyone else.  `calc_token_amount` carries no such check, so the arc quotes
+    a number nobody outside the list can get -- measured on the four Yield Basis
+    pools, $245M of TVL between them, every deposit reverting with "!wl".
+
+    A flag an admin can flip, so it is read per block rather than remembered.
+    Only the deposit is gated; swaps and withdrawals stay.
+    """
+    from ..core.codec import encode_call
+    from ..core.transport import Call
+
+    if not pools:
+        return 0
+    calls = [Call(p.address, encode_call("lp_allowlist(address)", DEPOSIT_GATE_FLAG))
+             for p in pools]
+    gated = 0
+    for pool, answer in zip(pools, client.raw(calls), strict=True):
+        # A pool without the getter answers empty, which is not a "no" -- but it
+        # is the absence of an allowlist, which is the same thing here.
+        pool.deposit_gated = bool(answer.ok and answer.uint_or(0))
+        gated += pool.deposit_gated
+    return gated
