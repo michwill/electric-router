@@ -342,6 +342,22 @@ def _client_block(client) -> int:
         return 0
 
 
+#: Whether a pool may be entered twice, priced by walking our own model forward.
+#:
+#: **Off.**  A re-entered pool is not chain-verifiable -- `quote_routes` is
+#: static calls, so the second leg reads the pool before the first touched it --
+#: and the shape it exists to serve is a *multi-port element*: one pool, one
+#: entry coin, several exits, bounded by `#in + #out <= N`.  An element appears
+#: once in the graph, carries the cross-term, and executes what it quotes; the
+#: reentry path is the compromise the solver notes describe, "two independent
+#: resistors, no cross-term, both calibrated at a state neither will see".
+#:
+#: With this off, `check_one_arc_per_pool` refuses any pool used twice and the
+#: route falls back to the repaired one-arc-per-pool candidate, which the chain
+#: can price.  Elements are the replacement; see `docs/multi-port-elements.md`.
+REENTRY = False
+
+
 def prepare(
     pools: list[PoolSpec],
     nodes: NodeMap,
@@ -875,7 +891,8 @@ def _quote(
     # Which pools the quoting client can compute forward.  Asked of the
     # client rather than imported, so `core` stays free of `dev`: a plain
     # quoter offers nothing and the rule is exactly as it was.
-    reentrant = frozenset(getattr(client, "reentrant_pools", ()) or ())
+    reentrant = (frozenset(getattr(client, "reentrant_pools", ()) or ())
+                 if REENTRY else frozenset())
     conflicts = check_one_arc_per_pool(result.route, reentrant)
     if conflicts:
         result.warnings.append(
@@ -1216,6 +1233,19 @@ def _optimise_split(
     result.counters["split_gain_bp"] = round(report.gain_bp, 2)
 
 
+def _value_flow(nodes: NodeMap, nu: np.ndarray, token: str, node: int,
+                amount: int) -> float:
+    """`amount` of `token`, in the value coordinate the solver and `realize` use.
+
+    The inverse of `_realised_delta`.  A model-free candidate is built from
+    probes rather than a solve, so it has no `psi` of its own -- and one has to
+    be supplied, not left at a placeholder: `realize` sizes every leg from it,
+    and `bps` then normalises the shares so a wrong scale is invisible on an
+    ordinary route and fatal on a capped one.
+    """
+    return (amount / 10 ** nodes.decimals(token)) * nodes.rate(token) * float(nu[node])
+
+
 def direct_candidates(
     pools: list[PoolSpec],
     nodes: NodeMap,
@@ -1232,6 +1262,7 @@ def direct_candidates(
     anyone could find by inspection.
     """
     src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
+    flow = _value_flow(nodes, nu, src_token, src_node, amount_in)
     out: list[Candidate] = []
     made: list[PoolArc] = []
     for pool in pools:
@@ -1260,7 +1291,7 @@ def direct_candidates(
                 out.append(
                     Candidate(
                         label=f"direct {pool.name[:22]}",
-                        psi=np.array([1.0]), certificate=False,
+                        psi=np.array([flow]), certificate=False,
                         kind="direct", reason="DIRECT", n_arcs=1,
                     )
                 )
@@ -1372,10 +1403,18 @@ def two_step_candidates(
             _synthetic_arc(pool1, i1, j1, nodes, nu, src_node, middle),
             _synthetic_arc(pool2, i2, j2, nodes, nu, middle, dst_node),
         ]
+        # The second leg carries what the first one paid, measured: round A
+        # probed at the full `amount_in`, so `canonical` is the real arrival at
+        # the intermediate rather than a guess from the element law.
+        middle_token = nodes.canonical_of[middle]
         out.append(
             Candidate(
                 label=f"2-hop via {nodes.symbol(pool1.coins[j1].address)}",
-                psi=np.array([1.0, 1.0]), certificate=False,
+                psi=np.array([
+                    _value_flow(nodes, nu, src_token, src_node, amount_in),
+                    _value_flow(nodes, nu, middle_token, middle, _canonical),
+                ]),
+                certificate=False,
                 kind="direct", reason="TWO_STEP", n_arcs=2,
             )
         )
