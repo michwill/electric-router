@@ -58,14 +58,39 @@ def ask_curve(api: str, src: str, dst: str, wei: int) -> tuple[dict, float]:
     return payload, (time.perf_counter() - started) * 1000
 
 
-def pairs_for(chain, pools, sizes: tuple[int, ...]):
-    """(src, dst, amount, volatile) for one chain, from its own universe."""
+def _resolve(symbol: str, holders: dict) -> str:
+    """A symbol or address to an address, preferring the deepest on a clash."""
+    wanted = symbol.strip()
+    if wanted.lower() in holders:
+        return wanted.lower()
+    matches = [a for a, (sym, _, _) in holders.items()
+               if sym.upper().replace("\u20ae", "T") == wanted.upper()]
+    if not matches:
+        raise KeyError(f"{symbol!r} is not a coin of any pool in the universe")
+    return max(matches, key=lambda a: holders[a][2])
+
+
+def pairs_for(chain, pools, sizes: tuple[int, ...], pair: str = ""):
+    """(src, dst, amount, volatile) for one chain, from its own universe.
+
+    `pair` names one explicitly as `SRC->DST`, by symbol or address, for asking
+    about a pair the curated list does not reach.  A cross-currency pair is
+    marked volatile: the row still pins to their block, but the two sides are
+    not the same unit and a tally over them would be adding francs to dollars.
+    """
     holders: dict[str, tuple[str, int, float]] = {}
     for pool in pools:
         for coin in pool.coins:
             key = coin.address.lower()
             symbol, decimals, tvl = holders.get(key, (coin.symbol, coin.decimals, 0.0))
             holders[key] = (symbol, decimals, tvl + pool.tvl_usd)
+
+    if pair:
+        left, _, right = pair.partition("->")
+        src, dst = _resolve(left, holders), _resolve(right, holders)
+        units = {holders[src][0].upper(), holders[dst][0].upper()}
+        crosses = not all("USD" in u.replace("\u20ae", "T") or u == "DAI" for u in units)
+        return [(src, dst, size, crosses) for size in sizes], holders
 
     stables = [s.lower() for s in chain.stables if s.lower() in holders]
     if not stables:
@@ -88,7 +113,8 @@ def pairs_for(chain, pools, sizes: tuple[int, ...]):
     return out, holders
 
 
-def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
+def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict],
+                  pair: str = "") -> None:
     from erouter.core.pipeline import RoutingError, prepare, route
     from erouter.core.quoter import QuoterClient
     from erouter.dev import chains as chain_table
@@ -116,7 +142,7 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
     # the scoped key answers 403 to anything that is not the quoter.
     args = argparse.Namespace(rpc=None, block=None, private=True)
     load = load_pools(chain, min_tvl=10_000.0 if not chain.lite else 1_000.0)
-    cases, holders = pairs_for(chain, load.pools, sizes)
+    cases, holders = pairs_for(chain, load.pools, sizes, pair)
     if not cases:
         print(f"  {name}: no stable pair in the universe to compare")
         return
@@ -205,6 +231,9 @@ def main() -> int:
     parser.add_argument("--chain", default="all",
                         help="'all', one chain, or a comma-separated list")
     parser.add_argument("--sizes", default=",".join(str(s) for s in DEFAULT_SIZES))
+    parser.add_argument("--pair", default="",
+                        help="one pair as SRC->DST, by symbol or address, "
+                             "instead of the chain's curated stables")
     args = parser.parse_args()
 
     sizes = tuple(int(s) for s in args.sizes.split(","))
@@ -213,7 +242,7 @@ def main() -> int:
     rows: list[dict] = []
     for name in wanted:
         try:
-            compare_chain(name, sizes, rows)
+            compare_chain(name, sizes, rows, args.pair)
         except Exception as exc:
             print(f"  {name}: failed: {str(exc)[:70]}")
 
