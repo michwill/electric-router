@@ -1,8 +1,8 @@
 {
  "chain_id": 42161,
- "fingerprint": "8dc8ed527e109a1e",
+ "fingerprint": "a36d19e0c7a99e02",
  "unquotable": {
-  "0x6eb2dc694eb516b16dc9fbc678c60052bbdd7d80": "cb454fce1110"
+  "0x6eb2dc694eb516b16dc9fbc678c60052bbdd7d80": "e250c7eda2c0"
  },
  "verdicts": {
   "0x1446999b0b0e4f7ada6ee73f2ae12a2cfdc5d9e7": {
