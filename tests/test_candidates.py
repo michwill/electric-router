@@ -5,7 +5,8 @@ from __future__ import annotations
 import numpy as np
 
 from erouter.core import graph
-from erouter.core.candidates import CandidateSet, conflicting_pools, generate
+from erouter.core.candidates import (CandidateSet, conflicting_pools, generate,
+                                     keep_only, repair_order)
 from erouter.core.solve import active_set_solve
 from erouter.core.types import ArcKind, PoolArc
 from erouter.core.verify import verify
@@ -295,3 +296,59 @@ def test_the_winner_is_never_worse_than_a_direct_swap():
     verify(candidates, FakeClient([900_000, 1_000_000]), amount_in=10**6)
     assert candidates.best is direct
     assert candidates.best.verified_out == 1_000_000
+
+
+def test_repair_order_is_largest_flow_first():
+    """The greedy choice is where the branch starts, not where it ends."""
+    conflicts = {"poolA": [3, 1, 7]}
+    psi = np.zeros(8)
+    psi[3], psi[1], psi[7] = 0.2, 0.9, 0.5
+    assert repair_order(conflicts, psi) == {"poolA": [1, 7, 3]}
+
+
+def test_keep_only_walks_the_branch_and_clamps_past_the_end():
+    """Each rank keeps a different arc; a rank past the end keeps the last.
+
+    Clamping matters: `resolve` sweeps ranks until one re-solve is feasible, and
+    falling off the end would raise rather than end the search.
+    """
+    ordered = {"poolA": [1, 7, 3]}
+    for rank, kept in ((0, 1), (1, 7), (2, 3), (9, 3)):
+        banned = np.zeros(8, bool)
+        assert keep_only(banned, ordered, rank)
+        assert not banned[kept]
+        assert [k for k in (1, 7, 3) if banned[k]] == [k for k in (1, 7, 3) if k != kept]
+
+
+def test_keep_only_never_bans_a_pinned_arc():
+    """A pin is the candidate's whole point (§6.3), so the repair works around it."""
+    banned = np.zeros(8, bool)
+    keep_only(banned, {"poolA": [1, 7, 3]}, 0, pinned={7: 0.5})
+    assert not banned[7] and not banned[1] and banned[3]
+
+
+def test_keep_only_reports_when_it_has_no_move_left():
+    """Nothing newly banned ends the repair instead of spinning a round on it."""
+    ordered = {"poolA": [1, 7]}
+    banned = np.zeros(8, bool)
+    assert keep_only(banned, ordered, 0)          # bans arc 7
+    assert not keep_only(banned, ordered, 0)      # already banned: no move left
+
+
+def test_repair_recovers_a_candidate_whose_greedy_choice_was_infeasible():
+    """The end-to-end shape, at the level `resolve` sees it.
+
+    Pool A holds arcs 0, 1 and 2.  Banning down to the busiest (arc 0) leaves
+    the flow with nowhere to go; the branch has to reach arc 2 before a
+    re-solve succeeds.  Keeping only the greedy choice returns no candidate at
+    all, which is how four sparse candidates were lost on crvUSD -> sDOLA
+    at $2M.
+    """
+    conflicts = {"poolA": [0, 1, 2]}
+    psi = np.array([0.77, 0.77, 0.16, 0.23, 0.07])
+    ordered = repair_order(conflicts, psi)
+    assert ordered["poolA"][0] in (0, 1)          # greedy picks one of the pair
+    # Only keeping arc 2 leaves arcs 2, 3 and 4 usable -- the split that works.
+    banned = np.zeros(5, bool)
+    keep_only(banned, ordered, 2)
+    assert list(np.flatnonzero(~banned)) == [2, 3, 4]

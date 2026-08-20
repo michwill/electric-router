@@ -60,6 +60,38 @@ WIDE_STREAK = 2
 # Candidates are heuristics; stopping early yields a feasible flow, not a
 # broken one, and the quoter is what decides between them anyway.
 CANDIDATE_PIVOTS = 60
+# Repair rounds per candidate.  Three was enough while the repair only ever made
+# one choice; branching to the next arc down spends a round each time it has to
+# back out, and the deepest measured chain is three bans then two backtracks.
+REPAIR_ROUNDS = 6
+
+
+def repair_order(conflicts: dict, psi: np.ndarray) -> dict:
+    """Each conflicting pool's arcs, the one carrying most first.
+
+    Decision 3 allows a pool one arc per route, so a conflict is a choice of
+    which to keep.  Largest-first is the order to try them in, not the answer.
+    """
+    return {pool: sorted(indices, key=lambda k: -psi[k])
+            for pool, indices in conflicts.items()}
+
+
+def keep_only(banned: np.ndarray, ordered: dict, rank: int, pinned=None) -> bool:
+    """Ban every arc of each conflicting pool but the one at `rank`.
+
+    `rank = 0` is the greedy choice; higher ranks are the rest of the branch.
+    A rank past the end clamps, so a caller sweeping ranks cannot fall off.
+    Returns whether anything was newly banned -- nothing banned means the
+    repair has no move left to make and the caller must stop rather than loop.
+    """
+    applied = False
+    for indices in ordered.values():
+        keep = indices[min(rank, len(indices) - 1)]
+        for k in indices:
+            if k != keep and not (pinned and k in pinned) and not banned[k]:
+                banned[k] = True
+                applied = True
+    return applied
 
 
 @dataclass(slots=True)
@@ -265,12 +297,26 @@ def generate(
         """Re-solve, then repair pool conflicts rather than discarding them.
 
         Decision 3 allows a pool at most one arc per route, and the Laplacian
-        knows nothing about that.  Repairing in place -- keep the arc carrying
-        most, forbid its siblings, solve again -- turns what would be a wasted
-        candidate into a usable one, and every generator gets it for free.
+        knows nothing about that.  Repairing in place -- keep one arc, forbid its
+        siblings, solve again -- turns what would be a wasted candidate into a
+        usable one, and every generator gets it for free.
+
+        **Which arc to keep is a branch, not a guess.**  Keeping the one carrying
+        most is the right first try, but when the sibling it bans is the only
+        thing joining src to dst in this restricted subgraph, the re-solve comes
+        back "src not connected" and a candidate that had *already solved* is
+        thrown away.  Measured on crvUSD -> sDOLA at $2M: four candidates died
+        exactly this way -- every level of the path family above `k = 1`, the
+        family that is connected by construction, plus `top 6 pools` -- leaving
+        two solved candidates on the ballot.  The router fell back to dumping
+        the whole trade through one pool at 212% of its reserve, 706 bp behind
+        the route the branch finds.
+        So on an infeasible repair, put the bans back and keep the next arc down.
         """
         banned = forbidden.copy()
-        for _ in range(3):
+        # (bans before the repair, arcs per conflicting pool, which one we kept)
+        undo: tuple[np.ndarray, dict, int] | None = None
+        for _ in range(REPAIR_ROUNDS):
             # One warm-started active-set solve, not column generation.  The
             # base solve already priced out all m arcs, so a candidate is a small
             # perturbation of a known optimum: re-deriving the support from
@@ -290,15 +336,24 @@ def generate(
             )
             out.pivots += solution.pivots
             if not solution.feasible:
-                return False
+                if undo is None:
+                    return False
+                before, ordered, rank = undo
+                rank += 1
+                if rank >= max(len(v) for v in ordered.values()):
+                    return False
+                banned = before.copy()
+                keep_only(banned, ordered, rank, pinned)
+                undo = (before, ordered, rank)
+                continue
             conflicts = conflicting_pools(arcs, solution.psi)
             if not conflicts:
                 break
-            for indices in conflicts.values():
-                keep = max(indices, key=lambda k: solution.psi[k])
-                for k in indices:
-                    if k != keep and not (pinned and k in pinned):
-                        banned[k] = True
+            ordered = repair_order(conflicts, solution.psi)
+            before = banned.copy()
+            if not keep_only(banned, ordered, 0, pinned):
+                return False
+            undo = (before, ordered, 0)
         else:
             return False
         # Two ways to be unrealisable, and both are known before realising:
