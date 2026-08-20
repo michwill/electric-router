@@ -17,6 +17,10 @@ from dataclasses import dataclass, field, replace
 
 from erouter.core.transport import Answer, Status
 from erouter.dev import chains as chain_table
+import numpy as np
+
+from erouter.core.realize import realize
+from erouter.core.types import ArcKind, PoolArc
 from erouter.dev.wrappers import build_node_map
 
 V1 = "0x" + "e1" * 20
@@ -94,3 +98,43 @@ def test_gnosis_declares_the_eure_pair():
     declared = {(a.lower(), b.lower())
                 for a, b in chain_table.get("gnosis").duals}
     assert (GNOSIS_EURE[0].lower(), GNOSIS_EURE[1].lower()) in declared
+
+
+def _arc(pool: str, token_in: str, nodes) -> PoolArc:
+    return PoolArc(
+        id=f"{pool}:0>1", pool=pool, kind=ArcKind.SWAP_STABLE, i=0, j=1, n_coins=2,
+        token_in=token_in, token_out=OTHER,
+        tau=nodes.node(token_in), sigma=nodes.node(OTHER),
+        a=1.0, B=1e-9, decimals_in=18, decimals_out=18, tvl_usd=100_000.0,
+    )
+
+
+def test_flow_leaving_both_halves_of_an_alias_is_realisable():
+    """One node, two addresses, an arc drawing on each.
+
+    `realize.slot` collapses an alias onto its canonical deliberately -- two
+    contracts over one balance, as gnosis's two EURe are -- so an arc whose
+    input is the alias is already drawing on the hub's slot.  The hub check
+    compared *addresses*, so that arc was sent down the spoke path and the
+    conversion leg built for it moved slot 0 to slot 0, which `Leg` refuses.
+
+    It takes both halves to reach: with flow leaving only one address the hub
+    is reassigned to that address and the comparison is true either way.  Two
+    arcs pin the hub to the canonical and put the alias on the spoke path --
+    which is the real gnosis shape, where EURe sits in two pools.  `EURe ->
+    USDC` at 10,000 died there with "leg must move between slots (got 0)".
+    """
+    nodes, _ = build_node_map(pools(), chain_with_duals(), Client())
+    canonical, alias = nodes.canonical(V1), V2
+    assert nodes.node(canonical) == nodes.node(alias), "the fixture must merge them"
+    assert canonical.lower() != alias.lower(), "and must keep two addresses"
+
+    arcs = [_arc("0x" + "a1" * 20, canonical, nodes),
+            _arc("0x" + "a2" * 20, alias, nodes)]
+    route = realize(arcs, np.array([0.5, 0.5]), np.ones(nodes.n_nodes), nodes,
+                    src_token=canonical, dst_token=OTHER, amount_in=10**20)
+
+    assert len(route.legs) == 2, f"both arcs should carry flow: {route.legs}"
+    for leg in route.wire_legs:
+        assert leg.src_slot != leg.dst_slot, (
+            f"a leg from slot {leg.src_slot} to itself cannot be executed")
