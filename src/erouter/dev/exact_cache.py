@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,6 +67,47 @@ MATH_SOURCES = (
 )
 
 
+def _code_only(source: str) -> bytes:
+    """The module's tokens, without comments, docstrings or line breaks.
+
+    Hashing the raw bytes made a *documentation* edit discard every verdict on
+    every chain: trimming comments in `cryptoswap.py` and the three readers
+    moved the fingerprint and cost a full re-gate -- 2,406 probes against the 84
+    a warm cache needs.  What decides whether a pool reproduces its own quote is
+    the arithmetic, so that is what is hashed.
+
+    Any real edit still moves it.  Token types and strings are both in the
+    stream, so a changed constant, a renamed variable or a reordered expression
+    is caught; `INDENT`/`DEDENT` keep block structure, so moving a line into or
+    out of a branch is caught too.  A string used as a *value* is kept -- only
+    one standing alone as a statement is a docstring.
+    """
+    import ast
+    import io
+    import tokenize
+
+    docstrings = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            if ast.get_docstring(node, clean=False) is not None:
+                first = node.body[0]
+                docstrings.add((first.lineno, first.col_offset))
+
+    kept: list[str] = []
+    for token in tokenize.generate_tokens(io.StringIO(source).readline):
+        if token.type in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE,
+                          tokenize.ENCODING, tokenize.ENDMARKER):
+            continue
+        if token.type == tokenize.STRING and token.start in docstrings:
+            continue
+        if token.type in (tokenize.INDENT, tokenize.DEDENT):
+            kept.append(str(token.type))          # depth, not whitespace width
+            continue
+        kept.append(f"{token.type}:{token.string}")
+    return "\n".join(kept).encode()
+
+
 def math_fingerprint() -> str:
     """A digest of the maths, so editing it discards every stale verdict."""
     root = Path(__file__).resolve().parents[1]
@@ -74,11 +116,16 @@ def math_fingerprint() -> str:
         path = root / package / name
         digest.update(name.encode())
         try:
-            digest.update(path.read_bytes())
+            source = path.read_text()
         except OSError:
             # A missing module is a real difference, not a reason to fall back
             # on a fingerprint that would match a tree that still has it.
             digest.update(b"<missing>")
+            continue
+        try:
+            digest.update(_code_only(source))
+        except (SyntaxError, tokenize.TokenError):   # noqa: F821 -- see below
+            digest.update(source.encode())          # unparseable: hash it whole
     return digest.hexdigest()[:16]
 
 

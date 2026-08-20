@@ -206,3 +206,55 @@ def test_changing_the_maths_forgets_every_failure(tmp_path):
 
     again = ExactCache.load(1, "c", directory=tmp_path)
     assert not again.skip("0xaa", [1, 1])
+
+
+# ----------------------------------------- the fingerprint must ignore prose
+#
+# It hashed the raw bytes of every maths module, so trimming comments in
+# `cryptoswap.py` and the three readers moved it and discarded every verdict on
+# every chain -- a documentation edit costing a full re-gate, 2,406 probes
+# against the 84 a warm cache needs.  It has to stay sensitive to the
+# arithmetic and blind to what is written about it.
+
+def test_the_fingerprint_ignores_comments_and_docstrings():
+    from erouter.dev.exact_cache import _code_only
+
+    documented = (
+        'def get_y(a, b):\n'
+        '    """What the pool would pay.\n'
+        '\n'
+        '    A long explanation that says nothing about the arithmetic.\n'
+        '    """\n'
+        '    # a note about the constant below\n'
+        '    return a * 3 + b\n'
+    )
+    bare = 'def get_y(a, b):\n    return a * 3 + b\n'
+    assert _code_only(documented) == _code_only(bare)
+
+
+def test_the_fingerprint_still_catches_every_real_edit():
+    from erouter.dev.exact_cache import _code_only
+
+    base = 'def get_y(a, b):\n    return a * 3 + b\n'
+    for label, edited in [
+        ("a changed constant", 'def get_y(a, b):\n    return a * 4 + b\n'),
+        ("a renamed name",     'def get_y(a, c):\n    return a * 3 + c\n'),
+        ("a reordered term",   'def get_y(a, b):\n    return b + a * 3\n'),
+        ("a new guard",        'def get_y(a, b):\n    if a:\n        return 0\n    return a * 3 + b\n'),
+    ]:
+        assert _code_only(base) != _code_only(edited), label
+
+    # A string used as a *value* is arithmetic, not prose: only a string
+    # standing alone as a statement is a docstring.
+    assert (_code_only('def f():\n    return "int128"\n')
+            != _code_only('def f():\n    return "uint256"\n'))
+
+
+def test_a_line_moved_between_branches_moves_the_fingerprint():
+    from erouter.dev.exact_cache import _code_only
+
+    # Indentation is structure, so it is hashed as depth rather than dropped
+    # with the other whitespace.
+    inside = 'def f(x):\n    if x:\n        y = 1\n        return y\n    return 0\n'
+    outside = 'def f(x):\n    if x:\n        return 1\n    y = 1\n    return 0\n'
+    assert _code_only(inside) != _code_only(outside)

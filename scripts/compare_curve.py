@@ -93,12 +93,14 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
     from erouter.core.quoter import QuoterClient
     from erouter.dev import chains as chain_table
     from erouter.dev.cli import _local_quoter, _rpc_url
-    from erouter.dev.facts import FactsCache
+    from erouter.dev.facts import FactsCache, apply_broken_facts
     from erouter.dev.rpc import JsonRpcTransport
     from erouter.dev.universe import (
         load_pools,
         read_balances,
         resolve_dialects,
+        check_reserves_are_real,
+        resolve_deposit_gates,
         resolve_lp_tokens,
     )
     from erouter.dev.wrappers import (
@@ -138,6 +140,14 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict]) -> None:
         resolve_dialects(load.pools, client, chain)
         read_balances(load.pools, client, None, chain.chain_id)
         resolve_lp_tokens(load.pools, client, chain.chain_id)
+        # The same three filters the CLI applies, or this compares their router
+        # against a universe ours does not offer: a pool holding less than it
+        # reports, a deposit behind an allowlist, an arc known to revert.
+        # Winning a row on one of those would be winning on a quote nobody can
+        # execute, which is the opposite of what this script is for.
+        list(check_reserves_are_real(load.pools, client, rpc))
+        resolve_deposit_gates(load.pools, client)
+        apply_broken_facts(load.pools, facts)
         nodes, _ = build_node_map(load.pools, chain, client, facts=facts)
         stake = (build_stake_arcs(nodes, chain, client)
                  + build_transmuter_arcs(nodes, chain, client))
