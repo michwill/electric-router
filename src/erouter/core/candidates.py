@@ -40,24 +40,21 @@ from .types import PoolArc
 # double as §11.1's gas-sparsification candidates.
 TOP_K = (1, 2, 3, 4, 6, 8, 12)
 PIN_LADDER = (0.0, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0)
-# An arc carrying less than this fraction of the trade cannot change the
-# outcome, but chasing it costs pivots.  Candidates are heuristics adjudicated
-# by the quoter, so they are solved to this screen rather than to machine
-# tolerance; the certified base solve is not.
+# An arc carrying less than this fraction of the trade cannot change the outcome,
+# but chasing it costs pivots.  Candidates are heuristics adjudicated by the
+# quoter, so they are solved to this screen; the certified base solve is not.
 MIN_FLOW_FRACTION = 1e-4
 # A candidate is realised into the quoter's slot accumulator, one slot per
 # distinct token it touches.  A support wider than that cannot be priced no
 # matter how good it is, so counting nodes is a cheap, sound rejection: the
-# realised slot count is never *fewer* than the distinct nodes carrying flow
-# (conversions only add spokes).
+# realised slot count is never *fewer* than the distinct nodes carrying flow.
 #
 # Predicting it from the relaxation's own width does not work.  The obvious
-# argument -- pin/drop/repair perturb C0 by one arc, so they inherit its width
-# -- is false: forbidding an arc makes the re-solve find a different and
-# sometimes far narrower support.  Skipping those families on that reasoning
-# cost 5.65 bp on a $100 USDC->USDT swap and 0.49 bp at $1,000.  So the family
-# is stopped only once it has actually produced this many unrealisable
-# candidates in a row, which costs a few pivots to learn and never guesses.
+# argument -- pin/drop/repair perturb C0 by one arc, so they inherit its width --
+# is false: forbidding an arc makes the re-solve find a different and sometimes
+# far narrower support, and skipping those families cost 5.65 bp on a $100 swap.
+# So a family is stopped only once it has actually produced this many
+# unrealisable candidates in a row.
 WIDE_STREAK = 2
 # Candidates are heuristics; stopping early yields a feasible flow, not a
 # broken one, and the quoter is what decides between them anyway.
@@ -135,11 +132,10 @@ def _pool_of(arcs: list[PoolArc]) -> np.ndarray:
 def _by_new_pools(paths: list[list[int]], pools: np.ndarray) -> list[list[int]]:
     """Re-order paths so each one brings pools the earlier ones did not.
 
-    The cheapest path stays first -- it is `C_*` and it is what a caller with
-    no appetite for splitting gets.  After that, greedily take whichever
-    remaining path adds the most unseen pools, breaking ties toward the
-    cheaper one, so the cumulative unions grow in *venues* rather than in
-    count.  Ordering only; nothing is dropped.
+    The cheapest path stays first -- it is `C_*`, what a caller with no appetite
+    for splitting gets.  After that, greedily take whichever remaining path adds
+    the most unseen pools, breaking ties toward the cheaper one, so the
+    cumulative unions grow in *venues* rather than in count.  Ordering only.
     """
     if len(paths) < 3:
         return paths
@@ -174,12 +170,10 @@ def _spread(top_k: tuple[int, ...], budget: int) -> set[int]:
 #: kernel and another.  Testing `psi > 0` therefore made *membership* itself
 #: kernel-dependent: an arc carrying 1e-18 counted as active under LU and not
 #: under Cholesky, which changed which pools conflict, which changed the repair
-#: candidates, which changed the ballot.  Measured at one block: the winning
-#: candidate (72 bp better than the alternative) existed on one ballot and not
-#: the other.
+#: candidates, which changed the ballot -- measured, by 72 bp.
 #:
-#: A floor relative to the trade makes the question "did the solve route
-#: anything here" rather than "is this float positive".
+#: A floor relative to the trade makes the question "did the solve route anything
+#: here" rather than "is this float positive".
 ACTIVE_FLOOR = 1e-12
 
 
@@ -278,19 +272,18 @@ def generate(
         banned = forbidden.copy()
         for _ in range(3):
             # One warm-started active-set solve, not column generation.  The
-            # base solve already priced out all m arcs, so a candidate is a
-            # small perturbation of a known optimum: re-deriving the support
-            # from scratch costs ~150 pivots and buys nothing, since a
-            # restricted candidate cannot be certified anyway.
+            # base solve already priced out all m arcs, so a candidate is a small
+            # perturbation of a known optimum: re-deriving the support from
+            # scratch costs ~150 pivots and buys nothing, since a restricted
+            # candidate cannot be certified anyway.
             out.solves += 1
             solution = active_set_solve(
                 g, src, dst, Psi, A0=warm, forbidden=banned, forced_upper=pinned,
                 # §11.1: gas cannot enter the objective without making the
                 # program mixed-integer, but it bounds it from outside.  An arc
                 # carrying less value than its leg costs to execute cannot pay
-                # for itself even if it were pure profit, so screening it out
-                # is sound rather than heuristic -- and it is what stops a
-                # small trade sprouting branches that gas would eat.
+                # for itself even if it were pure profit, so screening it out is
+                # sound rather than heuristic.
                 min_flow=MIN_FLOW_FRACTION * Psi,
                 gas_cost=gas_floor,
                 maxit=CANDIDATE_PIVOTS, partial_ok=True,
@@ -330,32 +323,28 @@ def generate(
     base_active = np.flatnonzero(carries(base.psi, Psi))
     # Warm-start from the *circulation-free* support.  The raw optimum carries
     # flow on arcs that only exist to go round a negative-eps loop; they are
-    # cancelled before execution anyway, and leaving them in the start set is
-    # what makes every candidate re-solve churn through them again.
+    # cancelled before execution anyway, and leaving them in the start set makes
+    # every candidate re-solve churn through them again.
     acyclic, _ = cancel_cycles(g.tau, g.sig, base.psi)
     warm = np.flatnonzero(acyclic > 0)
     if warm.size == 0:
         warm = base_active
 
-    # Per-family budgets.  Ordering alone is not enough: with many flagged
-    # arcs the pin sweep alone is 3 x 7 = 21 candidates, which used to consume
-    # the whole budget before sparsification ran.  That mattered because every
-    # un-sparsified candidate inherits the relaxation's sprawl and blows the
-    # quoter's leg limit -- measured on a 5M USDC->USDT swap, *all twenty*
-    # candidates came back too_long and the router fell back to a single pool,
-    # missing a 0.08 bp two-pool split.
+    # Per-family budgets.  Ordering alone is not enough: with many flagged arcs
+    # the pin sweep alone is 3 x 7 = 21 candidates, which used to consume the
+    # whole budget before sparsification ran.  Every un-sparsified candidate
+    # inherits the relaxation's sprawl and blows the quoter's leg limit -- on a
+    # 5M swap, *all twenty* came back too_long and the router fell back to a
+    # single pool.
     sparse_budget = max(6, int(max_candidates * 0.45))
     pin_budget = max(4, int(max_candidates * 0.30))
     # Split the sparse budget between its two families.  They answer different
     # questions -- a union of the cheapest *paths*, versus the *pools* the
-    # relaxation actually put flow through -- and one shared counter let the
-    # first starve the second, because paths run first and there are more of
-    # them.  Measured on USDC->sUSDS 1M, where the relaxation sprawled over 48
-    # arcs and no candidate could be realised whole: the pool family's winner
-    # was never generated, and the route came out 48.8 bp short of it and 5.4
-    # short of Curve's own solver.  Paths keep first claim, since they are the
-    # family that reliably fits the quoter's leg limit; pools inherit whatever
-    # paths leave.
+    # relaxation actually put flow through -- and one shared counter let the first
+    # starve the second, because paths run first and there are more of them.
+    # Measured on USDC->sUSDS 1M, the pool family's winner was never generated and
+    # the route came out 48.8 bp short of it.  Paths keep first claim, since they
+    # are the family that reliably fits the quoter's leg limit.
     path_budget = max(3, sparse_budget // 2)
 
     # 2. sparsification, over the k cheapest *paths* rather than the k largest
@@ -367,21 +356,17 @@ def generate(
     made_paths = 0
     paths = k_shortest_paths(g, src, dst, k=max(top_k) if top_k else 6)
     # Yen's returns *near-duplicates*: the same route with one hop swapped, in
-    # eps order.  Taking them in that order makes each union differ from the
-    # last by a single arc, so a budget of four buys four nested sets covering
-    # the same handful of pools -- and the loop stops long before the ladder's
-    # wide end.  Measured on mainnet USDC -> crvUSD at $5M: `TOP_K` opens
-    # (1, 2, 3, 4, ...), all four succeeded, the loop broke at k=4 with a union
-    # of 7 arcs, and the 9th path -- the one through 3pool that Curve's own
-    # router takes and that this model prices at 73% of the trade -- was never
-    # on the ballot.  Whether it made the top four moved with the block, so the
-    # router won or lost that pair by luck.
+    # eps order.  Taking them in that order makes each union differ from the last
+    # by a single arc, so a budget of four buys four nested sets covering the same
+    # handful of pools, and the loop stops long before the ladder's wide end.
+    # Measured on USDC -> crvUSD at $5M, the 9th path -- the one through 3pool
+    # that Curve's own router takes -- was never on the ballot, and whether it
+    # made the top four moved with the block.
     #
-    # Two changes, both about spending a fixed budget on distinguishable
-    # candidates.  Order the paths so each brings pools the earlier ones did
-    # not, and spread the budget across the whole ladder instead of consuming
-    # it at the dense low end.  `k = 1` stays first either way: it is §6.2's
-    # `C_*`, and it is the candidate that reliably fits the quoter.
+    # So: order the paths so each brings pools the earlier ones did not, and
+    # spread the budget across the whole ladder instead of consuming it at the
+    # dense low end.  `k = 1` stays first either way: it is §6.2's `C_*`, and the
+    # candidate that reliably fits the quoter.
     paths = _by_new_pools(paths, pools)
     levels = _spread(top_k, path_budget)
     union: set[int] = set()
@@ -421,19 +406,16 @@ def generate(
     #    Arcs of a **re-entered pool** join the sweep, and this is the whole
     #    treatment reentry gets in the solver.  Two arcs of one pool are two
     #    independent resistors here: separate `psi^2/2G` terms, no cross-term,
-    #    both calibrated at a state neither of them will see -- because the
-    #    first leg through the pool moves it before the second arrives.  The
-    #    honest fix is a dense Hessian block per pool, which the diagonal the
-    #    §5.5 certificate prices out against does not admit.
+    #    both calibrated at a state neither will see, because the first leg moves
+    #    the pool before the second arrives.  The honest fix is a dense Hessian
+    #    block per pool, which the diagonal the §5.5 certificate prices out
+    #    against does not admit.
     #
-    #    So do what §6.3 already does for a chord: stop trusting the model for
-    #    the *allocation*, sweep it, and let a real quote adjudicate.  The
-    #    walk prices each pin with the pool actually advanced between legs
-    #    (`_stateful_leg`), so every pin is evaluated on state the solver
-    #    could not see.  If the diagonal was good enough the sweep returns
-    #    C0 and costs a handful of candidates; if it was not, the sweep wins
-    #    and says by how much.  Co-activity is only known after the solve,
-    #    which is why this is here and not in the arc flags.
+    #    So do what §6.3 already does for a chord: stop trusting the model for the
+    #    *allocation*, sweep it, and let a real quote adjudicate.  The walk prices
+    #    each pin with the pool actually advanced between legs (`_stateful_leg`).
+    #    Co-activity is only known after the solve, which is why this is here and
+    #    not in the arc flags.
     made = 0
     swept = {int(k) for k in base_active if g.flagged[k]}
     live_pools = {pools[int(k)] for k in base_active}
@@ -484,11 +466,10 @@ def generate(
 
         # Keeping one arc per pool is a heavy hammer where the pool can be
         # entered twice.  Measured on gnosis WXDAI->EURe at 100,000, the
-        # unrestricted optimum wants the 3pool six ways -- three swaps and
-        # three deposits -- and dropping to a single arc gives up 23% against
-        # a split that swaps through it and then deposits into it.  So also
-        # offer the largest *admissible* subset: every arc we can advance
-        # past, plus the biggest one we cannot, which realisation orders last.
+        # unrestricted optimum wants the 3pool six ways, and dropping to a single
+        # arc gives up 23% against a split that swaps through it and then
+        # deposits into it.  So also offer the largest *admissible* subset: every
+        # arc we can advance past, plus the biggest one we cannot.
         if reentrant:
             allowed = {pool.lower() for pool in reentrant}
             subset = np.zeros(g.m, bool)
