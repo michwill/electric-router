@@ -1,20 +1,18 @@
 """How often a pool's own minimum-out would trip before the route lands.
 
 Each leg carries a minimum-out at a fraction of the pool's fee; moving past it
-between quote and inclusion reverts the leg.  This estimates `p` per arc so
-`core/risk.py` can price a route as `output * product(1 - p_i) - gas`.
-Horizon is two minutes -- a wallet confirmation plus propagation.
+between quote and inclusion reverts the leg.  Estimates `p` per arc -- per arc,
+not per pool, since one pool's two rates need not move alike -- so
+`core/risk.py` can price a route as `output * product(1 - p_i) - gas`.  Horizon
+is two minutes: a wallet confirmation plus propagation.
 
 Counting breaches directly cannot work at ~25 samples: zero events claims
 "never", and Jeffreys smoothing puts an unbreached pool at 2%, or 22% over
-twelve legs.  So the process is modelled instead, as the data shows it: rates
-jump when someone trades rather than diffusing.  That factors into
-`P(window contains a move) * P(a move exceeds the bound)` -- the first counted
-per arc, the second a shape pooled across the universe from *nonzero* moves
-standardised by their own arc's scale, with a Hill power-law tail.
-
-Per arc, not per pool: one pool's two rates need not move alike, and the
-minimum-out is per leg.
+twelve legs.  So the process is modelled as the data shows it, rates jumping on
+trades rather than diffusing: `P(window contains a move) * P(a move exceeds the
+bound)`, the first counted per arc, the second a shape pooled across the
+universe from *nonzero* moves standardised by their own arc's scale, with a
+Hill power-law tail.
 """
 
 from __future__ import annotations
@@ -25,8 +23,8 @@ from ..core.codec import encode_call
 from ..core.transport import Call
 from .drift import series_drift_bp
 
-#: Five-block steps, twenty-five of them: roughly a minute apart over half an
-#: hour.  Ordered so consecutive samples are adjacent in time.
+#: Twenty-five five-block steps: ~a minute apart over half an hour, ordered so
+#: consecutive samples are adjacent in time.
 STEP_BLOCKS = 5
 SAMPLES = 25
 FINE_BLOCKS = tuple(k * STEP_BLOCKS for k in range(SAMPLES))
@@ -34,30 +32,27 @@ FINE_BLOCKS = tuple(k * STEP_BLOCKS for k in range(SAMPLES))
 HORIZON = 2
 #: The minimum-out, as a fraction of the pool's own fee.
 BOUND_OF_FEE = 0.2
-#: Absolute floor under that, for arcs whose rate really moves.  A fraction of
-#: the fee is the right shape but not survivable where the fee is small against
-#: the pool's own volatility: TricryptoUSDC's 3.3 bp fee gives a 0.65 bp bound
-#: against a rate that jumps ~0.9 bp per trade.  5 bp sits well past the knee
-#: (1-2 bp) on purpose -- the estimate is noisy enough between sampling windows
-#: that a floor at the knee would land on the wrong side of it half the time.
-#: Must match what the executor actually sets.  Applied only to
-#: `wide_bound_pools`; on a pegged pair it would be a huge allowance.
+#: Absolute floor under that, for arcs whose rate really moves: a fee fraction
+#: is unsurvivable where the fee is small against the pool's own volatility
+#: (TricryptoUSDC: a 3.3 bp fee buys 0.65 bp against ~0.9 bp jumps).  5 bp sits
+#: past the knee (1-2 bp) on purpose -- the estimate is noisy enough that a
+#: floor at the knee would land on the wrong side of it half the time.  Must
+#: match what the executor sets.  Applied only to `wide_bound_pools`; on a
+#: pegged pair it would be a huge allowance.
 BOUND_FLOOR_BP = 5.0
 #: What counts as a pair whose rate moves, in bp over the ~4-hour drift series.
-#: The populations do not overlap -- pegged pairs sit under 0.6, volatile ones
-#: above 4 -- so the cut is not delicate.  Made against the *pair* across every
-#: pool holding it, not one pool's recent trading: a quiet pool looks pegged
+#: Not delicate: pegged pairs sit under 0.6, volatile ones above 4.  Measured
+#: against the *pair* across every pool holding it -- a quiet pool looks pegged
 #: whatever it trades.
 PAIR_DRIFT_CUT_BP = 2.0
 #: How often a fee-derived bound may trip before the pool is listed anyway.
-#: The pair test is about the market; this is about the pool -- an accruing
-#: vault, a rebalance or an oracle step moves a pool's rate without moving the
-#: pair, and on a sub-bp bound any of them fails a route.
+#: The pair test is about the market, this one about the pool: an accruing
+#: vault, a rebalance or an oracle step moves a pool's rate without the pair's.
 TIGHT_TRIP_CUT = 0.01
 #: Below this a rate is not moving as far as our own quotes can resolve.
 SCALE_FLOOR_BP = 0.005
-#: Never claim an arc is safer than this: the tail is extrapolated past the
-#: data and is not to be trusted to four figures.
+#: Never claim an arc is safer than this -- the tail is extrapolated past the
+#: data.
 RISK_FLOOR = 1e-5
 RISK_CEILING = 0.95
 
@@ -66,8 +61,8 @@ def read_fees(client, pools) -> dict[str, float]:
     """Each pool's fee as a fraction, from the pool itself.
 
     Curve reports fees in units of 1e10.  A pool that does not answer is left
-    out rather than defaulted -- without its own fee there is no bound to
-    measure against, and inventing one would be a claim.
+    out rather than defaulted: without its own fee there is no bound to measure
+    against.
     """
     targets = [p.address for p in pools]
     calls = [Call(to=address, data=encode_call("fee()")) for address in targets]
@@ -90,8 +85,7 @@ def jump_scale_bp(moves: list[float]) -> float:
     """The size of a typical *move*, ignoring the windows with none.
 
     The median over all windows would be zero for most pools, which says only
-    that most minutes are quiet.  What the tail shape needs is the size of a
-    move given that one happened.
+    that most minutes are quiet.
     """
     jumps = sorted(m for m in moves if m > 0)
     if not jumps:
@@ -102,10 +96,9 @@ def jump_scale_bp(moves: list[float]) -> float:
 def pair_drift_bp(series) -> dict[tuple[str, str], float]:
     """Worst drift per canonical pair, over every pool that holds it.
 
-    The series keys carry the canonical pair already -- `"tokenIn|tokenOut@pool"`
-    -- so this needs no node map.  Worst rather than deepest: a quiet pool has a
-    rate that does not move, which says the pool saw no trades, not that the
-    pair holds still.
+    Series keys carry the canonical pair already (`"tokenIn|tokenOut@pool"`), so
+    this needs no node map.  Worst rather than deepest: a quiet pool's rate not
+    moving says the pool saw no trades, not that the pair holds still.
     """
     out: dict[tuple[str, str], float] = {}
     for key, entry in series.items():
@@ -122,17 +115,14 @@ def wide_bound_pools(series, fees: dict[str, float], tight: dict | None = None, 
                      floor_bp: float = BOUND_FLOOR_BP) -> dict[str, dict]:
     """Pools whose own fee does not buy them a survivable minimum-out.
 
-    A fraction of the fee works nearly everywhere -- a pool trading a volatile
-    pair usually charges for it.  The exceptions charge like a stablecoin venue
-    and move like something else.  A pool already clearing the floor is never
-    listed.
-
-    Two ways to qualify, both needed:
+    A fraction of the fee works nearly everywhere; the exceptions charge like a
+    stablecoin venue and move like something else.  A pool already clearing the
+    floor is never listed.  Two ways to qualify, both needed:
 
     * **its pair moves**, measured across every pool holding the pair.  One
       quiet pool over half an hour cannot answer this -- a per-arc version left
       156 arcs on volatile pairs holding sub-bp bounds.
-    * **the tight bound was seen to trip**, which catches a pool whose own rate
+    * **the tight bound was seen to trip**, catching a pool whose own rate
       wobbles more than its pair does.
 
     Returns `{address: {"fee_bp", "drift_bp", "tight_p", "pair"}}`, so the
@@ -171,9 +161,8 @@ def bound_bp(fee: float, wide: bool = False,
     """The minimum-out this arc executes with, in basis points.
 
     A fraction of the pool's fee, floored for pools on the exception list.
-    `floor_bp` is a parameter so the same sampled series can be scored against
-    several candidate floors; the choice is an execution parameter, and picking
-    it is worth a measurement rather than a guess.
+    `floor_bp` is a parameter so one sampled series can be scored against
+    several candidate floors.
     """
     bound = fee * BOUND_OF_FEE * 1e4
     return max(bound, floor_bp) if wide else bound
@@ -182,11 +171,10 @@ def bound_bp(fee: float, wide: bool = False,
 def tail_model(standardised: list[float]):
     """P(Z > z) for a move's size in units of its arc's typical move.
 
-    Empirical inside the sample, a power law past its edge.  The exponent comes
-    from Hill's estimator on the top decile -- the mean log excess over the
-    threshold is 1/alpha -- clamped, since below 1.5 the tail is heavier than
-    any market (usually too few samples) and above 8 it is thinner than one,
-    which would invent safety.
+    Empirical inside the sample, a power law past its edge.  The exponent is
+    Hill's estimator on the top decile (mean log excess over the threshold is
+    1/alpha), clamped: below 1.5 the tail is heavier than any market, above 8
+    it is thinner than one, which would invent safety.
     """
     ordered = sorted((z for z in standardised if z > 0), reverse=True)
     n = len(ordered)
@@ -214,14 +202,12 @@ def breach_risk(series, fees: dict[str, float], arcs=None, *, wide=(),
                 floor_bp: float = BOUND_FLOOR_BP) -> dict[str, dict]:
     """Per-arc risk, from rate series and pool fees.
 
-    `series` is what `drift.sample_rates` returns -- one `PriceSeries` per arc,
-    carrying the pool it was read from.  `arcs` is the list handed to
-    `sample_rates`, whose entries are `(key, pool, kind, i, j, n_coins, dx)`;
-    it supplies the coin indices, so the answer is keyed by direction the way
-    the minimum-out is.  Without it the answer falls back to pool-level keys.
+    `series` is what `drift.sample_rates` returns.  `arcs` is the list handed to
+    it, entries `(key, pool, kind, i, j, n_coins, dx)`; it supplies the coin
+    indices, so the answer is keyed by direction the way the minimum-out is.
+    Without it the answer falls back to pool-level keys.
 
-    Returns `{"address:i>j": {"p", "bound_bp", "scale_bp", "active", "n"}}`, so
-    the committed file says why and not merely how much.
+    Returns `{"address:i>j": {"p", "bound_bp", "scale_bp", "active", "n"}}`.
     """
     index = {entry[0]: (entry[1], entry[3], entry[4]) for entry in (arcs or [])}
 
@@ -245,12 +231,11 @@ def breach_risk(series, fees: dict[str, float], arcs=None, *, wide=(),
         bound = bound_bp(fees[pool], pool in wide, floor_bp)
         jumps = sum(1 for m in moves if m > 0)
         # How often a window contains a move at all.  Half an event stands in
-        # for none, so an arc that saw no trade in half an hour is priced low
-        # rather than at zero -- it is quiet, not frozen.
+        # for none: an arc that saw no trade in half an hour is quiet, not
+        # frozen.
         active = max(jumps, 0.5) / len(moves)
         modelled = active * tail(bound / scale)
-        # A move that was actually seen past the bound outranks any model of
-        # how likely one was.
+        # A move seen past the bound outranks any model of how likely one was.
         seen = sum(1 for m in moves if m > bound) / len(moves)
         risk = min(max(max(seen, modelled), RISK_FLOOR), RISK_CEILING)
         out[key] = {"p": round(risk, 6), "bound_bp": round(bound, 4),

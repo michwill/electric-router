@@ -1,20 +1,18 @@
 """Reference prices by weighted least squares on log-prices (spec §4).
 
-`nu` is needed to define both `G_p` and `eps_p`, and the best estimator is a
-weighted LS fit -- which is itself one Laplacian solve, reusing the same
-machinery as the router:
+`nu` defines both `G_p` and `eps_p`, and the best estimator is a weighted LS
+fit -- itself one Laplacian solve, reusing the router's own machinery:
 
     min_z  sum_p w_p ( z_sig - z_tau + log a_p )^2      =>   L_w z = -M^T W log a
 
-It is robust in the way that matters: it fits the best *consistent* price
-system rather than trusting any single quote path, and with `w_p = TVL_p` a
-single manipulated shallow pool cannot move the frame.
+It fits the best *consistent* price system rather than trusting any single quote
+path, and with `w_p = TVL_p` a single manipulated shallow pool cannot move the
+frame.
 
 **Feed both directions at half weight.**  For one pool the fit then lands at
-`z_tau - z_sig = (log a_f - log a_r) / 2`, which is the fee-free mid price
-exactly: the two one-sided quotes bracket it by +/- log(Gamma), and the
-least-squares optimum sits in the middle.  Using one direction biases every
-reference price to that side of the spread, by the fee, systematically -- and a
+`z_tau - z_sig = (log a_f - log a_r) / 2`, the fee-free mid exactly: the two
+one-sided quotes bracket it by +/- log(Gamma).  Using one direction biases every
+reference price to that side of the spread by the fee, systematically -- and a
 mis-estimated `nu` can manufacture a negative 2-cycle that the solver will
 happily route around (§2.6).
 """
@@ -26,13 +24,13 @@ import numpy as np
 from .graph import component_of, laplacian
 from .linalg import DEFAULT_SOLVER, SingularSystem
 
-# A pool's two directions must agree on the price to within fees: `a_f * a_r`
-# is `Gamma_live^2` (§2.6), just under 1 for any symmetric-fee CFMM.  Far below
-# it means the two probes landed in different regimes and neither `a` is a
-# marginal rate.  Measured on mainnet LLAMMA markets, which are banded and
-# quote from whichever band is live: 0.000616 and 0.002516, against 0.999+ for
-# every ordinary pool.  Such an arc is still perfectly routable -- the quoter
-# prices it exactly -- it just must not get a vote on what anything is worth.
+# A pool's two directions must agree on the price to within fees: `a_f * a_r` is
+# `Gamma_live^2` (§2.6), just under 1 for any symmetric-fee CFMM.  Far below it
+# means the two probes landed in different regimes and neither `a` is a marginal
+# rate -- mainnet LLAMMA markets, banded and quoting from whichever band is live,
+# measure 0.000616 and 0.002516 against 0.999+ for every ordinary pool.  Such an
+# arc is still perfectly routable; it just must not vote on what anything is
+# worth.
 ROUND_TRIP_FLOOR = 0.5
 # Muted, not removed: `reference_prices` requires strictly positive weights,
 # and a vanishing one is the same thing numerically while keeping the arc in
@@ -46,9 +44,9 @@ def price_fit_weights(keys: list, a: np.ndarray, w: np.ndarray) -> np.ndarray:
     §4 fits log-prices by weighted least squares, so one arc claiming WETH is
     worth 296 crvUSD drags the whole frame -- and the frame sets `eps` and `G`
     for *every* arc, not just the liar.  Adding 11 LLAMMA markets moved crvUSD
-    36% and USDC 27% away from parity and took USDC->sUSDS down 67%.
+    36% and USDC 27% away from parity.
 
-    `keys[k]` is `(pool, i, j)`, and the partner is `(pool, j, i)`.  Pairing on
+    `keys[k]` is `(pool, i, j)` and the partner is `(pool, j, i)`.  Pairing on
     node indices instead is wrong and quietly so: a dozen pools join USDC and
     USDT, so a healthy arc gets matched against some *other* pool's reverse and
     muted for its neighbour's sins.
@@ -79,10 +77,9 @@ def reference_prices(
 ) -> np.ndarray:
     """Fit `nu` with `nu[numeraire] == 1`.
 
-    `a` must be strictly positive.  A zero marginal rate is not a cheap pool,
-    it is a broken probe: `log 0` would NaN the entire reference frame, and
-    6% of arcs fail their smallest probe on mainnet, so this is a live concern
-    rather than a hypothetical.
+    `a` must be strictly positive.  A zero marginal rate is not a cheap pool but
+    a broken probe: `log 0` would NaN the whole reference frame, and 6% of arcs
+    fail their smallest probe on mainnet.
     """
     tau = np.asarray(tau, np.int64)
     sig = np.asarray(sig, np.int64)
@@ -139,11 +136,10 @@ def pool_mid(a_forward: float, a_reverse: float) -> float:
 def gamma_live(a_forward: float | np.ndarray, a_reverse: float | np.ndarray):
     """Measured effective retention, `sqrt(a_f * a_r)` (§2.6).
 
-    Reads the pool's *current* fee straight off two tiny probes -- no fee
-    parameters, no `k` computation, no ABI knowledge of the fee law.  For a
-    fixed-fee pool it must equal `1 - fee` to full precision, so a deviation
-    means the probe pipeline is broken; for a dynamic-fee pool it is the live
-    value and its drift across blocks is directly observable.
+    Reads the pool's *current* fee off two tiny probes -- no fee parameters, no
+    ABI knowledge of the fee law.  For a fixed-fee pool it must equal `1 - fee`
+    to full precision, so a deviation means the probe pipeline is broken; for a
+    dynamic-fee pool it is the live value and its drift is observable.
     """
     return np.sqrt(np.asarray(a_forward) * np.asarray(a_reverse))
 
@@ -155,9 +151,8 @@ def check_pair_drops(
 
     Round-tripping a pool always loses (`a_f a_r = Gamma^2 < 1`), but the
     *linearised* drops are frame-dependent and their sum falls below zero when
-    `nu` is far enough off for that pair.  The model then sees a two-arc
-    negative cycle that does not exist and allocates flow around it.  Violation
-    means `nu` is inconsistent with the pool, not that arbitrage exists: snap
-    `nu_sig/nu_tau` toward the pool's own mid, or drop the pool.
+    `nu` is far enough off for that pair.  Violation means `nu` is inconsistent
+    with the pool, not that arbitrage exists: snap `nu_sig/nu_tau` toward the
+    pool's own mid, or drop the pool.
     """
     return np.flatnonzero(np.asarray(eps_forward) + np.asarray(eps_reverse) <= tol)

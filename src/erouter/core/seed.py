@@ -13,7 +13,7 @@ uses SPFA (queue-based Bellman-Ford) rather than Dijkstra, and detects negative
 cycles instead of looping on them.
 
 **Seed quality only affects how many column-generation rounds run, never the
-answer.**  §5.5's certificate is what guarantees correctness, so this file is
+answer** (§5.5's certificate is what guarantees correctness), so this file is
 allowed to be approximate and is not allowed to be slow.
 """
 
@@ -33,12 +33,10 @@ from .graph import ArcArrays
 INF = float("inf")
 
 # Relaxation depth for the seed searches.  Real Curve routes are 1-3 hops
-# (measured over the mainnet universe: mean 1.97, max 3), so this is generous
-# rather than tight -- but it turns each search from "iterate to a fixed point
-# over 301 nodes" into a bounded sweep.  Bounding it is safe in a way that
-# bounding the solve would not be: §5.5's certificate prices out *all* m arcs,
-# so a path the seed misses can still be found by column generation.  The seed
-# decides how many CG rounds run, never what the answer is.
+# (mainnet universe: mean 1.97, max 3), so this is generous -- but it turns each
+# search from "iterate to a fixed point over 301 nodes" into a bounded sweep.
+# Safe in a way bounding the solve would not be: §5.5's certificate prices out
+# *all* m arcs, so a path the seed misses is still found by column generation.
 MAX_HOPS = 8
 #: Opt-in on the same switch as the rest of the port.
 _ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
@@ -48,11 +46,9 @@ _ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 class Adjacency:
     """Outgoing arc indices per node, in CSR form.
 
-    Carries plain-`list` mirrors beside the numpy arrays.  That is not
-    redundancy for its own sake: the relaxation loop below reads single
-    elements ~300k times per route, and a boxed numpy scalar costs 72.8 ns
-    against 21.2 ns for a Python list element (measured on this machine) --
-    `int(numpy_int)` costs 85.2 ns against 19.4 ns.  Building the mirrors is
+    Carries plain-`list` mirrors beside the numpy arrays: the relaxation loop
+    below reads single elements ~300k times per route, and a boxed numpy scalar
+    costs 72.8 ns against 21.2 ns for a list element.  Building the mirrors is
     one vectorised pass; the loop that consumes them is the hottest in the
     router.
     """
@@ -99,22 +95,18 @@ def spfa(
 
     Bellman-Ford with a FIFO queue (SPFA), not Dijkstra: `eps_p` can be
     **negative** -- a favourably dislocated pool is an EMF -- and Dijkstra needs
-    non-negative weights.  Returns the arc indices of the path; if a negative
-    cycle is reachable, its arcs come back separately rather than the search
-    diverging.
+    non-negative weights.  Returns the arc indices of the path; a reachable
+    negative cycle comes back separately rather than the search diverging.
 
-    `max_hops` caps the path depth.  With the cap the search is approximate
-    (a node reached cheaply but deep may keep a shallower, dearer label), which
-    §5.3 explicitly permits: the seed decides how many column-generation rounds
-    run, not what the answer is.
+    `max_hops` caps the path depth, which makes the search approximate (a node
+    reached cheaply but deep may keep a shallower, dearer label).  §5.3 permits
+    that: the seed decides how many CG rounds run, not what the answer is.
 
-    Everything in the loop is a plain Python `int`/`float` read out of a list.
-    Reading `g.sig[arc]` from the numpy array instead costs 3.4x as much per
-    access, and this loop runs ~300k times per route.
+    Everything in the loop is a plain Python `int`/`float` read out of a list;
+    the numpy arrays cost 3.4x as much per access.
     """
-    # The compiled search, when it is installed.  Same algorithm, same
-    # tie-breaks; `tests/test_seed_differential.py` differs the two.  The
-    # loop below runs ~300k times a route, which is what a port helps.
+    # The compiled search when installed: same algorithm, same tie-breaks, and
+    # `tests/test_seed_differential.py` differs the two.
     if _ACCEL_ON and _accel.available():
         got = _accel.shortest_path(
             g, src, dst, banned_arcs=banned_arcs, banned_nodes=banned_nodes,
@@ -138,14 +130,12 @@ def spfa(
     hops = [0] * n
     in_queue = [False] * n
     # Depth-bounding already forces termination -- every relaxation strictly
-    # lowers a `dist`, and only walks of at most `max_hops` arcs exist -- so the
-    # old relaxation-count cycle detector is gone from the inner loop.  This is
-    # a backstop against a pathology in the bound itself, not the mechanism.
+    # lowers a `dist` and only walks of at most `max_hops` arcs exist -- so this
+    # is a backstop against a pathology in the bound, not the mechanism.
     budget = 8 * max_hops * n
 
     dist[src] = 0.0
-    # FIFO through a deque: `list.pop(0)` is a memmove of the whole queue, and
-    # this dequeues ~127k times per route (65.0 ns against 32.9 ns, measured).
+    # FIFO through a deque: `list.pop(0)` memmoves the queue, ~127k times a route.
     queue: deque[int] = deque((src,))
     in_queue[src] = True
 
@@ -179,9 +169,7 @@ def spfa(
     # Walk the parent pointers back.  A negative cycle shows up here and only
     # here: `dist` keeps falling around the loop, so the chain from `dst`
     # re-enters a node it already passed instead of reaching `src`.  Detecting
-    # it on the walk costs nothing -- the walk happens anyway -- and it needs no
-    # relaxation counters in the inner loop, no guess at which node the cycle
-    # runs through, and no separate recovery pass.
+    # it on the walk needs no relaxation counters in the inner loop.
     tail_of = g.tau.tolist()
     arcs: list[int] = []
     seen_at: dict[int, int] = {}
@@ -216,9 +204,8 @@ def k_shortest_paths(
     first = spfa(g, src, dst, adj)
     if first.negative_cycle:
         # §5.3: "shift by min(0, min_p eps_p) and correct".  Shifting changes a
-        # path's cost by a constant per hop rather than preserving the order,
-        # so the result is only approximately cheapest -- which is fine, since
-        # seed quality affects rounds and not correctness.
+        # path's cost per hop rather than preserving the order, so the result is
+        # only approximately cheapest -- fine, since seed quality affects rounds.
         weights = g.eps - min(0.0, float(g.eps.min()))
         first = spfa(g, src, dst, adj, weights=weights)
     if not first.found:
@@ -272,9 +259,9 @@ def seed_subgraph(
 ) -> np.ndarray:
     """Boolean mask of arcs to start column generation from.
 
-    `breadth` is how many top-conductance arcs to add per touched node.  Adding
-    breadth rather than depth is deliberate: the solver discovers depth through
-    pricing-out, but it can only price in an arc that some node makes reachable.
+    `breadth` is how many top-conductance arcs to add per touched node.  Breadth
+    rather than depth: the solver discovers depth through pricing-out, but it can
+    only price in an arc that some node makes reachable.
     """
     mask = np.zeros(g.m, bool)
     if g.m == 0:

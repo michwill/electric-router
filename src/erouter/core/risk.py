@@ -16,11 +16,10 @@ safety.  Instead:
 The gas term carries `(1 + P(fails))` because a failed attempt pays and the
 retry pays again.
 
-Fee against volatility predicts the risk; asset class does not.  Only pool arcs
-carry it -- a wrap, stake, lending mint or vault redemption is priced by a rate
-that accrues slowly and not against us.  An unmeasured pool takes
-`DEFAULT_RISK` rather than zero, so a thin unsampled pool cannot look safer
-than a deep measured one.
+Only pool arcs carry risk -- a wrap, stake, lending mint or vault redemption is
+priced by a rate that accrues slowly and not against us.  An unmeasured pool
+takes `DEFAULT_RISK` rather than zero, so a thin unsampled pool cannot look
+safer than a deep measured one.
 """
 
 from __future__ import annotations
@@ -44,31 +43,25 @@ RISKLESS: frozenset[ArcKind] = frozenset({
 
 #: What an arc nobody has measured is assumed to cost, as a probability.
 #
-# Deliberately small but not zero.  Zero would say "this pool provably never
-# moves", which is the one thing a missing measurement cannot say, and would
-# make an unprobed pool the cheapest thing in the graph.
-#
-# The measured distribution is sharply bimodal -- nine arcs in ten sit at the
-# 1e-5 floor and the rest run from 1% to 50% -- so neither its median nor its
-# upper decile is a sensible stand-in: the first is indistinguishable from free
-# and the second charges 120 bp for a gap in our own sampling.  0.2% is chosen
-# instead as what an unknown arc must beat: about 20 bp, which is more than any
-# tail-end routing gain and less than the cost of dropping a good pool.
-# `FactsCache.risk_table` raises it to the measured 75th percentile when that
-# is higher.
+# Small but not zero: zero would say "this pool provably never moves", which is
+# the one thing a missing measurement cannot say, and would make an unprobed
+# pool the cheapest thing in the graph.  The measured distribution is sharply
+# bimodal -- nine arcs in ten at the 1e-5 floor, the rest from 1% to 50% -- so
+# neither its median nor its upper decile stands in: one is indistinguishable
+# from free, the other charges 120 bp for a gap in our own sampling.  0.2% is
+# what an unknown arc must beat: about 20 bp, more than any tail-end routing
+# gain and less than the cost of dropping a good pool.  `FactsCache.risk_table`
+# raises it to the measured 75th percentile when that is higher.
 DEFAULT_RISK = 0.002
 
 #: What one failed attempt costs, as basis points of the trade.
 #
 # Gas, plus whatever the price did while the user resubmitted.  Set so that the
 # most dangerous arc measured -- 39%, TricryptoUSDC's ETH side -- costs a route
-# 0.4 bp, and a typical crypto pair a fraction of that.  Anything larger stops
-# being a tie-break and starts buying worse prices: at the scale implied by
-# "a failure loses the trade" the same 39% would be worth 390 bp.
-#
-# It is deliberately one number rather than a per-pair drift estimate.  What
-# varies between pairs is `p`, which is measured; the cost of resubmitting is
-# roughly the same trade either way.
+# 0.4 bp.  Anything larger stops being a tie-break and starts buying worse
+# prices.  Deliberately one number rather than a per-pair drift estimate: what
+# varies between pairs is `p`, which is measured; resubmitting costs roughly
+# the same trade either way.
 REVERT_COST_BP = 1.0
 
 
@@ -76,17 +69,12 @@ class RiskTable:
     """Per-arc probability that a leg's minimum-out trips before inclusion.
 
     Keyed by direction, like `GasTable` and for the same reason: a pool's own
-    pairs do not behave alike.  TriCRV's CRV/ETH rate moves several times as
-    far in a minute as its crvUSD/USDC one, and the minimum-out is written per
-    leg, so pricing the pool by its worst pair would charge every route for the
-    riskiest thing in it.
+    pairs do not behave alike, and the minimum-out is written per leg, so
+    pricing a pool by its worst pair would charge every route for the riskiest
+    thing in it.
 
-    Lookup walks from the specific to the general:
-
-    1. this direction of this pool, measured;
-    2. any direction of this pool, under `(-1, -1)` -- a pair the sweep missed
-       on a pool it knows;
-    3. `default`, for a pool that has never been sampled.
+    Lookup walks from the specific to the general: this direction of this pool;
+    then any direction of it, under `(-1, -1)`; then `default`.
     """
 
     __slots__ = ("arcs", "default")
@@ -105,10 +93,8 @@ class RiskTable:
         got = None
         if kind.is_swap:
             # `(i, j)` means coin indices only on a swap.  A deposit or a
-            # single-coin withdrawal numbers its legs differently, so reading
-            # the specific tier for one would hand it whichever swap happened
-            # to share the pair -- it goes to the pool-level entry instead,
-            # which is the right granularity for it anyway.
+            # single-coin withdrawal numbers its legs differently, so it takes
+            # the pool-level entry, which is the right granularity for it.
             got = self.arcs.get((address, int(i), int(j)))
         if got is None:
             got = self.arcs.get((address, -1, -1))
@@ -117,10 +103,8 @@ class RiskTable:
     def survival(self, legs: Iterable[Leg]) -> float:
         """P(every leg stays inside its bound).
 
-        A pool touched twice counts twice, which is right: two legs are two
-        separate minimum-outs, both of which have to hold.  (Routes are one
-        arc per pool anyway, so this is a statement about wraps sharing a
-        target, not about split pools.)
+        A pool touched twice counts twice: two legs are two separate
+        minimum-outs, both of which have to hold.
         """
         product = 1.0
         for leg in legs:

@@ -1,24 +1,21 @@
 """Read what a twocrypto-ng pool needs to be evaluated instead of probed.
 
-The factory deploys two pools that are indistinguishable by type, name or
-coins: cryptoswap proper, and the "FX Swap" -- a *stableswap* invariant wearing
-cryptoswap's machinery.  Which one a pool is, is decided by the math contract
-it holds as an immutable.
+The factory deploys two pools indistinguishable by type, name or coins:
+cryptoswap proper, and the "FX Swap" -- a *stableswap* invariant wearing
+cryptoswap's machinery.  Which one a pool is, is decided by the math contract it
+holds as an immutable.
 
 **This does not read that address.**  It builds the FX Swap model for every
 twocrypto pool and lets the wei-exact check decide: a cryptoswap pool cannot
 reproduce its own `get_dy` from a stableswap invariant, so it fails and keeps
-being probed.  That is the same rule the stableswap reader uses, and it has the
-property an address list does not -- it works on a chain nobody has surveyed,
-and it cannot go stale when a new math implementation is deployed.
+being probed.  That rule works on a chain nobody has surveyed and cannot go
+stale when a new math implementation is deployed; an address list does neither.
 
-Two exclusions are made up front rather than left to the check, because the
-check cannot see them:
+Two exclusions are made up front, because the check cannot see them:
 
-* **a `POLICY` contract.**  `_fee` asks it first, and `Policy.get_fee(xp)`
-  takes the balances -- so the fee may vary with trade size.  One probe would
-  agree at the size it was taken and disagree elsewhere, which is worse than
-  not modelling the pool at all.
+* **a `POLICY` contract.**  `_fee` asks it first, and `Policy.get_fee(xp)` takes
+  the balances -- so the fee may vary with trade size, and one probe would agree
+  at the size it was taken and disagree elsewhere.
 * **an A/gamma ramp in progress.**  `D` then comes from `newton_D` rather than
   storage, and `newton_D` is not implemented here yet.
 """
@@ -35,9 +32,9 @@ from ..core.types import ArcKind, Probe
 from .exact_cache import trust as _trust_verdict
 
 #: Sizes to check at, in both directions -- see `stable_params` for why one
-#: point is not enough.  Here it is load-bearing rather than prudent: telling
-#: an FX Swap from a cryptoswap pool *is* the check, and the two invariants can
-#: agree at a single size by coincidence.
+#: point is not enough.  Here it is load-bearing rather than prudent: telling an
+#: FX Swap from a cryptoswap pool *is* the check, and two invariants can agree
+#: at a single size by coincidence.
 CHECK_FRACTIONS = (0.001, 0.01, 0.1)
 UINT64 = 2**64 - 1
 
@@ -93,9 +90,8 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
             Call(pool.address, encode_call("POLICY()")),
             Call(pool.address, encode_call("future_A_gamma_time()")),
             Call(pool.address, encode_call("last_timestamp()")),
-            # The pre-factory generation keeps these unpacked, as three public
-            # variables.  Reading them costs three calls in a batch that is
-            # already going out; requiring `packed_fee_params()` silently
+            # The pre-factory generation keeps these unpacked, as three
+            # public variables.  Requiring `packed_fee_params()` silently
             # dropped all 43 of those pools.
             Call(pool.address, encode_call("mid_fee()")),
             Call(pool.address, encode_call("out_fee()")),
@@ -103,10 +99,9 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
         ]
     answers = client.raw(calls)
 
-    # `precisions()` returns two words, which the quoter's one-word `Res`
-    # cannot carry -- the same truncation that made every rate-bearing
-    # stableswap look wrong.  Ask the transport, which returns whole
-    # returndata.
+    # `precisions()` returns two words, which the quoter's one-word `Res` cannot
+    # carry -- the same truncation that made every rate-bearing stableswap look
+    # wrong.  Ask the transport, which returns whole returndata.
     transport = getattr(client, "transport", None)
     precisions: dict[str, tuple[int, int]] = {}
     if transport is not None and hasattr(transport, "call_many"):
@@ -118,9 +113,8 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
                 except Exception:  # noqa: BLE001
                     continue
                 precisions[pool.address.lower()] = (int(got[0]), int(got[1]))
-    # The pre-factory generation keeps its precisions internal, so there is no
-    # getter to read -- they are just the decimal corrections, and skipping
-    # those pools for want of a getter silently dropped all 43 of them.
+    # The pre-factory generation keeps its precisions internal, with no getter
+    # to read -- they are just the decimal corrections.
     for pool in wanted:
         precisions.setdefault(
             pool.address.lower(),
@@ -130,13 +124,12 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
     # A pool with a `POLICY` is only unmodellable if the policy actually
     # charges.  `_fee` asks it first and falls back to the pool's own mid/out
     # curve when the answer is zero -- which is what the Yield Basis policy
-    # does, and it says so: "get_fee returns 0 so the pool keeps its native
-    # dynamic fee".  That policy steers the *price scale*, not the fee.
+    # does; it steers the *price scale*, not the fee.
     #
-    # Asked at two balance vectors a decade apart, because the risk the blanket
-    # rejection was guarding against is a fee that varies with size: one that
-    # answers zero at both is not that.  The wei-exact gate then checks the
-    # whole model at three more sizes anyway.
+    # Asked at two balance vectors a decade apart, because what the blanket
+    # rejection guarded against is a fee that varies with size: one answering
+    # zero at both is not that.  The wei-exact gate then checks the whole model
+    # at three more sizes anyway.
     policy_charges: dict[str, bool] = {}
     with_policy = [(pool, answers[11 * k + 5]) for k, pool in enumerate(wanted)]
     probes: list[Call] = []
@@ -193,11 +186,10 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
         else:
             mid_fee, out_fee = mid_raw.uint(), out_raw.uint()
             fee_gamma = gamma_raw.uint()
-        # Every combination, and the wei-exact check decides which this pool
-        # is: the invariant (FX Swap or cryptoswap), which of the two deployed
-        # `_fee` formulas the pool implements, and which math version bounds
-        # it.  An address list would work today and rot the day a new
-        # implementation is deployed, or on a chain nobody has surveyed.
+        # Every combination, and the wei-exact check decides which this pool is:
+        # the invariant (FX Swap or cryptoswap), which of the two deployed
+        # `_fee` formulas it implements, and which math version bounds it.  An
+        # address list would rot the day a new implementation is deployed.
         for stable, legacy_fee, v21, legacy_pool, legacy_mul2 in product(
                 (True, False), (False, True), (True, False), (False, True),
                 (False, True)):
@@ -238,10 +230,9 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
         if key not in seen:
             seen.add(key)
             order.append(pool)
-    # A pool that has already proved itself is admitted on the verdict.  What
-    # is trusted is only which of the sixteen variants it is -- the invariant,
-    # the fee formula, the bounds -- never a number: `D`, `A`, `gamma`, the fee
-    # terms, `POLICY` and the ramp are all read fresh above.
+    # A pool that has already proved itself is admitted on the verdict.  What is
+    # trusted is only which of the sixteen variants it is, never a number: `D`,
+    # `A`, `gamma`, the fee terms, `POLICY` and the ramp are all read fresh.
     order = [p for p in order
              if not _trust_verdict(out, cache, resample, built, p.address.lower())
              and not (cache is not None and cache.skip(p.address, p.balances))]
@@ -283,8 +274,7 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
                     break
                 if mine != quote.value:
                     # Usually "this is a cryptoswap pool, not an FX Swap", or
-                    # the other `_fee`.  One point would not separate them:
-                    # two invariants can agree at a single size by coincidence.
+                    # the other `_fee`.  One point would not separate them.
                     failed = f"{mine} != {quote.value} at {probe.dx}"
                     break
             if not failed:

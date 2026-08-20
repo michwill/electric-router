@@ -1,40 +1,38 @@
 """Exact per-leg curves, sampled from the chain rather than fitted (§7).
 
 The §2 element law has to be a quadratic: the solver is a convex QP over ~900
-arcs and it needs `f''` frozen to stay one.  But once a route is realised the
-topology is fixed and there are a dozen legs, so there is no reason to keep
-paying the `O(theta^2)` Taylor error -- at that point a dense sample of the
-true `f` is affordable, and it is exact by construction.
+arcs and needs `f''` frozen to stay one.  Once a route is realised the topology
+is fixed and there are a dozen legs, so there is no reason to keep paying the
+`O(theta^2)` Taylor error -- a dense sample of the true `f` is affordable there,
+and exact by construction.
 
-The thing that makes it affordable is that these probes are *independent*.  A
-chained route quote forces a round trip per iteration, because leg `k`'s input
-is leg `k-1`'s output; sampling one pool at 24 sizes does not chain at all, so
-a whole route's curves are one `probe_batch` -- the same transport that already
-carries ~5,600 grid points for the entire universe.  Composition then happens
-in Python, where an evaluation costs microseconds and the optimiser can run to
-convergence instead of being shaped by a batch budget.
+What makes it affordable is that these probes are *independent*.  A chained
+route quote forces a round trip per iteration, since leg `k`'s input is leg
+`k-1`'s output; sampling one pool at 24 sizes does not chain at all, so a whole
+route's curves are one `probe_batch` -- the same transport that already carries
+~5,600 grid points for the entire universe.  Composition then happens in Python,
+where an evaluation costs microseconds and the optimiser can run to convergence
+instead of being shaped by a batch budget.
 
-**Interpolate `u = x / f(x)`, not `f`.**  Measured, not assumed.  Two reasons,
-and the second is the load-bearing one:
+**Interpolate `u = x / f(x)`, not `f`.**  Measured, not assumed; the second
+reason is the load-bearing one:
 
 * *Accuracy.*  A cubic through 24 log-spaced samples of `f` reproduces a plain
   CPMM to 0.74 bp -- the same order as the effect being optimised, so useless.
   In `u` -- input per unit output, the average inverse price -- that same curve
   is **exactly affine**, since `x/f(x) = (R_in + x(1-fee)) / (R_out(1-fee))`.
-  Linear interpolation is then exact rather than approximate, and stableswap
-  and CryptoSwap, while not affine there, are far flatter in `u` than in `f`.
+  Stableswap and CryptoSwap are not affine there but are far flatter in `u`.
 * *Monotonicity, structurally.*  With `u` linear on a node interval,
-  `f' = (u - x u') / u^2` has **constant sign** across the whole interval, and
-  that sign is positive exactly when `s <= u_k / x_k` -- which is algebraically
-  the same statement as `f(x_k+1) >= f(x_k)`.  So the interpolant is monotone
-  if and only if the probes are.  It cannot invent a region where trading more
-  returns less, which is the failure an optimiser hunts for and walks into, and
-  it cannot overshoot a saturation wall it was never shown above.
+  `f' = (u - x u') / u^2` has **constant sign** across it, positive exactly when
+  `s <= u_k / x_k` -- algebraically the same statement as `f(x_k+1) >= f(x_k)`.
+  So the interpolant is monotone if and only if the probes are.  It cannot
+  invent a region where trading more returns less, which is the failure an
+  optimiser hunts for and walks into, and it cannot overshoot a saturation wall
+  it was never shown above.
 
 A monotone cubic (PCHIP) buys nothing over this and costs the guarantee: it
-keeps *`u`* monotone, which does not bound `f` between the nodes.  On a
-measured LLAMMA wall it invented an output 54% above anything the chain ever
-returned.
+keeps *`u`* monotone, which does not bound `f` between the nodes.  On a measured
+LLAMMA wall it invented an output 54% above anything the chain ever returned.
 
 Below the first probe the curve is the chord through the origin, which is `a` --
 the same tangent-as-chord the coarse ladder already reports.  Above the last,
@@ -48,10 +46,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-# Nodes per leg, and the span they cover below the leg's maximum input.  A
-# leg's input moves over decades as its weight sweeps the simplex, so the grid
-# is geometric: what the optimiser needs resolved is the marginal rate, which
-# is a relative quantity.
+# Nodes per leg, and the span they cover below the leg's maximum input.  A leg's
+# input moves over decades as its weight sweeps the simplex, and what the
+# optimiser needs resolved is the marginal rate, a relative quantity -- so the
+# grid is geometric.
 NODES = 24
 SPAN = 4096.0
 
@@ -102,10 +100,9 @@ class Curve:
         """Estimated interpolation error at `v`, in basis points, from the data.
 
         Linear interpolation of `u` is off by about `h^2 |u''| / 8`, and a
-        relative error in `u` is a relative error in `f = x/u`.  `u''` comes
-        from the neighbouring secants, so this costs no extra probes -- which
-        is what lets the caller refine only the legs that need it instead of
-        re-sampling a whole route because one leg sits on a peg edge.
+        relative error in `u` is one in `f = x/u`.  `u''` comes from the
+        neighbouring secants, so this costs no extra probes -- which is what
+        lets the caller refine only the legs that need it.
         """
         x, slope, u = self.x, self.slope, self.u
         if v <= x[0]:
@@ -139,12 +136,12 @@ def fit(deltas, quotes) -> Curve:
 
     us = xs / ys
     slope = np.diff(us) / np.diff(xs)
-    # Never extrapolate a *falling* `u`.  A final secant with increasing
-    # returns -- a dynamic fee shrinking with size, §11.2's CryptoSwap-NG case
-    # -- would drive `u` to zero and then negative, and `f = x/u` through the
-    # roof and then off a cliff.  Holding `u` flat continues the last average
-    # rate instead, which is §2.3's chord: an over-estimate, hence the side
-    # that cannot prune the true optimum.
+    # Never extrapolate a *falling* `u`.  A final secant with increasing returns
+    # -- a dynamic fee shrinking with size, §11.2's CryptoSwap-NG case -- would
+    # drive `u` to zero and then negative, and `f = x/u` through the roof and
+    # then off a cliff.  Holding `u` flat continues the last average rate
+    # instead, which is §2.3's chord: an over-estimate, hence the side that
+    # cannot prune the true optimum.
     tail = max(0.0, float(slope[-1]))
     return Curve(
         tuple(map(float, xs)),

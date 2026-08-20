@@ -3,22 +3,19 @@
 `core/stableswap.py` runs the pool's own invariant, which turns `f(delta)` from
 something measured into something computed -- exact at any size, and free once
 the parameters are in hand.  This is the part that gets them: one batched pass
-over the universe for `A`, the fee, the off-peg multiplier and the rates, and
-the balances the arc list already carries.
+over the universe for `A`, the fee, the off-peg multiplier and the rates.
 
-**Every pool is checked against the chain before it is believed.**  That is not
-belt-and-braces, it is the whole safety argument: a misread `A`, a rate array
-in the wrong order or the wrong fee convention produces a curve that is
-confidently wrong at every size, and unlike a failed probe it does not announce
-itself.  So each candidate is quoted once for real and kept only if the
-arithmetic reproduces it exactly.  A pool that does not reproduce keeps being
-probed, which is what every pool did before this existed.
+**Every pool is checked against the chain before it is believed.**  That is the
+whole safety argument: a misread `A`, a rate array in the wrong order or the
+wrong fee convention produces a curve that is confidently wrong at every size
+and, unlike a failed probe, does not announce itself.  So each candidate is
+quoted once for real and kept only if the arithmetic reproduces it exactly.  A
+pool that does not reproduce keeps being probed.
 
 The two dialects are separated by asking rather than by guessing: a pool that
 answers `A_precise()` scales `A` by 100 and takes its fee in `xp` space; one
 that does not is the legacy shape and takes the fee after converting back to
-token units.  3pool disagrees by exactly one wei at $100k under the wrong
-convention, which is how the split was found.
+token units.
 """
 
 from __future__ import annotations
@@ -36,12 +33,10 @@ from .lending_params import build_exact_lending, build_exact_rate_pools
 #
 # One point is not enough, and that is measured rather than cautious: a
 # cryptoswap model built from the wrong invariant reproduced a pool at 1% of
-# balance and disagreed with it at five of the six other points tried.  A
-# model that matches where it was checked and diverges elsewhere is worse than
-# no model, because nothing downstream will ever ask again.
-#
-# A dust probe also agrees with almost any `A`, so the ladder spans three
-# decades rather than clustering.
+# balance and disagreed with it at five of the six other points tried.  A model
+# that matches where it was checked and diverges elsewhere is worse than no
+# model, because nothing downstream will ever ask again.  A dust probe also
+# agrees with almost any `A`, so the ladder spans three decades.
 CHECK_FRACTIONS = (0.001, 0.01, 0.1)
 
 
@@ -79,9 +74,8 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
 
     # A metapool is the same invariant with the base pool's LP valued at its
     # `virtual_price` rather than at 1 -- so it is a *rates* problem, not a
-    # solver problem, and `StableSwap` already takes rates as an argument.
-    # `stored_rates()` reports this on the ng pools that have it; the older
-    # ones do not, and their LP coin then reads as a plain 18-decimal token,
+    # solver problem.  `stored_rates()` reports this on the ng pools that have
+    # it; on the older ones the LP coin reads as a plain 18-decimal token,
     # which is wrong by exactly the accrued yield.
     issuer = {p.lp_token.lower(): p.address for p in pools if p.lp_token}
     lp_coins = {
@@ -107,23 +101,18 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
             Call(pool.address, encode_call("fee()")),
             Call(pool.address, encode_call("offpeg_fee_multiplier()")),
             # Only `exchange` needs this, never `get_dy`, so a pool that does
-            # not report it still models and quotes -- it just cannot have its
-            # state advanced, and `StableSwap.exchange` refuses rather than
-            # assuming a zero that would flatter the next leg.
+            # not report it still models and quotes; `StableSwap.exchange`
+            # then refuses rather than assuming a flattering zero.
             Call(pool.address, encode_call("admin_fee()")),
         ]
     answers = client.raw(calls)
 
-    # `stored_rates()` cannot come through the quoter.  Its `Res` struct holds
-    # one `uint256`, so `raw_batch` hands back 32 bytes -- and a rates *array*
-    # is 128, of which the first word is the ABI offset.  The truncation is
-    # silent and reads as a valid answer, so every rate-bearing ng pool fell
-    # back to decimals-only rates and modelled sUSDe as worth exactly one
-    # DOLA: 3.434e23 against the chain's 2.764e23, a ratio of 1.2424, which is
-    # the sUSDe rate itself.  That was all 77 of the ng rejections.
-    #
-    # The transport returns whole returndata, so ask it directly.  One batched
-    # round trip, same block, and nothing about the quoter has to change.
+    # `stored_rates()` cannot come through the quoter: its `Res` struct holds one
+    # `uint256`, so `raw_batch` hands back 32 bytes where a rates *array* is 128,
+    # the first word being the ABI offset.  The truncation is silent and reads as
+    # a valid answer, so every rate-bearing ng pool fell back to decimals-only
+    # rates and modelled sUSDe as worth exactly one DOLA -- all 77 of the ng
+    # rejections.  The transport returns whole returndata, so ask it directly.
     transport = getattr(client, "transport", None)
     rate_data: dict[str, bytes] = {}
     if transport is not None and hasattr(transport, "call_many"):
@@ -167,12 +156,11 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
         if meta != plain:
             candidates.append(("meta", meta))
 
-        # Which convention this pool follows is asked, not assumed: the
-        # variants are cheap to evaluate and only one of them can reproduce
-        # the chain to the wei.  They are built whether or not a verdict says
-        # which one will win -- construction is arithmetic, and building them
-        # all is what lets a stale verdict fall back to the gate instead of
-        # silently dropping the pool.
+        # Which convention this pool follows is asked, not assumed: the variants
+        # are cheap to evaluate and only one of them can reproduce the chain to
+        # the wei.  All are built whether or not a verdict predicts the winner,
+        # so a stale verdict falls back to the gate instead of silently
+        # dropping the pool.
         for label, rates in candidates:
             for on_xp in (fee_on_xp, not fee_on_xp):
                 built.append((pool, StableSwap(
@@ -198,10 +186,9 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
 
     # A pool the cache has already seen prove itself does not prove itself
     # again: the gate establishes that a pool's *code* implements this
-    # invariant, and Curve pools are not upgradeable.  Everything the numbers
-    # depend on -- `A`, the fee terms, the ramp, the balances -- was read fresh
-    # above and is not cached, so what is being trusted is only "this variant,
-    # not one of the other five".
+    # invariant, and Curve pools are not upgradeable.  `A`, the fee terms, the
+    # ramp and the balances were all read fresh above, so what is trusted is
+    # only "this variant, not one of the other five".
     order = [p for p in order
              if not _trust_verdict(out, cache, resample, built, p.address.lower())
              and not (cache is not None and cache.skip(p.address, p.balances))]
@@ -243,8 +230,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
                     failed = str(exc)[:40]
                     break
                 # Not a tolerance.  Agreeing to the wei at *every* point is
-                # the evidence that every parameter was read correctly;
-                # agreeing at one is evidence of very little.
+                # the evidence that every parameter was read correctly.
                 if mine != quote.value:
                     failed = f"{mine} != {quote.value} at {probe.dx}"
                     break
@@ -260,12 +246,11 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
             if cache is not None:
                 cache.refuse(key, why, balances=pool.balances)
 
-    # The lending pools reach the same holder by a different road.  Their coin
+    # The lending pools reach the same holder by a different road: their coin
     # list runs past their balances, so the filter at the top of this function
     # never sees them, and their rates come from the wrappers rather than from
-    # `stored_rates()`.  `lending_params` settles both, and picks the pool's
-    # variant by reproducing its own `get_dy` -- which is this gate, one level
-    # down, so they arrive already checked.
+    # `stored_rates()`.  `lending_params` settles both and picks each pool's
+    # variant by reproducing its own `get_dy` -- this gate, one level down.
     block = (getattr(getattr(client, "transport", None), "block", None)
              or getattr(client, "block", None))
     if block and only is None:
@@ -280,9 +265,9 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
             print(f"  exact lending: {len(lent)} wrapped-token pools")
 
         # And the ones the ordinary reading could not reproduce: a coin whose
-        # value is not one -- rETH, ankrETH -- or a moving target like RAI's
-        # redemption price.  Only the rejects are retried, so a pool that
-        # models correctly with a plain rate cannot be talked out of it.
+        # value is not one (rETH, ankrETH) or a moving target like RAI's
+        # redemption price.  Only the rejects are retried, so a pool that models
+        # correctly with a plain rate cannot be talked out of it.
         stubborn = {a.lower() for a, _ in out.rejected}
         if stubborn:
             try:

@@ -2,8 +2,7 @@
 
 A wrapped native (WETH/ETH) and a linear ERC4626 vault (scrvUSD/crvUSD) are
 *zero-resistance elements*.  In value coordinates a linear arc has `eps = 0` and
-`G = inf` -- a short circuit -- which means the two tokens are literally the
-same graph node.
+`G = inf` -- a short circuit -- so the two tokens are literally the same node.
 
 Merging rather than adding an arc is not a nicety:
 
@@ -16,11 +15,11 @@ Merging rather than adding an arc is not a nicety:
 The conversion itself is materialised only when a route is emitted, as a leg.
 
 **Merging is allowlist-gated, never inferred.**  Linearity of `convertToAssets`
-is necessary and nowhere near sufficient: of 31 linear ERC4626 tokens in the
-Ethereum universe, `pufETH` reports `asset = WETH` with zero linearity error
-and redeems through a *withdrawal queue*, `sUSDe` has a 7-day cooldown, and
-`sfrxUSD` has `maxDeposit == 0`.  Merging any of those would declare the vault
-equal to its asset at NAV and mint the market discount out of thin air.
+is necessary and nowhere near sufficient: of 31 linear ERC4626 tokens on
+Ethereum, `pufETH` reports `asset = WETH` with zero linearity error and redeems
+through a *withdrawal queue*, `sUSDe` has a 7-day cooldown, and `sfrxUSD` has
+`maxDeposit == 0`.  Merging any of those would declare the vault equal to its
+asset at NAV and mint the market discount out of thin air.
 """
 
 from __future__ import annotations
@@ -34,20 +33,17 @@ from .types import ArcKind
 class ConversionKind(StrEnum):
     NATIVE_WRAP = "NATIVE_WRAP"  # 1:1, ERC20 <-> native
     ERC4626 = "ERC4626"  # shares <-> assets at the vault's rate
-    # Lido's wstETH: same shape as a native wrapper but rate-bearing, and it
-    # predates ERC4626 so it exposes its own getters rather than
-    # convertToAssets.  curve_solver's generic equivalent is AmountCall*; if a
-    # second token of this shape appears, that is the generalisation to make.
+    # Lido's wstETH: a native-wrapper shape but rate-bearing, and it predates
+    # ERC4626 so it exposes its own getters.  A second token of this shape is
+    # the signal to generalise, as curve_solver's AmountCall* does.
     WSTETH = "WSTETH"  # wstETH <-> stETH at getStETHByWstETH
     # Two addresses over *one* balance, not two assets that convert.  Gnosis
     # EURe is the case: v1 and v2 report identical `totalSupply` and identical
     # `balanceOf` for every holder, to the wei -- holding one *is* holding the
-    # other.  Modelled as separate nodes they split a single market in half,
-    # which is what left EURe liquidity looking like 74k here and 172k there.
+    # other, and modelled as separate nodes they split one market in half.
     #
     # It merges like any other conversion and realises like none of them: the
-    # rate is exactly 1 and no leg is emitted, because there is nothing to
-    # call.  `to_canonical` is the identity by construction.
+    # rate is exactly 1 and no leg is emitted, because there is nothing to call.
     ALIAS = "ALIAS"
 
 
@@ -151,16 +147,13 @@ class NodeMap:
 
     # -------------------------------------------------------------- lookup
 
-    # Every one of these tries the address as given before lowering it, and
-    # the difference is not cosmetic: `node` and `has` are called 32,000 times
-    # in a single route -- the direct-chain search alone asks about every coin
-    # of every pool, twice -- and almost always with an address that came from
-    # a `PoolSpec`, which is already lowercase.  Lowering it again allocates a
-    # string per call to look up the same key.  Measured, `str.lower` was the
-    # seventh-hottest call in the profile.
-    #
-    # The fallback stays, because the symbol resolver and the CLI do hand
-    # checksummed addresses in; they simply pay for it.
+    # Every one of these tries the address as given before lowering it, and the
+    # difference is not cosmetic: `node` and `has` are called 32,000 times in a
+    # single route, almost always with an address that came from a `PoolSpec`
+    # and is already lowercase.  Lowering it again allocates a string per call
+    # to look up the same key; measured, `str.lower` was the seventh-hottest
+    # call in the profile.  The fallback stays for the symbol resolver and the
+    # CLI, which do hand checksummed addresses in and simply pay for it.
 
     def node(self, token: str) -> int:
         found = self.node_of.get(token)

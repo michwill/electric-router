@@ -45,9 +45,8 @@ def _log2(x: int) -> int:
 def cbrt(x: int) -> int:
     """`_cbrt`: seeded from log2, then seven unrolled Newton steps.
 
-    The iteration count is part of the answer, not an implementation detail --
-    the contract runs exactly seven and stops, so a "converged" result here
-    would be a different number.
+    The iteration count is part of the answer: the contract runs exactly seven
+    and stops, so a "converged" result here would be a different number.
     """
     if x >= 115792089237316195423570985008687907853269 * 10**18:
         xx = x
@@ -85,28 +84,20 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
               mul2_over_sum: bool = False) -> int:
     """The fallback `get_y` reaches for when the discriminant is not positive.
 
-    It is also the *whole* of `get_y` for the 2-coin pools that predate the
-    optimized math and iterate in the pool itself (`inline`).  Those state
-    their own bounds -- on `K0_i` rather than on `frac`, and so twice ours at
-    each end, since `K0_i` carries the `N_COINS` factor `frac` does not --
-    and re-check the answer before returning it.
+    Also the *whole* of `get_y` for the 2-coin pools that predate the optimized
+    math and iterate in the pool itself (`inline`).  Those bound `K0_i` rather
+    than `frac` -- twice ours at each end, since `K0_i` carries the `N_COINS`
+    factor `frac` does not -- and re-check the answer before returning it.
 
     `mul2_over_sum` is the one line on which two deployed generations of that
-    same inline loop disagree.  Vyper 0.3.1 wrote
-
-        mul2 = 10**18 + (2 * 10**18) * K0 / _g1k0
-
-    and 0.3.3 rewrote it with the unsafe helpers as
-
-        mul2 = unsafe_div(10**18 + (2 * 10**18) * K0, _g1k0)
-
-    which moved the `10**18` inside the division.  Both are live -- 41 mainnet
-    pools take the first, Gnosis's EURe-3Crv takes the second -- so this is a
-    fork in what is deployed, not a slip in what we transcribed.  The forms
-    differ by about 1e18 in 2e20; Newton damps that to 4e-10 in the answer,
-    which is small enough to read as rounding and far too large to be it, and
-    the pool misses the wei-exact gate and goes unmodelled.  Which one a pool
-    implements is settled by that gate, never by a list of addresses.
+    inline loop disagree: Vyper 0.3.1's `10**18 + (2 * 10**18) * K0 / _g1k0`
+    against 0.3.3's `unsafe_div(10**18 + (2 * 10**18) * K0, _g1k0)`, which moved
+    the `10**18` inside the division.  Both are live -- 41 mainnet pools take the
+    first, Gnosis's EURe-3Crv the second -- and they differ by ~1e18 in 2e20,
+    which Newton damps to 4e-10 in the answer: small enough to read as rounding
+    and far too large to be it, so the pool misses the wei-exact gate and goes
+    unmodelled.  Which one a pool implements is settled by that gate, never by a
+    list of addresses.
     """
     x_j = x[1 - i]
     if x_j <= 0 or d <= 0:
@@ -165,12 +156,12 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
 
 # ------------------------------------------------------ the float fast path
 #
-# This arithmetic was floating point before it was integer.  The deployed form
-# carries `PRECISION`, `A_MULTIPLIER` and a `divider` ladder stepping through
-# 10**48 down to 10**20, and none of that is the algorithm: it is armour that
-# keeps intermediates inside u256.  Transcribing it into `f64` would be the
-# worst of both -- `delta0 = 3ac/b - b` differences two like-sized 1e32
-# quantities, which is catastrophic cancellation at 53 bits of mantissa.
+# This arithmetic was floating point before it was integer.  `PRECISION`,
+# `A_MULTIPLIER` and the `divider` ladder stepping 10**48 down to 10**20 are not
+# the algorithm -- they are armour keeping intermediates inside u256.
+# Transcribing them into `f64` would be the worst of both: `delta0 = 3ac/b - b`
+# differences two like-sized 1e32 quantities, catastrophic cancellation at 53
+# bits of mantissa.
 #
 # So the scaling is undone instead, one variable at a time, by giving each its
 # dimension.  Balances, `D` and their sums are *dollars*; `PRECISION` is one
@@ -186,26 +177,22 @@ def _newton_y(ann: int, gamma: int, x: list[int], d: int, i: int,
 #       ... or (1e18 + 2e18*k0)//g1k0    ->  (1 + 2 * k0) / G           [-]
 #     fprime = yfprime // y               ->  yfprime / y                [-]
 #
-# What is left is the Newton iteration the whitepaper describes, and it is
-# self-correcting: it converges to the root of the invariant rather than
-# accumulating the rounding of a closed form.  The `+ 1` on `g1k0` and the
-# wei-denominated convergence floor are integer artifacts and go.
+# What is left is the Newton iteration the whitepaper describes, self-correcting
+# rather than accumulating the rounding of a closed form.  The `+ 1` on `g1k0`
+# and the wei-denominated convergence floor are integer artifacts and go.
 
 def newton_y_fast(a: float, gamma: float, x: list[float], d: float,
                   i: int, lim: float = 100.0, *, inline: bool = False,
                   mul2_over_sum: bool = False) -> float:
     """Balance `i` restoring the invariant, in dollars.
 
-    `a` is `ann / A_MULTIPLIER`, `gamma` is `gamma / 1e18`, and `x` and `d`
-    are in dollars -- the units the algorithm was written in before it was
-    made to fit in integers.
-
-    `lim` is the `K0_i` window, `lim_mul / 1e18`.  It reduces as cleanly as
-    everything else: the contract asks `10**36 // lim_mul <= k0_i <= lim_mul`
-    with `k0_i = 1e18 * N * x_j / D`, and dividing through leaves
-    `1 / lim <= N * x_j / D <= lim`.  It is not decoration -- a pool outside
-    that window reverts, so a float path that skipped the test would quote
-    sizes the chain refuses.
+    `a` is `ann / A_MULTIPLIER`, `gamma` is `gamma / 1e18`, and `x` and `d` are
+    in dollars -- the units the algorithm was written in before it was made to
+    fit in integers.  `lim` is the `K0_i` window, `lim_mul / 1e18`: the contract
+    asks `10**36 // lim_mul <= k0_i <= lim_mul`, and dividing through leaves
+    `1 / lim <= N * x_j / D <= lim`.  Not decoration -- a pool outside that
+    window reverts, so a float path that skipped the test would quote sizes the
+    chain refuses.
     """
     x_j = x[1 - i]
     if x_j <= 0.0 or d <= 0.0 or a <= 0.0 or gamma <= 0.0:
