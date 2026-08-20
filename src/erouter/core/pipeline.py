@@ -1,14 +1,13 @@
 """The ROUTE() driver (spec §5.1).
 
-    nu      <- reference_prices(pools, dst)          one Laplacian solve
-    a, B    <- calibrate(pools, nu, X)               M2, vectorised
+    nu      <- reference_prices(pools, dst)
+    a, B    <- calibrate(pools, nu, X)
     G, eps  <- M3, M4
     S       <- seed_subgraph(src, dst, eps, G)
-    repeat: solve on S -> price out all m -> extend S    until nothing violates
+    repeat: solve on S -> price out all m -> extend S
     realize -> legs
 
-Takes an already-loaded universe and a `QuoterClient`, so it stays in `core`
-and can run in the browser against a deployed quoter.
+Takes a loaded universe and a `QuoterClient`, so it stays in `core`.
 """
 
 from __future__ import annotations
@@ -71,26 +70,16 @@ from .verify import (
     verify,
 )
 
-# What the router will *propose* by default, as opposed to what the quoter can
-# *price* (MAX_LEGS, 128).  Raising the quoter's capacity is free -- it is a
-# memory array in a view call -- but a 67-leg route is not executable by any
-# deployed router, so the default stays where an executor might plausibly
-# follow.  `--max-legs` opens it up; measured on USDC->WETH 100k, going wide
-# is worth +5.35 bp below ~4 gwei and a loss above it.
+# What the router proposes by default, against what the quoter can price
+# (MAX_LEGS, 128).  A 67-leg route is not executable by any deployed router;
+# `--max-legs` opens it up.
 DEFAULT_MAX_LEGS = 32
 
-# §12.1's size check.  `theta_p = delta_p / y_p` on the *realised* flow: how
-# much of the pool's own input reserve this arc is about to take.
-#
-# The refine pass already probes at fractions of the whole trade, but it does
-# that before the solve, when nobody knows which arcs will carry what.  An arc
-# the relaxation loads far past anything it was measured at is exactly the one
-# whose `B` is least trustworthy, and that is the case the spec singles out:
-# recalibrate by secant *at the realised size* and re-pivot.
-#
-# Measured on mainnet crvUSD -> sDOLA at $5M, where the model promised 3.66M
-# and the chain paid 1.97M -- an 86% overstatement -- while the same pair at
-# $2M was honest to 1.2%.
+# §12.1's size check.  `theta_p = delta_p / y_p` on the realised flow: how much
+# of the pool's own input reserve this arc takes.  The refine pass probes before
+# the solve, when nobody knows which arcs carry what, so an arc loaded far past
+# anything it was measured at is recalibrated by secant at the realised size and
+# re-pivoted.
 THETA_RECALIBRATE = 0.03
 # Past this the arc is being asked for a fifth of the pool and no secant fit
 # is going to describe it; §11.3's remedy is a different model, not a better
@@ -131,10 +120,9 @@ class RouteResult:
     impact_fraction: float = 0.0
     impact_reference_in: int = 0
     impact_reference_out: int = 0
-    #: Curves the scout paid for, handed to the split pass so it does not
-    #: sample the same arcs twice.  Lives on the result rather than on the
-    #: route: a `RealizedRoute` is a serialisable description of a trade and
-    #: has no business carrying probe samples.
+    #: Curves the scout paid for, handed to the split pass so it does not sample
+    #: the same arcs twice.  On the result, not the route: a `RealizedRoute`
+    #: describes a trade and carries no probe samples.
     scout_curves: list = field(default_factory=list)
     candidates: CandidateSet | None = None
     refit_report: RefitReport | None = None
@@ -155,9 +143,8 @@ class RouteResult:
     @property
     def certificate(self) -> bool:
         # A conversion between two tokens of one node is not the optimum of a
-        # relaxation, it is the only way to get from one to the other.  There
-        # is nothing to price out and nothing to certify against, so saying
-        # "no certificate" would report a doubt that does not exist.
+        # relaxation -- there is nothing to price out, so "no certificate"
+        # would report a doubt that does not exist.
         return self.sole_route or bool(self.report and self.report.certificate)
 
     @property
@@ -174,10 +161,8 @@ class RoutingError(RuntimeError):
 def arc_tokens(pool: PoolSpec, kind: ArcKind, i: int, j: int) -> tuple[str, str]:
     """What an arc of this kind on this pool trades, in and out.
 
-    A swap moves between two coins; a deposit moves a coin into the LP token;
-    a withdrawal moves the LP token into a coin.  Which index is meaningful
-    differs -- `i` for a deposit, `j` for a withdrawal -- because that is what
-    the calldata uses, and the quoter's leg encoding reads the same fields.
+    Which index is meaningful differs -- `i` for a deposit, `j` for a
+    withdrawal -- because that is what the calldata uses.
     """
     if kind.is_deposit:
         return pool.coins[i].address, pool.lp_token
@@ -191,19 +176,13 @@ def build_arcs(
 ) -> tuple[list[ArcRef], list[tuple[PoolSpec, int, int]]]:
     """Every quotable interaction, with its probe target and metadata.
 
-    Three kinds, not one.  Swaps between coins, and -- where the pool's LP
-    token is known and is a node -- single-sided deposits and withdrawals,
-    which make the LP token routable rather than a dead end.  Without them 51
-    mainnet tokens have no path at all (they sit only in metapools whose other
-    coin is a base-pool LP), and on gnosis XDAI cannot reach the deeper EURe,
-    whose only liquidity is against 3pool's LP.
+    Swaps, plus single-sided deposits and withdrawals where the pool's LP token
+    is a node -- without them 51 mainnet tokens have no path at all.
 
-    Proportional `remove_liquidity` is deliberately absent: it takes one token
-    and returns *all* the coins at once, which is a hyperedge rather than an
-    arc, and the flow formulation (§3.3) has no way to tie the resulting flows
-    to fixed ratios.  Multi-coin `add_liquidity` is the same shape reversed.
-    Both are real and both are cheaper than what is built here; see the note in
-    `docs/quadratic-flow-router.md`.
+    Proportional `remove_liquidity` is deliberately absent: it returns all coins
+    at once, a hyperedge rather than an arc, and the flow formulation (§3.3)
+    cannot tie the resulting flows to fixed ratios.  Multi-coin `add_liquidity`
+    is the same shape reversed.
     """
     refs: list[ArcRef] = []
     meta: list[tuple[PoolSpec, int, int]] = []
@@ -318,8 +297,7 @@ def _to_arc(
 def _quantum(decimals_out: int) -> float:
     """One unit of the output token, in the human units calibration fits in.
 
-    Curve quotes integers, so this is the resolution of every measurement the
-    ladder makes: 1e-18 for DAI, 1e-6 for USDT, 0.01 for GUSD.
+    Curve quotes integers, so this is the resolution of every ladder measurement.
     """
     return 10.0 ** -int(decimals_out)
 
@@ -351,8 +329,7 @@ def calibrate_arcs(
 def _client_block(client) -> int:
     """The block a client is pinned to, or 0 if it will not say.
 
-    `Transport` exposes it; a stub in a test may not.  Zero means "unknown",
-    which reuses a preparation as before rather than rebuilding on every quote.
+    Zero means "unknown", which reuses a preparation rather than rebuilding.
     """
     try:
         return int(getattr(getattr(client, "transport", None), "block", 0) or 0)
@@ -372,8 +349,7 @@ def prepare(
 ) -> Prepared:
     """The size-independent half: probe, calibrate, restrict, price.
 
-    Everything here is a function of the block and the pair, not the amount,
-    so an interactive session pays for it once.
+    A function of the block and the pair, not the amount -- so it is paid once.
     """
     scratch = RouteResult(src_token=src_token.lower(), dst_token=dst_token.lower(),
                           nodes=nodes)
@@ -382,10 +358,9 @@ def prepare(
 
     # --- probe, pass 1: the whole universe, coarsely (§2.6) ---------------
     #
-    # Pricing out every arc is what the §5.5 certificate rests on, and that
-    # needs only `eps`, hence only `a`.  `B` matters only where flow goes.  So
-    # the universe gets two points each and the full ladder is spent later on
-    # the arcs that could carry something -- ~5,300 probes down to ~1,900.
+    # The §5.5 certificate needs only `eps`, hence only `a`; `B` matters only
+    # where flow goes.  Two points each here, the full ladder later on the arcs
+    # that could carry something.
     with clock("arcs"):
         refs, meta = build_arcs(pools, nodes)
         plan = plan_grid(refs, grid=COARSE_GRID)
@@ -414,13 +389,11 @@ def prepare(
     if not arcs:
         raise RoutingError("no arc survived calibration")
 
-    # Restrict to the part of the graph that can actually reach the
-    # destination.  A disconnected island has no price relative to the
-    # numeraire -- `reference_prices` returns 1.0 there as a placeholder, not
-    # as a valuation -- and feeding those arcs in gives conductances twelve
-    # orders of magnitude off, which wrecks the Laplacian's conditioning for
-    # everything else.  Measured: meme-coin pools with no path to WETH produced
-    # G ~ 3e12 against a physical maximum near 1e4.
+    # Restrict to the part of the graph that can reach the destination.  A
+    # disconnected island has no price relative to the numeraire --
+    # `reference_prices` returns 1.0 there as a placeholder, not as a valuation
+    # -- and those arcs give conductances orders of magnitude off, wrecking the
+    # Laplacian's conditioning for everything else.
     with clock("component"):
         arcs = _restrict_to_component(arcs, dst_node, nodes.n_nodes, scratch)
     if not arcs:
@@ -437,33 +410,20 @@ def prepare(
         sig_vec = np.array([a.sigma for a in arcs], dtype=np.int64)
         keys = [(arc.pool.lower(), arc.i, arc.j) for arc in arcs]
         # An arc whose reverse direction contradicts it is not reporting a
-        # price and must not vote in the fit, however routable it is.
-        #
-        # Both directions are already present as separate arcs, so half weight
-        # keeps a pool's influence from being counted twice.
+        # price and must not vote in the fit.  Half weight because both
+        # directions are separate arcs and a pool must not count twice.
         listed = np.array([max(a.tvl_usd, 1.0) / 2 for a in arcs])
         weights = price_fit_weights(keys, a_vec, listed)
         nu = reference_prices(
             tau_vec, sig_vec, a_vec, weights, nodes.n_nodes, dst_node,
         )
-        # Second pass, weighted by what each pool *holds at this block* rather
-        # than by what an API said it was worth.
-        #
-        # `tvl_usd` arrives with the pool list, which is on a five-minute TTL
-        # and is the one input `--block` does not pin.  Measured at a fixed
-        # block: eight quotes over thirteen minutes, identical across two
-        # five-minute plateaus and different between them, changing exactly at
-        # the refetch where a pool's TVL moved and not at the one where it did
-        # not.  A quote pinned to a block should not depend on when it was
-        # asked, and the balances are already in hand -- they were read on
-        # chain at that block to plan the probes.
-        #
-        # Whole-pool value, halved per arc, which is what the listed weight
-        # was: an arc's own input reserve is a different quantity, and using it
-        # weights the two directions of an imbalanced pool unequally.  Measured
-        # on USDC->WETH $1M, that cost 58.8 bp.  The first pass is what values
-        # the balances, since depth has to be in one currency to compare across
-        # pairs; one extra Laplacian solve, ~2 ms against a route's hundreds.
+        # Second pass, weighted by what each pool holds at this block rather
+        # than by `tvl_usd`, which arrives with the pool list on a five-minute
+        # TTL and is the one input `--block` does not pin.  Whole-pool value,
+        # halved per arc: an arc's own input reserve weights the two directions
+        # of an imbalanced pool unequally (measured at 58.8 bp on USDC->WETH
+        # $1M).  The first pass is what values the balances, since depth has to
+        # be in one currency to compare across pairs.
         held: dict[str, float] = {}
         for pool in pools:
             if not pool.balances or len(pool.balances) != len(pool.coins):
@@ -537,18 +497,14 @@ def _conversion_only(
 class Prepared:
     """Everything about a (universe, src, dst) that does not depend on size.
 
-    The split is not a convenience -- it is a property of the model.  Probe
-    sizes are fractions of each pool's *reserves*, so the whole derivative
-    measurement is amount-independent; and `G_p = nu_tau a_p / B_p`,
-    `eps_p = 1 - a_p nu_sig / nu_tau` contain no `Psi` at all.  `Psi` enters
-    only at the dust floor, the caps and the right-hand side of the solve.
+    A property of the model, not a convenience: probe sizes are fractions of
+    each pool's reserves, and `G_p = nu_tau a_p / B_p`,
+    `eps_p = 1 - a_p nu_sig / nu_tau` contain no `Psi`.  `Psi` enters only at
+    the dust floor, the caps and the right-hand side of the solve.
 
-    So quoting a second size reuses the probes (the RPC), the calibration and
-    the reference-price fit, and re-runs only the solve.  `warm` carries the
-    previous active set forward, which matters more than it sounds: within one
-    active set the KKT system is *affine* in `Psi` -- `L u = Psi(e_src - e_dst)
-    + B_A(G_A eps_A)` -- so a nearby size usually needs the same arcs
-    conducting, and the solve converges in a handful of pivots instead of ~80.
+    So a second size reuses the probes, the calibration and the price fit, and
+    re-runs only the solve.  Within one active set the KKT system is affine in
+    `Psi`, so a nearby size usually needs the same arcs conducting.
     """
 
     arcs: list[PoolArc]
@@ -560,11 +516,9 @@ class Prepared:
     counters: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
     quotes: int = 0
-    #: The block every number in here was measured at.  A preparation is a
-    #: function of (universe, block) and of nothing else, so reusing one across
-    #: a block change would mix derivatives fitted at two different states --
-    #: `route` rebuilds instead, which is what "re-fit when the block moves"
-    #: means in code.  Zero means "not recorded", which reuses as before.
+    #: The block every number in here was measured at.  Reusing a preparation
+    #: across a block change would mix derivatives fitted at two chain states;
+    #: `route` rebuilds instead.  Zero means "not recorded".
     block: int = 0
 
 
@@ -609,28 +563,21 @@ def route(
             raise RoutingError(
                 f"{nodes.symbol(src_token)} to itself is not a trade")
         # Same node, different tokens: the answer is the conversion, not an
-        # error.  There is no arc between them *because* they are merged, so
-        # the graph has nothing to find -- but a deposit into scrvUSD is a
-        # trade a user can ask for, and telling them to "convert directly"
-        # while refusing to say what that converts to is not an answer.
+        # error.  There is no arc between them *because* they are merged, but a
+        # deposit into scrvUSD is still a trade a user can ask for.
         return _conversion_only(
             result, clock, nodes, client, src_token=src_token,
             dst_token=dst_token, amount_in=amount_in,
             verify_on_chain=verify_on_chain,
         )
 
-    # A preparation is a function of (universe, block).  Reusing one whose
-    # block has moved would price this quote from derivatives fitted against a
-    # different chain state -- every probe, every `a`, every `B` -- so the
-    # block change is what triggers the re-fit, and nothing else does.
+    # A preparation is a function of (universe, block); a moved block means
+    # every probe, every `a`, every `B` was fitted against a different state.
     now = _client_block(client)
-    # The preparation is not the only thing a block invalidates.  A client that
-    # answers from a pool's own arithmetic built that model out of storage read
-    # once -- balances, `D`, the fee parameters -- so on a moving block it goes
-    # on quoting the previous block's pool, silently, and precisely on the pools
-    # it is most confident about.  Re-fitting the preparation against it would
-    # then fit stale numbers very carefully.  Ask it to catch up first; a client
-    # with nothing to refresh does not have the hook.
+    # A client answering from a pool's own arithmetic built that model from
+    # storage read once, so on a moving block it goes on quoting the previous
+    # block's pool -- silently, and precisely on the pools it is most confident
+    # about.  Ask it to catch up before re-fitting against it.
     refresh = getattr(client, "refresh_at", None)
     if refresh is not None and now:
         rebuilt = refresh(now)
@@ -653,16 +600,11 @@ def route(
     # and the §8 refit re-anchors `B` at one size's realised flows, so handing
     # the same objects to the next quote would leak this size into it.
     arcs = [copy.copy(a) for a in prepared.arcs]
-    # The ladders need the same treatment, and used not to get it.  §8 probes
-    # at the sizes *this* quote realised and `merge`s them in, so a second
-    # quote through the same `Prepared` recalibrated from a ladder carrying the
-    # first quote's sizes.  Measured on USDC->CRV $100k: 252 of 862 ladders
-    # moved after one route, and quoting the same trade again returned 26 bp
-    # less.  Whichever quote ran second lost, which is how it hid -- it looks
-    # like a routing difference rather than contamination.
-    #
-    # Shallow is enough for the lists, which `merge` rebinds rather than
-    # mutates, but `failures` is updated in place and needs its own dict.
+    # The ladders need the same treatment.  §8 probes at the sizes *this* quote
+    # realised and `merge`s them in, so without a copy a second quote through
+    # the same `Prepared` recalibrates from the first quote's sizes.  Shallow is
+    # enough for the lists, which `merge` rebinds rather than mutates, but
+    # `failures` is updated in place and needs its own dict.
     ladders = []
     for ladder in prepared.ladders:
         clone = copy.copy(ladder)
@@ -739,19 +681,12 @@ def _quote(
         wanted |= {a.id for a in arcs if a.tau in (src_node, dst_node) or a.sigma in (src_node, dst_node)}
         # And every arc the client can *compute* rather than probe.
         #
-        # The shortlist exists because a probe costs a round trip, so only the
-        # arcs likely to carry flow were worth re-measuring at the trade's own
-        # size; everything else kept the coarse fit made at a fraction of its
-        # reserves.  That is the asymmetry behind the whole class of bug here:
-        # a derivative fitted near zero describes a different curve than the
-        # one a $2M trade rides, so which arcs happened to be on the shortlist
-        # decided the answer.
-        #
-        # Where the pool's own invariant can be evaluated (see
-        # `dev/exact_probe.py`), that cost is 15 us and no round trip, so there
-        # is no reason to be selective: re-fit all of them at this trade's
-        # size, every quote.  The rest keep the shortlist, because for them the
-        # round trip is real.
+        # The shortlist exists because a probe costs a round trip, and a
+        # derivative fitted near zero describes a different curve than the one a
+        # $2M trade rides -- so which arcs made the shortlist decided the answer.
+        # Where the pool's own invariant can be evaluated (`dev/exact_probe.py`)
+        # that costs 15 us and no round trip, so re-fit all of them every quote.
+        # The rest keep the shortlist.
         computes = getattr(client, "computes", None)
         if computes is not None:
             free = {a.id for a in arcs if computes(a.pool)}
@@ -759,10 +694,8 @@ def _quote(
             wanted |= free
         # Sample where the flow will land, not near zero.  `Psi / nu[tau]` is
         # the amount of this arc's input token worth the whole trade, so the
-        # fractions read directly as "5%, 10%, 20% of the swap" in whatever
-        # token this arc happens to take.  Both quantities are already in hand
-        # -- that is why the refine pass can do this and the coarse pass, which
-        # produces `nu`, cannot.
+        # fractions read as "5%, 10%, 20% of the swap".  The coarse pass cannot
+        # do this: it is what produces `nu`.
         sizes: dict[str, list[int]] = {}
         for arc in arcs:
             if arc.id not in wanted:
@@ -791,35 +724,19 @@ def _quote(
     # --- solve (§5.4, §5.5) ----------------------------------------------
     with clock("seed"):
         seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
-        # §5.4's warm start, and it is worth a lot here.  Starting with all m
-        # arcs active means pivoting ~700 of them back *out* one at a time, and
-        # every one of those pivots factorises a matrix the size of the whole
-        # connected component.  Starting from one path only ever adds arcs, so
-        # the matrix stays the size of the active set.
-        # The start is a function of *this* quote and nothing else.
+        # §5.4's warm start.  Starting with all m arcs active means pivoting
+        # ~700 of them back out one at a time, each factorising a matrix the
+        # size of the whole component; starting from one path only ever adds
+        # arcs.
         #
-        # A previous size's support used to be carried forward here, on the
-        # argument that the KKT system is affine in Psi within one active set,
-        # so a nearby amount lands in the same piece with nothing to do.  That
-        # is true of the base solve, which column-generates against all m arcs
-        # and certifies.  It is not true of everything downstream: column
-        # generation is capped at `max_rounds`, and the candidate re-solves run
-        # truncated (`CANDIDATE_PIVOTS`, `partial_ok`).  So the basis it starts
-        # from can decide which candidates exist, and a quote's answer became a
-        # function of what had been quoted before it.
-        #
-        # Measured on crvUSD -> sDOLA at block 25,770,648, gas pinned: the same
-        # $2M quote returned 1,415,273.115793 alone and 1,419,036.382808 after
-        # a $100k quote in the same session -- 26.5 bp apart, both verified on
-        # chain, so both real and one of them needlessly worse.  Which one won
-        # also moved with the state cache, which is how it looked like a
-        # regression rather than a dependency.
-        #
-        # A session may reuse the probes, the calibration and the price fit --
-        # those are functions of (universe, block) and `Prepared` is defined as
-        # exactly that.  It may not reuse anything that is a function of a
-        # previous *query*.  The solve costs a few milliseconds against a
-        # route's hundreds; buying determinism with them is the right trade.
+        # The start is a function of *this* quote and nothing else.  A previous
+        # size's support must not be carried forward: column generation is
+        # capped at `max_rounds` and the candidate re-solves run truncated
+        # (`CANDIDATE_PIVOTS`, `partial_ok`), so the starting basis decides
+        # which candidates exist -- measured at 26.5 bp between the same $2M
+        # quote run alone and run after a $100k one.  A session may reuse
+        # anything that is a function of (universe, block), never of a previous
+        # query.
         best_path = k_shortest_paths(g, src_node, dst_node, k=1)
         warm_start = np.array(best_path[0]) if best_path else None
     with clock("solve"):
@@ -839,11 +756,9 @@ def _quote(
             f"{cycles} circulation(s) removed from the optimal flow: the model "
             "found a negative-eps loop it cannot execute as a one-way trade (§2.6)"
         )
-    # Decompose the loss *here*, against the graph that produced this flow.
+    # Decompose the loss here, against the graph that produced this flow.
     # Candidate generation and the refit both mutate `g` -- the refit re-anchors
-    # B at realised sizes, which at theta ~ 20% can move G by orders of
-    # magnitude -- so pairing this psi with a later G reports nonsense
-    # (measured: a "resistor" term of 683,668 bp on a 2.7 bp route).
+    # B at realised sizes -- so pairing this psi with a later G reports nonsense.
     fee, impact = report.solution.loss_split(g)
     result.fee_bp = fee * g.g_scale / Psi * 10_000
     result.impact_bp = impact * g.g_scale / Psi * 10_000
@@ -857,24 +772,11 @@ def _quote(
     result.counters["max_theta"] = max(thetas.values(), default=0.0)
     # Everything the model is loading past what it measured, with no ceiling.
     #
-    # There used to be one at THETA_ESCALATE, because re-probing an arc at 3.4x
-    # the pool's own reserve does not measure it: the quotes come back
-    # saturated, `_recalibrate` reads that as a wall, and the allocation
-    # collapses -- crvUSD -> sDOLA at $5M went from 3,379,277 sDOLA to
-    # 1,935,692, 43% worse, from "fixing" the very arc the model had wrong.
-    # That failure was the ladder asking for more than the pool holds, which
-    # the `reserve_in` clamp below now forbids outright, so the ceiling was
-    # left excluding exactly the arcs whose `B` is least trustworthy: USDC ->
-    # crvUSD at $5M runs legs at theta 1.03 and 2.00, and past 10% the code
-    # warned and re-fitted nothing.
-    #
-    # Removing it is worth no output.  A/B at block 25,769,383 over
-    # USDC->crvUSD, crvUSD->sDOLA, USDC->USDT and USDC->WETH from $10k to $20M:
-    # every route identical to within 0.0002 bp, sDOLA included -- so the clamp
-    # does hold and the collapse does not come back, and equally the blind spot
-    # was not costing anything on these pairs.  It is kept because an arc the
-    # model cannot describe should be re-measured rather than warned about, not
-    # because it was measured to pay.
+    # There used to be one at THETA_ESCALATE, because re-probing an arc past the
+    # pool's own reserve does not measure it: the quotes come back saturated and
+    # `_recalibrate` reads that as a wall.  The `reserve_in` clamp below now
+    # forbids that outright, so the ceiling was left excluding exactly the arcs
+    # whose `B` is least trustworthy.
     over = {k: v for k, v in thetas.items() if v > THETA_RECALIBRATE}
     if over and refit_rounds > 0:
         with clock("size_check"):
@@ -932,26 +834,16 @@ def _quote(
     result.counters["kcl_residual"] = residual
     tolerance = _kcl_tolerance(Psi, g.g_scale)
     if residual > tolerance:
-        # Before failing, ask what accuracy the solve could possibly have had.
-        # A Laplacian of condition number `k` yields relative error about
+        # Before failing, ask what accuracy the solve could have had.  A
+        # Laplacian of condition number `k` yields relative error about
         # `k * eps`, and that lands in `psi` through `psi = G(du - eps)`.  The
-        # graph deliberately tolerates `k` up to MAX_CONDITION = 1e12, where
-        # that error is 2e-4 -- four orders coarser than the flat 1e-8 above.
-        # The two constants were simply never reconciled.
+        # graph tolerates `k` up to MAX_CONDITION = 1e12, where that error is
+        # 2e-4 -- four orders coarser than the flat 1e-8 above, and the two
+        # constants were never reconciled.  Whether a route lands above or below
+        # the flat bound moves with BLAS thread count and cache contents, which
+        # is what made the failure look random.
         #
-        # Measured on USDC->CRV: at $1M the residual was 1.16e-07 against a
-        # tolerance of 1.13e-08, and the active Laplacian's condition number
-        # was 2.3e9, making the achievable error 5.2e-07.  The solve was
-        # running four times *better* than its conditioning guaranteed and was
-        # rejected regardless.  Across six runs the residual tracked `k * eps`
-        # within 0.04x to 33x, which is what a backward-stable solve does.
-        #
-        # This is what made the failure look random: whether a route lands
-        # above or below k ~ 4.5e7 depends on which active set the solve
-        # reaches, which moves with BLAS thread count and cache contents.
-        #
-        # `cond` is only computed here, on the path that is about to fail, so
-        # the usual route pays nothing for it.
+        # `cond` is computed only here, on the path that is about to fail.
         conditioned = _achievable_kcl(g, report.solution.A, dst_node)
         if residual > max(tolerance, conditioned):
             _r, node, n_in, n_out = _kcl_detail(g, psi, src_node, dst_node, Psi)
@@ -969,10 +861,8 @@ def _quote(
                 f"(achievable at this conditioning: {conditioned:.3e})"
             )
         result.counters["kcl_conditioning_allowed"] = 1
-    # §12.2b: a certificate that failed is worth far less than a certificate
-    # that failed by a known amount.  `gap` bounds the objective still on the
-    # table, so a DEGENERATE route can say "optimal to within 0.024 bp" rather
-    # than only "not proven optimal".
+    # §12.2b: `gap` bounds the objective still on the table, so a DEGENERATE
+    # route can say "optimal to within 0.024 bp" rather than only "not proven".
     if report.gap > 0 and Psi_scaled > 0:
         result.counters["optimality_gap_bp"] = report.gap / Psi_scaled * 1e4
     result.counters["active_arcs"] = int(active.size)
@@ -1010,14 +900,10 @@ def _quote(
     # --- candidates and on-chain verification (§6, §7) --------------------
     if verify_on_chain:
         scaled = report.solution.psi.copy()
-        # The §11.1 bound, in the solver's scaled value units.  Zero when gas
-        # is disabled, which restores the previous behaviour exactly.
-        # Gas screens *candidate* generation only.  The base solve stays
-        # gas-blind on purpose: it is then always present as a candidate, so
-        # the gas-aware ones can only be chosen when they are net better.
-        # Screening the base solve too made USDC->USDT $10k pick a 19-leg
-        # route over a 6-leg one and lose $0.21 -- the cheaper answer had
-        # stopped being generated at all, so verification could not find it.
+        # The §11.1 bound, in the solver's scaled value units; zero when gas is
+        # disabled.  Gas screens *candidate* generation only -- the base solve
+        # stays gas-blind so it is always present as a candidate and the
+        # gas-aware ones can only win when they are net better.
         dst_wei_per_eth = _dst_per_eth(nodes, nu, dst_token)
         gas_floor = _gas_cost(nodes, nu, dst_token, gas_price_wei, g.g_scale)
         result.counters["gas_floor_bp"] = int(
@@ -1097,9 +983,8 @@ def _quote(
         winner = pool_set.best
         if winner is None:
             # The modelled route was never capped -- it is the relaxation's own
-            # answer, not a candidate -- so falling back to it would hand back
-            # a route that breaks the limit the caller set.  If nothing fits,
-            # the honest answer is that there is no route at this width.
+            # answer, not a candidate -- so falling back to it would break the
+            # limit the caller set.
             if result.route and len(result.route.legs) > max_legs:
                 raise RoutingError(
                     f"no route within {max_legs} legs: every candidate was "
@@ -1132,10 +1017,9 @@ def _quote(
                     )
 
             # --- is a wider candidate being hidden by its own split? ---------
-            #
-            # Ranking compares candidates on the split the model gave them, and
-            # only the winner is ever re-split -- so a wide topology whose model
-            # split is bad loses before it can be fixed.  See `split.scout`.
+            # Ranking compares candidates on the split the model gave them and
+            # only the winner is re-split, so a wide topology whose model split
+            # is bad loses before it can be fixed.  See `split.scout`.
             if optimise_split and result.route is not None:
                 with clock("scout"):
                     _scout_wider(result, pool_set, nodes, client,
@@ -1145,18 +1029,15 @@ def _quote(
                                  gas_table=gas_table, leg_cost_bp=leg_cost_bp)
 
             # --- §7: let the chain choose the split, not the model -----------
-            #
-            # Last, so it runs on whatever the refit and the scout left as the
-            # winner, and safe there because it only ever accepts a strict
-            # improvement.
+            # Last, so it runs on whatever the refit and scout left as winner,
+            # and safe there because it only accepts a strict improvement.
             if optimise_split and result.route is not None:
                 with clock("split"):
                     _optimise_split(result, nodes, client, amount_in=amount_in)
 
             # --- what the size itself cost ----------------------------------
-            #
-            # Last of all, on the route as finally split, so the figure
-            # describes what will be executed rather than an intermediate.
+            # On the route as finally split, so the figure describes what will
+            # be executed.
             if measure_impact and result.route is not None and result.verified_out:
                 with clock("impact"):
                     measured = price_impact(
@@ -1173,10 +1054,8 @@ def _quote(
     return result
 
 
-#: A candidate has to be this many legs wider than the winner before it is
-#: worth scouting.  The failure is specific to wide topologies -- the model's
-#: split error grows with the number of branches -- and scouting a candidate
-#: the same size as the winner buys nothing measurable.
+#: A candidate has to be this many legs wider than the winner before it is worth
+#: scouting: the model's split error grows with the number of branches.
 SCOUT_WIDER_BY = 3
 #: How many of the widest candidates go into the shared batch.  They ride one
 #: probe batch between them, so this is cheap to raise; three covered every
@@ -1184,15 +1063,10 @@ SCOUT_WIDER_BY = 3
 SCOUT_CANDIDATES = 3
 #: How far a scouted candidate must beat the incumbent before it is adopted.
 #
-# The comparison is made *before* either route has been through the split
-# stage, and the incumbent gains from that too -- measured at about 0.14 bp on
-# the narrow topologies that usually hold the lead.  Adopting on a hair
-# therefore loses: USDC->CRV $100k swapped a 29-leg route for a 32-leg one that
-# quoted better at the time and finished 0.12 bp worse once both had been
-# split.  Half a basis point clears the incumbent's own upside with room, and
-# keeps the wins that matter -- the two real ones measured were 20.1 and
-# 0.9 bp.  It also keeps the router from adopting a wider route, and paying to
-# optimise it, for a gain nobody would notice.
+# The comparison is made before either route has been split, and the incumbent
+# gains from that too -- about 0.14 bp on the narrow topologies that usually hold
+# the lead -- so adopting on a hair loses.  Half a basis point clears that with
+# room and keeps the wins that matter.
 SCOUT_MARGIN_BP = 0.5
 
 
@@ -1205,10 +1079,8 @@ def _scout_wider(
     """Re-split the widest candidates against one shared probe batch, and adopt
     one only if the chain agrees it is better.
 
-    Nothing here trusts the curves.  `scout` returns a *predicted* output, the
-    predictions order the candidates, and then the best of them is quoted for
-    real alongside the incumbent -- so the worst case is one wasted batch and
-    one wasted quote, never a route chosen on an interpolation.
+    `scout` returns a *predicted* output; the predictions only order the
+    candidates, and the best is then quoted for real alongside the incumbent.
     """
     winner, route = result.winner, result.route
     if winner is None or route is None or pool_set is None:
@@ -1225,10 +1097,8 @@ def _scout_wider(
 
     # The incumbent goes into the batch too, at index 0.  Comparing a tuned
     # challenger against an untuned incumbent is the same mistake the ranking
-    # was making, one level up: USDC->CRV $100k swapped a 29-leg route for a
-    # 32-leg one that led before either was split and finished 0.11 bp behind
-    # after both were.  Its arcs are in the shared sample already, so tuning it
-    # costs nothing but the comparison it makes honest.
+    # makes one level up; its arcs are in the shared sample already, so tuning
+    # it costs nothing.
     entrants = [winner, *wider]
     plans = [
         ([rl.leg for rl in c.route.legs], c.route.dst_slot,
@@ -1266,13 +1136,9 @@ def _scout_wider(
         (challenger.predicted / max(incumbent, 1.0) - 1) * 1e4, 2)
 
     # Net of what the route costs to execute, exactly as `verify.score` ranks.
-    #
     # Comparing gross here undid the gas-aware selection made moments earlier:
-    # ranking put a 1-leg route first at 200 gwei -- correctly, its 198,651 gas
-    # against a 25-leg route's 2.2M -- and this adopted the wide one anyway for
-    # 2 bp of gross gain, which at that price is $2 bought for $855.  The
-    # ranking was never wrong; it was overruled.  Same failure the refit had
-    # (see `_refit_winner`), one stage further on.
+    # at 200 gwei it adopted a 25-leg route over a 1-leg one for 2 bp of gross
+    # gain, $2 bought for $855.  Same failure the refit had (`_refit_winner`).
     def net(value: float, index: int, legs) -> float:
         # `scout_splits` only reweights an entrant's legs, so the two lists are
         # the same legs in the same order and `strict=True` is a real check.
@@ -1374,14 +1240,10 @@ def direct_candidates(
 ) -> tuple[list[Candidate], list[PoolArc]]:
     """One-leg candidates through every pool holding both tokens.
 
-    These are the safety floor, and they exist precisely because they do *not*
-    depend on the probe grid, the calibration, the reference-price fit or the
-    solver.  If a probe fails and an arc is dropped, the model can lose sight
-    of an obvious direct swap; measured once on a degraded run, the router
-    returned 13,700 USDC for 100,000 DAI and honestly verified it, because
-    every candidate it generated really was that bad.
-
-    A router must never be beaten by a swap anyone could find by inspection.
+    The safety floor: they depend on no part of the model -- not the probe grid,
+    the calibration, the price fit or the solver -- so a dropped arc cannot lose
+    sight of an obvious direct swap.  A router must never be beaten by a swap
+    anyone could find by inspection.
     """
     src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
     out: list[Candidate] = []
@@ -1432,25 +1294,20 @@ def two_step_candidates(
 ) -> tuple[list[Candidate], list[list[PoolArc]]]:
     """Model-free `src -> M -> dst` chains, one pool per hop.
 
-    The two-hop half of the safety floor.  `direct_candidates` covers what a
-    person would find in one glance; this covers what they would find in two,
-    and it depends on no part of the model either.  It exists because the
+    The two-hop half of the safety floor, model-free for the same reason: the
     quadratic element law degrades badly once a trade is large relative to the
-    pools -- measured on wstETH->WETH at 50 units, where the whole Curve
-    universe holds ~900 wstETH, the model's best candidate paid 50.30 against
-    54.70 from an obvious two-pool chain.
+    pools -- measured on wstETH->WETH at 50 units against a ~900 wstETH
+    universe, the model's best paid 50.30 against 54.70 from an obvious chain.
 
-    Two batched rounds pick *which* chains to offer; the quoter then decides
-    the actual amounts, so the ranking here only has to be roughly right.
+    Two batched rounds pick *which* chains to offer; the quoter decides the
+    amounts, so the ranking here only has to be roughly right.
     """
     src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
 
     # Which pools hold which node, and at which coin indices, resolved once.
-    #
-    # Round B otherwise walks the whole universe for each of the ~30
-    # intermediate tokens it is considering: 11,610 pool scans, each asking
-    # `nodes` about every coin, for a question that does not depend on the
-    # token being asked about.  The index costs one pass over the pools.
+    # Round B otherwise walks the whole universe for each intermediate token it
+    # considers -- 11,610 pool scans for a question that does not depend on the
+    # token being asked about.
     tradeable = [pool for pool in pools if pool.swap_kind is not None]
     slots_of: list[dict[int, list[int]]] = []
     holders: dict[int, list[int]] = {}
@@ -1586,9 +1443,7 @@ def _refit_winner(
     """§8 -- refit the winner, re-solve, and let the chain adjudicate again.
 
     The refitted route is *offered*, never imposed: it goes back through the
-    same quoter as an extra candidate, so it only wins if it actually quotes
-    higher.  A refit can only improve the model, but the model is not what is
-    being reported.
+    quoter as an extra candidate, so it only wins if it quotes higher.
     """
     from .verify import realize_candidates
     from .verify import verify as verify_candidates
@@ -1645,10 +1500,8 @@ def _refit_winner(
 
     pool_set.candidates.append(refitted)
     # `dst_wei_per_eth` is what turns gas into output-token units; without it
-    # the gas term is silently skipped and this re-ranking undoes the
-    # gas-aware selection made moments earlier.  Measured on USDC->USDT $1k:
-    # a 31-leg route burning $0.56 of gas to gain $0.08 was reinstated over
-    # the 1-leg answer.
+    # the gas term is silently skipped and this re-ranking undoes the gas-aware
+    # selection made moments earlier.
     verify_candidates(
         pool_set, client, amount_in=amount_in, gas_price_wei=gas_price_wei,
         dst_wei_per_eth=_dst_per_eth(nodes, nu, dst_token),
@@ -1696,9 +1549,8 @@ def _assemble(
 ):
     """Build the solver arrays from the current calibration.
 
-    Called twice -- once on the coarse pass, once after refinement -- because
-    `build` drops dust and can merge duplicates, so the arc list has to be
-    re-aligned to whatever survived.
+    Called twice, coarse then refined, because `build` drops dust and can merge
+    duplicates -- the arc list has to be re-aligned to whatever survived.
     """
     bottomless = _clamp_unphysical_depth(arcs, nu, nodes)
     if bottomless:
@@ -1767,16 +1619,11 @@ def _kcl_tolerance(Psi: float, g_scale: float) -> float:
     """How much KCL slop is floating-point noise rather than a bug.
 
     The solve runs in units scaled by `g_scale`, so its roundoff is absolute
-    *there* and gets multiplied by `g_scale` on the way out.  A tolerance
-    expressed purely as a fraction of `Psi` therefore tightens without limit as
-    the trade shrinks: measured on USDC->USDT at this block, `g_scale = 1.5e6`
-    turns a clean 1e-11 solve into a 4.7e-5 absolute residual, which is 4.7e-5
-    of a $1 trade and 3.8e-11 of a $100k one.  The router was identical in both
-    cases; only the yardstick moved, and small trades were rejected outright.
-
-    So allow both terms.  This stays far tighter than the failure the check
-    exists to catch -- flow conjured on arcs outside the active component is
-    `O(Psi)`, several orders above either bound at any size.
+    there and gets multiplied by `g_scale` on the way out.  A tolerance purely
+    as a fraction of `Psi` therefore tightens without limit as the trade
+    shrinks, and rejects small trades outright.  So allow both terms; this stays
+    far tighter than the failure the check exists to catch, since flow conjured
+    outside the active component is `O(Psi)`.
     """
     return KCL_RELATIVE + KCL_ABSOLUTE * g_scale / max(Psi, 1e-30)
 
@@ -1784,25 +1631,19 @@ def _kcl_tolerance(Psi: float, g_scale: float) -> float:
 def _achievable_kcl(g: ArcArrays, active: np.ndarray, dst: int) -> float:
     """The KCL residual a backward-stable solve could deliver on this graph.
 
-    `k * eps` is the relative error a linear solve of condition number `k`
-    carries, so it is the floor under any residual computed from its output --
-    no amount of correct code gets below it.  Returns 0 when there is nothing
-    to condition, which leaves the caller's flat tolerance in charge.
+    `k * eps` is the relative error a solve of condition number `k` carries, so
+    it floors any residual computed from its output.  Returns 0 when there is
+    nothing to condition, leaving the caller's flat tolerance in charge.
 
-    The safety factor covers the gap between the condition number and the error
-    actually realised, measured between 0.04x and 33x of `k * eps` over the
-    routes examined.  Even at the graph's permitted worst -- `k = 1e12`, giving
-    2e-2 -- this stays two orders below the failure the check exists to catch:
-    flow conjured on arcs outside the active component is `O(Psi)`, a residual
-    near 1.
+    The safety factor covers the gap to the error actually realised -- 0.04x to
+    33x of `k * eps` over the routes examined.  Even at `k = 1e12` this stays
+    two orders below conjured flow, which is `O(Psi)`.
     """
     from .graph import component_of, laplacian
 
-    # The *active set*, not the arcs that ended up carrying flow.  The solve
-    # factorises the Laplacian of everything in `A`, zero-flow arcs included,
-    # and that is the system whose conditioning limited `u`.  Measuring the
-    # smaller psi>0 system understated the bound 651-fold on USDC->CRV and let
-    # the gate keep rejecting a solve that was doing as well as it could.
+    # The *active set*, not the arcs that ended up carrying flow: the solve
+    # factorises the Laplacian of everything in `A`, and that is the system
+    # whose conditioning limited `u`.
     live = np.flatnonzero(active)
     if live.size == 0:
         return 0.0
@@ -1833,10 +1674,8 @@ def _kcl_detail(
 ) -> tuple[float, int, int, int]:
     """The residual, and *where* it is -- worst node, and its live arc counts.
 
-    A refusal reading only "violated by 8.4e-03" says nothing about what to
-    look at.  The node is what makes it diagnosable: a node with flow leaving
-    and none arriving is conjured flow, which is a different bug from a
-    conditioning failure and has to be told apart from one.
+    The node is what makes a refusal diagnosable: flow leaving a node with none
+    arriving is conjured flow, a different bug from a conditioning failure.
     """
     net = np.zeros(g.n_nodes)
     np.add.at(net, g.tau, psi)
@@ -1849,10 +1688,9 @@ def _kcl_detail(
     err = np.abs(net - want) / Psi
     worst = int(np.argmax(err))
     live = psi > 0
-    # `tau` is an arc's origin and `sig` its head -- that is the orientation
-    # `_find_cycle` walks (`outgoing[tau] -> sig`) and the one that makes
-    # `want[src] = +Psi` come out right.  Counting `tau == worst` therefore
-    # counts what *leaves* the node.
+    # `tau` is an arc's origin and `sig` its head -- the orientation
+    # `_find_cycle` walks, and the one that makes `want[src] = +Psi` come out
+    # right.  Counting `tau == worst` therefore counts what *leaves* the node.
     n_out = int(np.count_nonzero((g.tau == worst) & live))
     n_in = int(np.count_nonzero((g.sig == worst) & live))
     return float(err[worst]), worst, n_in, n_out
@@ -1881,12 +1719,11 @@ DEPTH_LIMIT = 1e4
 def _clamp_unphysical_depth(arcs: list[PoolArc], nu: np.ndarray, nodes: NodeMap) -> int:
     """Treat immeasurably small curvature as the zero-curvature limit.
 
-    A `B` that implies a conductance far beyond the pool's own reserves is not
-    a very deep pool, it is a curvature below the integer noise floor of the
-    quotes -- deep pools probed at small sizes look linear.  Leaving it as a
-    huge finite `G` wrecks the Laplacian's condition number for every other
-    arc; clamping to `B = 0` with a cap is the admissible limit (§2.3) and
-    keeps the arc honest: bottomless only up to the size actually probed.
+    A `B` implying a conductance far beyond the pool's own reserves is not a
+    very deep pool but a curvature below the quotes' integer noise floor.  A
+    huge finite `G` wrecks the Laplacian's conditioning for every other arc;
+    clamping to `B = 0` with a cap is the admissible limit (§2.3) and keeps the
+    arc bottomless only up to the size actually probed.
     """
     clamped = 0
     for arc in arcs:
@@ -1916,8 +1753,7 @@ def _align(planned, refs, meta):
 def _warn_pair_drops(arcs: list[PoolArc], result: RouteResult) -> None:
     """§2.6: `eps_f + eps_r <= 0` means `nu` is inconsistent with that pool.
 
-    It manufactures a two-arc negative cycle that does not exist, and the
-    solver will happily allocate flow around it.
+    It manufactures a two-arc negative cycle that does not exist.
     """
     forward: dict[tuple[str, int, int], PoolArc] = {}
     for arc in arcs:
@@ -1957,11 +1793,8 @@ class _Span:
         return self
 
     def __exit__(self, *exc):
-        # Accumulate.  A stage that runs twice -- `seed` runs once for the
-        # scout and once for the solve, `refit` once per round -- used to
-        # report only its last visit, and the difference silently became
-        # whatever was left over when the stages were subtracted from the
-        # total.
+        # Accumulate.  A stage that runs twice -- `seed` for the scout and the
+        # solve, `refit` once per round -- otherwise reports only its last visit.
         self.sink[self.name] = (
             self.sink.get(self.name, 0.0) + (time.monotonic() - self.started) * 1000
         )
