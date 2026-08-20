@@ -37,10 +37,9 @@ class ArcKind(IntEnum):
         """A lending wrapper leg, which is not a swap and not a merge.
 
         Not a merge because the two directions differ: Compound V2 answers
-        "mint is paused" and redeems fine, Aave V2's reserves are frozen the
-        same way.  A node merge is symmetric and could not say that, which is
-        why these are arcs -- built per direction, and only where `data/facts`
-        recorded the direction working.
+        "mint is paused" and redeems fine, Aave V2 freezes reserves the same
+        way.  A node merge is symmetric and could not say that, so these are
+        arcs -- per direction, and only where `data/facts` saw it working.
         """
         return self in (ArcKind.LEND_MINT, ArcKind.LEND_REDEEM)
 
@@ -85,8 +84,8 @@ def _check_indices(kind: ArcKind, i: int, j: int) -> None:
     """A swap with i == j reverts on every real pool.
 
     Enforced at construction because the failure is otherwise invisible: the
-    quoter returns 0 for the leg, the route is dropped as "unroutable", and
-    nothing says why.  Same reasoning as rejecting empty returndata.
+    quoter returns 0, the route is dropped as "unroutable", and nothing says
+    why.  Same reasoning as rejecting empty returndata.
     """
     if kind.is_swap and i == j:
         raise ValueError(f"{kind.name} needs i != j (got i=j={i})")
@@ -116,8 +115,8 @@ class Leg:
 
     `bps` is a fraction of the *current* balance at `src_slot`, snapshotted when
     the group of legs leaving that slot opens.  `bps == 0` means "take whatever
-    is left", which is how the last leg out of a node avoids dust.  This is the
-    format the on-chain router will execute, not a quoting convenience.
+    is left", which is how the last leg out of a node avoids dust.  This is what
+    the on-chain router will execute, not a quoting convenience.
     """
 
     target: str

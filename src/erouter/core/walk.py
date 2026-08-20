@@ -4,24 +4,21 @@ The contract runs a route over a slot accumulator: legs arrive topologically
 ordered and grouped by `src_slot`, the group's base balance is snapshotted when
 the group opens, and `bps` is a share of that snapshot rather than of whatever
 is left -- so a split does not depend on the order its branches drain.  This is
-the same walk, so that a route whose every leg is a pool we evaluate from its
-own parameters can be quoted without asking anyone.
+the same walk, so a route whose every leg is a pool we evaluate from its own
+parameters can be quoted without asking anyone.
 
-It is a *port*, not a reimplementation, and the details that look incidental
-are the ones that matter:
+It is a *port*, and the details that look incidental are the ones that matter:
 
 * the group opens on a **change** of `src_slot` (`src != cur`), so a group is a
   contiguous run.  Revisiting a slot later opens a new group against its new
   balance, which is not the same as remembering the first snapshot.
 * `dx == 0` **continues**.  A split can round its smallest branch down to
-  nothing, and that is a leg with no work to do rather than a dead route --
-  treating it as fatal discards an otherwise fine split.
+  nothing, and that is a leg with no work to do rather than a dead route.
 * a leg that reverts, or returns zero, **kills the route** and the answer is 0.
 * the result is `bal[dst_slot]`, not the last leg's output.
 
-`quote_leg` returns `None` for "this leg cannot be quoted here", which is not
-the same as a revert: the caller uses it to hand the whole route to the chain
-instead.  A leg that genuinely reverts returns 0.
+`quote_leg` returns `None` for "this leg cannot be quoted here", which is not a
+revert: the caller uses it to hand the whole route to the chain instead.
 """
 
 from __future__ import annotations

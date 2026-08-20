@@ -4,14 +4,13 @@ Deposits and withdrawals run the invariant the swap models already reproduce;
 what is new is that `D` itself moves, and that each operation has its own fee
 convention.  Both are settled by the deployed source rather than assumed --
 `calc_token_amount` takes no fee on the legacy pools, `calc_withdraw_one_coin`
-charges on the imbalance -- and then checked the same way everything else here
-is: build it, ask the pool, keep it only if the arithmetic reproduces the
+charges on the imbalance -- and then checked the same way as everything else
+here: build it, ask the pool, keep it only if the arithmetic reproduces the
 answer to the wei at every point.
 
-Only pools whose *swap* model was already admitted are candidates.  That is not
-a shortcut, it is the precondition: `D`, `A`, the rates and the fee all come
-from that model, so a pool whose swaps do not reproduce has no business being
-trusted for its LP arcs either.
+Only pools whose *swap* model was already admitted are candidates.  That is the
+precondition, not a shortcut: `D`, `A`, the rates and the fee all come from that
+model.
 """
 
 from __future__ import annotations
@@ -41,14 +40,10 @@ class ExactLP:
     does not -- `calc_withdraw_one_coin` charges on the imbalance and
     `calc_token_amount` does not, so they exercise different code -- and
     rejecting the pool wholesale on the withdrawal throws away a deposit model
-    that was measured to be correct.
-
-    That is not hypothetical: on Ethereum the withdrawal check rejected 111
-    pools, and with them every deposit those pools could have priced.  Since
-    the chain's own `calc_token_amount` is fee-free on the legacy pools, each
-    of those deposits then went to the chain and came back overstated -- up to
-    22 bp, measured against execution.  Same shape as the lending wrappers,
-    which are per-direction for the same reason.
+    measured to be correct.  On Ethereum that rejected 111 pools, and each of
+    their deposits then went to the chain and came back overstated by up to
+    22 bp, since `calc_token_amount` is fee-free on the legacy pools.  Same
+    shape as the lending wrappers, which are per-direction for the same reason.
     """
 
     by_pool: dict[str, StableSwapLP] = field(default_factory=dict)
@@ -151,16 +146,14 @@ def _admit_deposits(built, client, out: ExactLP) -> None:
 
     **What the chain answers here is not one quantity but two.**  Stableswap-NG
     charges the imbalance fee inside `calc_token_amount`; the legacy pools do
-    not, and only take it in `add_liquidity` itself.  Both were measured against
-    real execution -- NG agrees to the wei, legacy overstates by `fee/2` on a
-    one-sided deposit, 0.055 bp on gnosis 3pool and 22 bp on an imbalanced
+    not, and only take it in `add_liquidity` itself.  Measured against real
+    execution, NG agrees to the wei and legacy overstates by `fee/2` on a
+    one-sided deposit -- 0.055 bp on gnosis 3pool, 22 bp on an imbalanced
     factory pool.
 
     So a match against *either* convention proves the same thing: the invariant
-    arithmetic reproduces this pool.  Which convention matched says only whether
-    the pool's own view charges, and pricing uses `calc_token_amount_charged`
-    regardless, because `add_liquidity` always charges.  That is the whole point
-    of admitting these -- the model is the only path that is right for both.
+    arithmetic reproduces this pool.  Pricing uses `calc_token_amount_charged`
+    regardless, because `add_liquidity` always charges.
     """
     probes, at = [], []
     for pool, model in built:

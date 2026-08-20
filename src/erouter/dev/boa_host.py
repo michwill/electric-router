@@ -1,14 +1,13 @@
 """Hosting RouteQuoter.vy: two backends, one client.
 
 `OverrideHost` is the production path -- inject the contract's runtime bytecode
-with an `eth_call` state override and quote in a single round trip, with nothing
-deployed.  Verifying 20 candidates by real fork execution instead would cost
-1-2 minutes cold, because a sequential `eth_getStorageAt` is 33.6 ms even
-against a local node and a swap leg touches tens of slots.
+with an `eth_call` state override and quote in one round trip, nothing deployed.
+Verifying 20 candidates by real fork execution instead costs 1-2 minutes cold: a
+sequential `eth_getStorageAt` is 33.6 ms even against a local node and a swap
+leg touches tens of slots.
 
-`BoaHost` runs the same contract inside boa (local EVM or a fork).  Tests use it
-so the whole client path is exercised with no chain at all, and it is the
-fallback for a node that rejects state overrides.
+`BoaHost` runs the same contract inside boa, so tests exercise the whole client
+path with no chain; it is also the fallback for a node that rejects overrides.
 """
 
 from __future__ import annotations
@@ -43,16 +42,11 @@ RUNTIME = Path(__file__).resolve().parents[3] / "data" / "quoter" / "RouteQuoter
 def runtime_bytecode() -> bytes:
     """What a state override injects.
 
-    Read from disk rather than compiled, because compiling needs boa and
-    vyper and the override path has to work where neither exists -- the Flet
-    frontend runs under Pyodide, which has no compiler and no boa.  Every
-    chain in the table has a deployed quoter today, so this is the day-one
-    fallback for a new one; it should not be the thing that makes the browser
-    build impossible.
-
-    Compiling stays as the fallback *here*, where a developer has the tools,
-    and `tests/test_quoter_bytecode.py` holds the committed copy to what the
-    source compiles to -- so it cannot rot silently.
+    Read from disk rather than compiled, because compiling needs boa and vyper
+    and the override path has to work where neither exists -- the Flet frontend
+    runs under Pyodide.  Compiling stays as the fallback *here*, where a
+    developer has the tools, and `tests/test_quoter_bytecode.py` holds the
+    committed copy to what the source compiles to, so it cannot rot silently.
     """
     try:
         text = RUNTIME.read_text()
@@ -75,9 +69,9 @@ def quoter_client(rpc: JsonRpcTransport, chain) -> QuoterClient:
     """The deployed quoter when the chain has one, else the override.
 
     Prefer deployed: it sends 7,486 fewer bytes per call and needs neither a
-    compiler nor state-override support, so the same code path works from a
-    browser.  The override stays as the fallback because it needs no
-    deployment at all, which is what makes a new chain routable on day one.
+    compiler nor state-override support, so the same path works from a browser.
+    The override stays as the fallback because it needs no deployment at all,
+    which is what makes a new chain routable on day one.
     """
     address = (getattr(chain, "quoter", "") or "").strip()
     if address:
@@ -146,8 +140,8 @@ def fork_client(url: str, block: int, *, prefetch: bool | None = None) -> Quoter
 
     `prefetch=None` probes for `debug_traceCall`.  Note this inverts yb-core's
     idiom: with prestateTracer served, prefetching costs 0.127 s per message
-    against 33.6 ms per *slot* without it, so it is ~13x faster -- but against a
-    remote endpoint that does not serve `debug_*` it must be off.
+    against 33.6 ms per *slot* without it -- but against a remote endpoint that
+    serves no `debug_*` it must be off.
     """
     import boa
 
@@ -156,12 +150,9 @@ def fork_client(url: str, block: int, *, prefetch: bool | None = None) -> Quoter
         prefetch = probe.supports_debug_trace()
 
     # `allow_dirty` because boa's env is process-global and any earlier forked
-    # test may have deployed into it -- the executor tests and the reentry
-    # tests both do.  Without it this raises "Cannot fork with dirty state",
-    # which made the forked suite pass or fail on collection order alone:
-    # green run alphabetically, red the moment a forking module ran first.
-    # Forking rebuilds state from the chain regardless, so there is nothing to
-    # protect here; every other fork site in this repo already says so.
+    # test may have deployed into it.  Without it this raises "Cannot fork with
+    # dirty state", which made the forked suite pass or fail on collection order
+    # alone.  Forking rebuilds state from the chain regardless.
     boa.fork(url, block_identifier=block, allow_dirty=True)
     boa.env.evm._fork_try_prefetch_state = bool(prefetch)
     return BoaHost().client()

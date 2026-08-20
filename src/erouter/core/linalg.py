@@ -7,16 +7,15 @@ Measured at the sizes this router actually runs at (single-threaded, us/solve):
 
 Three things follow, none of which match the textbook:
 
-* Dense LU beats dense Cholesky by 15-25%.  LAPACK's blocked `getrf` wins at
-  this size and the n^3/3 flop advantage does not show up until much larger n.
+* Dense LU beats dense Cholesky by 15-25%: LAPACK's blocked `getrf` wins at this
+  size and the n^3/3 flop advantage does not show up until much larger n.
 * Sparse is 3x *slower* at n~300 -- per-call symbolic analysis dominates.
-* The per-pivot system is tiny anyway (the active set is 3-10 arcs, so a handful
-  of nodes after the connectivity restriction), where everything is call
-  overhead.
+* The per-pivot system is tiny anyway (the active set is 3-10 arcs), where
+  everything is call overhead.
 
-So: dense, refactorise every pivot.  Total solve time is ~2.5 ms against a ~7 s
-cold route, i.e. 0.03%.  Sparse Cholesky with rank-1 updates is a real
-optimisation at n~1e5, not here, and this interface keeps it a drop-in.
+So: dense, refactorise every pivot -- ~2.5 ms against a ~7 s cold route, 0.03%.
+Sparse Cholesky with rank-1 updates is a real optimisation at n~1e5, not here,
+and this interface keeps it a drop-in.
 
 Cholesky is kept as a debug mode: it raises on an indefinite matrix where LU
 silently returns a plausible answer.  That is a weak net -- a single negative

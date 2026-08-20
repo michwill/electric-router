@@ -3,22 +3,20 @@
 A vault is the one element in this router with no curve at all.  At a fixed
 block `previewDeposit` and `previewRedeem` are `x * S / A` and `x * A / S` for
 the vault's total supply and total assets -- linear, so one ratio per direction
-describes the whole range, and there is nothing to fit, no ladder to probe and
-no size at which the model stops being right.
+describes the whole range, with nothing to fit, no ladder to probe and no size
+at which the model stops being right.
 
 What is *not* uniform is the rounding.  A vault built on OpenZeppelin's
-implementation carries a virtual offset -- `(S + 1) / (A + 1)` -- added so that
-the first share cannot be bought for nothing, which is the inflation attack.
-Others use the plain ratio.  The two agree for most sizes and disagree by a wei
-exactly where it matters least, which is why the convention is *asked* rather
-than assumed, the same way the stableswap rate convention is.
+implementation carries a virtual offset -- `(S + 1) / (A + 1)`, added so the
+first share cannot be bought for nothing -- where others use the plain ratio.
+The two agree for most sizes and disagree by a wei exactly where it matters
+least, which is why the convention is *asked* rather than assumed.
 
 And the direction matters on its own.  Measured on mainnet: of ten vaults
 reached as arcs, six reproduce both ways with the plain ratio, one needs the
 offset, two reproduce one direction only, and one reproduces neither.  A vault
-that quotes a deposit exactly may charge an exit fee, hold a withdrawal queue
-or round the other way on the way out -- so a verdict is per `(vault,
-direction)`, never per vault.
+that quotes a deposit exactly may charge an exit fee, hold a withdrawal queue or
+round the other way out -- so a verdict is per `(vault, direction)`.
 """
 
 from __future__ import annotations

@@ -7,8 +7,7 @@ checked and in each direction separately.
 A vault is linear, so the check is stronger than it looks.  A curve fitted at
 one size can agree there and diverge elsewhere; a ratio that reproduces four
 sizes spanning eight decades is either the vault's own arithmetic or a
-coincidence with no room left to hide.  Anything that fails keeps being
-probed, which is what every vault did before this existed.
+coincidence with no room left to hide.
 """
 
 from __future__ import annotations
@@ -75,8 +74,8 @@ def build_exact_vaults(addresses, client, *, quiet: bool = True) -> ExactVaults:
         seen = {DEPOSIT: block[:len(CHECK_SIZES)], REDEEM: block[len(CHECK_SIZES):]}
         # The plain ratio and OpenZeppelin's virtual offset, in that order --
         # they agree at most sizes, so whichever is tried first would "pass" on
-        # a vault that is really the other.  Ordering is harmless *because*
-        # both must reproduce every check point to be kept at all.
+        # a vault that is really the other.  Harmless *because* both must
+        # reproduce every check point to be kept at all.
         variants = {
             DEPOSIT: (Vault(num=S, den=A), Vault(num=S + 1, den=A + 1)),
             REDEEM: (Vault(num=A, den=S), Vault(num=A + 1, den=S + 1)),

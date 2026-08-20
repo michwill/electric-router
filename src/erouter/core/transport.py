@@ -6,7 +6,7 @@ own provider -- ~/Projects/flet-curve-demo already exposes exactly this shape
 (`WalletProvider.request` / `.call`) -- instead of `core/` growing a dependency
 on `requests` or on a particular RPC client.
 
-`Answer` is three-state on purpose.  A Curve pool that does not implement a
+`Answer` is three-state on purpose: a Curve pool that does not implement a
 function returns *empty* data rather than reverting, so "call succeeded" and
 "call returned a value" are different questions, and conflating them
 mis-dispatches real mainnet pools today.
@@ -86,11 +86,10 @@ def run_batch(
     Deciding that inside `core` would bake a threading model into the part that
     has to run in a Web Worker.
 
-    Distinct from `Transport.call_many`, which means JSON-RPC *batching* --
-    many calls inside one HTTP request, and so one stream.  That is the wrong
-    tool here: measured over a 1.2 Mbps uplink, three independent 600-probe
-    chunks took 3,979 ms in sequence and 2,334 ms issued at once, and the 1.70x
-    comes precisely from using more than one stream.
+    Distinct from `Transport.call_many`, which means JSON-RPC *batching* -- many
+    calls inside one HTTP request, and so one stream.  Measured over a 1.2 Mbps
+    uplink, three independent 600-probe chunks took 3,979 ms in sequence and
+    2,334 ms issued at once; the 1.70x comes from using more than one stream.
 
     An entry is `None` where that call raised, so the caller can fall back to
     its own splitting rather than lose the whole batch.

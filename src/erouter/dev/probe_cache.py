@@ -110,12 +110,11 @@ class CachedQuoterClient:
     def quote_routes(self, routes, amounts_in, dst_slots) -> list[int]:
         """Cached too, which is what makes property-based fuzzing affordable.
 
-        Unlike the probe grid -- whose sizes are fractions of pool *reserves*
-        and so are identical no matter what amount is being routed -- candidate
-        verification depends on the amount, so a new draw is a genuine miss.
-        Caching it still pays for two reasons: hypothesis replays an example
-        many times while shrinking, and a failing case is then re-run offline as
-        often as the fix needs without touching the node.
+        Unlike the probe grid -- whose sizes are fractions of pool *reserves*,
+        identical whatever amount is routed -- candidate verification depends on
+        the amount, so a new draw is a genuine miss.  It still pays: hypothesis
+        replays an example many times while shrinking, and a failing case is
+        then re-run offline as often as the fix needs.
         """
         if not self.enabled or not routes:
             return self.client.quote_routes(routes, amounts_in, dst_slots)

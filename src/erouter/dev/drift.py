@@ -2,29 +2,23 @@
 
 The router needs to know what a routing gain has to beat before another leg is
 worth taking, and that is not a property of either token separately.  WETH and
-stETH each move ~125 bp against the dollar over a thousand blocks while the
-rate *between* them barely moves at all, so a gain of 0.04 bp is noise on one
-comparison and signal on the other.  Classifying tokens as "stable" or not
-cannot express that, and got it wrong exactly there: a 1:1 Lido mint, which
-cannot lose, was discarded for being worth less than a threshold set by WETH's
-volatility against the dollar.
+stETH each move ~125 bp against the dollar over a thousand blocks while the rate
+*between* them barely moves, so a gain of 0.04 bp is noise on one comparison and
+signal on the other.  Classifying tokens as "stable" or not cannot express that,
+and got it wrong exactly there: a 1:1 Lido mint, which cannot lose, was
+discarded for being worth less than a threshold set by WETH's volatility against
+the dollar.
 
 So: sample the rate *between* the two, at spaced blocks, from a pool that holds
-both.  That is the exchange rate itself, and correlated tokens show a flat one
-by construction.
+both.  An earlier attempt stored one price per token and divided, which priced
+each token in the counter-coin of its own deepest pool -- USDC/WETH came out at
+0.29 bp against 125 measured directly.
 
-An earlier attempt stored one price per token and divided.  It was wrong and
-quietly so: each token was priced in whatever the counter-coin of its own
-deepest pool happened to be, so the ratio compared WETH-in-USDC against
-stETH-in-ETH.  USDC/WETH came out at 0.29 bp against 125 measured directly.  A
-common numeraire would have fixed it; using the pair's own pool is cheaper and
-needs no numeraire at all.
-
-One series per *arc* rather than per pair -- 876 instead of 45,000 -- and a
-pair with no shared pool has no measurement, which the caller must treat as
-unknown rather than as zero.  Blocks are spaced rather than consecutive: ten
-consecutive blocks showed nothing move at all, which measures how quiet the
-chain was, not what the pair does.
+One series per *arc* rather than per pair -- 876 instead of 45,000 -- and a pair
+with no shared pool has no measurement, which the caller must treat as unknown
+rather than as zero.  Blocks are spaced rather than consecutive: ten consecutive
+blocks showed nothing move at all, which measures how quiet the chain was, not
+what the pair does.
 """
 
 from __future__ import annotations
@@ -41,9 +35,8 @@ from ..core.types import ArcKind, Probe
 SAMPLE_BLOCKS = (0, 30, 120, 300, 600, 1200)
 #: A trade small enough to read the marginal rate rather than the pool's depth.
 SAMPLE_FRACTION = 1e-5
-#: The quoter's own MAX_PROBES.  Sending the whole universe in one call
-#: overflows it and the call reverts -- silently, since a failed sample is
-#: indistinguishable from a quiet pair unless the chunking is right.
+#: The quoter's own MAX_PROBES.  Sending the whole universe in one call reverts
+#: silently -- a failed sample is indistinguishable from a quiet pair.
 PROBES_PER_CALL = 500
 #: Below this a pair is treated as pegged: the measurement is at the limit of
 #: what integer quotes resolve, and pretending otherwise invents precision.
@@ -65,8 +58,7 @@ def series_drift_bp(rates: list[float]) -> float:
     """The largest step this rate took between samples, in basis points.
 
     The largest rather than the average: what a routing gain has to survive is
-    the move that happens while the transaction is pending, not the typical
-    one.
+    the move that happens while the transaction is pending.
     """
     clean = [r for r in rates if r > 0]
     if len(clean) < 3:
@@ -79,15 +71,14 @@ def sample_rates(rpc, quoter: str, arcs, blocks=SAMPLE_BLOCKS,
                  overrides=None) -> dict[str, PriceSeries]:
     """One rate series per arc, keyed "tokenIn|tokenOut".
 
-    `arcs` is `(key, pool, kind, i, j, n_coins, dx)` -- chosen by the caller,
-    which knows the universe.  Every arc goes out in one `probe_batch` per
-    block, so the whole sweep is one request per block regardless of size.
+    `arcs` is `(key, pool, kind, i, j, n_coins, dx)`, chosen by the caller.
+    Every arc goes out in one `probe_batch` per block, so the whole sweep is one
+    request per block regardless of size.
 
     `overrides` carries the quoter's runtime bytecode on chains where it is not
     deployed.  Without it this asks an address with no code and gets nothing
-    back for every block: measured on base, "0 pair rate(s) sampled" and "no
-    pool answered fee() with a usable series", which reads as a quiet chain
-    rather than a missing contract.
+    back for every block, which reads as a quiet chain rather than a missing
+    contract.
     """
     head = rpc.block
     series: dict[str, PriceSeries] = {

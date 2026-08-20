@@ -81,8 +81,7 @@ class QuoterClient:
         """Is a quote cheap enough to spend thousands of them?
 
         The whole shape of the split search -- sampled curves, rationed rounds,
-        a batch budget -- exists because a quote costs a round trip.  A
-        transport that executes in-process changes the arithmetic, and this is
+        a batch budget -- exists because a quote costs a round trip.  This is
         how `core/` asks without importing anything that knows about revm.
         """
         return bool(getattr(self.transport, "local", False))

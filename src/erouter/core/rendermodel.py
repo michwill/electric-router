@@ -20,11 +20,9 @@ def format_units(amount: int, decimals: int, places: int = 6) -> str:
     """Exact decimal formatting -- never a float, which would lose wei.
 
     The context precision is raised to fit the number rather than left at the
-    default 28 digits.  `quantize` *raises* rather than rounding when the
-    result would not fit, so a diagram is one absurd intermediate away from
-    taking the whole quote down with `InvalidOperation` -- which is how a bad
-    leg amount used to surface: as a traceback in the renderer, naming
-    neither the leg nor the pool.
+    default 28 digits.  `quantize` *raises* rather than rounding when the result
+    would not fit, so a diagram is one absurd intermediate away from taking the
+    whole quote down with `InvalidOperation`, naming neither leg nor pool.
     """
     with localcontext() as ctx:
         ctx.prec = max(28, len(str(abs(amount))) + places + 2)
@@ -205,8 +203,8 @@ def _slot_order(route: RealizedRoute) -> list[int]:
     """Topological order of slots, so a bus is drawn after everything feeding it.
 
     First-appearance order looks right on a single path and is wrong the moment
-    a branch merges back: the destination bus would print before the branch
-    that fills it.
+    a branch merges back: the destination bus would print before the branch that
+    fills it.
     """
     slots = sorted(route.slots.values())
     indegree = dict.fromkeys(slots, 0)

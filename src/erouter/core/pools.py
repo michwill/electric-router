@@ -15,10 +15,10 @@ universe (388 pools, one batched call):
     api says stable, neither answers                       3
     api says stable, int128 EMPTY,   uint256 answers       1   <-- API is wrong
 
-So 60 pools return *empty data* for the wrong spelling rather than reverting,
-and decoding that as a uint gives a perfectly plausible zero quote.  One pool
-is outright mis-typed by the API.  Hence: seed from the table, resolve by
-probe, and never treat "did not revert" as "answered".
+60 pools return *empty data* for the wrong spelling rather than reverting, and
+decoding that as a uint gives a perfectly plausible zero quote.  One pool is
+outright mis-typed by the API.  So: seed from the table, resolve by probe, and
+never treat "did not revert" as "answered".
 """
 
 from __future__ import annotations
@@ -84,9 +84,8 @@ class PoolSpec:
     is_meta: bool = False
     base_pool: str = ""
     lp_token: str = ""
-    # The LP token's decimals and supply, read on chain alongside it.  Supply
-    # is what sizes a withdrawal probe: a withdrawal's "reserve" is the whole
-    # token, not any one coin's balance.
+    # The LP token's decimals and supply, read on chain alongside it.  Supply is
+    # what sizes a withdrawal probe: its "reserve" is the whole token.
     lp_decimals: int = 18
     lp_supply: int = 0
     # Resolved by probe; None until then.  Persisted, because it is a property
@@ -118,9 +117,9 @@ class PoolSpec:
     def table_dialect(self) -> Dialect | None:
         """What the registry claims.  `None` means unknown -- do not guess.
 
-        flet-curve-demo defaults an unknown type to stableswap, which is right
-        for a UI (a visible failure) and wrong here: a mis-dispatched call
-        returns empty data and reads as a zero quote inside a 900-arc batch.
+        flet-curve-demo defaults an unknown type to stableswap, right for a UI
+        (a visible failure) and wrong here: a mis-dispatched call returns empty
+        data and reads as a zero quote inside a 900-arc batch.
         """
         if self.key in CRYPTO_POOL_TYPES:
             return Dialect.CRYPTO
@@ -202,13 +201,13 @@ def parse_universe(raw_pools: list[dict]) -> list[PoolSpec]:
 def dialect_from_probes(table: Dialect | None, stable_ok: bool, crypto_ok: bool):
     """Resolve a pool's dialect from one probe of each spelling.
 
-    Returns `(dialect, note)`.  `*_ok` must mean "returned 32 bytes", not
-    "did not revert" -- conflating those mis-dispatches 60 pools on Ethereum.
+    Returns `(dialect, note)`.  `*_ok` must mean "returned 32 bytes", not "did
+    not revert" -- conflating those mis-dispatches 60 pools on Ethereum.
 
     When neither answers, fall back to the table: the pool is live-but-
-    unquotable (paused, dust, rounding to zero), which is a different fact from
-    not knowing its ABI, and 4 measured pools have the *reverting* spelling as
-    the implemented one.
+    unquotable (paused, dust, rounding to zero), a different fact from not
+    knowing its ABI, and 4 measured pools have the *reverting* spelling as the
+    implemented one.
     """
     if stable_ok and not crypto_ok:
         return Dialect.STABLE, "PROBED"

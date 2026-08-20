@@ -2,22 +2,19 @@
 
 Cryptoswap *swaps* have been modelled since the exact path existed; their LP
 legs never were, so every cryptoswap deposit and withdrawal went over the wire
-as a probe.  That costs a round trip where the arithmetic is 15 us, it leaves
-those arcs calibrated at whatever size the coarse grid happened to use, and it
-is why `ExactQuoterClient` refuses to advance a cryptoswap pool between legs at
-all -- there was no model to advance.
+as a probe.  That costs a round trip where the arithmetic is 15 us, leaves those
+arcs calibrated at whatever size the coarse grid happened to use, and is why
+`ExactQuoterClient` refuses to advance a cryptoswap pool between legs at all --
+there was no model to advance.
 
 Only the withdrawal is modelled.  A cryptoswap deposit's own
 `calc_token_amount` already charges the fee `add_liquidity` charges -- measured
 against execution on every tricrypto pool on Ethereum, view and execution agree
 to the wei -- so a second implementation would add risk and correct nothing.
-The legacy stableswap deposits are the ones that needed a model, and they have
-one.
 
-The gate is the usual one and it does real work here: the 2021 tricrypto
-generation computes its withdrawal differently, and asking it to reproduce
-`calc_withdraw_one_coin` is what tells the two apart rather than a guess from
-the pool's name or factory.
+The gate does real work here: the 2021 tricrypto generation computes its
+withdrawal differently, and asking it to reproduce `calc_withdraw_one_coin` is
+what tells the two apart rather than a guess from the pool's name or factory.
 """
 
 from __future__ import annotations
@@ -29,9 +26,8 @@ from ..core.transport import Call
 from ..core.tricrypto import TricryptoError, TricryptoLP
 
 #: Fractions of total supply to burn in the check.  Three decades, because a
-#: fee charged on an imprecise post-withdrawal balance is exactly the kind of
-#: term that agrees at one size and drifts at another -- the legacy pools pass
-#: at 0.01% and are 1.26 bp out at 1%.
+#: fee charged on an imprecise post-withdrawal balance agrees at one size and
+#: drifts at another -- the legacy pools pass at 0.01%, are 1.26 bp out at 1%.
 CHECK_FRACTIONS = (0.0001, 0.001, 0.01)
 
 

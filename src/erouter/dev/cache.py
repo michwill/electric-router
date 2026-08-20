@@ -2,11 +2,10 @@
 
 Two kinds, with different lifetimes:
 
-* **Universe** -- the pool list for a (chain, min_tvl).  Keyed by nothing but
-  that, and deliberately *stale-servable*: the Curve API 502s often enough to
-  matter, and an outage must degrade to a slightly old universe rather than to
-  a failed route.  Every number that actually enters the solve is read
-  on-chain anyway.
+* **Universe** -- the pool list for a (chain, min_tvl), deliberately
+  *stale-servable*: the Curve API 502s often enough to matter, and an outage
+  must degrade to a slightly old universe rather than to a failed route.  Every
+  number that actually enters the solve is read on-chain anyway.
 
 * **Dialect** -- which ABI spelling a pool answers.  A property of the deployed
   contract, not of the block, so it never expires.  Worth persisting because
@@ -112,11 +111,10 @@ class DialectCache:
 class TokenFactsCache:
     """Immutable per-address facts: a token's decimals, a pool's LP token.
 
-    Neither can change -- ERC20 decimals are fixed at deployment and a pool's
-    LP token with it -- so reading them once per chain is enough.  Asking every
-    time cost two extra round trips through the quoter on a universe of 385
-    pools and ~900 coins, measured at ~7s of a 13.5s mainnet route, all of it
-    outside the routing stages, which were unchanged to within a few ms.
+    Neither can change -- ERC20 decimals are fixed at deployment and a pool's LP
+    token with it -- so reading them once per chain is enough.  Asking every
+    time cost ~7 s of a 13.5 s mainnet route, all of it outside the routing
+    stages, which were unchanged to within a few ms.
 
     Same shape as `DialectCache`, and stored beside it.
     """
@@ -133,20 +131,18 @@ class TokenFactsCache:
     def save(self, chain_id: int, facts: dict[str, dict]) -> None:
         """Merge per address, not per file.
 
-        Three passes write here about the same address -- a coin's `decimals`,
-        a pool's `lp_token`/`lp_decimals`, and a token's ERC4626 `asset` -- and
+        Three passes write here about the same address -- a coin's `decimals`, a
+        pool's `lp_token`/`lp_decimals`, and a token's ERC4626 `asset` -- and
         `a | b` at the top level replaces an address's whole entry rather than
-        updating it.  So whichever pass ran last was the only one whose facts
-        survived, and the others silently re-read theirs every session.
+        updating it, so only the last pass's facts survived.
 
-        That is not merely wasted round trips.  A reader that has already
-        established the address is present concludes its own fact is known and
-        never asks: measured on gnosis, `read_balances` skipped the `decimals()`
-        call for USDC.e because the wrapper pass had overwritten `{"decimals":
-        6}` with `{"asset": ""}`, so the API's null-defaulted 18 stood, every
-        amount through that pool was out by 1e12, and the whole pool fell out
-        of the graph.  Across 20 cached chains, 674 Ethereum entries and not
-        one of them still held a `decimals`.
+        That is not merely wasted round trips.  A reader that has established
+        the address is present concludes its own fact is known and never asks:
+        measured on gnosis, `read_balances` skipped `decimals()` for USDC.e
+        because the wrapper pass had overwritten `{"decimals": 6}` with
+        `{"asset": ""}`, so the API's null-defaulted 18 stood, every amount
+        through that pool was out by 1e12, and the whole pool fell out of the
+        graph.
         """
         merged = self.load(chain_id)
         for address, fresh in facts.items():

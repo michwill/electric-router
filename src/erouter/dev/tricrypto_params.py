@@ -66,19 +66,18 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True,
             Call(pool.address, encode_call("price_scale(uint256)", 1)),
             # The 2021 pools keep the three fees as separate getters; the
             # optimized math packs them into one word.  Asking for both costs
-            # three calls a pool and is what lets tricrypto2 be modelled at
-            # all -- without it a $10M pool on the main BTC/ETH path falls
-            # through to the EVM, and every route touching it with it.
+            # three calls a pool and is what lets tricrypto2 be modelled at all
+            # -- without it a $10M pool on the main BTC/ETH path falls through
+            # to the EVM, and every route touching it with it.
             Call(pool.address, encode_call("mid_fee()")),
             Call(pool.address, encode_call("out_fee()")),
             Call(pool.address, encode_call("fee_gamma()")),
-            # `A()` does not mean the same thing across the generations.  The
-            # 2021 tricrypto2 returns `A * N**N * A_MULTIPLIER` from it; the
-            # 2021 *v1* pool divides that by `A_MULTIPLIER` and keeps the raw
-            # value under `A_precise()`, which is what its own views contract
-            # reads.  Taking `A()` from a v1 pool is off by 10,000 and quotes
-            # it 3.5x wrong -- caught by the gate, but only because the gate
-            # exists.  Prefer `A_precise()` where there is one.
+            # `A()` does not mean the same thing across the generations: the
+            # 2021 tricrypto2 returns `A * N**N * A_MULTIPLIER`, while the 2021
+            # *v1* pool divides that by `A_MULTIPLIER` and keeps the raw value
+            # under `A_precise()`, which is what its own views contract reads.
+            # Taking `A()` from a v1 pool is off by 10,000 and quotes it 3.5x
+            # wrong.  Prefer `A_precise()` where there is one.
             Call(pool.address, encode_call("A_precise()")),
         ]
     answers = client.raw(calls)

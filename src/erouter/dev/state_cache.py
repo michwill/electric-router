@@ -1,26 +1,22 @@
 """What storage a pool reads, and the code that reads it -- kept on disk.
 
-Warming a local EVM has three costs, and two of them are answers to questions
-that do not change between blocks:
+Warming a local EVM has three costs, and two are answers to questions that do
+not change between blocks:
 
     access lists   4,302 ms   *which* slots a pool touches
     code+balance   1,841 ms   the bytecode that touches them
     storage        1,358 ms   what those slots contain *now*
 
-Only the third is per-block.  A contract's storage layout is a property of its
-bytecode, so the slot list for a pool is stable until the pool's code changes --
-which for a Curve pool is never, since they are not upgradeable.  Cache the
-first two and a session's warm becomes one storage sweep.
-
-That makes the file worth committing: a new checkout starts warm, and a new
-pool costs an access list for that pool alone rather than for the universe.
-It is also why `code` is keyed by hash -- factory-deployed pools share
-bytecode, so a few hundred pools resolve to a few dozen blobs.
+A contract's storage layout is a property of its bytecode, so a pool's slot list
+is stable until its code changes -- which for a Curve pool is never.  Cache the
+first two and a session's warm becomes one storage sweep.  That is what makes
+the file worth committing: a new checkout starts warm, and a new pool costs an
+access list for itself rather than for the universe.  `code` is keyed by hash
+because factory-deployed pools share bytecode.
 
 **Some pools do not get to be cached.**  A LLAMMA reads a different set of band
-slots as the price moves, so its "layout" is genuinely a function of state, not
-just of code.  Those are listed as volatile and re-discovered every time; the
-cost is one access list each, which is what the cache is saving everywhere else.
+slots as the price moves, so its layout is genuinely a function of state, not
+just of code.  Those are listed as volatile and re-discovered every time.
 """
 
 from __future__ import annotations
@@ -32,9 +28,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 VERSION = 1
-# Committed, so it has to be small and it has to diff.  Slots are integers and
-# code is deduplicated by hash, which is what keeps a universe-wide file in the
-# hundreds of kilobytes rather than the tens of megabytes.
+# Committed, so it has to be small and it has to diff: slots are integers and
+# code is deduplicated by hash, which keeps a universe-wide file in the hundreds
+# of kilobytes.
 DEFAULT_DIR = Path(__file__).resolve().parents[3] / "data" / "evm-state"
 
 
@@ -63,16 +59,12 @@ class StateCache:
     #: What the *wrapper* stages need, at slot granularity.
     #:
     #: `build_node_map` and the stake/transmuter/lending arcs read vaults and
-    #: ERC20s, which no pool probe touches, so no arc access list names them.
-    #: Their 377 calls reach 167 accounts -- they call through, to Aave's pool
-    #: and to rate oracles -- of which 122 are already cached because some pool
-    #: swap touched them, 32 are cached but missing slots, and 13 are absent.
-    #:
-    #: Account presence is therefore *not* the test.  A vault's
-    #: `convertToAssets` reads different slots than the swap that first cached
-    #: that account, and an unread slot is zero, which makes the vault look
-    #: unusable and quietly drops the arc: measured, 12 stake arcs instead of
-    #: 19, with nothing to say so.
+    #: ERC20s that no pool probe touches, so no arc access list names them.
+    #: Account presence is therefore *not* the test: a vault's `convertToAssets`
+    #: reads different slots than the swap that first cached that account, and
+    #: an unread slot is zero, which makes the vault look unusable and quietly
+    #: drops the arc -- measured, 12 stake arcs instead of 19, with nothing to
+    #: say so.
     wrapper_needs: dict[str, set[int]] = field(default_factory=dict)
     #: What those stages produced when they last ran against the chain.  The
     #: local run is checked against it -- see `cli._wrapper_signature`.
@@ -118,9 +110,9 @@ class StateCache:
     def covers_wrappers(self) -> bool:
         """Whether every slot those stages read is loaded, not merely present.
 
-        Slot granularity is the whole point: the accounts are almost all
-        cached already, and that is what made an account-level check pass
-        while the arcs it produced were wrong.
+        Slot granularity is the whole point: the accounts are almost all cached
+        already, which is what let an account-level check pass while the arcs it
+        produced were wrong.
         """
         if not self.wrapper_needs or not self.wrapper_sig:
             return False
@@ -193,16 +185,14 @@ class StateCache:
     def learn_code(self, address: str, blob: bytes) -> None:
         """Record an account's bytecode, and make sure it is loadable.
 
-        `prime` walks `slots()` to decide which accounts to insert into the
-        EVM, so code recorded without an entry there is never loaded and the
-        address answers every call as if it had no code -- which is a zero, not
-        an error.  A stateless contract has no storage to record, so it would
+        `prime` walks `slots()` to decide which accounts to insert into the EVM,
+        so code recorded without an entry there is never loaded and the address
+        answers every call as if it had no code -- which is a zero, not an
+        error.  A stateless contract has no storage to record, so it would
         otherwise never appear: measured after the quoter was redeployed, its
-        code was cached correctly and every pool still read as holding nothing,
-        because the account it lived at was never materialised.
-
-        An empty slot set is the right entry: it costs no storage reads and it
-        is the truth about a contract that keeps no state.
+        code was cached correctly and every pool still read as holding nothing.
+        An empty slot set is the right entry -- it costs no storage reads and is
+        the truth about a contract that keeps no state.
         """
         address = address.lower()
         if not blob:

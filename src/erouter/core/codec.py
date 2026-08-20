@@ -1,10 +1,10 @@
 """Minimal ABI encoder/decoder -- stdlib only.
 
 `eth-abi` would do all of this, but it pulls compiled dependencies that make a
-Pyodide build impractical (see docs, decision 0, and the same reasoning in
-~/Projects/flet-curve-demo/src/wallet/erc20.py).  The subset the router needs is
-small enough to write and pin down with a differential test: `tests/test_codec.py`
-checks every case here against `eth_abi`, which is a dev-only dependency.
+Pyodide build impractical (docs, decision 0).  The subset the router needs is
+small enough to write and pin down with a differential test:
+`tests/test_codec.py` checks every case here against `eth_abi`, a dev-only
+dependency.
 
 Supported grammar -- deliberately no more than the quoter's ABI needs:
 
@@ -224,15 +224,11 @@ def decode(types: list[str], data: bytes) -> list[Any]:
 def selector(signature: str) -> bytes:
     """First 4 bytes of keccak256 of a canonical signature.
 
-    Cached, because a selector is a property of the signature and the hash
-    behind it is not cheap here: `keccak.py` is pure Python by design, so that
-    `core` stays importable under Pyodide with nothing but numpy.  One call is
-    ~430 us.
-
-    Reading every pool's balances asked for the same handful of signatures
-    2,403 times and spent 1.04 s hashing them -- more than the revm calls the
-    selectors were for, and the reason "reading storage" looked like it cost a
-    second.  There are a few dozen distinct signatures in the whole codebase.
+    Cached, because a selector is a property of the signature and `keccak.py` is
+    pure Python by design (so `core` imports under Pyodide with nothing but
+    numpy) -- one call is ~430 us.  Reading every pool's balances asked for the
+    same handful of signatures 2,403 times and spent 1.04 s hashing them, which
+    is what made "reading storage" look like it cost a second.
     """
     return keccak256(signature.encode())[:4]
 
@@ -262,9 +258,7 @@ def decode_uint(data: bytes) -> int:
 
     Raises on empty data rather than returning 0.  A Curve pool that does not
     implement a function returns *empty* data instead of reverting, and
-    `int.from_bytes(b"", "big") == 0` would silently quote every swap at zero --
-    the single biggest correctness trap in reading Curve pools
-    (flet-curve-demo/src/curve/pool.py:12).
+    `int.from_bytes(b"", "big") == 0` would silently quote every swap at zero.
     """
     if len(data) < WORD:
         raise ValueError(f"expected a 32-byte word, got {len(data)} bytes")

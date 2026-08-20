@@ -1,11 +1,10 @@
 """Curve Prices v2 client (stdlib urllib).
 
 The API supplies only the *universe and the TVL bootstrap*.  Every number that
-enters the solve -- balances, decimals, `a`, `B`, the ABI dialect -- is read
-on-chain at the pinned block, because the API is demonstrably wrong about some
-of them (`pool_type` mis-types 6 mainnet arcs today) and unreliable about
-others (`tvl_usd` on dust pools).  A total API outage should degrade to a stale
-universe, never to a wrong route.
+enters the solve is read on-chain at the pinned block, because the API is
+demonstrably wrong about some of them (`pool_type` mis-types 6 mainnet arcs
+today) and unreliable about others (`tvl_usd` on dust pools).  An outage should
+degrade to a stale universe, never to a wrong route.
 
 Two quirks worth knowing: the default urllib User-Agent gets a **403**, and
 `pagination` is hard-capped at 50.
@@ -124,15 +123,14 @@ class CurveApi:
     def llamma_markets(self, chain: str) -> list[dict]:
         """crvUSD mint markets and Curve Lending markets, as raw entries.
 
-        LLAMMA is the AMM inside a crvUSD or lending market -- collateral on
-        one side, the borrowed token on the other, spread across bands.  It is
-        not in `/v2/pools`, which is why 61 mainnet venues were invisible to
-        us, including a sDOLA/crvUSD market on a pair we were losing by 13 bp.
+        LLAMMA is the AMM inside a crvUSD or lending market -- collateral on one
+        side, the borrowed token on the other, spread across bands.  It is not
+        in `/v2/pools`, which is why 61 mainnet venues were invisible to us,
+        including a sDOLA/crvUSD market on a pair we were losing by 13 bp.
 
         It quotes with `get_dy(uint256,uint256,uint256)`, the crypto spelling,
-        so once it is a `PoolSpec` nothing downstream needs to know it is
-        special.  It has no `balances()` getter, though, so the reserves have
-        to come from here rather than from the chain.
+        so downstream needs no special case.  It has no `balances()` getter,
+        though, so the reserves have to come from here rather than the chain.
         """
 
         def produce():
@@ -158,17 +156,17 @@ class CurveApi:
     def pool_filters(self, chain_id: int) -> set[str]:
         """Curve's own list of pools that do not do what they advertise.
 
-        Same list curve_solver loads at startup.  These are not merely
-        illiquid -- illiquidity the router prices correctly by itself -- they
-        are pools whose quote and execution disagree: rebasing or
-        fee-on-transfer coins, broken oracles, deprecated implementations.  A
-        quoter cannot tell the difference, so `get_dy` looks perfectly healthy
-        right up until the swap delivers something else.
+        Same list curve_solver loads at startup.  These are not merely illiquid
+        -- illiquidity the router prices correctly by itself -- they are pools
+        whose quote and execution disagree: rebasing or fee-on-transfer coins,
+        broken oracles, deprecated implementations.  A quoter cannot tell the
+        difference, so `get_dy` looks perfectly healthy right up until the swap
+        delivers something else.
 
         Returns lowercase addresses.  An unreachable endpoint yields an empty
         set: routing on the full universe is worse than routing on a filtered
-        one, but it is much better than not routing at all, and every quote is
-        still verified on-chain.
+        one, but much better than not routing at all, and every quote is still
+        verified on-chain.
         """
 
         def produce():
