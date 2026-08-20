@@ -454,20 +454,43 @@ def realize(
                 group.append((k, spoke))
                 spokes.append((k, spoke))
 
-        # A pool may only be entered twice if everything before its final leg can
-        # be advanced past, so put the legs we cannot advance past last.  Both
-        # legs of the gnosis split leave the same node, so they land in this one
-        # group and this is the whole of the ordering: it swaps through the 3pool
-        # and then deposits into it.  Emitted the other way round the route is
-        # correct but unquotable, and `check_one_arc_per_pool` would refuse it.
-        if _reused_pools(arcs):
-            reused = _reused_pools(arcs)
-            group.sort(key=lambda item: (arcs[item[0]].pool.lower() in reused
-                                         and arcs[item[0]].kind not in ADVANCEABLE))
+        # The last leg of a group sweeps -- `bps == 0` takes whatever is left, so
+        # no dust strands in the slot -- and that makes the order load-bearing
+        # twice over.
+        #
+        # **A capped arc must never be last.**  Its `cap` is honoured in the
+        # solve and there is no room for it in the calldata, so being the
+        # sweeper hands it the remainder whatever the solve decided.  Measured
+        # on USDT -> ZCHF at $10,000: the USD3 vault arc holds `cap = 5.0e-05`
+        # and `clamped`, the solve gave it nothing, and coming last out of the
+        # USDC slot handed it 99.7% of the trade -- 9,960 USDC into a vault
+        # whose `maxDeposit` is 1,142.  `previewDeposit` quotes it happily and
+        # `deposit` reverts, so the route was published and could not be run.
+        #
+        # **A pool entered twice needs the legs we cannot advance past last**,
+        # which is what lets the gnosis split swap through the 3pool and then
+        # deposit into it.  Where the two fight, the cap wins: emitting a
+        # reentry in the wrong order costs a candidate, because
+        # `check_one_arc_per_pool` refuses it, and a capped sweeper costs a
+        # reverted route.
+        reused = _reused_pools(arcs)
+
+        def absorbs_remainder(item) -> bool:
+            return not math.isfinite(arcs[item[0]].cap)
+
+        group.sort(key=lambda item: (
+            absorbs_remainder(item),
+            bool(reused) and arcs[item[0]].pool.lower() in reused
+            and arcs[item[0]].kind not in ADVANCEABLE,
+        ))
+        # Nothing here can take the remainder, so nobody sweeps and the rounding
+        # dust stays in the slot.  A few wei stranded is a cost; a leg that
+        # sweeps past its cap is a route that does not run.
+        sweeper = len(group) - 1 if any(map(absorbs_remainder, group)) else -1
 
         for position, (k, spoke) in enumerate(group):
-            last = position == len(group) - 1
-            bps = 0 if last else max(1, min(BPS - 1, round(BPS * deltas[k] / total)))
+            bps = (0 if position == sweeper
+                   else max(1, min(BPS - 1, round(BPS * deltas[k] / total))))
             if spoke >= 0:
                 conversion = nodes.conversion[arcs[k].token_in.lower()]
                 route.legs.append(

@@ -1590,7 +1590,17 @@ def _recalibrate(arcs: list[PoolArc], ladders, nodes: NodeMap) -> int:
             continue
         a, B = rescale(fit.a, fit.B, nodes.rate(arc.token_in), nodes.rate(arc.token_out))
         arc.a, arc.B = a, B
-        arc.cap = fit.cap * nodes.rate(arc.token_in) if math.isfinite(fit.cap) else math.inf
+        # **A cap only ever tightens.**  A fit can discover a wall the ladder
+        # walked into; it cannot know about a capacity the curve does not show.
+        # `maxDeposit` is exactly that: USD3 answers `previewDeposit` linearly
+        # at every probe size and refuses the deposit past 1,085 USDC, so the
+        # ladder sees no wall, `fit.cap` comes back infinite, and assigning it
+        # here erased the limit `wrappers.py` had read off the chain.  The route
+        # then sent 9,985 USDC into it and reverted.  Same rule as the depth
+        # clamp below, which has always used `min`.
+        fitted = (fit.cap * nodes.rate(arc.token_in)
+                  if math.isfinite(fit.cap) else math.inf)
+        arc.cap = min(arc.cap, fitted)
         arc.clamped, arc.convex_flag = fit.clamped, fit.convex_flag
         arc.flag_reason, arc.drift, arc.eta = fit.flag_reason, fit.drift, fit.eta
         arc.calib_delta = fit.calib_delta

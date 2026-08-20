@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -572,3 +574,83 @@ def test_a_conversion_still_gets_its_own_slot():
                     src_token=USDC, dst_token=ETH, amount_in=1000 * 10**6)
     assert route.slots[WETH.lower()] != route.slots[ETH.lower()]
     assert route.dst_slot == route.slots[ETH.lower()]
+
+
+# --------------------------------------------- a capped arc must not sweep
+#
+# `bps == 0` means "take whatever is left", which is how the last leg out of a
+# node avoids stranding dust.  An arc with a finite `cap` cannot honour that:
+# the cap is enforced in the solve and there is nowhere to put it in the
+# calldata, so being last hands it the remainder whatever the solve decided.
+#
+# Measured on USDT -> ZCHF at $10,000.  The USD3 vault arc carries
+# `cap = 5.0e-05` and `clamped`, the solve gave it nothing, and it came last
+# out of the USDC slot -- so it swept 99.7% of the trade, 9,960 USDC into a
+# vault whose `maxDeposit` is 1,142.  `previewDeposit` quotes that happily and
+# `deposit` reverts, so the route was published and could not be executed.
+
+def _capped(pool, token_in, token_out, nodes, *, cap, **kw):
+    made = arc(pool, token_in, token_out, nodes, **kw)
+    return replace(made, cap=cap, clamped=True)
+
+
+def test_a_capped_arc_is_never_the_leg_that_sweeps():
+    nodes = base_nodes()
+    arcs = [
+        _capped(POOL_A, USDC, WETH, nodes, cap=1e-4, a=1 / 4000.0),
+        arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    # The capped arc is first in `arcs` and carries the larger flow, so nothing
+    # but the cap can push it off the sweeping position.
+    route = realize(
+        arcs, np.array([700.0, 300.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    sweepers = [rl for rl in route.legs if rl.leg.bps == 0]
+    assert len(sweepers) == 1, "exactly one leg takes the remainder"
+    assert sweepers[0].target.lower() == POOL_B.lower(), (
+        "the uncapped arc sweeps; the capped one takes an explicit share")
+    capped_leg = next(rl for rl in route.legs if rl.target.lower() == POOL_A.lower())
+    assert capped_leg.leg.bps > 0
+
+
+def test_nobody_sweeps_when_every_arc_in_the_group_is_capped():
+    nodes = base_nodes()
+    arcs = [
+        _capped(POOL_A, USDC, WETH, nodes, cap=1e-4, a=1 / 4000.0),
+        _capped(POOL_B, USDC, WETH, nodes, cap=1e-4, a=1 / 4001.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        arcs, np.array([700.0, 300.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    # Rounding dust stays in the slot rather than being swept past a cap.  A few
+    # wei stranded is a cost; a leg that sweeps past its cap is a reverted route.
+    assert all(rl.leg.bps > 0 for rl in route.legs), "no leg takes the remainder"
+
+
+def test_an_uncapped_arc_still_sweeps_when_one_exists():
+    """The fix must not strand dust on ordinary routes."""
+    nodes = base_nodes()
+    arcs = [
+        arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        arcs, np.array([700.0, 300.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert sum(rl.amount_in for rl in route.legs) == 1000 * 10**6
+    assert sum(1 for rl in route.legs if rl.leg.bps == 0) == 1
