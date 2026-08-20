@@ -1,29 +1,24 @@
 """A `Transport` that executes locally, against state fetched once (§10).
 
 Every question the router asks is a read at one pinned block, and it asks the
-same few hundred arcs repeatedly.  Fetching the state once and running the EVM
-here takes the round trips to zero: a `get_dy` costs 30-449 us locally against
-~0.8 ms marginal on the wire.
+same few hundred arcs repeatedly.  Fetching the state once takes the round trips
+to zero: a `get_dy` costs 30-449 us locally against ~0.8 ms on the wire.
 
 State comes from `eth_createAccessList` -- exactly the accounts and slots the
-call touches -- so one `eth_getProof` per account pulls all of them.  The
-touched set does not vary with trade size on any pool measured, but lists are
-still gathered at several sizes and unioned: a LLAMMA crossing bands is the
-shape that would break that assumption.
+call touches.  The touched set does not vary with trade size on any pool
+measured, but lists are still gathered at several sizes and unioned.
 
 **A missed slot reads as zero, not as an error.**  That is the hazard, and
 `strict=True` (the default) accepts it: prefetching and lazy fallback are
-mutually exclusive, because with `fork_url` set revm loads an account from the
-fork before accepting an insert, so every prefetched slot goes over the network
-anyway.  What makes it safe is upstream -- the router verifies its chosen route
-on chain regardless, so a stale prefetch costs route quality, never a wrong
-answer.
+mutually exclusive, since with `fork_url` set revm loads an account from the fork
+before accepting an insert.  What makes it safe is upstream -- the router
+verifies its chosen route on chain regardless, so a stale prefetch costs route
+quality, never a wrong answer.
 
-`strict=False` gives up the bulk load and lets the fork serve every read lazily
-at ~34 ms a slot: slow, correct by construction, and the mode to reach for when
-a quote disagrees with the chain.  It matters for state a cached slot list
-cannot predict -- a Chainlink aggregator's `s_transmissions[roundId]` advances
-every price update, and a LLAMMA's active band moves.
+`strict=False` gives up the bulk load and serves every read lazily at ~34 ms a
+slot: slow, correct by construction, and the mode to reach for when a quote
+disagrees with the chain.  It matters for state a cached slot list cannot predict
+-- a Chainlink aggregator's `s_transmissions[roundId]`, a LLAMMA's active band.
 """
 
 from __future__ import annotations
@@ -52,23 +47,16 @@ BATCH_LIMIT = 100
 def _access_list_error(answer: Any) -> str:
     """Why an `eth_createAccessList` answer is unusable, or `""` if it is fine.
 
-    Three failure modes, and only one of them is a JSON-RPC error.  Geth
-    reports a *failed simulation* inside a successful result -- `{"accessList":
-    [], "error": "..."}` -- and tac's endpoint does not even report that much:
-
-        {}                              header not found
-        {gas: 2M}                       {'accessList': [], 'gasUsed': '0xf4240'}
-        {gas: 2M, gasPrice: 0}          failed to apply transaction
-        {gasPrice: 0}                   header not found
-
-    The second row is a `get_dy` that supposedly burned a million gas and
-    touched no storage.  It is not true, and nothing in the answer says so.
+    Three failure modes, and only one of them is a JSON-RPC error.  Geth reports
+    a *failed simulation* inside a successful result -- `{"accessList": [],
+    "error": "..."}` -- and some endpoints do not report even that, returning a
+    `get_dy` that supposedly burned a million gas and touched no storage.
 
     So an **empty list is treated as a failure**, not as a call that touched
-    nothing.  A genuine no-storage call loses one tracer message, once, since
-    the result is cached per call; believing this one cost the whole chain --
-    three pools were loaded with their code and none of their state, the EVM
-    read them as holding zero, and calibration dropped every arc on tac.
+    nothing.  A genuine no-storage call loses one tracer message, once, since the
+    result is cached per call; believing the empty list cost a whole chain --
+    pools loaded with their code and none of their state, read as holding zero,
+    and every arc dropped at calibration.
     """
     if isinstance(answer, Exception):
         return str(answer)
@@ -85,12 +73,10 @@ def _access_list_failed(answer: Any) -> bool:
     return bool(_access_list_error(answer))
 
 
-# The storage sweep is a few thousand tiny independent reads, which is a very
-# different shape from the probe batches the transport's default is tuned for.
-# Measured on 4,136 slots: 4,513 ms on one stream, 1,238 on four, 521 on
-# sixteen, 457 on thirty-two.  Sixteen takes 2.4x of the four-stream default;
-# doubling again buys 12% more and twice the connections, which a hosted
-# endpoint is entitled to object to.
+# The storage sweep is a few thousand tiny independent reads, a very different
+# shape from the probe batches the transport's default is tuned for.  Sixteen
+# streams take 2.4x of the four-stream default; doubling again buys 12% more and
+# twice the connections, which a hosted endpoint is entitled to object to.
 PRIME_STREAMS = 16
 
 # Twenty-seven bytes that read their own storage.
@@ -100,15 +86,13 @@ PRIME_STREAMS = 16
 # blob injected at a pool runs in that pool's context and can read all of it.
 # The quoter's `raw_batch` coordinates, 600 reads a call.
 #
-# Not the default: an unmetered node answers many small `eth_getStorageAt`
-# faster than it runs seven big `eth_call`s, while a public endpoint is ~334x
-# the other way.  `prefer_dump` turns it on where requests are counted.  The
-# keyed drpc cannot use it at all -- the blob is injected by state override and
-# that key's `eth_call` is restricted to the quoter, which is the point of the
-# restriction rather than a gap in it.
+# Not the default: an unmetered node answers many small `eth_getStorageAt` faster
+# than seven big `eth_call`s, while a public endpoint is ~334x the other way.
+# `prefer_dump` turns it on where requests are counted.  The keyed drpc cannot
+# use it at all -- the blob rides an `eth_call` state override and that key's
+# `eth_call` is restricted to the quoter.
 #
 # Calldata is a run of 32-byte slot numbers, the return their values in order.
-# No selector dispatch, because the only caller is us.
 #
 #   36        CALLDATASIZE        [size]
 #   6000      PUSH1 0             [size, i]
@@ -149,10 +133,9 @@ class WarmStats:
     code_ms: float = 0.0
     storage_ms: float = 0.0
     errors: list[str] = field(default_factory=list)
-    #: Slots and balances the node would not give up, after a retry.  Each one
-    #: is a value the EVM will read as **zero** -- see `_read_values` -- so this
-    #: is not a diagnostic, it is a statement that the state is wrong and the
-    #: caller must not quote from it.
+    #: Slots and balances the node would not give up, after a retry.  Each is a
+    #: value the EVM will read as **zero**, so this is not a diagnostic: it says
+    #: the state is wrong and the caller must not quote from it.
     unreadable: int = 0
 
     @property
@@ -164,10 +147,9 @@ class WarmStats:
 class LocalEvm:
     """Read-only chain access at a pinned block, executed in-process.
 
-    Implements `core.transport.Transport`, so `QuoterClient` and everything
-    above it work unchanged -- including the quoter contract itself, whose
-    runtime bytecode is inserted here exactly as an `eth_call` state override
-    would inject it on the wire.
+    Implements `core.transport.Transport`, so `QuoterClient` and everything above
+    it work unchanged -- including the quoter contract, whose runtime bytecode is
+    inserted here exactly as an `eth_call` state override would inject it.
     """
 
     rpc: object
@@ -208,16 +190,11 @@ class LocalEvm:
         self._evm.set_balance(CALLER, 10 ** 24)
         # Discovering the node's batch ceiling by failing into it is fine when
         # chunks go out one at a time -- the first failure teaches the rest.
-        # Concurrently it is not: every in-flight chunk fails together, and the
-        # halving retries collide.  So the ceiling is *asked for* once, up
-        # front and sequentially, instead of assumed.
-        #
-        # It used to be assumed, at BATCH_LIMIT = 100, which is Erigon's
-        # default and safe everywhere.  Measured on the committed drpc key, the
-        # same 5,934-slot sweep costs 18.96 ms a slot at 100 per batch and 0.69
-        # at 2,000 -- 62 round trips against 3, and 25 s of a 23 s cold start.
-        # A ceiling every node accepts is not free; it is the slowest node's
-        # ceiling imposed on all of them.
+        # Concurrently it is not: every in-flight chunk fails together and the
+        # halving retries collide.  So the ceiling is *asked for* once, up front
+        # and sequentially, rather than assumed at a value every node accepts --
+        # which is the slowest node's ceiling imposed on all of them, measured at
+        # 62 round trips against 3 on one sweep.
         probe = getattr(self.rpc, "probe_batch_limit", None)
         if probe is not None:
             sample = ("eth_getStorageAt",
@@ -285,14 +262,12 @@ class LocalEvm:
     def prime(self, pools=()) -> WarmStats:
         """Load everything the disk cache already knows, then read values.
 
-        No access lists and no `eth_getCode` for a pool that is already in the
-        cache -- its layout and its bytecode are properties of code that does
-        not change.  What is left is the storage sweep, which is per-block and
-        irreducible, plus the balances of the few accounts that hold any.
-
-        Returns without touching the network for any pool it does not know;
-        `warm` discovers those.
-
+        No access lists and no `eth_getCode` for a pool already in the cache --
+        its layout and its bytecode are properties of code that does not change.
+        What is left is the storage sweep, which is per-block and irreducible,
+        plus the balances of the few accounts that hold any.  Returns without
+        touching the network for any pool it does not know; `warm` discovers
+        those.
         """
         import time as _t
 
@@ -336,13 +311,9 @@ class LocalEvm:
             # reads an uninserted slot as zero, and a zero fee, rate or balance
             # is a *plausible* number: the quote succeeds and is wrong, the arc
             # is mis-calibrated or silently dropped, and the route changes with
-            # no error anywhere.  Measured across a flaky connection: identical
-            # code at block 25,769,788 returned 5,001,179.88 over 7 legs on one
-            # run and 5,002,399.84 over 24 on the next, a 2.4 bp swing, because
-            # some of this sweep had failed and nothing said so.
-            #
-            # Retry once -- a dropped batch is usually transient -- and count
-            # whatever is still missing so `complete` can refuse the EVM.
+            # no error anywhere.  Retry once -- a dropped batch is usually
+            # transient -- and count whatever is still missing so `complete` can
+            # refuse the EVM.
             missing = [k for k, value in enumerate(values) if value is None]
             if missing:
                 self.stats.retried += len(missing)
@@ -376,20 +347,18 @@ class LocalEvm:
                     self._evm.set_balance(address, int(balance, 16))
                 else:
                     # `holders` is exactly the set the cache knows holds ETH, so
-                    # a failed read here is a zero balance on a pool that has
-                    # one -- and the ETH/stETH pool answers `get_dy` with zero
-                    # when its balance is zero (E11).
+                    # a failed read here is a zero balance on a pool that has one
+                    # -- and ETH/stETH answers `get_dy` with zero then (E11).
                     self.stats.errors.append(f"balance {address[:10]} unreadable")
                     self.stats.unreadable += 1
 
     def list_state(self, calls: list[Call]) -> dict[str, set[int]]:
         """`account -> slots` these calls read, without loading anything.
 
-        The same access lists `warm` uses, kept rather than consumed, so a
-        caller can record *what was needed* and check later whether it still
-        has it.  Account presence is not that check: these calls reach 167
-        accounts of which 122 are already cached for other reasons, and the
-        slots are what differ.
+        The same access lists `warm` uses, kept rather than consumed, so a caller
+        can record what was needed and check later whether it still has it.
+        Account presence is not that check -- most of these accounts are already
+        cached for other reasons, and the slots are what differ.
         """
         block = self.rpc.pin.hex_block
         extra = self._access_list_shape(calls[0] if calls else None)
@@ -411,14 +380,12 @@ class LocalEvm:
     def warm(self, calls: list[Call]) -> WarmStats:
         """Load every account and slot these calls touch.
 
-        `eth_createAccessList` names the slots and `eth_getStorageAt` reads
-        their values, because neither computes anything the caller discards.
+        `eth_createAccessList` names the slots and `eth_getStorageAt` reads their
+        values, because neither computes anything the caller discards.
         `prestateTracer` returns the same state in one message but re-executes
-        the call under a tracer to do it -- over a 600-probe batch that is tens
-        of seconds -- so it is the fallback, for nodes that serve `debug_*` but
-        not `eth_createAccessList`.
-
-        Calls already seen are skipped, so warming a session again costs nothing.
+        the call under a tracer to do it -- tens of seconds over a 600-probe
+        batch -- so it is the fallback, for nodes that serve `debug_*` but not
+        `eth_createAccessList`.  Calls already seen are skipped.
         """
         import time as _time
 
@@ -434,8 +401,7 @@ class LocalEvm:
         if not self._warm_by_proof(fresh) and self._tracing is not False:
             # No access list came back at all -- the node may serve `debug_*`
             # instead.  This must not key off "did we load a new account": an
-            # incremental warm legitimately adds only slots, and treating that
-            # as failure re-traced every quote, which cost 93 s of 105 s.
+            # incremental warm legitimately adds only slots.
             self._warm_by_trace(fresh)
         self.stats.ms += (_time.perf_counter() - started) * 1000
         self.stats.accounts = len(self._loaded)
@@ -462,8 +428,8 @@ class LocalEvm:
                 out.extend(self.rpc.fetch_multi(payloads[lo:lo + BATCH_LIMIT]))
             return out
 
-    #: Request shapes for `eth_createAccessList`, cheapest first.  No single
-    #: one works everywhere, which is only discoverable by asking:
+    #: Request shapes for `eth_createAccessList`, cheapest first.  No single one
+    #: works everywhere, which is only discoverable by asking:
     #:
     #:     chain     as-is   +gas   +gas +gasPrice 0
     #:     ethereum  ok      ok     ok
@@ -471,18 +437,13 @@ class LocalEvm:
     #:     polygon   ok      ok     "gasPrice must be non-zero"
     #:     sonic     "insufficient funds"  "failed to apply"  ok
     #:
-    #: Sonic prices the simulation against the sender's balance, so it refuses
-    #: a large cap it cannot pay for and wants either a small one or a zero
-    #: price; arbitrum and polygon reject a zero price outright.  Hence: try
-    #: them in order once per endpoint and remember which answered.
+    #: Sonic prices the simulation against the sender's balance, so it refuses a
+    #: cap it cannot pay for; arbitrum and polygon reject a zero price outright.
+    #: Hence: try them in order once per endpoint and remember which answered.
     #:
-    #: The 50M rung is last because it is the one only a *heavy call* needs,
-    #: not a fussy endpoint: arbitrum resolves to the 2M cap and then meets a
-    #: leg that does not fit in it -- measured, one call in a 34-pool universe
-    #: -- and "out of gas" is a failure of the cap rather than of the shape.
-    #: It sits at the end so no chain's resolution order changes; the retry
-    #: ladder is what reaches it.  Arbitrum accepts 100M on the same call it
-    #: refuses at 2M, so this is headroom the endpoint already offers.
+    #: The 50M rung is last because only a *heavy call* needs it, not a fussy
+    #: endpoint.  It sits at the end so no chain's resolution order changes; the
+    #: retry ladder is what reaches it.
     ACCESS_LIST_SHAPES = (
         {},
         {"gas": "0x1e8480"},                      # 2M, small enough to afford
@@ -494,11 +455,10 @@ class LocalEvm:
     def _access_list_shape(self, sample: Call | None = None) -> dict:
         """The first shape this endpoint accepts, resolved once per session.
 
-        Probed with a *real* call rather than a synthetic one.  Fraxtal accepts
+        Probed with a *real* call rather than a synthetic one: fraxtal accepts
         the bare request for a transfer to an empty account and then fails the
         same request against a contract, so a trivial probe picks a shape that
-        does not work -- measured, it warmed 7 accounts and still reported
-        "failed to apply transaction" on the call that mattered.
+        does not work.
         """
         if self._al_shape is not None:
             return self._al_shape
@@ -547,13 +507,11 @@ class LocalEvm:
     def _install_prestate(self, state: dict) -> None:
         """Load traced state into the EVM **and** into the disk cache.
 
-        The cache writes matter as much as the EVM ones, and only the access
-        list path used to do them: state arriving by tracer landed in this
-        process and nowhere else, so `warmcache` on a chain that cannot serve
-        access lists ran to completion, reported success, and wrote an empty
-        file.  Measured on robinhood -- 39 accounts and 1,033 slots in memory,
-        0 KiB on disk -- which is worse than failing, because the next run
-        finds a cache and believes it.
+        The cache writes matter as much as the EVM ones, and only the access-list
+        path used to do them: state arriving by tracer landed in this process and
+        nowhere else, so a warm on a chain that cannot serve access lists ran to
+        completion, reported success, and wrote an empty file -- worse than
+        failing, because the next run finds a cache and believes it.
         """
         from pyrevm import AccountInfo
 
@@ -583,16 +541,14 @@ class LocalEvm:
     def _warm_by_proof(self, calls: list[Call]) -> bool:
         """accessList names the slots; getStorageAt fetches their values.
 
-        Not `eth_getProof`: it returns many slots per account in one reply,
-        which looks like the efficient choice and is not -- it computes a
-        Merkle proof per account that this caller immediately discards.
-        Measured on one route's 198 accounts and 1,212 slots: 2,343 ms by
-        proof against 1,303 ms by plain storage reads, and the gap widens with
-        account count because proofs are per-account while storage reads batch.
+        Not `eth_getProof`: it returns many slots per account in one reply, which
+        looks like the efficient choice and is not -- it computes a Merkle proof
+        per account that this caller immediately discards, and the gap widens
+        with account count, because proofs are per-account while storage reads
+        batch.
 
-        `eth_getCode` is the real cost here -- 6,265 ms for those 198 accounts,
-        because it ships whole contracts.  Code is immutable, so it is fetched
-        once per address per process and belongs in a disk cache next.
+        `eth_getCode` is the real cost here, because it ships whole contracts.
+        Code is immutable, so it is fetched once per address per process.
         """
         block = self.rpc.pin.hex_block
         extra = self._access_list_shape(calls[0] if calls else None)
@@ -609,23 +565,17 @@ class LocalEvm:
         touched: dict[str, set[int]] = {}
         served = False
         pending = list(zip(calls, listed, strict=True))
-        # Retry what failed under the next shape, rather than dropping it.
-        #
-        # A fixed shape per endpoint is not enough: `lb.drpc.live` is a load
-        # balancer, so two requests a second apart can land on backends that
+        # Retry what failed under the next shape, rather than dropping it: a
+        # fixed shape per endpoint is not enough, because `lb.drpc.live` is a
+        # load balancer and two requests a second apart can land on backends that
         # disagree about whether a zero gas price or a large cap is acceptable.
-        # Measured across nine chains, the same chain resolved to `{}` on one
-        # run and to a gas cap on the next, and a failure here is not a warning
-        # -- it is slots the local EVM will read as zero, which is a wrong
-        # quote rather than a missing one.
-        # What the *resolved* shape said, kept so a call that no shape can
-        # serve is reported by the reason that shape gave.  The retries below
-        # walk shapes this endpoint may reject wholesale -- arbitrum and
-        # polygon refuse a zero gas price outright -- so the last attempt's
-        # error is the ladder talking about itself, not a fact about the call.
-        # Reporting it sent a real "failed to apply transaction" out as
-        # "gasPrice must be non-zero after london", which is a different bug
-        # on a different layer and cost an afternoon.
+        # A failure here is not a warning -- it is slots the local EVM will read
+        # as zero, which is a wrong quote rather than a missing one.
+        #
+        # What the *resolved* shape said, kept so a call that no shape can serve
+        # is reported by the reason that shape gave.  The retries below walk
+        # shapes this endpoint may reject wholesale, so the last attempt's error
+        # is the ladder talking about itself, not a fact about the call.
         first: dict[int, object] = {
             k: answer for k, answer in enumerate(listed)
             if _access_list_failed(answer)
@@ -652,18 +602,15 @@ class LocalEvm:
                 self.stats.errors.append(
                     f"accessList: {_access_list_error(original)[:100]}")
                 if isinstance(answer, Exception):
-                    # A transport failure, not a reverting probe -- and every
-                    # shape above has already been tried, so this is the node
-                    # refusing rather than the call failing.  The slots this
-                    # request would have named are slots the EVM now reads as
-                    # zero, so it counts against `complete` exactly as an
-                    # unreadable slot does.
+                    # A transport failure, not a reverting probe -- every shape
+                    # above has already been tried, so this is the node refusing
+                    # rather than the call failing.  The slots it would have
+                    # named are slots the EVM now reads as zero, so it counts
+                    # against `complete` exactly as an unreadable slot does.
                     #
                     # A revert is *not* counted: it arrives as a result with an
                     # error inside it, never as an exception, and a probe that
-                    # reverts because the size is past what the pool holds is a
-                    # real answer.  Conflating the two would refuse the local
-                    # EVM on every route that probes a small pool.
+                    # reverts past what the pool holds is a real answer.
                     self.stats.unreadable += 1
                 continue
             # Only a call that was actually simulated registers its target.
@@ -673,14 +620,10 @@ class LocalEvm:
             served = True
             for entry in answer.get("accessList") or []:
                 # `storageKeys` may be **null**, not an empty list.  It is a
-                # valid reply -- an account touched for its code or balance
-                # names no slots -- and some backends spell that as `null`
-                # while others send `[]`.  Iterating it raised `'NoneType'
-                # object is not iterable`, which killed the whole warm and
-                # read as a transport failure: reported as an intermittent
-                # warm that "worked on the second attempt", because whether it
-                # happens depends on which account the call touches and which
-                # backend answers.
+                # valid reply -- an account touched for its code or balance names
+                # no slots -- and some backends spell that as `null` while others
+                # send `[]`.  Iterating it killed the whole warm and read as a
+                # transport failure.
                 touched.setdefault(entry["address"].lower(), set()).update(
                     int(k, 16) for k in entry.get("storageKeys") or ())
         self.stats.list_calls += len(payloads)
@@ -739,23 +682,19 @@ class LocalEvm:
         """Discover state for specific arcs -- the ones the cache has not seen.
 
         A new pool costs an access list over a probe batch covering only its own
-        arcs, so keeping up with a moving universe is proportional to what
-        moved.  The batch is the same shape the router itself sends, which is
-        what makes one list cover every size that arc will ever be quoted at.
+        arcs, so keeping up with a moving universe is proportional to what moved.
+        The batch is the same shape the router itself sends, which is what makes
+        one list cover every size that arc will ever be quoted at.
 
         **Without a deployed quoter, that shape is useless.**  The batch is a
-        call to the quoter's address, and off mainnet the quoter is not
-        deployed -- it rides along as an `eth_call` state override, which
-        `eth_createAccessList` has no way to accept.  So the request executes
-        against an address with no code, returns an empty list, and the cache
-        learns nothing: measured on arbitrum, 34 pools produced 1 account and
-        0 slots where mainnet produces 688 and 4,199.
+        call to the quoter's address, and where the quoter is not deployed it
+        rides along as an `eth_call` state override, which `eth_createAccessList`
+        has no way to accept: the request executes against an address with no
+        code and the cache learns nothing.
 
         So where there is no quoter, ask the pools directly.  One `get_dy` per
-        arc rather than a batch, which costs more requests and reads exactly
-        the same state -- the pool's own storage is what the quoter would have
-        touched anyway, and the access list does not vary with trade size
-        (measured over four decades, see the module docstring).
+        arc rather than a batch -- more requests, exactly the same state, since
+        the pool's own storage is what the quoter would have touched anyway.
         """
         from ..core.codec import encode_call
         from ..core.probe import COARSE_GRID, plan_grid
@@ -787,14 +726,13 @@ class LocalEvm:
     def _dump(self, wanted: dict, flat) -> list[int | None] | None:
         """Read every slot by becoming the account that owns it.
 
-        Chunks carry only the overrides they use: 683 code overrides in one
-        request is silently dropped by the node (`MISSING`, not an error), and
-        the sweep comes back 86% complete with nothing to say it is short.
+        Chunks carry only the overrides they use: hundreds of code overrides in
+        one request is silently dropped by the node (`MISSING`, not an error),
+        and the sweep comes back short with nothing to say so.
 
-        The coordinator is never overridden.  The quoter's own address is in
-        the state cache -- `warm` records it as the call target -- and giving
-        *it* the dumper makes the request execute the dumper instead of
-        `raw_batch`, which loses the whole chunk.
+        The coordinator is never overridden.  The quoter's own address is in the
+        state cache, and giving *it* the dumper makes the request execute the
+        dumper instead of `raw_batch`, which loses the whole chunk.
         """
         from concurrent.futures import ThreadPoolExecutor
 
@@ -861,9 +799,7 @@ class LocalEvm:
         *pool*, but neither sees a pool that has started reading a slot it was
         not reading before -- a Chainlink aggregator that advanced a round, a
         LLAMMA whose active band moved.  The pool is not unknown; its behaviour
-        changed.  Measured 10,802 blocks after the cache was built: 18 such
-        slots on 4 accounts, read as zero, worth 3.06 bp on one route and
-        nothing to say so.
+        changed, and the new slots read as zero.
 
         Returns how many slots were new, so a caller can say when it mattered.
         """
@@ -899,10 +835,8 @@ class Recorder:
     """A `Transport` that passes through and remembers what was asked.
 
     The access list has to be built from the calls that will actually be made,
-    and the calls the router makes are quoter batches, not bare `get_dy` --
-    so rather than re-deriving the contract's dispatch in Python, run once
-    against the node and record.  One warm session then serves every later
-    quote at that block.
+    and those are quoter batches, not bare `get_dy` -- so rather than re-deriving
+    the contract's dispatch in Python, run once against the node and record.
     """
 
     inner: object
