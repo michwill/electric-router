@@ -30,7 +30,7 @@ import time  # noqa: E402
 from . import chains as chain_table  # noqa: E402
 from . import config  # noqa: E402
 from .curve_api import CurveApi, CurveApiError  # noqa: E402
-from .facts import FactsCache  # noqa: E402
+from .facts import FactsCache, apply_broken_facts  # noqa: E402
 from .rpc import JsonRpcTransport, RpcError  # noqa: E402
 
 OK = "\x1b[32m✔\x1b[0m"
@@ -843,6 +843,9 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 2
 
     facts = FactsCache.load(chain.chain_id, chain.name.lower())
+    withheld = apply_broken_facts(load.pools, facts)
+    if withheld:
+        print(f"{WARN} {withheld} arc(s) quote and revert on execution; withheld")
 
     # Wrapper stages read vaults and ERC20s, which no arc access list names.
     # Run them locally when the cache covers every slot, then *check* the

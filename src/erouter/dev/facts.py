@@ -340,6 +340,24 @@ class FactsCache:
         """The reason this direction cannot be traded, or "" if it can."""
         return self.broken.get(self.key(target, kind, i, j), "")
 
+    def blocked_arcs(self) -> dict[str, frozenset[tuple[int, int, int]]]:
+        """`{pool: {(kind, i, j), ...}}` -- what has been seen to revert.
+
+        The keys are `address:kind:i>j`, so a reason recorded against an arc
+        kind that no longer exists simply never matches a pool's arcs.
+        """
+        out: dict[str, set[tuple[int, int, int]]] = {}
+        for key in self.broken:
+            address, _, rest = key.partition(":")
+            kind, _, pair = rest.partition(":")
+            i, _, j = pair.partition(">")
+            try:
+                triple = (int(kind), int(i), int(j))
+            except ValueError:                      # not a per-direction key
+                continue
+            out.setdefault(address.lower(), set()).add(triple)
+        return {a: frozenset(v) for a, v in out.items()}
+
     def broken_pools(self) -> set[str]:
         """Pools with no tradeable direction left at all."""
         seen: dict[str, int] = {}
@@ -357,3 +375,23 @@ class FactsCache:
                 "broken": len(self.broken), "wrappers": len(self.wrappers),
                 "breach": len(self.breach),
                 "wide_bounds": len(self.wide_bounds)}
+
+
+def apply_broken_facts(pools, cache) -> int:
+    """Hang each pool's known-unexecutable directions on it, for `build_arcs`.
+
+    `core/` cannot read `data/facts`, so the arcs the router must not offer are
+    carried on `PoolSpec` the same way `deposit_gated` is.  Returns how many
+    arcs were withheld, so a caller can say so rather than silently routing
+    around them.
+    """
+    blocked = cache.blocked_arcs()
+    if not blocked:
+        return 0
+    withheld = 0
+    for pool in pools:
+        found = blocked.get(pool.address.lower())
+        if found:
+            pool.blocked_arcs = found
+            withheld += len(found)
+    return withheld

@@ -191,6 +191,8 @@ def build_arcs(
         token_in, token_out = arc_tokens(pool, kind, i, j)
         if not (token_in and token_out):
             return
+        if (int(kind), i, j) in pool.blocked_arcs:
+            return  # quotes, and reverts when executed; see PoolSpec.blocked_arcs
         if not (nodes.has(token_in) and nodes.has(token_out)):
             return
         if nodes.node(token_in) == nodes.node(token_out):

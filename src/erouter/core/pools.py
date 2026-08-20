@@ -102,6 +102,11 @@ class PoolSpec:
     # not a property of the code, so it is read per block like a balance --
     # `dev.universe.resolve_deposit_gates`.  Swaps and withdrawals are unaffected.
     deposit_gated: bool = False
+    # `(kind, i, j)` triples this pool quotes and cannot execute -- a suspended
+    # synth, a paused transfer, a frozen reserve.  None of it shows in the
+    # balances, so it is learned by executing and remembered in `data/facts`;
+    # `dev.facts.apply_broken_facts` puts it here and `build_arcs` withholds it.
+    blocked_arcs: frozenset[tuple[int, int, int]] = frozenset()
     extra: dict = field(default_factory=dict)
 
     # ------------------------------------------------------------ metadata

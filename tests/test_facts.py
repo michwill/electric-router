@@ -210,3 +210,57 @@ def test_without_facts_the_hand_written_list_still_stands():
     from erouter.dev.wrappers import merge_candidates
 
     assert merge_candidates(FakeChain(), None) == ["0xaaa"]
+
+
+# ------------------------------------------- a broken arc must reach build_arcs
+#
+# `is_broken` was written, tested and never read: the only reasons ever recorded
+# were against arc kind 14, which no longer exists, so no live arc ever matched
+# and nothing noticed.  Executing every arc on every chain turned up reasons
+# against kinds the router does build -- a suspended synth on optimism, a
+# refused deposit on base -- so the path from the file to `build_arcs` has to
+# carry them.
+
+def test_blocked_arcs_are_keyed_by_direction_and_kind():
+    cache = FactsCache(chain_id=1, path=None)
+    cache.learn_broken({
+        cache.key("0xAA", ArcKind.SWAP_STABLE, 1, 0): "Synth is suspended",
+        cache.key("0xAA", ArcKind.WITHDRAW_STABLE, 0, 0): "Synth is suspended",
+        cache.key("0xBB", 14, 0, 1): "reverted",     # a kind nothing builds
+    })
+    blocked = cache.blocked_arcs()
+
+    assert blocked["0xaa"] == frozenset({
+        (int(ArcKind.SWAP_STABLE), 1, 0),
+        (int(ArcKind.WITHDRAW_STABLE), 0, 0),
+    })
+    # The reverse direction of the same pool is untouched.
+    assert (int(ArcKind.SWAP_STABLE), 0, 1) not in blocked["0xaa"]
+    # A retired kind is carried through rather than dropped; it simply never
+    # matches an arc, which is why the old entries were invisible.
+    assert blocked["0xbb"] == frozenset({(14, 0, 1)})
+
+
+def test_apply_broken_facts_withholds_only_the_recorded_direction():
+    from erouter.core.nodes import NodeMap
+    from erouter.core.pipeline import build_arcs
+    from erouter.core.pools import Coin, PoolSpec
+    from erouter.core.types import Dialect
+    from erouter.dev.facts import apply_broken_facts
+
+    a, b = "0x" + "b1" * 20, "0x" + "b2" * 20
+    pool = PoolSpec(address="0x" + "aa" * 20, name="p", pool_type="factory",
+                    coins=(Coin(a, "A", 18, 0), Coin(b, "B", 18, 1)),
+                    balances=(10**21, 10**21), dialect=Dialect.STABLE)
+    cache = FactsCache(chain_id=1, path=None)
+    cache.learn_broken({cache.key(pool.address, ArcKind.SWAP_STABLE, 1, 0): "suspended"})
+
+    assert apply_broken_facts([pool], cache) == 1
+
+    nodes = NodeMap()
+    for token in (a, b):
+        nodes.add_token(token)
+    offered = {(int(r.kind), r.i, r.j) for r in build_arcs([pool], nodes)[0]}
+
+    assert (int(ArcKind.SWAP_STABLE), 1, 0) not in offered, "the reverting arc"
+    assert (int(ArcKind.SWAP_STABLE), 0, 1) in offered, "its healthy reverse"
