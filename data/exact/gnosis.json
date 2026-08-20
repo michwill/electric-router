@@ -39,6 +39,14 @@
    "fee_on_xp": true,
    "rates": "reported"
   },
+  "0x9af34331175e053bcff330d7bb7a6ea2ba53e83d": {
+   "family": "twocrypto",
+   "legacy_fee": false,
+   "legacy_mul2": false,
+   "legacy_pool": false,
+   "stable": true,
+   "v21": true
+  },
   "0x9c9ddda2a6bda693856b9081baebbe1444ffcc37": {
    "family": "stable",
    "fee_on_xp": true,

@@ -27,6 +27,7 @@ import numpy as np
 
 from . import accel as _accel
 
+from .multiport import MultiPortError, element_of
 from .nodes import NodeMap
 from .types import ArcKind, Leg, PoolArc
 
@@ -780,26 +781,32 @@ ADVANCEABLE = (ArcKind.SWAP_STABLE, ArcKind.DEPOSIT_FIXED,
                ArcKind.DEPOSIT_DYN, ArcKind.DEPOSIT_FIXED_NOFLAG)
 
 
-def check_one_arc_per_pool(route: RealizedRoute,
-                           reentrant: Collection[str] = ()) -> list[str]:
-    """Decision 3: a pool may appear at most once -- unless it can be advanced.
+def check_one_arc_per_pool(route: RealizedRoute) -> list[str]:
+    """Decision 3: a pool appears once, or its legs form one multi-port element.
 
-    Deposits and withdrawals mutate pool state and a view-only chained quoter
-    cannot see its own earlier leg, so two arcs of the same pool would be quoted
-    against stale state.  That is a limit of *asking the chain*, not of the
-    arithmetic: `reentrant` names the pools whose state the caller can compute
-    forward, and for those a second leg is priced against the pool the first one
-    left behind.
+    A view-only chained quoter cannot see its own earlier leg, so two arcs of
+    one pool priced independently are priced against a state neither will see.
+    The old exemption let them through when every leg but the last was
+    `ADVANCEABLE`, which bought a walk that advances the pool but still models
+    the arcs as two independent resistors -- separate `psi^2/2G` terms, no
+    cross-term.
 
-    Two conditions, and the second is the subtle one.  Every leg **but the last**
-    on such a pool must be a kind we can advance past, because only the legs with
-    something after them need the pool moved.  That is what lets the gnosis split
-    work -- it swaps through the 3pool and then deposits into it, and the deposit
-    is last.  Reverse the order and this refuses it, correctly.
+    An **element** is the same trade with the pool appearing once, so the
+    coupling *is* the advancing state.  Admissibility is then structural rather
+    than a rule to remember (`core/multiport.py`):
 
-    Returns the offending pool addresses.
+    * a coin may hold at most one port -- on both sides is a wash, twice on one
+      side is one port -- which gives `#coin-ports in + #coin-ports out <= N`
+      for free.  A 2-coin pool therefore admits exactly one in and one out and
+      **cannot be re-entered at all**;
+    * the LP token is not one of the `N`, so `add_liquidity` of both coins of a
+      2-coin pool stays a real operation;
+    * many-in many-out needs a pairing rule and is refused rather than guessed;
+    * an LP *input* paying several coins is refused: `evaluate` cannot advance a
+      withdrawal, so it would price every burn against one supply.
+
+    Returns the pool addresses whose legs are not an admissible element.
     """
-    allowed = {pool.lower() for pool in reentrant}
     order: dict[str, list[RealizedLeg]] = {}
     for realized in route.legs:
         if realized.is_conversion:
@@ -809,8 +816,9 @@ def check_one_arc_per_pool(route: RealizedRoute,
     for pool, legs in order.items():
         if len(legs) < 2:
             continue
-        if pool not in allowed or any(rl.kind not in ADVANCEABLE
-                                      for rl in legs[:-1]):
+        try:
+            element_of(legs)
+        except (MultiPortError, ValueError):
             bad.append(pool)
     return sorted(bad)
 

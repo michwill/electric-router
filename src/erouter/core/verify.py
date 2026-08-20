@@ -95,7 +95,6 @@ def realize_candidates(
     amount_in: int,
     potentials: np.ndarray | None = None,
     max_legs: int = MAX_LEGS,
-    reentrant: Collection[str] = (),
 ) -> None:
     """Turn each candidate's flow into legs, marking the ones that cannot be.
 
@@ -126,7 +125,7 @@ def realize_candidates(
             candidate.note = str(exc)
             continue
 
-        conflicts = check_one_arc_per_pool(route, reentrant)
+        conflicts = check_one_arc_per_pool(route)
         if conflicts:
             candidate.status = "conflict"
             candidate.note = f"{len(conflicts)} pool(s) used twice"

@@ -73,3 +73,32 @@ chain appears with deep multi-coin pools and thin alternatives around them,
 re-run the A/B before rebuilding anything -- it is nine lines of harness
 (`scripts/verify_execution.py` is the same shape) and it settles the question
 in one run.
+
+
+## What it is now (2026-08-20)
+
+Elements are the **admissibility rule**, not a candidate generator competing
+against re-entry.  `check_one_arc_per_pool` and `conflicting_pools` both ask
+`core/multiport.element_from`: a pool may appear more than once in a route only
+when its legs form one element.  The old exemption -- "every leg but the last is
+`ADVANCEABLE`" -- is gone, along with the `reentrant` plumbing and the
+`reenter N pool(s)` candidate, which is unnecessary once a legal element is not
+a conflict to repair around.
+
+Admissibility is structural rather than a rule to remember:
+
+* a coin holds at most one port, so `#coin-ports in + #coin-ports out <= N`
+  follows.  **A 2-coin pool admits one in and one out and cannot be re-entered**;
+* the LP token is not one of the `N`, so swap-and-deposit on a 2-coin pool --
+  the gnosis split -- stays legal at three ports over two coins;
+* many-in many-out is refused rather than paired by guess;
+* an LP *input* paying several coins is refused: `evaluate` cannot advance a
+  burn, so it would price every withdrawal against one supply;
+* two arcs sharing both ports are §9.5's parallel pair, not an element.
+
+**The generator still does not win.**  Re-measured with re-entry removed rather
+than switched on in both arms -- the flaw in the original A/B -- `best_split`
+prices the four pairs offered on gnosis WXDAI -> EURe at ratios of about
+10,000:1, so the element degenerates to a single arc and the pinned candidate
+adds nothing.  That is the same answer as before, now from a fair comparison.
+The representation earns its place; the search heuristic still does not.

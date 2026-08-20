@@ -342,22 +342,6 @@ def _client_block(client) -> int:
         return 0
 
 
-#: Whether a pool may be entered twice, priced by walking our own model forward.
-#:
-#: **Off.**  A re-entered pool is not chain-verifiable -- `quote_routes` is
-#: static calls, so the second leg reads the pool before the first touched it --
-#: and the shape it exists to serve is a *multi-port element*: one pool, one
-#: entry coin, several exits, bounded by `#in + #out <= N`.  An element appears
-#: once in the graph, carries the cross-term, and executes what it quotes; the
-#: reentry path is the compromise the solver notes describe, "two independent
-#: resistors, no cross-term, both calibrated at a state neither will see".
-#:
-#: With this off, `check_one_arc_per_pool` refuses any pool used twice and the
-#: route falls back to the repaired one-arc-per-pool candidate, which the chain
-#: can price.  Elements are the replacement; see `docs/multi-port-elements.md`.
-REENTRY = False
-
-
 def prepare(
     pools: list[PoolSpec],
     nodes: NodeMap,
@@ -888,12 +872,7 @@ def _quote(
             src_token=src_token, dst_token=dst_token, amount_in=amount_in,
             potentials=report.solution.u,
         )
-    # Which pools the quoting client can compute forward.  Asked of the
-    # client rather than imported, so `core` stays free of `dev`: a plain
-    # quoter offers nothing and the rule is exactly as it was.
-    reentrant = (frozenset(getattr(client, "reentrant_pools", ()) or ())
-                 if REENTRY else frozenset())
-    conflicts = check_one_arc_per_pool(result.route, reentrant)
+    conflicts = check_one_arc_per_pool(result.route)
     if conflicts:
         result.warnings.append(
             f"{len(conflicts)} pool(s) used more than once; a view-only quote "
@@ -912,12 +891,33 @@ def _quote(
         result.counters["gas_floor_bp"] = int(
             gas_floor * g.g_scale / Psi * 10_000 if Psi > 0 else 0
         )
+        # A pool paying two ports out of one coin can be priced as a single
+        # element, which advances the pool between legs; `candidates` is pure
+        # and holds `a` and `B` rather than a pool model, so the pricing is
+        # handed in.  `None` from any of it means the sweep handles that pool
+        # as before.
+        splitter = getattr(client, "element_split", None)
+
+        def element_split(one, two, psi_one: float, psi_two: float):
+            total = (psi_one + psi_two) * g.g_scale
+            if total <= 0 or one.pool.lower() != two.pool.lower():
+                return None
+            delta = int(_realised_delta(one, total, nu, nodes))
+            if delta <= 0:
+                return None
+            got = splitter(one.pool, one.i, one.j, two.j, delta)
+            if not got:
+                return None
+            first = total * got[0] / 10_000 / g.g_scale
+            return first, (total / g.g_scale) - first
+
         with clock("candidates"):
             pool_set = generate(
                 g, arcs, src_node, dst_node, Psi_scaled, report.solution,
                 base_certificate=report.certificate, seed=seed,
                 max_candidates=max_candidates, gas_floor=gas_floor,
-                max_legs=max_legs, reentrant=reentrant,
+                max_legs=max_legs,
+                element_split=element_split if splitter is not None else None,
             )
             for candidate in pool_set.candidates:
                 candidate.psi = candidate.psi * g.g_scale
@@ -926,7 +926,6 @@ def _quote(
                 pool_set, arcs, nu, nodes,
                 src_token=src_token, dst_token=dst_token, amount_in=amount_in,
                 potentials=report.solution.u, max_legs=max_legs,
-                reentrant=reentrant,
             )
         with clock("verify"):
             verify(

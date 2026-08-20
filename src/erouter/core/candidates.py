@@ -29,6 +29,7 @@ import numpy as np
 
 from .graph import ArcArrays
 from .quoter import MAX_LEGS, MAX_SLOTS
+from .multiport import MultiPortError, element_of_arcs
 from .realize import (ADVANCEABLE, RealizedRoute, cancel_cycles,
                       prune_dust)
 from .seed import k_shortest_paths
@@ -183,17 +184,16 @@ def carries(psi: np.ndarray, Psi: float) -> np.ndarray:
 
 
 def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
-                      Psi: float = 0.0,
-                      reentrant: Collection[str] = ()) -> dict[str, list[int]]:
-    """Pools carrying flow on more than one arc that may not carry two.
+                      Psi: float = 0.0) -> dict[str, list[int]]:
+    """Pools carrying flow on more than one arc whose arcs are not one element.
 
-    `reentrant` names pools whose state the caller can compute forward, so a
-    second arc on one of them is not a conflict.  At most one of its arcs may
-    be a kind we cannot advance past, because realisation can order that one
-    last and nothing needs the pool moved after it -- `check_one_arc_per_pool`
-    is what actually holds that, on the realised legs, where the order exists.
+    The same rule `check_one_arc_per_pool` applies to realised legs, asked here
+    of the arcs -- a coin holds at most one port, so `#in + #out <= N` and a
+    2-coin pool cannot be entered twice.  Order does not exist yet at this
+    stage and the rule does not need it: admissibility is a property of which
+    ports are used, not of the sequence.
+
     """
-    allowed = {pool.lower() for pool in reentrant}
     groups: dict[str, list[int]] = {}
     for k in np.flatnonzero(carries(psi, Psi) if Psi else psi > 0):
         groups.setdefault(arcs[int(k)].pool.lower(), []).append(int(k))
@@ -201,10 +201,10 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
     for pool, idx in groups.items():
         if len(idx) < 2:
             continue
-        if pool in allowed and sum(
-                1 for k in idx if arcs[k].kind not in ADVANCEABLE) <= 1:
-            continue
-        out[pool] = idx
+        try:
+            element_of_arcs([arcs[k] for k in idx])
+        except (MultiPortError, ValueError):
+            out[pool] = idx
     return out
 
 
@@ -222,7 +222,7 @@ def generate(
     top_k: tuple[int, ...] = TOP_K,
     gas_floor: float = 0.0,
     max_legs: int = MAX_LEGS,
-    reentrant: Collection[str] = (),
+    element_split=None,
 ) -> CandidateSet:
     out = CandidateSet()
     seen: set[tuple] = set()
@@ -291,8 +291,7 @@ def generate(
             out.pivots += solution.pivots
             if not solution.feasible:
                 return False
-            conflicts = conflicting_pools(arcs, solution.psi,
-                                          reentrant=reentrant)
+            conflicts = conflicting_pools(arcs, solution.psi)
             if not conflicts:
                 break
             for indices in conflicts.values():
@@ -452,9 +451,61 @@ def generate(
         if made >= pin_budget or len(out) >= max_candidates or exhausted("pin"):
             break
 
+    # 3b. multi-port elements (docs/multi-port-elements.md, step 2).
+    #
+    #     Where one pool pays two ports out of one coin, the split between
+    #     them is not something the model can rank: they are two independent
+    #     resistors here, and the second was calibrated against a pool the
+    #     first has already moved.  The sweep above brackets that.  An element
+    #     *solves* it -- `best_split` advances the pool between legs, which is
+    #     the arithmetic that matches execution -- so its answer is pinned as
+    #     one more candidate and ranked on measured output like everything
+    #     else.
+    #
+    #     Pinned rather than forced: `resolve` takes these as `forced_upper`,
+    #     so the solver may take less than the element asked for.  That can
+    #     only improve the candidate, and it means a bad split cannot make a
+    #     route worse than the unpinned solve already was.
+    #
+    #     `element_split` is supplied by the caller because pricing needs a
+    #     pool model and this module is pure -- it holds `a` and `B`, not a
+    #     `StableSwap`.  Absent, nothing here runs.
+    #     Pairs are proposed **speculatively**, not read off the base solve.
+    #     Gating on "the solver already went through this pool twice" makes
+    #     the generator unable to reach the case it was built for: gnosis
+    #     WXDAI -> EURe runs 100% down one arm, so no pool is co-active, so no
+    #     element is offered, so the second arm is never priced.  Both ports
+    #     have to be on the table before either can win.  So an active arc is
+    #     paired with its idle siblings -- same pool, same input coin -- and
+    #     the candidate competes on measured output like any other.
+    if element_split is not None:
+        pairs: list[tuple[int, int]] = []
+        active_set = {int(k) for k in base_active}
+        for shared in by_pool.values():
+            live = [k for k in shared if k in active_set]
+            for k1 in live:
+                for k2 in shared:
+                    if k2 != k1 and arcs[k1].tau == arcs[k2].tau:
+                        pairs.append((k1, k2) if k1 < k2 else (k2, k1))
+        for k1, k2 in dict.fromkeys(pairs):
+            if len(out) >= max_candidates or exhausted("element"):
+                break
+            try:
+                tuned = element_split(arcs[k1], arcs[k2],
+                                      float(base.psi[k1]), float(base.psi[k2]))
+            except Exception:
+                tuned = None      # a pricer that cannot answer is not an error
+            if not tuned:
+                continue
+            psi1, psi2 = tuned
+            if psi1 <= 0 or psi2 <= 0:
+                continue
+            resolve(np.zeros(g.m, bool),
+                    f"element {arcs[k1].note[:16]} {psi1 / (psi1 + psi2):.0%}",
+                    "element", pinned={k1: psi1, k2: psi2})
 
     # 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
-    conflicts = conflicting_pools(arcs, base.psi, Psi, reentrant=reentrant)
+    conflicts = conflicting_pools(arcs, base.psi, Psi)
     if conflicts:
         forbidden = np.zeros(g.m, bool)
         for indices in conflicts.values():
@@ -464,32 +515,12 @@ def generate(
                     forbidden[k] = True
         resolve(forbidden, f"repair {len(conflicts)} pool conflict(s)", "repair")
 
-        # Keeping one arc per pool is a heavy hammer where the pool can be
-        # entered twice.  Measured on gnosis WXDAI->EURe at 100,000, the
-        # unrestricted optimum wants the 3pool six ways, and dropping to a single
-        # arc gives up 23% against a split that swaps through it and then
-        # deposits into it.  So also offer the largest *admissible* subset: every
-        # arc we can advance past, plus the biggest one we cannot.
-        if reentrant:
-            allowed = {pool.lower() for pool in reentrant}
-            subset = np.zeros(g.m, bool)
-            trimmed = False
-            for pool, indices in conflicts.items():
-                if pool not in allowed:
-                    keep_index = max(indices, key=lambda k: base.psi[k])
-                    for k in indices:
-                        if k != keep_index:
-                            subset[k] = True
-                    continue
-                blocked = [k for k in indices if arcs[k].kind not in ADVANCEABLE]
-                if len(blocked) > 1:
-                    keep_index = max(blocked, key=lambda k: base.psi[k])
-                    for k in blocked:
-                        if k != keep_index:
-                            subset[k] = True
-                            trimmed = True
-            if trimmed:
-                resolve(subset, f"reenter {len(conflicts)} pool(s)", "repair")
+        # There is no "re-enter this pool anyway" candidate any more, and none
+        # is needed: `conflicting_pools` only reports a pool whose arcs are not
+        # an admissible element, so a legal element was never a conflict and
+        # never had to be repaired around.  The gnosis split -- swap through the
+        # 3pool, then deposit into it -- is a 1-in-2-out element and survives
+        # the base solve untouched.
         worst = max(conflicts.items(), key=lambda kv: len(kv[1]))
         for keep_index in sorted(worst[1], key=lambda k: -base.psi[k])[1:2]:
             alt = np.zeros(g.m, bool)
