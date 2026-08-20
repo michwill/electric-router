@@ -1,28 +1,22 @@
 """Optimise a finished route's split ratios, without consulting the model (§7).
 
-The model decides *which* pools; this decides *how much* through each.  With
-the topology fixed the output is a smooth function of the weights alone, and
-the model's `O(theta^2)` error -- negligible below 10% of pool depth, 36 bp
-above 50% -- has no business near that decision.
+The model decides *which* pools; this decides *how much* through each.  With the
+topology fixed the output is a smooth function of the weights alone, and the
+model's `O(theta^2)` error -- 36 bp past 50% of pool depth -- has no business
+near that decision.  Preferred to re-fitting the model (§8) because it cannot go
+infeasible and cannot lose: only a strict improvement, measured by a real chained
+quote, is accepted.
 
-Preferred to re-fitting the model (§8) because it cannot go infeasible (the
-topology is fixed, so src stays connected to dst) and cannot lose (only a
-strict improvement, measured by a real chained quote, is accepted).
-
-**Sample the legs; do not chain them.**  A chained route quote costs a round
-trip per iteration, since leg `k`'s input is leg `k-1`'s output.  Probing one
-pool at many sizes does not chain, so a whole route's curves arrive in one
-`probe_batch` and composition happens in Python, where each coordinate can be
-solved by golden section rather than stepped towards.  See `curves.py` for why
-`u = x/f(x)` is what gets interpolated.
+**Sample the legs; do not chain them.**  A chained quote costs a round trip per
+iteration, since leg `k`'s input is leg `k-1`'s output; probing one pool at many
+sizes does not chain, so a whole route's curves arrive in one `probe_batch` and
+composition happens in Python.  See `curves.py` for what gets interpolated.
 
 **The curves check themselves against the chain before being trusted.**
 `baseline` is a real chained quote at known weights, so composing at those
-weights compares like with like for free.  A stableswap crossing its peg edge
-inside one ladder interval measured 497 bp out on the coarse ladder, and
-optimising on that would be optimising on fiction.  A curve set that misses
-gets one dense pass; if it still misses, the chained hill-climb takes over,
-which is also what runs when a leg refuses to probe at all.
+weights compares like with like for free.  A curve set that misses gets one dense
+pass, then the chained hill-climb takes over -- which is also what runs when a
+leg refuses to probe.
 """
 from __future__ import annotations
 
@@ -50,17 +44,14 @@ GATE_GAP_BP = 2.0
 # Two rounds is the budget: on 4 of the 6 reference routes that trip the gate,
 # round 2 gains under 0.4 bp and a third would be pure latency.
 MAX_ROUNDS = 2
-# ...but the pathological route is exactly the one worth chasing.  On
-# crvUSD->sDOLA 5M -- where the model's own split was 300 bp wrong -- rounds 2
-# and 3 were still buying 18 and 25 bp.  So a round that is *still* finding
-# this much extends the budget by one, to a hard cap.  Cost then scales with
-# the money on the table instead of with a constant.
+# ...but the pathological route is the one worth chasing: on crvUSD->sDOLA 5M,
+# rounds 2 and 3 were still buying 18 and 25 bp.  A round that is still finding
+# this much extends the budget by one, to a hard cap.
 CONTINUE_BP = 1.0
 HOT_ROUNDS = 4
-# Central-difference probe scales, in weight units.  Two scales because the
-# useful step is not knowable in advance: 0.02 clears integer `bps`
-# granularity by two orders and stays local, 0.08 still resolves a coordinate
-# whose curvature is flat at 0.02.  They cost quotes, not round trips.
+# Central-difference probe scales, in weight units.  Two because the useful step
+# is not knowable in advance: 0.02 clears integer `bps` granularity by two orders
+# and stays local, 0.08 still resolves a coordinate whose curvature is flat there.
 PROBE_SCALES = (0.02, 0.08)
 # Multipliers along the normalised gradient, spanning two decades so one batch
 # covers both a cautious and an aggressive step.
@@ -79,17 +70,13 @@ TOL_BP = 0.01
 
 # --- the sampled-curve search ---------------------------------------------
 #
-# Golden section.  Each iteration shrinks the bracket by 0.618, so 20 take a
-# unit interval to 6.6e-5 -- just under the 1e-4 that integer `bps` can express,
-# and therefore exact as far as the executable format is concerned.  It was 32,
-# which reaches 5.3e-7: three orders of refinement that `apply_weights` rounds
-# away, paid for on every one of ~100,000 evaluations.
+# Golden section.  Each iteration shrinks the bracket by 0.618, so 20 take a unit
+# interval to 6.6e-5 -- just under the 1e-4 integer `bps` can express, and
+# therefore exact as far as the executable format is concerned.
 GOLDEN = (5.0 ** 0.5 - 1.0) / 2.0
 GOLDEN_ITERS = 20
 # Screening a start does not need that precision -- it only has to say which
-# basin is worth refining.  Measured on USDC->WETH $100k: 10 starts, 11,644
-# evaluations, and 11,532 of them spent on the nine that lost.  Eight converged
-# to the same value to six figures; the winner took 112.
+# basin is worth refining.
 SCREEN_ITERS = 6
 SCREEN_SWEEPS = 3
 # How many of the screened starts earn a full-precision ascent.  More than one
@@ -113,8 +100,7 @@ NOMINAL_HEADROOM = 4.0
 CHECK_TOL_BP = 1.0
 # Refinement: a narrow window around each leg's operating size, sampled hard.
 # Linear-`u` error falls as `(r - 1)^2` in the node ratio, and the coarse
-# ladder's 1.42 is what put a stableswap's peg edge 497 bp out; 1.015 is two
-# orders better, which is what it takes.
+# ladder's 1.42 is what put a stableswap's peg edge 497 bp out.
 REFINE_SPAN = 2.0
 REFINE_NODES = 96
 # Only legs whose own ladder says they are this badly interpolated get the
@@ -123,38 +109,27 @@ LEG_TOL_BP = 0.05
 
 # --- the exact pass, when a quote is cheap ---------------------------------
 #
-# An in-process EVM prices a route in milliseconds, so the last word can be
-# taken from the true chained function instead of an interpolant.  The curves
-# still do the searching -- a composed evaluation is microseconds against
-# milliseconds -- but they no longer decide the answer, which is the one place
-# interpolation error would have shown up in basis points.
+# An in-process EVM prices a route in milliseconds, so the last word comes from
+# the true chained function instead of an interpolant.  The curves still do the
+# searching -- a composed evaluation is microseconds -- but no longer decide.
 POLISH_ITERS = 12
 POLISH_SWEEPS = 2
 # The curve search has already found the basin; this only refines inside it.
 POLISH_WINDOW = 0.05
 #: Skip the polish when the curves already agree with the chain this closely.
 #
-# Polish exists to correct interpolation drift, and the run measures that drift
-# for free -- `check_bp` composes the curves at the weights a real chained quote
-# was taken at.  When it is small there is nothing left to find, and measured,
-# it is usually small: WETH->USDC 300 checked at -0.078 bp and polishing bought
-# 0.031 for 241 sequential quotes, about 770 ms; USDC->sUSDS $1M checked at
-# -0.045 and bought exactly nothing for 121 calls.  Each of those calls is a
-# chained `quote_routes`, ~3.2 ms in-process and a round trip on the wire, so
-# this is the single most expensive thing the router does per basis point.
+# Polish corrects interpolation drift, and the run measures that drift for free:
+# `check_bp` composes the curves at the weights a real chained quote was taken
+# at.  Each polish evaluation is a chained `quote_routes` -- ~3.2 ms in-process,
+# a round trip on the wire -- so this is the most expensive thing the router does
+# per basis point, and measured, the drift is usually small enough to buy
+# nothing.
 #
-# The threshold is well below the 1.0 bp at which `_trusted_curves` stops
-# believing the curves at all, and above the drift observed when polishing was
-# worthless.  Note the drift is only a *ceiling* on what polish can find, and a
-# loose one: measured, it returned 40% of the check in one case and 2.5% in
-# another (0.031 bp at a -0.078 check, 0.005 bp at -0.199).  So a quarter of a
-# basis point of drift is not a quarter of a basis point of opportunity, and
-# 241 sequential quotes is a great deal to spend finding out.
-#
-# Reused curves (`scout`) come off a shared ladder sized for the widest
-# candidate, so they are a little coarser than a bespoke sample and check
-# correspondingly worse -- which is what set this threshold: at 0.15 the very
-# case reuse was meant to speed up went back to polishing for 0.005 bp.
+# The drift is only a *ceiling* on what polish can find, and a loose one: 40% of
+# the check in one case, 2.5% in another.  So the threshold sits well below the
+# 1.0 bp at which `_trusted_curves` stops believing the curves at all, and above
+# the drift seen when polishing was worthless -- reused curves (`scout`) come off
+# a shared ladder and check correspondingly worse.
 POLISH_CHECK_BP = 0.25
 # With an exact finish available, the curves only have to be right enough to
 # land in the correct basin, so the dense second sampling pass is not needed.
@@ -191,9 +166,7 @@ class SplitReport:
     def curve_error_bp(self) -> float:
         """How far the composed curves missed the real chained quote.
 
-        The whole case for sampling rests on this being small, so it is
-        reported rather than assumed.  Signed: positive means the curves
-        over-promised.
+        Signed: positive means the curves over-promised.
         """
         if not (self.predicted > 0 and self.after > 0):
             return 0.0
@@ -280,10 +253,8 @@ def should_optimise(
     """Why this route is worth optimising, or "" to skip it.
 
     Deliberately permissive: firing needlessly costs round trips, not basis
-    points, and the two triggers catch different failures.  `theta` catches a
-    leg large enough for the quadratic to have drifted; the model-vs-chain gap
-    catches a route where it already demonstrably has, including the shallow
-    pools theta misses.
+    points.  `theta` catches a leg large enough for the quadratic to have
+    drifted; the model-vs-chain gap catches a route where it demonstrably has.
     """
     if not split_groups(legs):
         return ""
@@ -300,9 +271,8 @@ def batch_budget(client: QuoterClient, legs: int) -> int:
     """How many routes fit in *one* round trip.
 
     `quote_routes` silently re-chunks a batch that busts either the route count
-    or the total leg count, and a re-chunk is another sequential round trip --
-    so the search sizes itself to the smaller of the two limits rather than
-    discovering the boundary as unexplained latency.
+    or the total leg count, and a re-chunk is another sequential round trip -- so
+    the search sizes itself to the smaller of the two limits.
     """
     routes = int(getattr(client, "max_routes", MAX_ROUTES))
     all_legs = int(getattr(client, "max_all_legs", MAX_ALL_LEGS))
@@ -317,20 +287,17 @@ def reachable_tops(
 ) -> list[float]:
     """The largest input each leg can be handed, over the whole weight simplex.
 
-    A leg can take at most its source slot's entire balance, so one forward
-    pass bounds every leg: what arrives at a slot is bounded by what its
-    feeders can send, and each feeder's rate is taken from the realised
-    amounts.  Linear rates over-state a concave leg's output, which is the
-    direction that keeps this an upper bound -- and an upper bound is all it
-    has to be, since it only decides where the probe ladder stops.
+    A leg can take at most its source slot's entire balance, so one forward pass
+    bounds every leg, taking each feeder's rate from the realised amounts.
+    Linear rates over-state a concave leg's output, which keeps this an upper
+    bound -- all it has to be, since it only decides where the ladder stops.
     """
     cap: dict[int, float] = {0: float(amount_in)}
     tops: list[float] = []
     for k, leg in enumerate(legs):
-        # The slot bound alone is not enough.  A leg whose modelled output was
-        # zero propagates a rate of zero, and every leg downstream of it then
-        # bounds at nothing -- so each leg also floors on its own realised
-        # input, which is a size the chain demonstrably served.
+        # The slot bound alone is not enough: a leg whose modelled output was
+        # zero propagates a rate of zero and starves everything downstream, so
+        # each leg also floors on its own realised input.
         top = max(cap.get(leg.src_slot, 0.0), nominal_in[k] * NOMINAL_HEADROOM)
         tops.append(top)
         rate = (nominal_out[k] / nominal_in[k]) if nominal_in[k] > 0 else 0.0
@@ -347,8 +314,7 @@ def _probe_ladders(legs, client, ladders, report, *, optional: bool = False):
     """Quote every leg's ladder in one batch.  None if a leg comes back unusable.
 
     These probes are independent, so a whole route's sampling is one round trip
-    -- the property a chained quote does not have, and the reason any of this
-    is worth doing.
+    -- the property a chained quote does not have.
     """
     plans: list[tuple[list[int], int, int] | None] = []
     probes: list[Probe] = []
@@ -416,13 +382,10 @@ def sample_curves(legs, client, tops, report=None):
 def refine_curves(legs, client, curves, takes, points, report=None):
     """A second pass, dense and narrow, around where the legs actually operate.
 
-    Only the legs that need it: each curve estimates its own interpolation
-    error from the secants it already has, so a route where one stableswap sits
-    on a peg edge refines that one leg rather than all fifteen.
-
-    Merged into the coarse points rather than replacing them, so a weight that
-    later wanders outside the refined window degrades to the wide ladder
-    instead of extrapolating off the end of a narrow one.
+    Only the legs that need it: each curve estimates its own interpolation error
+    from the secants it already has.  Merged into the coarse points rather than
+    replacing them, so a weight that later wanders outside the refined window
+    degrades to the wide ladder instead of extrapolating off a narrow one.
     """
     ladders = []
     for curve, take in zip(curves, takes, strict=True):
@@ -464,10 +427,9 @@ def _fractions(legs: list[Leg], groups: list[list[int]], weights) -> list[float 
 def walk(legs: list[Leg], curves, fractions, amount_in: float, dst_slot: int) -> float:
     """Compose the leg curves the way the quoter composes the real calls.
 
-    Same group-snapshot semantics as `RouteQuoter._walk` and
-    `realize._forward_simulate`: the base balance is captured when `src_slot`
-    changes, so a share is stable regardless of draining order.  Floats, not
-    integers -- the executable rounding happens once, in `apply_weights`.
+    Same group-snapshot semantics as `RouteQuoter._walk`: the base balance is
+    captured when `src_slot` changes, so a share is stable regardless of draining
+    order.  Floats -- the executable rounding happens once, in `apply_weights`.
     """
     balances: dict[int, float] = {0: float(amount_in)}
     current: int | None = None
@@ -513,19 +475,12 @@ def make_evaluator(legs: list[Leg], groups: list[list[int]], curves,
                    amount_in: float, dst_slot: int):
     """`walk(_fractions(...))`, specialised for the inner loop.
 
-    The search calls this ~100,000 times on a wide route, and the reference
-    pair spends most of that rebuilding things that never change: `_fractions`
-    reconstructs the grouped-index set and the whole fractions list per call,
-    `_project` runs three numpy calls on arrays of two to five elements where
-    the call overhead dwarfs the arithmetic, and `walk` carries balances in a
-    dict and re-reads `leg.src_slot` per leg.  Measured on USDC->WETH $100k,
-    29 legs: 108,520 evaluations cost 10.0 s, of which `_project` alone was
-    3.6 s across 545,065 calls.
-
-    None of it can be vectorised across legs -- the walk is sequential by
-    construction, each leg spending what its predecessors left -- so this
-    hoists the invariants out of the loop and keeps the arithmetic identical,
-    rather than replacing it with something array-shaped.
+    The search calls this ~100,000 times on a wide route, and the reference pair
+    spends most of that rebuilding what never changes: the grouped-index set, the
+    fractions list, three numpy calls on arrays of two to five elements, a dict
+    of balances.  None of it can be vectorised across legs -- the walk is
+    sequential by construction -- so this hoists the invariants out of the loop
+    and keeps the arithmetic identical.
 
     `walk` and `_fractions` stay as the readable definition of what this
     computes, and `test_split.py` holds the two to each other.
@@ -620,8 +575,7 @@ def _ascend(start, evaluate, free, counter, *, iters: int = GOLDEN_ITERS,
     """Coordinate ascent, each coordinate maximised exactly by golden section.
 
     No step size, no gradient, no normalisation -- all of which existed only to
-    ration round trips.  With the curves in hand an evaluation is microseconds,
-    so each coordinate can simply be solved.
+    ration round trips.  With the curves in hand an evaluation is microseconds.
     """
     plan = getattr(evaluate, "plan", None)
     if _ACCEL_ON and plan is not None and _accel.available():
@@ -694,12 +648,11 @@ def optimise(
     """Re-split a finished route.  Returns the best legs found and a report.
 
     `curves` lets a caller hand over a sample it already paid for -- the scout
-    holds one for every candidate it considered.  They are still checked
-    against the chain; only the sampling is skipped.
+    holds one per candidate.  They are still checked against the chain; only the
+    sampling is skipped.
 
-    Sampled curves when the caller can supply the realised per-leg amounts --
-    two round trips, converged.  The chained hill-climb otherwise, and as a
-    fallback whenever a leg refuses to probe.
+    Sampled curves when the caller can supply the realised per-leg amounts; the
+    chained hill-climb otherwise, and whenever a leg refuses to probe.
     """
     groups = split_groups(legs)
     report = SplitReport(groups=len(groups), before=baseline)
@@ -835,10 +788,9 @@ def polish(
     """Finish on the true chained function, not on an interpolant.
 
     Only worth doing where a quote is cheap: each evaluation here is a real
-    `quote_routes`, which on the wire is a round trip and in-process is
-    milliseconds.  The window is deliberately small -- the curve search has
+    `quote_routes`.  The window is deliberately small -- the curve search has
     already chosen the basin, and this decides only where inside it the answer
-    sits, which is exactly the decision interpolation error was distorting.
+    sits, which is exactly what interpolation error was distorting.
     """
     calls = [0]
 
@@ -869,15 +821,13 @@ def _trusted_curves(
 
     The check is free: `baseline` is a real chained quote at known weights, so
     composing the curves at those same weights compares like with like.  A
-    stableswap crossing its peg edge inside one ladder interval was measured
-    497 bp out on a coarse ladder, which would have made the objective fiction
-    -- so a curve set that misses gets one dense pass at the sizes the legs
-    actually operate at, and if it still misses, the chained search takes over.
+    stableswap crossing its peg edge inside one ladder interval measured 497 bp
+    out, which would have made the objective fiction -- so a curve set that
+    misses gets one dense pass, and if it still misses the chained search runs.
     """
-    # Curves the caller already sampled are used as they are -- but they are
-    # still *checked*, below.  The check is one chained quote and it is what
-    # the whole approach rests on; only the sampling is skipped, and only when
-    # somebody else already paid for it at a ladder at least as wide.
+    # Curves the caller already sampled are used as they are -- but still
+    # *checked*, below.  Only the sampling is skipped, and only when somebody
+    # else paid for it at a ladder at least as wide.
     points = None
     if curves is None:
         tops = reachable_tops(legs, nominal_in, nominal_out, amount_in)
@@ -939,10 +889,9 @@ def _search_curves(
 ) -> tuple[list[Leg], SplitReport]:
     """Optimise on the sampled curves, then let the chain adjudicate once.
 
-    The curves are exact at their nodes but interpolated between them, so the
-    optimum they find is proposed to the quoter *with its neighbours*: one
-    batch picks the real winner and simultaneously measures how far the
-    composition drifted, which is the number the whole approach stands on.
+    The curves are exact at their nodes but interpolated between them, so their
+    optimum is proposed to the quoter *with its neighbours*: one batch picks the
+    real winner and measures how far the composition drifted.
     """
     report.mode = "curves"
     counter = [0]
@@ -953,11 +902,10 @@ def _search_curves(
         counter[0] += 1
         return fast(candidate)
 
-    # The wrapper exists only to count, and it must not hide what it wraps:
-    # without this the compiled ascent sees an evaluator it does not recognise
-    # and stays in Python, which is where the whole cost of a wide route sits
-    # -- measured on USDC->WBTC $100k, 25 ascents and 772 ms of the 1,072 ms
-    # split stage, none of it compiled.  `_ascend` keeps the counter itself.
+    # The wrapper exists only to count, and must not hide what it wraps: without
+    # this the compiled ascent sees an evaluator it does not recognise and stays
+    # in Python, which is where a wide route's whole cost sits.  `_ascend` keeps
+    # the counter itself.
     evaluate.plan = getattr(fast, "plan", None)
 
     # Several starts, because coordinate ascent finds a local optimum and the
@@ -972,15 +920,11 @@ def _search_curves(
             starts.append(corner)
 
     # Screen, then refine.  Every start used to run to full precision, and on a
-    # wide route that is where the whole cost sat: 11,644 evaluations over ten
-    # starts, of which 11,532 went to the nine that lost -- eight of them
-    # converging to the same value to six figures.  A start only has to say
-    # which basin it is in to be ranked, and that is a much cheaper question
-    # than where the optimum inside it lies.
+    # wide route that is where the whole cost sat -- 11,532 of 11,644 evaluations
+    # went to the starts that lost.  A start only has to say which basin it is in.
     #
-    # `REFINE_STARTS` of them go on to a full ascent rather than one, because
-    # the winner here beat the rest by 0.155 bp and a 6-bisection screen cannot
-    # be trusted to resolve that.
+    # `REFINE_STARTS` go on to a full ascent rather than one, because the winner
+    # beat the rest by 0.155 bp and a 6-bisection screen cannot resolve that.
     screened = []
     for start in starts:
         projected = [_project(w) for w in start]
@@ -1026,9 +970,8 @@ def _search_curves(
     winner, best = candidates[pick], int(values[pick])
 
     # The batch above is the last word only when a quote is expensive.  With an
-    # in-process EVM it is merely a good starting point, and the true function
-    # is affordable enough to be optimised directly -- but only where the
-    # curves and the chain actually disagree.  See `POLISH_CHECK_BP`.
+    # in-process EVM the true function is affordable enough to optimise directly
+    # -- but only where the curves and the chain disagree.  See `POLISH_CHECK_BP`.
     drifting = abs(report.check_bp) >= POLISH_CHECK_BP
     report.polish_skipped = not drifting
     if getattr(client, "local", False) and best > 0 and drifting:
@@ -1052,10 +995,9 @@ class ScoutResult:
     index: int
     predicted: float
     legs: list[Leg]
-    #: The curves this candidate was scored on, aligned to its legs.  Handed
-    #: back so the winner's own split pass can reuse them instead of sampling
-    #: the same arcs a second time -- measured, that second sampling is 400 to
-    #: 800 ms of EVM on exactly the wide routes that are slowest.
+    #: The curves this candidate was scored on, aligned to its legs.  Handed back
+    #: so the winner's own split pass can reuse them instead of sampling the same
+    #: arcs again -- 400 to 800 ms of EVM on exactly the slowest routes.
     curves: list = field(default_factory=list)
 
 
@@ -1063,31 +1005,23 @@ def scout(plans, client: QuoterClient, *, amount_in: int,
           report: SplitReport | None = None) -> list[ScoutResult]:
     """Re-split several candidate topologies against **one** probe batch.
 
-    The problem this exists for: candidates are ranked on the split the model
-    gave them, and the model's split is excellent on narrow topologies and
-    terrible on wide ones.  Measured on WETH->USDC 300, the winning 5-leg route
-    gained 0.14 bp when its split was tuned while a 14-leg candidate gained
-    102 -- so the wide one looked 100 bp worse than it was, lost the ranking,
-    and never reached the pass that would have fixed it.  The router shipped a
-    route 22 bp below its own best idea.
+    Candidates are ranked on the split the model gave them, and the model's split
+    is excellent on narrow topologies and terrible on wide ones: measured on
+    WETH->USDC 300, the winning 5-leg route gained 0.14 bp when tuned while a
+    14-leg candidate gained 102 -- so the wide one lost the ranking and never
+    reached the pass that would have fixed it.
 
-    Tuning each candidate properly is not affordable: it triples a warm route,
-    median +1.4 s and up to +12 s, for a median gain of 0.01 bp.  Nor does
-    scouting with a cheap round then converging the winner -- measured at 136%
-    of the cost, because the optimiser's expense is its *first* round, the one
-    that samples curves, not the convergence afterwards.
-
-    What makes it cheap is that the candidates are nested: `top 6 pools`,
-    `top 8 pools` and `top 12 pools` are largely the same arcs.  So the arcs
+    Tuning each candidate properly is not affordable (median +1.4 s, up to +12 s,
+    for a median 0.01 bp), and neither is scouting cheaply then converging the
+    winner: the optimiser's expense is its *first* round, the one that samples
+    curves.  What makes this cheap is that the candidates are nested -- the arcs
     are pooled, sampled once at the widest ladder anyone needs, and every
-    candidate is then optimised against that shared set in pure Python, where
-    an evaluation is microseconds.  One batch, no matter how many candidates.
+    candidate optimised against that shared set in Python.  One batch, no matter
+    how many candidates.
 
     `plans` is `(legs, dst_slot, nominal_in, nominal_out)` per candidate.
     Returns a `ScoutResult` per usable candidate with the *predicted* output --
-    predicted, not verified: composing interpolated curves is what the model
-    was doing wrong in the first place, so nothing here may be believed without
-    a real quote.  The caller quotes the survivors.
+    nothing here may be believed without a real quote, which the caller takes.
     """
     tops: dict[tuple, float] = {}
     for legs, _dst, nominal_in, nominal_out in plans:
