@@ -12,24 +12,11 @@ import os
 
 # Before numpy loads, and therefore before anything that imports it.
 #
-# The solve is thousands of *tiny* factorisations -- §9.4 restricts each pivot
-# to its own connected component, so `n` is 5-10 -- and one route can make
-# 4,713 calls into `numpy.linalg.solve`.  At that size OpenBLAS's threading is
-# pure overhead: the arithmetic is nanoseconds and the thread handoff is not.
-# Measured on the solve stage alone, five reps, minimum, eight threads against
-# one: USDC->USDT 103 vs 55 ms, USDC->WETH 50 vs 35, stETH->WETH 106 vs 53,
-# USDC->CRV 232 vs 135.  Twice as fast in all four -- but that is 35-135 ms of
-# routes taking 600-11,400 ms, so end to end it disappears into noise.  The
-# reproducibility below is the reason this is on by default, not the speed.
-#
-# It also makes the answer reproducible.  A threaded reduction sums in whatever
+# **For reproducibility, not speed.**  A threaded reduction sums in whatever
 # order the threads finish, so the §12.4 flow-conservation residual moves
-# between runs; on that pair it straddled the tolerance and the route failed
-# outright with eight threads while succeeding with one.  A router whose answer
-# depends on how busy the machine is cannot be verified against anything.
-#
-# Set EROUTER_BLAS_THREADS to override -- the §4 price fit is one dense solve
-# at n~300 per block and is the only part that could want more.
+# between runs -- on one pair it straddled the tolerance and the route failed
+# with eight threads and succeeded with one.  Each pivot is `n` = 5-10 (§9.4),
+# where threading is pure overhead anyway.  EROUTER_BLAS_THREADS overrides.
 _THREADS = os.environ.get("EROUTER_BLAS_THREADS", "1")
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
@@ -385,14 +372,9 @@ def _ledger(result, nodes, dst, in_human, out_human) -> dict:
     return ledger
 
 
-#: Symbol glyphs nobody types, folded to the letter they stand for.
-#
-# Tether's ticker is spelled with U+20AE TETHER SIGN on several chains -- tac
-# calls it `USD₮` and xlayer `USD₮0` -- and `--from USDT` there fails with "no
-# token with symbol 'USDT' in the universe" while the pool it wants is right
-# there and named `USDT/WTAC`.  NFKC does not fold this codepoint, so the map is
-# explicit.  A chain carrying both spellings is not a problem: they resolve to
-# one symbol and the existing TVL ranking picks between them out loud.
+#: Symbol glyphs nobody types, folded to the letter they stand for.  Tether is
+#: spelled with U+20AE on tac and xlayer, which NFKC does not fold, so `--from
+#: USDT` fails there against a pool plainly named `USDT/WTAC`.
 GLYPH_FOLD = {"₮": "T"}
 
 
@@ -469,19 +451,9 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
         if not quiet:
             print(f"  {WARN} no state cache for {chain.name}; run `erouter warmcache`")
         return None
-    # Retry a failed warm rather than quoting without one.
-    #
-    # `lb.drpc.live` is a load balancer, so a request can land on a backend
-    # that answers differently or not at all -- the shape retry inside
-    # `_warm_by_proof` exists for the same reason.  What it does not cover is a
-    # warm that raises partway through, and the fallback for that was to quote
-    # over the wire, which is the one outcome nobody wants: it is slower, and
-    # it silently produces a *different* answer from the local path.
-    #
-    # So: try again, and say what went wrong rather than only that something
-    # did.  `--traceback` keeps the stack, because a warm that fails twice with
-    # `'NoneType' object is not iterable` is a bug in this code and the message
-    # alone cannot say where.
+    # Retry rather than quoting without a warm: the endpoint is a load
+    # balancer, so a raised warm is often transient, and falling back to the
+    # wire silently produces a *different* answer from the local path.
     last: Exception | None = None
     for attempt in range(WARM_ATTEMPTS):
         try:
@@ -632,25 +604,15 @@ def _warm_once(rpc, chain, load, nodes, cache, *, quiet: bool,
     evm = LocalEvm(rpc, cache=cache)
     stats = evm.prime()
     fresh = cache.unknown(p.address for p in load.pools)
-    # Re-list every arc, not only the new pools.  `prime` refreshes values
-    # and `unknown` finds new pools, but neither sees a pool that has begun
-    # reading a slot it did not read before -- an oracle round that
-    # advanced, a band that moved.  Those slots then read as zero, which is
-    # not a small error: it gives an arc the wrong `a`, `B` and `cap`, and
-    # the solve built on it violates flow conservation outright.  Measured
-    # at a block 10,802 after the cache was built, 18 such slots turned
-    # USDC->sUSDS 3M from a route into a hard failure, and recovering them
-    # brought every size back to within 0.2 bp of the wire path.
+    # Re-list every arc, not only the new pools: neither `prime` nor
+    # `unknown` sees a pool that has begun reading a slot it did not read
+    # before -- an oracle round advancing, a band moving.  Those read as zero,
+    # which gives the arc a wrong `a`, `B` and `cap` and breaks flow
+    # conservation.  Must run *before* routing; a failed route produces no
+    # output for an after-the-fact check to compare.
     #
-    # One access-list pass over 887 arcs, ~1.0-1.4 s, concurrent.  It has
-    # to happen *before* routing: a route that fails produces no output to
-    # compare, so the after-the-fact check downstream never fires.
-    # `nodes is None` is the first half of a split warm: values are loaded now
-    # so the pool getters that follow can be answered locally, and the
-    # access-list pass waits until there are arcs to list.  Explicit, because
-    # it otherwise "works" only because balances are still unread at that
-    # point and `build_arcs` quietly yields nothing -- which would stop being
-    # true the moment anything upstream changed.
+    # `nodes is None` is the first half of a split warm: values now, access
+    # lists once there are arcs to list.
     learned = 0
     if nodes is not None:
         refs, _ = build_arcs(load.pools, nodes)
@@ -661,14 +623,10 @@ def _warm_once(rpc, chain, load, nodes, cache, *, quiet: bool,
             cache.save()
 
 
-    # Degrade on an *incomplete* warm too, not only on a raised one.  Every
-    # slot the sweep could not read is a zero the EVM will happily quote
-    # against, so an incomplete local EVM does not fail -- it answers, and
-    # answers differently from the chain.  That is what made a pinned block
-    # non-reproducible across processes: identical code at 25,769,788 returned
-    # 5,001,179.88 over 7 legs and 5,002,399.84 over 24, depending on whether
-    # the storage sweep had happened to succeed.  The wire path is slower and
-    # right, which is the correct way round for a tie-break.
+    # Degrade on an *incomplete* warm, not only a raised one: an unread slot
+    # is a zero the EVM quotes against, so it answers rather than failing --
+    # and answers differently from the chain, which made a pinned block
+    # non-reproducible across processes.
     if not stats.complete:
         # Raised, not returned: an incomplete sweep is the same transient the
         # retry above exists for -- slots the endpoint declined to serve this
@@ -847,28 +805,14 @@ def cmd_route(args: argparse.Namespace) -> int:
                            chain_id=chain.chain_id)
     client = quoter_client(rpc, chain)
 
-    # Warm the local EVM *before* asking any pool or vault anything.
+    # Warm the local EVM *before* asking any pool anything: every getter below
+    # reads storage the warm already fetched, so over the wire they pay twice.
     #
-    # Every getter below -- dialects, balances, LP tokens, the node map, the
-    # stake and lending arcs -- reads storage the warm has already fetched, so
-    # over the wire they are paying twice for the same bytes.  Measured on a
-    # cold start: balances alone were 9,098 ms over the wire and 1,152 ms
-    # against a primed EVM, and the answers are identical on all 385 pools.
-    #
-    # Only when the cache covers the universe.  A pool the cache has never
-    # seen has no slots loaded, and py-evm reads an absent slot as **zero** --
-    # which is a plausible balance, so the pool would be silently dropped or
-    # mis-sized rather than erroring.  When anything is unknown, everything
-    # goes over the wire as before and the warm still happens, just later.
-    #
-    # And only for the pools' *own* getters.  The state cache holds what the
-    # quoter touched, which is pool storage -- not the ERC20s and not the
-    # vaults.  `check_reserves_are_real` asks a token what it holds, and the
-    # node map and stake arcs ask vaults their rates; against an unloaded
-    # account every one of those reads zero, which is a plausible answer.
-    # Measured: routing them locally dropped pumpBTC/WBTC and sUSD/sUSDe as
-    # empty when the wire says they hold $842,751 and $110,637.  Those stay on
-    # the wire, and `reader` is only ever handed pool getters.
+    # Two conditions, both because an absent slot reads as **zero** rather than
+    # erroring, and zero is a plausible balance.  Only when the cache covers
+    # the universe; and only for the pools' *own* getters -- the cache holds
+    # pool storage, not the ERC20s' or the vaults', so token and vault reads
+    # stay on the wire.  `reader` is only ever handed pool getters.
     evm = None
     reader = client
     warm_cache = _state_cache_for(chain)
@@ -917,15 +861,10 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     facts = FactsCache.load(chain.chain_id, chain.name.lower())
 
-    # The wrapper stages read vaults and ERC20s rather than pools, so no arc
-    # access list names those accounts: 377 calls, 6 round trips, 1.3 s.
-    #
-    # Run them locally when the cache covers every slot they read, and then
-    # *check* -- coverage says the state should be there, the signature says it
-    # was.  A missing slot reads as zero, which makes a vault look unusable and
-    # drops its arc in silence; that is what an account-level check let
-    # through, 12 stake arcs where the chain gives 19.  A signature that does
-    # not match costs one wire pass, which is what today costs anyway.
+    # Wrapper stages read vaults and ERC20s, which no arc access list names.
+    # Run them locally when the cache covers every slot, then *check* the
+    # signature: coverage says the state should be there, the signature says it
+    # was.  A missing slot reads as zero, silently dropping a vault's arc.
     recorded: list = []
     nodes = wrappers = stake_arcs = None
     live_cache = getattr(evm, "cache", None) or warm_cache
@@ -950,27 +889,12 @@ def cmd_route(args: argparse.Namespace) -> int:
         # values loaded before it.
         with _boot("arc slots"):
             _learn_arcs(evm, rpc, chain, load, nodes, quiet=False)
-    # The local EVM comes first, and that ordering is a measured result
-    # rather than a preference.
-    #
-    # Building the models before it, over the wire, looked like the way to
-    # learn which pools never need warming -- and it does, but the models are
-    # built *from* the storage that warm would have fetched. Skipping the
-    # sweep does not remove the read; it moves it from one batched dumper pass
-    # to several hundred per-pool getter calls. On the private node that cost
-    # 5-8 s and looked like a win against 5,932 slots. On the scoped endpoint,
-    # which is what the CLI uses by default, it turned startup into minutes:
-    # `route --from crvUSD --to sDOLA` never finished initialising.
-    #
-    #     HEAD          5,932 slots in ~3.3 s, no wire parameter reads
-    #     wire-first    2,891 slots, parameters for ~359 pools over the wire
-    #
-    # So the sweep stays. What the verdict cache is worth is the *gate* --
-    # 2,406 probes down to 84 -- which is pure repetition of a question already
-    # answered, and that saving does not depend on the ordering at all.
-    # Already warmed above when the cache covered the universe, and the
-    # getters in between were answered from it.  Otherwise this is where the
-    # warm happens, as it always did.
+    # The local EVM comes first, and that ordering is measured.  The models
+    # are built *from* the storage the warm fetches, so building them first
+    # does not remove the read -- it moves it from one batched pass to several
+    # hundred per-pool getter calls, which on the scoped endpoint turned
+    # startup into minutes.  The verdict cache's value is the *gate* (2,406
+    # probes down to 84), which does not depend on the ordering.
     if evm is not None:
         client = reader
     elif args.local:
@@ -1020,17 +944,12 @@ def cmd_route(args: argparse.Namespace) -> int:
                 # the old ones would produce something self-consistent and
                 # wrong -- the failure this whole hook exists to prevent.
                 read_balances(load.pools, measured, None, chain.chain_id)
-            # A vault has no curve: `previewDeposit` is `x * S / A` at a fixed
-            # block, so one ratio per direction covers every size.  Which
-            # rounding convention it uses is asked, not assumed, and the two
-            # directions are decided separately -- a vault can quote a deposit
-            # exactly and charge on the way out.
-            # Both places a vault can appear, which is not obvious and cost a
-            # measurement to notice: as a wrapper *arc*, and -- for the ones
-            # the node map merged -- as a conversion *leg*, where the vault is
-            # a node member rather than an arc endpoint.  Collecting only the
-            # arcs modelled 28 directions and left the three vaults that
-            # actually block routes (scrvUSD, sDOLA, ynETHx) unmodelled.
+            # A vault has no curve, so one ratio per direction covers every
+            # size; the directions are decided separately, since a vault can
+            # quote a deposit exactly and charge on the way out.  Both places a
+            # vault appears are collected -- as a wrapper *arc*, and for merged
+            # ones as a conversion *leg* -- because arcs alone missed scrvUSD,
+            # sDOLA and ynETHx, the three that actually block routes.
             from ..core.pipeline import build_arcs as _build_arcs
             _refs, _ = _build_arcs(load.pools, nodes)
             _lp_pools = {r.pool.lower() for r in _refs
@@ -1049,14 +968,11 @@ def cmd_route(args: argparse.Namespace) -> int:
                     build_exact_twocrypto(load.pools, measured, cache=verdicts),
                     crypto,
                     build_exact_vaults(vault_arcs, measured),
-                    # Deposits and withdrawals run the same invariant, with `D`
-                    # moving.  Only pools whose swaps already reproduce are
-                    # candidates -- every parameter comes from that model --
-                    # and only those that actually carry an LP arc: LP arcs
-                    # exist where the LP token is itself traded, which is five
-                    # pools on mainnet, and checking all 252 that have a swap
-                    # model cost ~1,000 calls at startup to model 76 nobody
-                    # asks about.
+                    # Only pools whose swaps already reproduce -- every
+                    # parameter comes from that model -- and only those
+                    # carrying an LP arc, which needs the LP token to be traded
+                    # somewhere.  Five pools on mainnet, against 252 with a
+                    # swap model.
                     build_exact_lp([p for p in load.pools
                                     if p.address.lower() in _lp_pools],
                                    stable, measured),
@@ -1844,13 +1760,9 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     # universe already read them.
     holders: dict[str, list[tuple[str, int]]] = {}
     for pool in load.pools:
-        # `held`, never `balances`.  The latter is the pool's own accounting,
-        # which is a claim rather than a holding -- the same fiction
-        # `check_reserves_are_real` exists to catch.  Borrowing against it
-        # picks an address that reports reserves and owns nothing, and the
-        # transfer then fails for a reason that has nothing to do with the
-        # token being tested: eight of eight sampled holders had recorded
-        # reserves and a `balanceOf` of zero.
+        # `held`, never `balances`: the latter is the pool's own accounting, a
+        # claim rather than a holding, so borrowing against it picks addresses
+        # that report reserves and own nothing.
         for coin, held in zip(pool.coins, pool.held, strict=False):
             if held > 0:
                 holders.setdefault(coin.address.lower(), []).append((pool.address, held))
@@ -1879,13 +1791,10 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
     # --- what quotes but cannot be traded ---------------------------------
     #
-    # No second execution: the gas pass above already ran every leg for real,
-    # and a revert there is exactly the evidence wanted here.  Splitting them
-    # would double the work and let the two answers drift.
-    #
-    # A leg that could not be funded is *untested*, not broken.  Conflating
-    # them would delete good pools whose input token cannot be conjured, which
-    # is a far worse failure than the revert being guarded against.
+    # No second execution: the gas pass already ran every leg, and a revert
+    # there is the evidence wanted here.  A leg that could not be *funded* is
+    # untested, not broken -- conflating them deletes good pools whose input
+    # token cannot be conjured.
     if not args.skip_executability:
         broken, healed = {}, []
         for miss in got["failed"]:
@@ -1904,11 +1813,8 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
     # --- the survey: protocols that quote and cannot be traded -------------
     #
-    # The pass above only sees legs a route chose, so it can verify what we
-    # execute but never discover a pool we already refuse -- a blacklisted pool
-    # builds no arcs and is never reached again.  These are checked directly,
-    # every build, which is also what lets a pool come back if a protocol is
-    # unpaused.
+    # As above: checked directly every build, because the pass over chosen legs
+    # cannot discover a pool we already refuse.
     if not args.skip_executability and getattr(chain, "watch", ()):
         from .executability import revert_reason
 
@@ -1944,15 +1850,10 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
     # --- can each wrapper still be entered, and still be left? -------------
     #
-    # A property of the token, not of a pool or a swap, so every coin of every
-    # pool is asked both ways rather than a list someone maintains.
-    #
-    # Under boa rather than revm, and only here.  revm refuses a caller that
-    # has code (EIP-3607) and every holder of these tokens is a pool, so
-    # borrowing from one is impossible there -- which left 19 redemptions
-    # untestable and no way to reach them.  `boa.env.prank` has no such rule.
-    # It is slower, which is why quoting does not use it, but it costs 71s once
-    # per build and takes redemption coverage from 11 of 30 to all of them.
+    # A property of the token, so every coin is asked both ways rather than
+    # kept on a list.  Under boa rather than revm, and only here: revm refuses
+    # a caller with code (EIP-3607) and every holder of these tokens is a pool,
+    # which left 19 redemptions untestable.  `boa.env.prank` has no such rule.
     if not args.skip_executability:
         import boa
 
@@ -1981,11 +1882,8 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
     # --- the survey: protocols that quote and cannot be traded -------------
     #
-    # The pass above only sees legs a route chose, so it can verify what we
-    # execute but never discover a pool we already refuse -- a blacklisted pool
-    # builds no arcs and is never reached again.  These are checked directly,
-    # every build, which is also what lets a pool come back if a protocol is
-    # unpaused.
+    # As above: checked directly every build, because the pass over chosen legs
+    # cannot discover a pool we already refuse.
     if not args.skip_executability and getattr(chain, "watch", ()):
         from .executability import revert_reason
 
@@ -2088,15 +1986,10 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
     # --- what each pair does on its own ------------------------------------
     #
-    # The floor a routing gain must clear is the pair's own movement.  Measured
-    # from a pool holding both tokens, which is the rate itself -- an earlier
-    # version stored one price per token and divided, and each token was priced
-    # in whatever its own deepest pool paired it with, so the ratio was
-    # meaningless.  One series per arc, one request per block.
-    # Gated on its own flag, not on `--skip-executability`.  These two answer
-    # unrelated questions and age at different rates: what a pool costs to
-    # execute holds for months, while how far its rate moves against its own
-    # bound is this week's market.
+    # The floor a routing gain must clear is the pair's own movement, measured
+    # from a pool holding both tokens so the rate is the rate.  Its own flag,
+    # not `--skip-executability`: execution cost holds for months, rate
+    # movement is this week's market.
     if not args.skip_drift:
         from .drift import SAMPLE_BLOCKS, SAMPLE_FRACTION, sample_rates
 
@@ -2108,13 +2001,10 @@ def cmd_gascal(args: argparse.Namespace) -> int:
             for i, j in pool.swap_pairs():
                 if i >= len(pool.balances) or pool.balances[i] <= 0:
                     continue
-                # Every pool holding the pair, not just the deepest: the
-                # busiest one is what reveals the movement, and it is not
-                # always the biggest.
-                # Canonical, not raw.  ETH and WETH are one node, so pools
-                # quoting each of them against stETH answer the same question;
-                # keyed raw they split into two keys over disjoint pools and
-                # disagreed -- 0.0533 bp against 1.2915 for the same pair.
+                # Every pool holding the pair -- the busiest reveals the
+                # movement and is not always the biggest -- keyed canonically,
+                # since ETH and WETH are one node and keying raw split the same
+                # pair across disjoint pools that then disagreed.
                 key = (f"{nodes.canonical(pool.coins[i].address)}"
                        f"|{nodes.canonical(pool.coins[j].address)}"
                        f"@{pool.address.lower()}")
@@ -2131,14 +2021,10 @@ def cmd_gascal(args: argparse.Namespace) -> int:
 
         # --- how often each pool's own minimum-out would trip ---------------
         #
-        # The same arcs, resampled at a minute apart instead of hours, scored
-        # against the bound the executor will really set: 20% of the pool's fee,
-        # floored for the pools on the exception list.  One request per block
-        # for the whole universe, so the second sweep costs what the first did.
-        #
-        # The list comes from the *four-hour* series above rather than from
-        # this one, and that ordering matters: what it asks is what the pair
-        # does, and half an hour of a quiet pool cannot answer it.
+        # The same arcs a minute apart instead of hours, scored against the
+        # bound the executor really sets.  The exception list comes from the
+        # *four-hour* series above: it asks what the pair does, and half an
+        # hour of a quiet pool cannot answer that.
         from .revert_risk import (
             FINE_BLOCKS,
             breach_risk,
@@ -2332,12 +2218,9 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
 
     fresh = cache.unknown(p.address for p in load.pools)
     # The quoter is not a pool, so `unknown` never asks about it -- but the
-    # local EVM reads *its* code from this cache too, and a redeployment gives
-    # it an address nothing here has seen.  Reporting "nothing to do" while the
-    # contract every quote goes through is missing is the wrong answer, so it
-    # is checked explicitly.  (In practice a route recovers on its own:
-    # `refresh_arcs` passes the quoter to `warm`, which learns it.  This is so
-    # the cache is complete before one is run, not after.)
+    # local EVM reads its code from this cache, and a redeployment gives it an
+    # address nothing here has seen.  Checked explicitly, so the cache is
+    # complete before a route runs rather than after.
     quoter = (getattr(chain, "quoter", "") or "").lower()
     # Known means *loadable*, not merely recorded.  `prime` inserts the accounts
     # in `slots()`, so code without an entry there is never put into the EVM and
@@ -2346,14 +2229,10 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
                                   and quoter in cache.accounts)
     if not quoter_known:
         print(f"  {WARN} quoter {quoter[:12]} is not in the cache -- learning it")
-        # Read it straight off the chain rather than by recording a route
-        # through it.  Learning it *by use* cannot work when it is missing:
-        # every call through an address with no code answers zero, so the probe
-        # that was meant to capture the code calibrates nothing and the direct
-        # path below never touches the quoter at all.  Measured after a
-        # redeployment -- warmcache reported "learning it" and learned zero code
-        # blobs twice in a row, and the next route read all ten gnosis pools as
-        # holding nothing.
+        # Read straight off the chain, not by recording a route through it:
+        # learning it *by use* cannot work when it is missing, since every call
+        # through a codeless address answers zero and the probe meant to
+        # capture it calibrates nothing.
         try:
             blob = rpc.fetch("eth_getCode", [quoter, hex(rpc.block)])
             code = bytes.fromhex(blob[2:] if blob.startswith("0x") else blob)
@@ -2380,20 +2259,10 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
         return 0
 
     started = _time.perf_counter()
-    # Only the quoter path needs a route to record.  Off mainnet the recorded
-    # calls are discarded anyway (see below), and running `prepare` for them
-    # meant demanding a src and dst pair that most chains do not have: of 17,
-    # thirteen failed here on "no token with symbol 'WETH'" or "no path from
-    # USDC to WETH" -- gnosis, polygon, bsc, sonic, avalanche, etherlink,
-    # monad, plasma, xlayer, robinhood, celo, tac, fraxtal.  The universe is
-    # what is being cached, not a route through it.
-    # Record a real route where one can be had.  It covers call shapes
-    # `warm_arcs` does not -- ERC4626 reads, wrappers, stake arcs -- so it is
-    # worth having, but it is not worth *requiring*: the pair is hardcoded to
-    # USDC/WETH and most chains have neither.  Deploying tac's quoter put it
-    # back on this path and it failed with "no token with symbol 'USDC'", which
-    # is a caching command refusing to cache over a token it was never asked
-    # about.
+    # Record a real route where one can be had -- it covers call shapes
+    # `warm_arcs` does not (ERC4626 reads, wrappers, stake arcs) -- but never
+    # *require* one: the pair is hardcoded to USDC/WETH and thirteen of
+    # seventeen chains have neither.  The universe is what is being cached.
     recorded = False
     if chain.quoter:
         try:
