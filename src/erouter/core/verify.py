@@ -2,23 +2,21 @@
 
 The model is used for combinatorics and the chain for arithmetic.  Every
 candidate goes out in **one** `quote_routes` call at the pinned block, because
-chained `get_dy` cannot be batched any other way -- without the quoter, twenty
-multi-hop candidates would be twenty sequential round trips.
+chained `get_dy` cannot be batched any other way.
 
 Four rules from §7, all load-bearing here:
 
 1. *Net shared pools before quoting.*  Enforced upstream by the edge-flow
-   formulation, and asserted here: a candidate touching a pool twice is
-   rejected rather than quoted, because a view-only call cannot see its own
-   earlier leg.
+   formulation, and asserted here: a candidate touching a pool twice is rejected
+   rather than quoted, because a view-only call cannot see its own earlier leg.
 2. *Pin the block.*  All candidates share one `Transport`, hence one block.
 3. *Quote at the real size.*  The legs carry the amounts the model chose.
 4. *Treat a failed quote as arc removal.*  A zero comes back as `reverted` and
    the candidate is dropped, never as an error.
 
 What this catches that no amount of modelling will: paused pools, reentrancy
-locks, fee-on-transfer tokens, stale indexer state -- and, most importantly
-here, the difference between a fitted reference price and the real curve.
+locks, fee-on-transfer tokens, stale indexer state -- and the difference between
+a fitted reference price and the real curve.
 """
 
 from __future__ import annotations
@@ -35,54 +33,38 @@ from .realize import RealizationError, check_one_arc_per_pool, realize
 from .risk import REVERT_COST_BP, RiskTable, expected_value
 from .types import ArcKind, PoolArc
 
-# Per-kind execution gas lives in `gas.py`; a flat per-leg figure over-charged
-# wraps by 3x and under-charged single-coin withdrawals.
-# Outputs within this relative distance are the same answer; take the cheaper
-# route to execute.  0.05 bp is far below any gas cost worth the extra hop.
-# What counts as "the same answer".  A flat fraction was wrong in both
-# directions, because it stands in for a cost `score` has already subtracted.
-#
-# `score` nets gas off every candidate before ranking, so the only thing left
-# for a tolerance to absorb is noise in the quotes themselves -- integer
-# rounding, around 1e-12 relative.  A flat 5e-6 was instead absorbing a whole
-# basis point of real difference at low gas: measured on WETH->stETH 100 at
-# 0.049 gwei, a 4-leg route quoting 100.000239 stETH lost to a 2-leg one at
-# 99.999824, because 0.0415 bp fell under the 0.05 bp line -- while the two
-# extra legs cost 1.5e-5 stETH of gas, thirty times less than the gain thrown
-# away.  Minting stETH is exactly 1:1 and can never lose; the router had the
-# answer and discarded it.
-#
-# So the tolerance is what one more leg actually costs, in output units, and
-# nothing more.  At 30 gwei that is large and the preference for short routes
-# comes back on its own; at 0.05 gwei it is nearly zero and a real gain is
-# taken.  The floor keeps a tie from turning on the last bit of a quote.
+# What counts as "the same answer".  `score` nets gas off every candidate before
+# ranking, so the only thing left for a tolerance to absorb is noise in the
+# quotes themselves -- integer rounding, around 1e-12 relative.  A flat 5e-6 was
+# instead absorbing a whole basis point of real difference at low gas: measured
+# on WETH->stETH 100 at 0.049 gwei, a 4-leg route lost to a 2-leg one over
+# 0.0415 bp, while the two extra legs cost thirty times less than the gain thrown
+# away.  So the tolerance is what one more leg actually costs, in output units,
+# and nothing more; the floor keeps a tie from turning on the last bit.
 TIE_FLOOR = 1e-12
 
 #: Fraction of the trade re-quoted to find what the same route would have paid
 #: if the trade had been small.
 #
-# The finished route is quoted a second time at this fraction of the input.
 # Every leg's share is a fraction of its slot's balance, so scaling the input
-# scales every branch with it: the shape of the route is held fixed and only
-# the size changes, which is exactly the comparison price impact is supposed to
-# make.  5% is small enough that its own impact is a rounding error against the
-# full trade's and large enough to stay clear of integer dust on a six-decimal
-# token.
+# scales every branch with it: the shape of the route is held fixed and only the
+# size changes, which is exactly the comparison price impact is supposed to make.
+# 5% is small enough that its own impact is a rounding error against the full
+# trade's, and large enough to stay clear of integer dust on a 6-decimal token.
 IMPACT_FRACTION = 0.05
 
 #: What one leg is charged beyond its gas, in basis points of the trade.
 #
 # Gas is a real per-leg price and at any ordinary gas price it decides this on
-# its own: measured on USDC->WETH $10k, the winner is 9 legs at 0.045 gwei,
-# 3 at 5 gwei and 1 at 30.  This term is for the case gas stops arbitrating,
-# where the relaxation will take a long tail of branches for a fraction of a
-# basis point each.  On that same trade, going from 2 legs to 3 buys 8.4 bp
-# and going from 3 to 9 buys 0.85 -- while at $100k, 6 legs to 12 buys 60.
-# Whatever is charged has to leave the second of those alone.
+# its own: measured on USDC->WETH $10k, the winner is 9 legs at 0.045 gwei, 3 at
+# 5 gwei and 1 at 30.  This term is for the case gas stops arbitrating, where the
+# relaxation will take a long tail of branches for a fraction of a basis point
+# each.  Whatever is charged has to leave alone the cases where the legs earn
+# their keep -- at $100k, 6 legs to 12 buys 60 bp.
 #
-# The value is the measured knee.  Swept at 0.045 gwei, where gas stops
-# arbitrating (`scripts/leg_cost_frontier.py`), as legs taken and basis points
-# given up against charging nothing:
+# The value is the measured knee, swept at 0.045 gwei
+# (`scripts/leg_cost_frontier.py`) as legs taken and basis points given up
+# against charging nothing:
 #
 #     case                     0.0      0.02      0.05       0.1       0.2
 #     USDC->WETH  10k     31L +0.00 10L +0.62 10L +0.62 10L +0.62  9L +0.88
@@ -92,14 +74,13 @@ IMPACT_FRACTION = 0.05
 #     USDC->USDT  20M      4L +0.00  4L +0.00  2L +0.20  1L +0.34  1L +0.34
 #     crvUSD->WETH 1M     11L +0.00 11L +0.00 11L +0.00 11L +0.00 11L +0.00
 #
-# 0.02 takes 21 legs off the $10k trade for 0.62 bp and halves USDC->USDT $1M
-# for nothing, while costing zero on every case where the legs are earning
-# their keep.  Above 0.1 it starts buying simplicity with real money.
+# 0.02 takes 21 legs off the $10k trade for 0.62 bp and halves USDC->USDT $1M for
+# nothing, while costing zero where the legs are earning their keep.  Above 0.1
+# it starts buying simplicity with real money.
 #
 # Proportional rather than absolute, which is the right shape: what avoiding a
 # leg is worth scales with the trade, and so does what the leg earns, so the
-# charge stays self-limiting -- 12 legs cost 0.24 bp against the 60 bp they buy
-# at $100k.
+# charge stays self-limiting.
 LEG_COST_BP = 0.02
 
 
@@ -118,11 +99,11 @@ def realize_candidates(
 ) -> None:
     """Turn each candidate's flow into legs, marking the ones that cannot be.
 
-    `max_legs` defaults to the quoter's ABI capacity, which is what *we* can
-    price -- not what anything can execute.  A deployed router has its own,
-    much tighter, limit: curve_solver's caps at 4 legs and 16 ops.  Until this
-    router emits calldata there is nothing to violate, so the default stays
-    permissive and the knob exists for whoever has an executor to satisfy.
+    `max_legs` defaults to the quoter's ABI capacity, which is what *we* can price
+    -- not what anything can execute.  A deployed router has its own, much
+    tighter, limit.  Until this router emits calldata there is nothing to violate,
+    so the default stays permissive and the knob exists for whoever has an
+    executor to satisfy.
     """
     for candidate in candidates.candidates:
         active = np.flatnonzero(candidate.psi > 0)
@@ -183,11 +164,10 @@ def verify(
     neither is an element law and neither may enter the convex core (§11.1).
     """
     # Quote whatever is new.  Ranking happens unconditionally below: this is
-    # called more than once per route (candidates, then the direct floor, then
-    # the refit), and returning early when nothing needs quoting used to leave
-    # ranks stale from an earlier call -- including a rank of 1 that a solo
-    # verification had handed to the refit candidate.  The winner is chosen by
-    # rank, so a stale rank silently picks the wrong route.
+    # called more than once per route (candidates, then the direct floor, then the
+    # refit), and returning early when nothing needs quoting used to leave ranks
+    # stale from an earlier call.  The winner is chosen by rank, so a stale rank
+    # silently picks the wrong route.
     ready = [c for c in candidates.candidates if c.status == "ready" and c.route]
     if ready:
         outs = client.quote_routes(
@@ -218,12 +198,11 @@ def verify(
                 table=gas_table)
         if risk_table is None or not candidate.route:
             return value - gas_cost
-        # Every leg carries a minimum-out at a fraction of its pool's fee, so
-        # the route lands only if none of those pools moves past its own bound
-        # while the user is confirming.  `survival` is the chance of that; the
-        # cost of the other case is one more transaction and a basis point of
-        # price movement, not the trade.  See `core/risk.py` -- the scale of
-        # this term is the whole argument.
+        # Every leg carries a minimum-out at a fraction of its pool's fee, so the
+        # route lands only if none of those pools moves past its own bound while
+        # the user is confirming.  `survival` is the chance of that; the cost of
+        # the other case is one more transaction and a basis point of price
+        # movement, not the trade.  See `core/risk.py`.
         candidate.survival = risk_table.survival(
             leg.leg for leg in candidate.route.legs)
         return expected_value(value, candidate.survival, gas_cost=gas_cost,
@@ -234,10 +213,9 @@ def verify(
 
     # Prefer the simpler route when the outputs are indistinguishable.  Measured
     # on stablecoin pairs, the relaxation happily takes a 25-leg route to gain
-    # 0.02 bp over a 1-leg one; any real gas price makes that strictly worse,
-    # and §11.1 is explicit that a fixed per-arc cost belongs in candidate
-    # selection rather than in the convex core.  Quantising the score is how a
-    # tie becomes visible to the sort at all.
+    # 0.02 bp over a 1-leg one, and §11.1 is explicit that a fixed per-arc cost
+    # belongs in candidate selection rather than in the convex core.  Quantising
+    # the score is how a tie becomes visible to the sort at all.
     for candidate in candidates.candidates:
         if not candidate.ok:
             candidate.rank = None  # a stale rank must never survive a re-verify
@@ -248,16 +226,13 @@ def verify(
     best_score = max(score(c) for c in usable)
     # What one more leg has to earn to be worth taking.  Both of its costs are
     # already inside `score` -- gas subtracted, revert risk multiplied in -- so
-    # what is left for a tolerance to absorb is one leg's gas, the granularity
-    # at which two scores are the same answer.
+    # what is left for a tolerance to absorb is one leg's gas.
     #
-    # An earlier version added a `min_gain_bp` term here, standing in for the
-    # risk of the price moving before inclusion because nothing modelled it.
-    # Something does now, and per pool rather than per route: a threshold on
-    # the gain could only ever say "long routes are suspect", where the
-    # survival product says which pools are dangerous and leaves the rest
-    # alone.  The pair-drift measurement that fed it is still collected; it is
-    # simply no longer the instrument.
+    # An earlier version added a `min_gain_bp` term here, standing in for the risk
+    # of the price moving before inclusion.  Something models that now, and per
+    # pool rather than per route: a threshold on the gain could only ever say
+    # "long routes are suspect", where the survival product says which pools are
+    # dangerous and leaves the rest alone.
     per_leg = leg_gas(ArcKind.SWAP_STABLE) * gas_price_wei / 1e18 * dst_wei_per_eth
     tolerance = max(per_leg, abs(best_score) * TIE_FLOOR)
 
@@ -270,15 +245,13 @@ def verify(
 
     # Hard floor: never rank below a plain one-hop swap.  The tie-break should
     # already give this -- a direct candidate has one leg, so it wins any tie --
-    # but "the router is never worse than a pool you could find by inspection"
-    # is a promise, not an emergent property, so it is enforced rather than
-    # assumed.
+    # but "the router is never worse than a pool you could find by inspection" is
+    # a promise, not an emergent property.
     #
-    # Compared on `score`, not on the raw quote, so that the floor speaks the
-    # same language as the ranking.  Risk pricing makes the difference real: a
-    # single hop through a pool that breaches a quarter of the time can quote
-    # the largest number on the page and still be the worse trade, and a floor
-    # reading raw output would promote it over the safe route that beat it.
+    # Compared on `score`, not on the raw quote, so the floor speaks the same
+    # language as the ranking: a single hop through a pool that breaches a quarter
+    # of the time can quote the largest number on the page and still be the worse
+    # trade.
     floor = max(
         (c for c in usable if c.kind == "direct"), key=score, default=None,
     )
@@ -347,16 +320,12 @@ def price_impact(
     nothing to compare -- a size that rounds to zero, or a quote that reverts at
     the smaller size, which happens on legs whose pool has a minimum.
 
-    One extra `quote_routes` call, at the same block, on the route that was
-    already chosen.  Against an in-process EVM that is about 3 ms; over the wire
-    it is one more round trip, which is why the caller can turn it off.
+    One extra `quote_routes` call, at the same block, on the route already chosen.
 
     **What this is not.**  The reference trade has its own impact, so this
-    understates the true spot-relative figure by roughly `fraction` of it --
-    about 5%, in the same direction for every route, and not corrected for here
-    because correcting would mean assuming a shape for the impact curve.  The
-    honest reading is "what this trade costs against a small one", which is also
-    the comparison a user is actually making.
+    understates the true spot-relative figure by roughly `fraction` of it -- about
+    5%, in the same direction for every route, and not corrected for here because
+    correcting would mean assuming a shape for the impact curve.
     """
     reference_in = int(amount_in * fraction)
     if reference_in <= 0 or amount_in <= 0 or verified_out <= 0:
