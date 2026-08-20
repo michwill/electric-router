@@ -1233,17 +1233,22 @@ def _optimise_split(
     result.counters["split_gain_bp"] = round(report.gain_bp, 2)
 
 
-def _value_flow(nodes: NodeMap, nu: np.ndarray, token: str, node: int,
-                amount: int) -> float:
-    """`amount` of `token`, in the value coordinate the solver and `realize` use.
-
-    The inverse of `_realised_delta`.  A model-free candidate is built from
-    probes rather than a solve, so it has no `psi` of its own -- and one has to
-    be supplied, not left at a placeholder: `realize` sizes every leg from it,
-    and `bps` then normalises the shares so a wrong scale is invisible on an
-    ordinary route and fatal on a capped one.
-    """
-    return (amount / 10 ** nodes.decimals(token)) * nodes.rate(token) * float(nu[node])
+#: **The model-free candidates carry `psi = 1.0` per arc, and that is fine.**
+#:
+#: `direct_candidates` and `two_step_candidates` are built from probes rather
+#: than a solve, so they have no flow of their own.  The placeholder makes the
+#: numbers look alarming -- a 10,000 USDT request measures 1.25 USDT of outgoing
+#: flow at the source, 7,973x out -- and it costs nothing, because each of these
+#: candidates is a *single path*, one pool per hop.  A one-arc group's only
+#: member is its last, so every leg is `bps = 0` and sweeps whatever the slot
+#: holds; the amounts chain from the real input and `psi` is never read for
+#: anything but shares that do not exist here.
+#:
+#: Supplying the real flow was tried and reverted: it makes USDT -> ZCHF fail
+#: with "src not connected to dst through the active set" at a block where it
+#: otherwise routes.  Why a model-free candidate's `psi` reaches the solver's
+#: reachability check at all is the open question, and worth understanding
+#: before touching this -- but the placeholder is not the bug it looks like.
 
 
 def direct_candidates(
@@ -1262,7 +1267,6 @@ def direct_candidates(
     anyone could find by inspection.
     """
     src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
-    flow = _value_flow(nodes, nu, src_token, src_node, amount_in)
     out: list[Candidate] = []
     made: list[PoolArc] = []
     for pool in pools:
@@ -1291,7 +1295,7 @@ def direct_candidates(
                 out.append(
                     Candidate(
                         label=f"direct {pool.name[:22]}",
-                        psi=np.array([flow]), certificate=False,
+                        psi=np.array([1.0]), certificate=False,
                         kind="direct", reason="DIRECT", n_arcs=1,
                     )
                 )
@@ -1403,18 +1407,10 @@ def two_step_candidates(
             _synthetic_arc(pool1, i1, j1, nodes, nu, src_node, middle),
             _synthetic_arc(pool2, i2, j2, nodes, nu, middle, dst_node),
         ]
-        # The second leg carries what the first one paid, measured: round A
-        # probed at the full `amount_in`, so `canonical` is the real arrival at
-        # the intermediate rather than a guess from the element law.
-        middle_token = nodes.canonical_of[middle]
         out.append(
             Candidate(
                 label=f"2-hop via {nodes.symbol(pool1.coins[j1].address)}",
-                psi=np.array([
-                    _value_flow(nodes, nu, src_token, src_node, amount_in),
-                    _value_flow(nodes, nu, middle_token, middle, _canonical),
-                ]),
-                certificate=False,
+                psi=np.array([1.0, 1.0]), certificate=False,
                 kind="direct", reason="TWO_STEP", n_arcs=2,
             )
         )
