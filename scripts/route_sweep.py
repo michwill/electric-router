@@ -9,13 +9,23 @@ It drives the CLI rather than the library on purpose: everything this is meant t
 catch (a missing `--chain` entry, a symbol that will not resolve, an argparse
 crash, a chain with no state cache) lives in the CLI.
 
-    uv run python scripts/route_sweep.py [chain ...]
+`--execute` runs each winner on a fork and compares what it pays to what it
+quoted.  That is a different question from `find_reverting_arcs.py`, which
+checks arcs one at a time: a route is more than its arcs -- slot accounting,
+`bps` groups, wrap legs and re-entered pools only exist once legs are composed.
+Until now the only route-level execution check was `tests/forked/`, whose
+`chain` fixture is hardcoded to ethereum, so fourteen chains had none.
+
+Off by default because it needs an unrestricted endpoint to fork.
+
+    uv run python scripts/route_sweep.py [chain ...] [--execute]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -98,7 +108,21 @@ def pick_pair(chain, floor: float, rpc):
     return None, None, None, 0.0
 
 
-def route(name: str, chain, floor: float, rpc) -> dict:
+
+def _executed(output: str) -> dict:
+    """What `--execute` reported, if it was asked for.
+
+    Parsed from the CLI's own lines rather than recomputed, so the sweep agrees
+    with what a person running the same command sees.
+    """
+    got = re.search(r"executed\s+([\d,]+\.\d+)\s+\S+\s+([+-][\d.]+) bp", output)
+    if got:
+        return {"executed": got.group(1), "drift_bp": float(got.group(2))}
+    why = re.search(r"execute: (.+)", output)
+    return {"executed": None, "exec_note": why.group(1).strip()[:60] if why else ""}
+
+
+def route(name: str, chain, floor: float, rpc, execute: bool = False) -> dict:
     pool, src, dst, amount = pick_pair(chain, floor, rpc)
     if pool is None:
         return {"chain": name, "status": "no pair", "note": "no pool with two funded coins"}
@@ -106,6 +130,8 @@ def route(name: str, chain, floor: float, rpc) -> dict:
     cmd = ["uv", "run", "erouter", "route",
            "--chain", name, "--from", src.address, "--to", dst.address,
            "--amount", f"{amount:.6f}", "--min-tvl", str(floor), "--json", str(out)]
+    if execute:
+        cmd += ["--execute", "--private"]
     started = time.perf_counter()
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_S)
@@ -129,15 +155,20 @@ def route(name: str, chain, floor: float, rpc) -> dict:
                legs=len(result.get("legs") or []),
                pools=diag.get("pools") or diag.get("arcs_calibrated"),
                impact_bp=impact.get("bp"))
+    if execute:
+        row.update(_executed(done.stdout))
     return row
 
 
-def named(name: str, chain, floor: float, src: str, dst: str, amount: str) -> dict:
+def named(name: str, chain, floor: float, src: str, dst: str, amount: str,
+          execute: bool = False) -> dict:
     """One case from `NAMED_CASES`, run through the CLI like any other."""
     out = Path(tempfile.mkdtemp()) / "route.json"
     cmd = ["uv", "run", "erouter", "route", "--chain", name,
            "--from", src, "--to", dst, "--amount", amount,
            "--min-tvl", str(floor), "--json", str(out)]
+    if execute:
+        cmd += ["--execute", "--private"]
     started = time.perf_counter()
     try:
         done = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT_S)
@@ -158,11 +189,14 @@ def named(name: str, chain, floor: float, src: str, dst: str, amount: str) -> di
                certificate=bool(res.get("certificate")),
                legs=len(result.get("legs") or []),
                impact_bp=impact.get("bp"))
+    if execute:
+        row.update(_executed(done.stdout))
     return row
 
 
 def main(argv: list[str]) -> int:
-    wanted = argv or list(chain_table.CHAINS)
+    execute = "--execute" in argv
+    wanted = [a for a in argv if not a.startswith("-")] or list(chain_table.CHAINS)
     rows = []
     for name in wanted:
         chain = chain_table.CHAINS[name]
@@ -170,13 +204,13 @@ def main(argv: list[str]) -> int:
         try:
             rpc = JsonRpcTransport(_rpc_url(chain, argparse.Namespace(rpc=None)),
                                    chain_id=chain.chain_id)
-            row = route(name, chain, floor, rpc)
+            row = route(name, chain, floor, rpc, execute)
         except Exception as exc:  # a chain that cannot even list its pools
             row = {"chain": name, "status": "error", "note": str(exc)[:70]}
         rows.append(row)
         for src, dst, amount in NAMED_CASES.get(name, ()):
             try:
-                rows.append(named(name, chain, floor, src, dst, amount))
+                rows.append(named(name, chain, floor, src, dst, amount, execute))
             except Exception as exc:
                 rows.append({"chain": name, "status": "error",
                              "pair": f"{src}->{dst}", "note": str(exc)[:70]})
@@ -185,19 +219,35 @@ def main(argv: list[str]) -> int:
                   f"{shown.get('pair','')[:30]:<30} {shown.get('ms', 0):>7.0f} ms  "
                   f"{shown.get('note','')}", flush=True)
 
+    tail = f" {'drift bp':>9}" if execute else ""
     print(f"\n{'chain':<11} {'status':<9} {'pair':<30} {'legs':>4} {'pools':>6} "
-          f"{'ver':>4} {'cert':>5} {'impact':>7} {'ms':>7}")
-    print("-" * 92)
+          f"{'ver':>4} {'cert':>5} {'impact':>7} {'ms':>7}{tail}")
+    print("-" * (92 + len(tail)))
     for row in rows:
         impact = row.get("impact_bp")
         shown = f"{impact:.2f}" if impact is not None else "-"
+        drift = ""
+        if execute:
+            if row.get("executed"):
+                drift = f" {row['drift_bp']:>+9.4f}"
+            elif row.get("status") == "ok":
+                drift = f" {'REVERTED':>9}"
+            else:
+                drift = f" {'-':>9}"
         print(f"{row['chain']:<11} {row.get('status','?'):<9} {row.get('pair','')[:30]:<30} "
               f"{row.get('legs', 0):>4} {row.get('pools') or 0:>6} "
               f"{'y' if row.get('verified') else '-':>4} "
               f"{'y' if row.get('certificate') else '-':>5} {shown:>7} "
-              f"{row.get('ms', 0):>7.0f}")
+              f"{row.get('ms', 0):>7.0f}{drift}")
     ok = sum(1 for r in rows if r.get("status") == "ok")
     print(f"\n{ok}/{len(rows)} chains routed")
+    if execute:
+        ran = [r for r in rows if r.get("executed")]
+        failed = [r for r in rows if r.get("status") == "ok" and not r.get("executed")]
+        print(f"{len(ran)}/{len(ran) + len(failed)} of those executed on a fork")
+        for row in failed:
+            print(f"   {row['chain']:<11} {row.get('pair','')[:34]:<36} "
+                  f"{row.get('exec_note', 'did not run')}")
     return 0 if ok == len(rows) else 1
 
 
