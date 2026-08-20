@@ -37,29 +37,25 @@ DRIFT_TOL = 0.25
 #: a session runs both ports or neither and a comparison means something.
 _ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 # Two probes an order of magnitude apart returning the *same* output is not a
-# curve, it is a wall: the venue has handed over everything it has.  Measured
-# on a LLAMMA WETH market, `get_dy` returned 11.472806 crvUSD for every input
-# from 0.039 WETH to 38.7 -- a thousandfold range -- because only that much
-# crvUSD stood in reachable bands.  Fitting a rate through saturated points
-# reads the marginal price as 296 crvUSD/WETH when it is nearer 1,900, and in
-# §4's log-price fit that one arc drags the whole frame.
+# curve, it is a wall: the venue has handed over everything it has.  Measured on
+# a LLAMMA WETH market, `get_dy` returned the same 11.472806 crvUSD across a
+# thousandfold range of inputs.  Fitting a rate through saturated points reads
+# the marginal price sixfold low, and in §4's log-price fit that one arc drags
+# the whole frame.
 SATURATION_TOL = 1e-9
 # How far apart two ladder nodes must be to count as two probes at all.
 #
-# The wall test asks whether a bigger probe bought more, which two probes at
-# the *same* size cannot answer: they return the same quote, and "bought
-# nothing more" then clamps a perfectly healthy arc.  `merge` already drops
-# duplicates, but it keys on exact integer wei, and the refine pass computes
-# its sizes in floats -- so a ladder node landing on a grid node arrives a few
-# wei off and survives as a near-duplicate.
+# The wall test asks whether a bigger probe bought more, which two probes at the
+# *same* size cannot answer: they return the same quote, and "bought nothing
+# more" then clamps a perfectly healthy arc.  `merge` already drops duplicates,
+# but it keys on exact integer wei while the refine pass computes its sizes in
+# floats, so a ladder node landing on a grid node survives as a near-duplicate --
+# measured on tac, where the second copy read as saturation, capped the arc at a
+# tenth of the trade, and reported "src not connected to dst" on a chain whose
+# pool quotes the swap happily.
 #
-# Measured on tac, WTAC->USD$T, where the ladder carried 3,026.306608 twice:
-# the second copy read as saturation, capped the arc at a tenth of the trade,
-# and the only path out of WTAC could no longer carry it -- reported as "src
-# not connected to dst", on a chain whose pool quotes the swap happily.
-#
-# A millionth is far below any deliberate spacing (the grid is decades apart,
-# the ladder doubles) and far above the wei-level noise this exists to absorb.
+# A millionth is far below any deliberate spacing (the grid is decades apart, the
+# ladder doubles) and far above the wei-level noise this exists to absorb.
 DUPLICATE_TOL = 1e-6
 # A local `B` that jumps by more than this between grid nodes is a liquidity
 # cliff -- for stableswap, the edge of the peg (§2.5).
@@ -144,11 +140,10 @@ def calibrate(
     `1e-6 * reserve` and a couple return zero, and a zero `a` would poison
     `log a` in the reference-price fit.
     """
-    # The compiled fit, when it is installed.  Six-element arrays are the
-    # whole reason: `np.diff`, `np.interp` and `np.concatenate` over six
-    # floats cost 50 us a call and this runs 736 times a quote, so the
-    # dispatch is the bill rather than the arithmetic.
-    # `tests/test_calibrate_differential.py` differs the two.
+    # The compiled fit, when it is installed.  Six-element arrays are the whole
+    # reason: `np.diff`, `np.interp` and `np.concatenate` over six floats cost
+    # 50 us a call and this runs 736 times a quote, so the dispatch is the bill
+    # rather than the arithmetic.  `test_calibrate_differential.py` differs them.
     if _ACCEL_ON and _accel.available():
         got = _accel.calibrate_ladder(
             deltas, quotes, delta_bar=delta_bar,
@@ -188,9 +183,9 @@ def calibrate(
     # --- capacity wall (§2.3 rule 2) -------------------------------------
     #
     # Truncate to the strictly-increasing prefix, and treat the last size that
-    # still bought something more as a hard cap.  This is the clamped-arc
-    # shape the spec already provides for: no self-limiting term beyond the
-    # cap, so the cap must be finite -- which it is, by construction here.
+    # still bought something more as a hard cap.  This is the clamped-arc shape
+    # the spec provides for: no self-limiting term beyond the cap, so the cap
+    # must be finite -- which it is, by construction here.
     saturated_at: float | None = None
     for k in range(1, x.size):
         if y[k] <= y[k - 1] * (1.0 + SATURATION_TOL):
@@ -214,25 +209,21 @@ def calibrate(
 
     # --- what the output token's own resolution can fake ------------------
     #
-    # `quotes` are integers of the output token, so every one is rounded down
-    # by up to one unit.  For an 18-decimal token that is nothing; for GUSD's
-    # *two* it is 0.01, and the ladder's small node carries it into `a`:
+    # `quotes` are integers of the output token, so every one is rounded down by
+    # up to one unit.  For an 18-decimal token that is nothing; for GUSD's *two*
+    # it is 0.01, and the ladder's small node carries it into `a`:
     #
     #     a  = y0 / x0                    error  quantum / x0
     #     B  = 2 (a d - f(d)) / d^2       error  2 (quantum/x0) / d + 2 quantum / d^2
     #
-    # Measured on mainnet 3Crv -> GUSD, where the fitted curvature is -2.9e-8
-    # against a noise floor of 4.8e-8: the pool is a healthy stableswap holding
-    # 393,473 GUSD, and the entire "increasing returns" it appeared to show was
-    # the rounding.  Clamping on that evidence capped the arc at the largest
-    # size probed and made a $10,000 trade unroutable.
+    # Measured on 3Crv -> GUSD, where the fitted curvature is -2.9e-8 against a
+    # noise floor of 4.8e-8: the entire "increasing returns" the pool appeared to
+    # show was the rounding, and clamping on it made a $10,000 trade unroutable.
     #
     # Below the floor the sign of the curvature is simply unknown.  Taking the
-    # floor itself as `B` is the flattest reading the data supports, which is
-    # the same direction §2.3 clamps in -- optimistic, bounded, and finite, so
-    # the arc keeps a conductance instead of needing a cap.  The refine pass
-    # then probes it properly, because an arc that can carry flow is an arc the
-    # solver puts in the active set.
+    # floor itself as `B` is the flattest reading the data supports, which is the
+    # direction §2.3 clamps in -- optimistic, bounded, and finite, so the arc
+    # keeps a conductance instead of needing a cap.
     noise = 0.0
     if quantum > 0:
         noise = 2.0 * (quantum / float(x[0])) / d_bar + 2.0 * quantum / d_bar**2
@@ -240,23 +231,20 @@ def calibrate(
     if quantised:
         B = noise
 
-    # Two node sets, for two different jobs.
-    #
-    # Flag detection uses *every* probe, so a convex patch anywhere on the
-    # sampled range is caught -- strictly stronger than one 4-node ladder.
+    # Two node sets, for two different jobs.  Flag detection uses *every* probe,
+    # so a convex patch anywhere on the sampled range is caught -- strictly
+    # stronger than one 4-node ladder.
     xs = np.concatenate(([0.0], x))
     ys = np.concatenate(([0.0], y))
     D = second_divided_differences(xs, ys)
     numeric_flag = bool(np.any(D > 0) or (D.size > 1 and len(set(np.sign(D))) > 1))
 
     # DRIFT and eta use the local window `{0, d/4, d/2, d}` of §2.3: the origin
-    # (exact, not a probe) plus the top three nodes, with the tiny tangent
-    # probe deliberately excluded.  Divided differences estimate a derivative
-    # *at a point*, so spreading the nodes over decades measures the spread
-    # rather than the curve.
-    # DRIFT and eta need four nodes (origin plus three), so a two-point coarse
-    # pass reports neither -- by design: they are diagnostics for arcs that
-    # carry flow, and those get the full ladder.
+    # (exact, not a probe) plus the top three nodes, with the tiny tangent probe
+    # deliberately excluded.  Divided differences estimate a derivative *at a
+    # point*, so spreading the nodes over decades measures the spread rather than
+    # the curve.  Four nodes are needed, so a two-point coarse pass reports
+    # neither -- by design: they are diagnostics for arcs that carry flow.
     drift = 0.0
     eta = math.nan
     if x.size >= 3:
@@ -299,10 +287,10 @@ def calibrate(
             raise CalibrationError("clamped arc needs a positive f(cap) for the chord")
         # CHORD, not tangent.  Clamping B while keeping a = f'(0) leaves the
         # tangent, which on a convex piece lies *below* the curve -- an
-        # under-estimate that makes the solver silently skip the arc.  The
-        # chord is exact at both endpoints and above the curve in between: a
-        # valid concave majorant, hence an upper bound, hence it cannot prune
-        # the true optimum.
+        # under-estimate that makes the solver silently skip the arc.  The chord
+        # is exact at both endpoints and above the curve in between: a valid
+        # concave majorant, hence an upper bound, hence it cannot prune the true
+        # optimum.
         a = float(f_at_cap / cap)
         B = 0.0
         flag_reason = FlagReason.CLAMPED if flag_reason is FlagReason.NONE else FlagReason.BOTH
@@ -327,10 +315,10 @@ def peg_boundary(deltas, quotes, *, jump: float = PEG_JUMP) -> float | None:
     """Where local curvature jumps -- the edge of a stableswap's flat region.
 
     §2.5 calls a single fit across this boundary "the most dangerous single
-    mis-calibration in the system": inside the peg the pool looks bottomless,
-    and any trade that leaves it is wildly over-promised.  The geometric grid
-    turns detecting it into a comparison of second divided differences rather
-    than a hope that `d_bar` landed inside the flat region.
+    mis-calibration in the system": inside the peg the pool looks bottomless, and
+    any trade that leaves it is wildly over-promised.  The geometric grid turns
+    detecting it into a comparison of second divided differences rather than a
+    hope that `d_bar` landed inside the flat region.
 
     Returns the delta at which to split the arc, or None.
     """
