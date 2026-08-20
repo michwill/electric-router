@@ -124,7 +124,16 @@ def measure(chain_name: str, size: float, only: set[str] | None, quiet: bool):
                         got = executor.execute_route(
                             [leg.as_tuple()], [token_in, token_out], dx, 1, 0)
             except Exception as exc:                   # noqa: BLE001
-                rows.append((pool, kind.name, None, None, type(exc).__name__))
+                # Keep the revert reason, not just the exception class.  A
+                # third of these are pools that genuinely cannot be traded and
+                # the rest are worth looking at, and "23 would not run" cannot
+                # tell you which is which.
+                detail = " ".join(str(exc).split())
+                for marker in ("user revert with reason", "<"):
+                    if marker in detail:
+                        detail = detail.split(marker)[-1]
+                rows.append((pool, kind.name, None, None,
+                             f"{type(exc).__name__}: {detail.strip()[:70]}"))
                 continue
             if not view or not got:
                 continue
@@ -140,10 +149,12 @@ def measure(chain_name: str, size: float, only: set[str] | None, quiet: bool):
 def report(chain_name: str, rows, tolerance: float) -> int:
     """Per-kind summary.  Returns how many measurements exceeded `tolerance`."""
     by_kind: dict[str, list[float]] = {}
+    failures: dict[str, int] = {}
     failed = 0
     for _pool, kind, view, got, error in rows:
         if error is not None:
             failed += 1
+            failures[f"{kind}: {error}"] = failures.get(f"{kind}: {error}", 0) + 1
             continue
         by_kind.setdefault(kind, []).append((view / got - 1) * 1e4)
     over = []
@@ -155,6 +166,12 @@ def report(chain_name: str, rows, tolerance: float) -> int:
         worst = max(values, key=abs, default=0.0)
         print(f"  {kind:18} {len(values):>4} {len(wrong):>6} {worst:>+11.4f}")
         over += [v for v in values if abs(v) > tolerance]
+    if failures:
+        # Not a breach -- a pool that cannot be traded is a fact about the pool
+        # -- but an unmeasured surface, and worth naming rather than counting.
+        print(f"  {'':18} {'why it would not run':>44}")
+        for why, n in sorted(failures.items(), key=lambda kv: -kv[1])[:6]:
+            print(f"    {n:>4}x  {why[:80]}")
     return len(over)
 
 
