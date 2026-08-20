@@ -282,7 +282,10 @@
    "scale_bp": 0.005
   }
  },
- "broken": {},
+ "broken": {
+  "0x9f2fe3500b1a7e285fdc337acace94c480e00130:0:1>0": "Synth is suspended. Operation prohibited (Synthetix)",
+  "0x9f2fe3500b1a7e285fdc337acace94c480e00130:5:0>0": "Synth is suspended. Operation prohibited (Synthetix)"
+ },
  "chain_id": 10,
  "class_of": {
   "0x00d09cccda09bb97132293c571ead11630d57a71": "stableswapng",

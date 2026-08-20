@@ -352,7 +352,11 @@
    "scale_bp": 0.005
   }
  },
- "broken": {},
+ "broken": {
+  "0x773fde6f33522d7a92775f2375ac76a6e6f279b7:2:0>0": "get_p: unsafe D values -- D below the math contract's 1e17 floor",
+  "0x773fde6f33522d7a92775f2375ac76a6e6f279b7:2:1>0": "get_p: unsafe D values -- D below the math contract's 1e17 floor",
+  "0x773fde6f33522d7a92775f2375ac76a6e6f279b7:2:2>0": "get_p: unsafe D values -- D below the math contract's 1e17 floor"
+ },
  "chain_id": 8453,
  "class_of": {
   "0x09bf787b9ab2d52d7836272a41e9809481795ab0": "stableswapng",

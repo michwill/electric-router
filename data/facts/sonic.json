@@ -436,7 +436,10 @@
    "scale_bp": 0.005
   }
  },
- "broken": {},
+ "broken": {
+  "0xfff9f08db31c7b0ee9793cc11d9dd7a932250dd3:2:0>0": "get_p: unsafe D values -- D below the math contract's 1e17 floor",
+  "0xfff9f08db31c7b0ee9793cc11d9dd7a932250dd3:2:1>0": "get_p: unsafe D values -- D below the math contract's 1e17 floor"
+ },
  "chain_id": 146,
  "class_of": {
   "0x38dd6b3c096c8cbe649fa0039cc144f333be8e61": "stableswapng",

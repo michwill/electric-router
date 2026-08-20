@@ -49,9 +49,15 @@ from erouter.core.types import ArcKind, Leg
 
 #: `Error(string)` -- the selector every Vyper `assert ... , "reason"` emits.
 ERROR_SELECTOR = "08c379a0"
-#: Answers that mean the endpoint failed, not that the pool refused.
+#: Answers that mean the endpoint failed, not that the pool refused.  Matched
+#: only when the EVM never ran -- a boa trace contains gas figures and hex, so
+#: a bare "503" matches inside one and mis-filed a real optimism revert.
 TRANSPORT_NOISE = ("-32000", "missing trie node", "ConnectionError",
-                   "timed out", "Too Many Requests", "502", "503")
+                   "timed out", "Too Many Requests", "HTTP Error 50")
+#: What boa puts in the message when the EVM did run and something reverted.
+EVM_MARKERS = ("BoaError", "[E]", "user revert", "execution reverted")
+#: Our own executor's outer assert; the pool's own reason sits inside it.
+OUTER_ASSERT = "leg reverted"
 
 
 def revert_text(message: str) -> str:
@@ -60,6 +66,7 @@ def revert_text(message: str) -> str:
     boa prints raw returndata as a Python bytes literal, so the reason is
     recoverable without re-running under a tracer.
     """
+    found: list[str] = []
     for literal in re.findall(r"b'(?:[^'\\]|\\.)*'", message):
         try:
             raw = ast.literal_eval(literal)
@@ -67,10 +74,22 @@ def revert_text(message: str) -> str:
             continue
         if raw[:4].hex() == ERROR_SELECTOR and len(raw) >= 68:
             length = int.from_bytes(raw[36:68], "big")
-            reason = raw[68:68 + length].decode("utf-8", "replace").strip()
+            reason = raw[68:68 + length].decode("utf-8", "replace")
+            reason = reason.replace("\x00", "").strip()
             if reason:
-                return reason
-    return "reverted without a reason"
+                found.append(reason)
+    # `RouteExecutor` wraps a failed leg in its own assert, so the pool's reason
+    # is whichever one is not ours.  Reporting the wrapper would label every
+    # finding "leg reverted" and say nothing about why.
+    inner = [r for r in found if r != OUTER_ASSERT]
+    if inner:
+        return inner[0]
+    # A custom error carries no string; name its selector so it can be looked up
+    # (`0xe450d38c` is ERC20InsufficientBalance, which is how pumpBTC surfaced).
+    custom = re.search(r"<(0x[0-9a-fA-F]{8})[0-9a-fA-F]*>", message)
+    if custom:
+        return f"custom error {custom.group(1)}"
+    return OUTER_ASSERT if found else "reverted without a reason"
 
 
 def arcs_of(pool):
@@ -88,7 +107,8 @@ def arcs_of(pool):
     return out
 
 
-def sweep(chain_name: str, size: float, quiet: bool) -> list[dict]:
+def sweep(chain_name: str, size: float, quiet: bool,
+          only: set[str] | None = None) -> list[dict]:
     import boa
 
     from erouter.dev import chains as chain_table
@@ -112,6 +132,8 @@ def sweep(chain_name: str, size: float, quiet: bool) -> list[dict]:
     list(check_reserves_are_real(specs, client, rpc))
     resolve_deposit_gates(specs, client)
     specs = [p for p in specs if p.balances and any(p.balances)]
+    if only:
+        specs = [p for p in specs if p.address.lower() in only]
     specs.sort(key=lambda p: -p.tvl_usd)     # so a truncated run still covers value
 
     facts = FactsCache.load(chain.chain_id, chain.name.lower())
@@ -178,7 +200,8 @@ def sweep(chain_name: str, size: float, quiet: bool) -> list[dict]:
                             [leg.as_tuple()], [token_in, token_out], dx, 1, 0)
             except Exception as exc:                        # noqa: BLE001
                 text = str(exc)
-                if any(noise in text for noise in TRANSPORT_NOISE):
+                ran = any(marker in text for marker in EVM_MARKERS)
+                if not ran and any(noise in text for noise in TRANSPORT_NOISE):
                     row.update(outcome="NODE_ERROR",
                                detail=" ".join(text.split())[:110])
                 else:
@@ -234,6 +257,8 @@ def main() -> int:
     parser.add_argument("--out", default="", help="write the raw rows here")
     parser.add_argument("--record", action="store_true",
                         help="write the reverting arcs into data/facts")
+    parser.add_argument("--pool", default="",
+                        help="comma-separated addresses, to re-test just those")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
@@ -242,10 +267,11 @@ def main() -> int:
     # Etherlink serves no state overrides and no access lists, so it has no
     # quoter and nothing here can run against it.
     wanted = args.chains or [n for n in chain_table.CHAINS if n != "etherlink"]
+    only = {a.strip().lower() for a in args.pool.split(",") if a.strip()} or None
     rows: list[dict] = []
     for name in wanted:
         try:
-            rows += sweep(name, args.size, args.quiet)
+            rows += sweep(name, args.size, args.quiet, only)
         except Exception as exc:                            # noqa: BLE001
             print(f"\n  {name}: {type(exc).__name__}: {str(exc)[:140]}", flush=True)
 
