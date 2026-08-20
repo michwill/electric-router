@@ -1,47 +1,26 @@
 """What a route's own minimum-out costs it.
 
-Every leg executes with a minimum-out set to a fraction of that pool's fee --
-the level at which a sandwich stops paying for itself.  That bound is also a
-trigger: if the pool's rate moves further than it between the quote and the
-transaction landing, the leg reverts and the whole route with it.  A route
-lands only if *every* pool it touches stays inside its own bound, so
+Every leg executes with a minimum-out at a fraction of the pool's fee; if the
+rate moves past it before the transaction lands, the leg reverts and the route
+with it.  So `P(lands) = product over legs of (1 - p_i)`.
 
-    P(lands) = product over legs of (1 - p_i)
-
-**A revert does not cost the trade, though, and that distinction sets the whole
-scale of this term.**  Nothing is lost when a route fails: the gas is spent and
-the user resubmits, so what a failure costs is one more transaction plus
-whatever the price did in the meantime -- around a basis point, not a hundred.
-Ranking on `output * P(lands)` instead prices a failure as losing the entire
-notional, which is wrong by three orders of magnitude, and it shows: at the
-measured 20-40% breach probabilities that objective pays 17 to 126 bp for
-safety, and flips between routes 1-20% apart in price on nothing more than
-which candidates a given run happened to generate.  So:
+**A revert does not cost the trade, and that sets the scale of the term.**  The
+gas is spent and the user resubmits, so a failure costs one more transaction
+plus whatever the price did -- around a basis point, not a hundred.  Ranking on
+`output * P(lands)` prices it as losing the whole notional, wrong by three
+orders of magnitude, and at measured 20-40% breach rates it pays 17-126 bp for
+safety.  Instead:
 
     output * (1 - P(fails) * REVERT_COST_BP / 1e4) - gas * (1 + P(fails))
 
-The gas term carries the `(1 + P(fails))` because a failed attempt pays for
-itself and the retry pays again; the output term is scaled by what a retry is
-actually worth.  A leg is then priced at what it really adds -- its gas, and a
-fraction of a basis point of failure risk -- which is enough to separate two
-otherwise equal routes and never enough to buy a materially worse price.
+The gas term carries `(1 + P(fails))` because a failed attempt pays and the
+retry pays again.
 
-The measurement (`dev/revert_risk.py`) says that matters.  The median pool
-never breached its bound in half an hour of samples; the risk is concentrated
-in a handful whose fee is small against their own volatility.  TriCRV charges
-3.36 bp, so its bound is 0.67 bp against a rate that moves 2.4 bp a minute --
-it breaches a quarter of the time.  Yield Basis WETH holds a far more volatile
-asset and never breached, because its 218 bp fee puts the bound at 43.7.  Asset
-class does not predict this at all; fee against volatility does.  A leg budget
-would have charged those two the same.
-
-Only pool arcs carry the risk.  A wrap, a stake, a lending mint or a vault
-redemption is priced by a rate that moves with accrual -- upward, slowly, and
-not against us -- so no minimum-out of this kind can trigger on it.
-
-An unmeasured pool is not a free one.  `DEFAULT_RISK` stands in until it is
-probed, which keeps a thin pool nobody has sampled from looking safer than the
-deep ones we did measure.
+Fee against volatility predicts the risk; asset class does not.  Only pool arcs
+carry it -- a wrap, stake, lending mint or vault redemption is priced by a rate
+that accrues slowly and not against us.  An unmeasured pool takes
+`DEFAULT_RISK` rather than zero, so a thin unsampled pool cannot look safer
+than a deep measured one.
 """
 
 from __future__ import annotations

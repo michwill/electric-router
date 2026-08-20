@@ -1,53 +1,28 @@
 """Optimise a finished route's split ratios, without consulting the model (§7).
 
-The model decides *which* pools; this decides *how much* through each.  Once the
-topology is fixed the output is a smooth function of the split weights alone,
-and the model's `O(theta^2)` Taylor error -- median 0.00 bp below 10% of pool
-depth but 36 bp above 50%, worst case 2,450 bp -- has no business anywhere near
-that decision.
+The model decides *which* pools; this decides *how much* through each.  With
+the topology fixed the output is a smooth function of the weights alone, and
+the model's `O(theta^2)` error -- negligible below 10% of pool depth, 36 bp
+above 50% -- has no business near that decision.
 
-Why not re-fit the model instead (§8):
+Preferred to re-fitting the model (§8) because it cannot go infeasible (the
+topology is fixed, so src stays connected to dst) and cannot lose (only a
+strict improvement, measured by a real chained quote, is accepted).
 
-* **It cannot go infeasible.**  The topology is fixed, so src stays connected to
-  dst by construction.  That is exactly how §8's refit fails in practice --
-  "src not connected to dst through the active set" -- after which it discards
-  its own correction.
-* **It cannot lose.**  Only a strict improvement, measured by a real chained
-  quote, is ever accepted.  The worst case is the route we already had.
-
-**Sample the legs; do not chain them.**  A chained route quote forces a round
-trip per iteration, because leg `k`'s input is leg `k-1`'s output -- which is
-what shapes a search into batched line searches and rationed rounds.  Probing
-one pool at many sizes does not chain, so a whole route's curves arrive in one
-`probe_batch` and composition happens in Python, where an evaluation is
-microseconds and each coordinate can simply be solved by golden section rather
-than stepped towards.  See `curves.py` for why `u = x/f(x)` is the thing
-interpolated.
+**Sample the legs; do not chain them.**  A chained route quote costs a round
+trip per iteration, since leg `k`'s input is leg `k-1`'s output.  Probing one
+pool at many sizes does not chain, so a whole route's curves arrive in one
+`probe_batch` and composition happens in Python, where each coordinate can be
+solved by golden section rather than stepped towards.  See `curves.py` for why
+`u = x/f(x)` is what gets interpolated.
 
 **The curves check themselves against the chain before being trusted.**
-`baseline` is a real chained quote at known weights, so composing at those same
-weights compares like with like, for free.  It has to be done: a stableswap
-crossing its peg edge inside one ladder interval measured 497 bp out on the
-coarse ladder, and optimising on that would be optimising on fiction.  A curve
-set that misses gets one dense pass -- at the sizes the legs actually operate
-at, and only for the legs whose own secants say they are badly interpolated.
-If it still misses, the chained hill-climb below takes over, which is also what
-runs when a leg refuses to probe at all.
-
-Measured at block 25742250 over the 6 of 16 reference routes that trip the gate
-(the other 10 cost nothing at all), against the chained search:
-
-    route                trips   probes   gain      vs chained   curves miss
-    crvUSD->sDOLA 5M       3       672   +376.90 bp    +9.36 bp    -0.95 bp
-    rETH->WETH 50          3       432    +35.61 bp    +0.46 bp    -0.67 bp
-    USDC->sUSDS 1M         3       456    +20.46 bp    +0.11 bp    -0.14 bp
-    crvUSD->sDOLA 2M       2       360     +0.37 bp    +0.01 bp    +0.01 bp
-    USDC->WETH 100k        2       264     +2.65 bp    -0.08 bp    -0.26 bp
-    USDC->USDT 5M          2        96     +0.03 bp     0.00 bp    +0.01 bp
-
-Fifteen round trips against the chained search's twenty-four, converged rather
-than hill-climbed, and better on four routes of six.  The three that spent a
-third trip are the three whose coarse curves failed their own check.
+`baseline` is a real chained quote at known weights, so composing at those
+weights compares like with like for free.  A stableswap crossing its peg edge
+inside one ladder interval measured 497 bp out on the coarse ladder, and
+optimising on that would be optimising on fiction.  A curve set that misses
+gets one dense pass; if it still misses, the chained hill-climb takes over,
+which is also what runs when a leg refuses to probe at all.
 """
 from __future__ import annotations
 

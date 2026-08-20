@@ -1,46 +1,29 @@
 """Stableswap, evaluated exactly from its own parameters (§11.3).
 
-The quadratic in `calibrate.py` is what makes routing a convex program, and it
-is the right model for choosing *which* pools and *what split*: both quantities
-are first-order-flat at the optimum, so an `O(theta^2)` error in the curve does
-not move them.  It is the wrong model for asking what a pool actually pays at a
-size approaching its own reserves, and past that point no choice of sample
-point rescues it -- a secant fitted at the trade size still describes the chord
-of a curve that is not a parabola.
+The quadratic in `calibrate.py` is the right model for choosing *which* pools
+and *what split* -- both are first-order-flat at the optimum, so an
+`O(theta^2)` curve error does not move them.  It is the wrong model for what a
+pool pays at a size approaching its own reserves, and sampling closer does not
+rescue it: a secant fitted at trade size still describes the chord of something
+that is not a parabola.  Measured on crvUSD -> sDOLA at $2M, the candidate
+family's own cheapest path returned 0.3% of the expected output.
 
-Measured on mainnet crvUSD -> sDOLA at $2M, block 25,770,648: the candidate
-family's own cheapest path returned 5,800 sDOLA against an expected 1,419,000 --
-0.3% of the input, verified on chain, with `max theta` at 0.816.  The refine
-pass had already re-fitted 258 arcs at trade-sized steps and the §12.1 size
-check another 263.  Sampling closer did not help, because the object being
-sampled is not a parabola at 80% of a reserve.
+So read `A`, the fee, the balances and the rates and evaluate the pool's own
+invariant.  Exact at any size, no probes once the parameters are in hand.
 
-So: read `A`, the fee, the balances and the rates, and evaluate the pool's own
-invariant.  `f(delta)` is then exact at any size, which is what candidate
-scoring needs.  The relaxation keeps the quadratic.
+Third way of knowing a curve here: `calibrate.py` fits two derivatives for the
+convex program, `curves.py` interpolates `x/f(x)` through probes for any pool
+at all, and this is the pool's own arithmetic -- exact, but stableswap only.
 
-This is the third way of knowing a curve here, and they answer different
-questions.  `calibrate.py` fits two derivatives, which is what the convex
-program needs.  `curves.py` interpolates `x/f(x)` through probes, which is
-exact enough for a realised route's split and works for *any* pool, including
-ones whose parameters we cannot read.  This is neither: it is the pool's own
-arithmetic, so it costs no probes at all once the parameters are in hand and it
-is exact where the other two are approximations.  It only covers stableswap;
-anything else keeps sampling.
+Two dialects, and the difference is not cosmetic.  **legacy** stores `A`
+unscaled and takes the fee after converting to token units.  **ng** stores
+`A * A_PRECISION`, takes the fee in `xp` units before converting, and scales it
+with how far off peg the balances are -- so a badly imbalanced pool charges
+several times its nominal fee, which is exactly the regime a large trade
+creates.
 
-Two dialects, and the difference is not cosmetic:
-
-* **legacy** (3pool and everything of that era) stores `A` unscaled, and takes
-  the fee *after* converting the output back to token units.
-* **ng** (`CurveStableSwapNG`) stores `A * A_PRECISION`, takes the fee in `xp`
-  units before converting, and scales that fee with how far off peg the two
-  balances are -- the dynamic fee.  A pool at peg charges `fee`; the same pool
-  badly imbalanced charges several times that, which is exactly the regime a
-  large trade puts it in, so ignoring it understates the cost of the trades
-  that need it most.
-
-Integer arithmetic throughout, floor division everywhere the contracts use it,
-because the point of this module is to agree with them to the wei.
+Integer arithmetic with floor division throughout, because the point is to
+agree with the contracts to the wei.
 """
 
 from __future__ import annotations

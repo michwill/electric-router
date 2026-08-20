@@ -1,56 +1,29 @@
 """A `Transport` that executes locally, against state fetched once (§10).
 
-Everything the router asks a chain is a read at one pinned block, and it asks
-the same few hundred arcs over and over -- the probe ladder, the refine pass,
-twenty candidates, the split search.  Paying a network round trip for each is
-what shapes the algorithms upstream: rationed rounds, batched line searches,
-sampled curves instead of exact evaluation.
+Every question the router asks is a read at one pinned block, and it asks the
+same few hundred arcs repeatedly.  Fetching the state once and running the EVM
+here takes the round trips to zero: a `get_dy` costs 30-449 us locally against
+~0.8 ms marginal on the wire.
 
-So fetch the state once and run the EVM here.  Measured on this node, a
-`get_dy` costs 30-449 us locally against ~0.8 ms marginal inside a batched
-`quote_routes` on the wire, and the round trips go to zero.
+State comes from `eth_createAccessList` -- exactly the accounts and slots the
+call touches -- so one `eth_getProof` per account pulls all of them.  The
+touched set does not vary with trade size on any pool measured, but lists are
+still gathered at several sizes and unioned: a LLAMMA crossing bands is the
+shape that would break that assumption.
 
-**The state comes from `eth_createAccessList`, and that is what makes it
-cheap.**  The access list is exactly the accounts and slots the call touches,
-so one `eth_getProof` per account pulls all of them in a single reply.  Two
-batched round trips warm a whole route.  Measured over four decades of trade
-size on stableswap, stableswap-ng, tricrypto and tricrypto-ng, the touched set
-does **not** vary with size -- so one list serves every probe of that arc.  It
-is still gathered at several sizes and unioned, because "measured on five
-pools" is not "true of every pool", and a LLAMMA crossing bands is exactly the
-shape that would break it.
+**A missed slot reads as zero, not as an error.**  That is the hazard, and
+`strict=True` (the default) accepts it: prefetching and lazy fallback are
+mutually exclusive, because with `fork_url` set revm loads an account from the
+fork before accepting an insert, so every prefetched slot goes over the network
+anyway.  What makes it safe is upstream -- the router verifies its chosen route
+on chain regardless, so a stale prefetch costs route quality, never a wrong
+answer.
 
-**Prefetching and falling back are mutually exclusive here, by measurement.**
-With `fork_url` set, revm loads an account from the fork *before* accepting an
-insert, so every prefetched slot is fetched over the network anyway: warming 13
-accounts and 39 slots cost 294 ms strict against 2,340 ms with the fork on, of
-which 2,042 ms was the inserts alone.  A fallback therefore does not make the
-prefetch safer, it makes it pointless.
-
-So `strict` (the default) bulk-loads and accepts that a missed slot reads as
-zero.  Measured on a deliberately incomplete 3pool that *reverted* rather than
-returning a number, and a reverted probe is arc removal, which the pipeline
-already handles -- but that is the shape of one pool, not a guarantee, and a
-missing fee or rate would read as a plausible zero instead.  What makes it safe
-is upstream: the router verifies its chosen route on the chain regardless, so a
-stale prefetch costs route quality, never a wrong answer.
-
-`strict=False` gives up the bulk load entirely and lets the fork serve every
-read lazily at ~34 ms a slot.  Slow, and correct by construction; the mode to
-reach for when a quote disagrees with the chain and the question is why.
-
-That matters most for the state a cached slot list cannot predict.  A proxy
-upgrade is visible, because the EIP-1967 implementation slot is itself in the
-traced set and the per-block value fetch hands over the new address.  But a
-stableswap-ng reading a Chainlink aggregator hits `s_transmissions[roundId]`,
-and the round advances on every price update, so the *derived* key genuinely
-differs between blocks; likewise a LLAMMA whose active band has moved.  Nothing
-derivable from the old values detects those.  With the fallback they are simply
-a few extra lazy reads; without it, a zero fee or a zero rate is a plausible
-wrong number, which is the one outcome worth engineering against.
-
-`strict=True` turns the fallback off, which is how the forked test asserts the
-prefetch is actually complete rather than merely load-bearing.
+`strict=False` gives up the bulk load and lets the fork serve every read lazily
+at ~34 ms a slot: slow, correct by construction, and the mode to reach for when
+a quote disagrees with the chain.  It matters for state a cached slot list
+cannot predict -- a Chainlink aggregator's `s_transmissions[roundId]` advances
+every price update, and a LLAMMA's active band moves.
 """
 
 from __future__ import annotations
@@ -122,50 +95,20 @@ PRIME_STREAMS = 16
 
 # Twenty-seven bytes that read their own storage.
 #
-# No contract can read another account's storage -- SLOAD reads the executing
-# account's, and there is no opcode for anyone else's.  But an `eth_call` state
-# override replaces an account's *code* while keeping its *storage*, so this
+# No contract can read another account's storage, but an `eth_call` state
+# override replaces an account's *code* while keeping its *storage* -- so this
 # blob injected at a pool runs in that pool's context and can read all of it.
-# The quoter's `raw_batch` is the coordinator, 600 reads a call, so a universe
-# sweep is seven requests instead of 4,168.
+# The quoter's `raw_batch` coordinates, 600 reads a call.
 #
-# That matters exactly where requests are metered.  Measured on 4,168 slots:
-#
-#     endpoint                     getStorageAt   dumper (8 streams)
-#     local node, LAN                     429 ms            1,403 ms
-#     local node, over a VPN            2,443 ms            2,703 ms
-#     drpc (keyed)                        559 ms              607 ms
-#     drpc public                     185,103 ms              554 ms
-#
-# An unmetered node answers 4,168 small reads faster than it runs seven big
-# `eth_call`s, and a public endpoint is 334x the other way.  So this is not the
-# default; `prefer_dump` turns it on for endpoints that count requests.
-#
-# The middle row is the same node reached over a VPN, one round trip costing
-# 228 ms instead of a LAN's fraction of one.  The dumper's disadvantage falls
-# from 3.3x to 11% -- the small reads are what a slow link punishes, and the
-# gap closes as latency rises.  Still not enough to flip the default, but the
-# LAN row on its own reads as a much stronger verdict than the truth: on a
-# merely mediocre link these two are the same speed.
-#
-# Batching the chunks into one JSON-RPC request would not help: they already
-# go out concurrently, and the cost is the node's, not the wire's.  Measured
-# over the VPN, 8 chunks of ~600 slots: 8,520 ms one at a time, 3,216 ms all at
-# once, with the slowest single chunk at 2,251 ms.  Each chunk is ~1 s of node
-# execution -- building a state overlay for ~70 accounts and running 600
-# SLOADs through `eth_call` costs far more per slot than serving
-# `eth_getStorageAt` from the database.  That is why the two paths respond to
-# different things: small reads pay latency, so their disadvantage grows with
-# it, while the dumper pays node CPU and barely moves.  The residual gap
-# between 3,216 and 2,251 is the node declining to run `eth_call`s fully in
-# parallel, which is not ours to fix.
-#
-# The keyed drpc cannot use this path at all.  The blob is injected by state
-# override rather than deployed, and that key's `eth_call` is restricted to the
-# quoter's address -- which is the point of the restriction, not a gap in it.
+# Not the default: an unmetered node answers many small `eth_getStorageAt`
+# faster than it runs seven big `eth_call`s, while a public endpoint is ~334x
+# the other way.  `prefer_dump` turns it on where requests are counted.  The
+# keyed drpc cannot use it at all -- the blob is injected by state override and
+# that key's `eth_call` is restricted to the quoter, which is the point of the
+# restriction rather than a gap in it.
 #
 # Calldata is a run of 32-byte slot numbers, the return their values in order.
-# There is no selector dispatch, because the only caller is us.
+# No selector dispatch, because the only caller is us.
 #
 #   36        CALLDATASIZE        [size]
 #   6000      PUSH1 0             [size, i]

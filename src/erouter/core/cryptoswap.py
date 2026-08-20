@@ -1,37 +1,7 @@
 """CryptoSwap's `get_y`, ported from the deployed math contracts.
 
 `core/twocrypto.py` is the wrapper both twocrypto pools share; this is the
-backend for the ones that are cryptoswap proper rather than FX Swaps.
-
-Ported from the **verified source of the contracts the pools actually call**,
-fetched by address rather than from any repository copy:
-
-    0x1fd8af16dc4bebd950521308d55d0543b6cdf4a1  CurveTwocryptoMathOptimized v2.1.0
-    0x2005995a71243be9fb995dab4742327dc76564df  CurveTwocryptoMathOptimized v2.0.0
-
-That distinction is not pedantic.  The obvious local source is the original
-Newton iteration, and these are the *optimized* implementations: they solve the
-same cubic analytically and disagree with Newton at almost every point.  Porting
-the repository copy produced a model that matched one pool at one size and
-failed five of the next six.
-
-The two deployed versions share this arithmetic exactly and differ only in
-their bounds -- v2.1.0 allows gamma up to 1.99e17 and derives `lim_mul` from
-it, v2.0.0 caps gamma at 2e15 and fixes the `K0_i` window.  Both are supported
-because both are deployed.
-
-**Two Vyper semantics that Python does not share, and both change results:**
-
-* `/` and `unsafe_div` on *signed* integers truncate toward zero; Python's
-  `//` floors toward negative infinity.  They differ by one whenever the
-  result is negative and inexact, and `b`, `c`, `d`, `delta0`, `delta1` and
-  `root` are all routinely negative.  Hence `_sdiv` everywhere in the signed
-  section rather than `//`.
-* `pow_mod256` wraps at 2**256.  Python integers do not, so the cube-root
-  seed masks explicitly.
-
-Newton survives as `_newton_y`, because `get_y` itself falls back to it when
-the discriminant is not positive.
+arithmetic underneath.  Integer throughout, matching the contracts to the wei.
 """
 
 from __future__ import annotations
