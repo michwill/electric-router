@@ -196,6 +196,12 @@ def _element_block(
         stats = (
             f"eps {element.eps_bp:+.2f} bp   R {element.impact_bp:.2f} bp   "
             f"theta {element.theta_pct:.2f}%"
+            if element.modelled else
+            # The model-free candidates carry no fit, so there is no eps and no
+            # resistance to report.  `theta` is real either way -- it is the
+            # amount over the pool's own reserve -- and it is the number that
+            # says how far outside anything measured this leg sits.
+            f"no model: rate from the price fit   theta {element.theta_pct:.2f}%"
         )
         lines.append(indent + paint(stats, DIM))
         lines.append(indent + paint(f"{element.target}", DIM))

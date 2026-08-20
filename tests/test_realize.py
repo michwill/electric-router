@@ -654,3 +654,47 @@ def test_an_uncapped_arc_still_sweeps_when_one_exists():
     )
     assert sum(rl.amount_in for rl in route.legs) == 1000 * 10**6
     assert sum(1 for rl in route.legs if rl.leg.bps == 0) == 1
+
+
+# ---------------------------------------------- what the realised legs report
+
+
+def test_theta_follows_the_amounts_it_describes():
+    """`_forward_simulate` rescales the amounts; `theta` has to move with them.
+
+    The model-free `direct`/`two-step` candidates are realised at `psi = 1` --
+    under a token of flow -- and then replayed at the caller's real size.  A
+    `theta` left at the realisation value reads 0.00% on a leg taking several
+    times the pool, which is exactly the reading §12.1's size check exists to
+    prevent.
+    """
+    nodes = base_nodes()
+    reserve = 500 * 10**18
+    one = arc(POOL_A, CRVUSD, WETH, nodes, reserve=reserve)
+    route = realize(
+        [one], np.array([1.0]), np.array([1.0, 1.0, 1.0]), nodes,
+        src_token=CRVUSD, dst_token=WETH, amount_in=1800 * 10**18,
+    )
+    leg = route.legs[0]
+    assert leg.amount_in == 1800 * 10**18       # replayed at the real size
+    assert leg.theta == pytest.approx(1800 / 500)   # and theta says so
+    assert leg.theta > 1.0                       # past the pool, and it shows
+
+
+def test_an_uncalibrated_arc_is_not_reported_as_modelled():
+    """`B = 0` is the model-free candidate's placeholder, not a linear pool.
+
+    `direct_candidates` builds its arcs from the price fit alone: `B = 0`, so
+    `G = 0`, so `eps` and the impact term are zero because nothing measured
+    them.  Printing those as `eps +0.00 bp  R 0.00 bp` claims a fee-free,
+    depthless pool, which is a stronger statement than the router can make.
+    """
+    nodes = base_nodes()
+    free = replace(arc(POOL_A, CRVUSD, WETH, nodes), B=0.0, G=0.0, eps=0.0)
+    fitted = arc(POOL_B, CRVUSD, WETH, nodes)
+    for one, expected in ((free, False), (fitted, True)):
+        route = realize(
+            [one], np.array([1.0]), np.array([1.0, 1.0, 1.0]), nodes,
+            src_token=CRVUSD, dst_token=WETH, amount_in=10**18,
+        )
+        assert route.legs[0].modelled is expected

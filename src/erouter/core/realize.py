@@ -58,6 +58,16 @@ class RealizedLeg:
     impact_frac: float = 0.0
     theta: float = 0.0
     psi: float = 0.0
+    #: The arc's own input reserve, kept so `_forward_simulate` can refresh
+    #: `theta` after it rescales the amounts.  Without it `theta` describes the
+    #: flow the arc was realised at rather than the one being quoted.
+    reserve_in: int = 0
+    #: False when the arc behind this leg carries no calibration -- the
+    #: model-free `direct`/`two-step` candidates, built at `psi = 1` with
+    #: `B = 0`.  Their `eps` and `impact_frac` are placeholders, not
+    #: measurements, and printing them as `0.00 bp` claims a fee-free,
+    #: impact-free pool.
+    modelled: bool = True
 
     @property
     def is_conversion(self) -> bool:
@@ -581,6 +591,8 @@ def _arc_leg(
         impact_frac=impact,
         theta=theta,
         psi=psi,
+        reserve_in=arc.reserve_in,
+        modelled=arc.G > 0,
     )
 
 
@@ -710,6 +722,12 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
                 produced = 0
             realized.amount_in = take
             realized.amount_out = produced
+            if realized.reserve_in > 0:
+                # The amounts just moved; `theta` describes them or it describes
+                # nothing.  A model-free candidate is realised at `psi = 1` --
+                # under a token of flow -- so a stale `theta` reads 0.00% on a leg
+                # taking several times the pool.
+                realized.theta = take / realized.reserve_in
         balances[src] = available - take
         balances[realized.leg.dst_slot] = balances.get(realized.leg.dst_slot, 0) + produced
     return balances.get(route.dst_slot, 0)

@@ -340,7 +340,7 @@ def _certificate_note(result) -> str | None:
     return f"{reason} · relaxation gap {gap:.3f} bp"
 
 
-def _ledger(result, nodes, dst, in_human, out_human) -> dict:
+def _ledger(result, nodes, src, dst, in_human, out_human) -> dict:
     """Modelled loss against the reference price, and the verified figure."""
     ledger = {
         "fee_bp": result.fee_bp,
@@ -352,7 +352,19 @@ def _ledger(result, nodes, dst, in_human, out_human) -> dict:
         ledger["impact_fraction"] = result.impact_fraction
     price = result.price_out_per_in
     if price > 0 and in_human > 0:
+        # `price` is node to node: canonical output per canonical input.  Either
+        # end may sit off its node's canonical token -- crvUSD -> sDOLA prices
+        # crvUSD's node against DOLA's -- and measuring a sDOLA amount against a
+        # DOLA ideal reports the vault's premium as loss.  On sDOLA that is
+        # 2,909 bp at every size, which is how it was found: a loss that does not
+        # move with the trade is not a loss.
         ideal = in_human * price
+        src_conversion = nodes.conversion.get(src.lower())
+        dst_conversion = nodes.conversion.get(dst.lower())
+        if src_conversion is not None:
+            ideal *= src_conversion.rate
+        if dst_conversion is not None and dst_conversion.rate > 0:
+            ideal /= dst_conversion.rate
         modelled = result.route.modelled_out / 10 ** nodes.decimals(dst)
         ledger["total_bp"] = (1 - modelled / ideal) * 10_000
         if result.verified_out is not None:
@@ -1244,7 +1256,7 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
         certificate=result.certificate,
         certificate_reason=_certificate_note(result),
         pool_names=result.pool_names,
-        ledger=None if lean else _ledger(result, nodes, dst, in_human, out_human),
+        ledger=None if lean else _ledger(result, nodes, src, dst, in_human, out_human),
         diagnostics={} if lean else {
             "pools": result.counters.get("pools", 0),
             "arcs calibrated": result.counters.get("arcs_calibrated", 0),

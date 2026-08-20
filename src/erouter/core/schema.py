@@ -100,6 +100,8 @@ def to_json(
             "bps": realized.leg.bps,
             "share_of_node": round(realized.share_of_node, 6),
             "is_conversion": realized.is_conversion,
+            "theta": realized.theta,
+            "modelled": realized.modelled,
         }
         if arc is not None:
             entry["pool_name"] = arc.note

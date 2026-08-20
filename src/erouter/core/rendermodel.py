@@ -66,6 +66,8 @@ class ElementView:
     eps_bp: float = 0.0
     impact_bp: float = 0.0
     theta_pct: float = 0.0
+    #: False when `eps_bp`/`impact_bp` are placeholders rather than a fit.
+    modelled: bool = True
     conductance_usd: float = 0.0
     flags: list[str] = field(default_factory=list)
     detail: str = ""
@@ -190,6 +192,7 @@ def build_diagram(
                 eps_bp=realized.eps * 10_000,
                 impact_bp=realized.impact_frac * 10_000,
                 theta_pct=realized.theta * 100.0,
+                modelled=realized.modelled,
                 flags=flags,
                 detail=realized.target,
             )
