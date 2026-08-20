@@ -1381,14 +1381,47 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
             print(f"\n  wrote {args.json}")
 
     if getattr(args, "execute", False):
-        _report_execution(result, chain, rpc, nodes, dst)
+        _report_execution(result, chain, rpc, nodes, dst, load.pools)
 
     if args.strict and not result.certificate:
         return 5
     return 0
 
 
-def _report_execution(result, chain, rpc, nodes, dst) -> None:
+def _token_holders(pools, token: str, avoid=()) -> list[str]:
+    """Pools holding `token`, deepest first -- funding candidates for a fork.
+
+    The universe already knows who holds what, so a token `boa.deal` cannot
+    write needs no discovery service: the pools this route was built from hold
+    it by definition, and the deepest one is least disturbed by lending a
+    trade's worth of it.
+
+    **Never a pool the route itself trades through.**  Funding is a real
+    transfer out of the holder, so borrowing from a pool on the route would
+    price the trade against reserves the quote never saw -- the execution would
+    disagree with the quote for a reason the harness created, and it would do
+    it in the direction that looks like a modelling error.
+    """
+    skip = {a.lower() for a in avoid}
+    key = token.lower()
+    off_route, on_route = [], []
+    for pool in pools:
+        for coin, balance in zip(pool.coins, pool.balances or (), strict=False):
+            if coin.address.lower() != key or not balance:
+                continue
+            held = balance / 10 ** coin.decimals
+            (on_route if pool.address.lower() in skip else off_route).append(
+                (held, pool.address))
+    # Off-route holders first, deepest of each group first.  On-route holders
+    # are kept as a last resort rather than dropped: for a token held by only
+    # two pools -- gnosis EURe -- excluding them leaves nothing to fund from,
+    # and "could not be measured" is a worse answer than "measured, with this
+    # caveat".  `_fund` names whichever it used.
+    return [a for _, a in sorted(off_route, reverse=True)] + \
+           [a for _, a in sorted(on_route, reverse=True)]
+
+
+def _report_execution(result, chain, rpc, nodes, dst, pools) -> None:
     """Run the winning route for real and say whether the quote was honest.
 
     Quoting walks the route with chained `staticcall`, which cannot see its own
@@ -1415,7 +1448,9 @@ def _report_execution(result, chain, rpc, nodes, dst) -> None:
     try:
         fork(config.rpc_url(chain.rpc_attr), rpc.block)
         report = execute(result.route, quoted_out=result.verified_out,
-                         wrapped=chain.wrapped, expect_block=rpc.block)
+                         wrapped=chain.wrapped, expect_block=rpc.block,
+                         holders=_token_holders(pools, result.src_token,
+                                                avoid=result.route.pools_used))
     except Exception as exc:                       # noqa: BLE001
         print(f"  {BAD} execute: {type(exc).__name__}: {exc}")
         return

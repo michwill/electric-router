@@ -53,6 +53,14 @@ ERC20_ABI = """[
 
 GAS_HEADROOM_WEI = 10**19
 
+#: `transfer`, for funding out of a holder when the balance slot cannot be
+#: found.  Declared as returning a bool, which is the common spelling; a token
+#: that returns nothing still executes, the decode is what would differ.
+TRANSFER_ABI = """[
+ {"name":"transfer","outputs":[{"type":"bool","name":""}],
+  "inputs":[{"type":"address","name":"t"},{"type":"uint256","name":"v"}],
+  "stateMutability":"nonpayable","type":"function"}]"""
+
 # A native wrapper mints against native, so it is funded rather than dealt.
 WRAPPED_ABI = """[
  {"name":"deposit","outputs":[],"inputs":[],
@@ -161,6 +169,7 @@ def execute(
     amount_in: int | None = None,
     wrapped: str = "",
     expect_block: int | None = None,
+    holders: list[str] | None = None,
 ) -> Execution:
     """Run `route` against the active fork.  Never raises; reports instead.
 
@@ -210,7 +219,7 @@ def execute(
             boa.env.set_balance(who, GAS_HEADROOM_WEI + (amount if native_in else 0))
             if not native_in:
                 token = boa.loads_abi(ERC20_ABI).at(src)
-                _fund(boa, token, who, amount, result, wrapped)
+                _fund(boa, token, who, amount, result, wrapped, holders)
                 with boa.env.prank(who):
                     token.approve(contract.address, amount)
             with boa.env.prank(who):
@@ -223,7 +232,8 @@ def execute(
     return result
 
 
-def _fund(boa, token, who, amount: int, result: Execution, wrapped: str) -> None:
+def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
+          holders: list[str] | None = None) -> None:
     """Put `amount` of the input token in `who`'s hands, faithfully.
 
     **A native wrapper is minted, not dealt.**  WXDAI is to xDAI what WETH is to
@@ -251,7 +261,41 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str) -> None
         boa.deal(token, who, amount)
         return
     except Exception as exc:                       # noqa: BLE001
+        first = str(exc)
         result.warnings.append(
             f"total supply left unadjusted for {token.address}: {exc}"[:200]
         )
-    boa.deal(token, who, amount, adjust_supply=False)
+    try:
+        boa.deal(token, who, amount, adjust_supply=False)
+        return
+    except Exception:                              # noqa: BLE001
+        pass
+    # **Take it from someone who has it.**  `boa.deal` finds the balance slot
+    # by brute force, and a token that packs its balances or computes them --
+    # gnosis EURe, whose two contracts share one market -- defeats both halves
+    # of that.  A holder does not need to be discovered: the pools in the
+    # route's own universe hold the token by definition, and pranking one is a
+    # real `transfer`, so whatever the token does on the way out happens.
+    #
+    # The pool is left short, which is why this is the fallback and not the
+    # first choice: it moves the very liquidity the route is about to price.
+    # Recorded, so a caller reading a suspiciously good number can see it.
+    result.warnings.pop()                          # replaced by the line below
+    for holder in holders or ():
+        try:
+            if token.balanceOf(holder) < amount:
+                continue
+            with boa.env.prank(holder):
+                boa.loads_abi(TRANSFER_ABI).at(token.address).transfer(who, amount)
+        except Exception:                          # noqa: BLE001
+            continue
+        if token.balanceOf(who) >= amount:
+            result.warnings.append(
+                f"{token.address} could not be dealt ({first[:60]}); funded by "
+                f"transfer from {holder}, which leaves that holder short -- if "
+                f"the route trades through it, the execution saw reserves the "
+                f"quote did not")
+            return
+    raise RuntimeError(
+        f"cannot fund {token.address}: boa.deal found no balance slot and no "
+        f"holder among {len(holders or ())} candidate(s) had {amount}")
