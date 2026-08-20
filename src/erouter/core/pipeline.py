@@ -180,9 +180,8 @@ def build_arcs(
     is a node -- without them 51 mainnet tokens have no path at all.
 
     Proportional `remove_liquidity` is deliberately absent: it returns all coins
-    at once, a hyperedge rather than an arc, and the flow formulation (§3.3)
-    cannot tie the resulting flows to fixed ratios.  Multi-coin `add_liquidity`
-    is the same shape reversed.
+    at once, a hyperedge rather than an arc, which §3.3 cannot tie to fixed
+    ratios.  Multi-coin `add_liquidity` is the same shape reversed.
     """
     refs: list[ArcRef] = []
     meta: list[tuple[PoolSpec, int, int]] = []
@@ -418,12 +417,9 @@ def prepare(
             tau_vec, sig_vec, a_vec, weights, nodes.n_nodes, dst_node,
         )
         # Second pass, weighted by what each pool holds at this block rather
-        # than by `tvl_usd`, which arrives with the pool list on a five-minute
-        # TTL and is the one input `--block` does not pin.  Whole-pool value,
-        # halved per arc: an arc's own input reserve weights the two directions
-        # of an imbalanced pool unequally (measured at 58.8 bp on USDC->WETH
-        # $1M).  The first pass is what values the balances, since depth has to
-        # be in one currency to compare across pairs.
+        # than by `tvl_usd`, which is the one input `--block` does not pin.
+        # Whole-pool value, halved per arc: an arc's own input reserve weights
+        # the two directions of an imbalanced pool unequally (58.8 bp, measured).
         held: dict[str, float] = {}
         for pool in pools:
             if not pool.balances or len(pool.balances) != len(pool.coins):
@@ -497,14 +493,11 @@ def _conversion_only(
 class Prepared:
     """Everything about a (universe, src, dst) that does not depend on size.
 
-    A property of the model, not a convenience: probe sizes are fractions of
-    each pool's reserves, and `G_p = nu_tau a_p / B_p`,
-    `eps_p = 1 - a_p nu_sig / nu_tau` contain no `Psi`.  `Psi` enters only at
-    the dust floor, the caps and the right-hand side of the solve.
-
-    So a second size reuses the probes, the calibration and the price fit, and
-    re-runs only the solve.  Within one active set the KKT system is affine in
-    `Psi`, so a nearby size usually needs the same arcs conducting.
+    A property of the model, not a convenience: probe sizes are fractions of each
+    pool's reserves, and `G_p` and `eps_p` contain no `Psi`, which enters only at
+    the dust floor, the caps and the solve's right-hand side.  So a second size
+    reuses the probes, the calibration and the price fit, and re-runs only the
+    solve.
     """
 
     arcs: list[PoolArc]
@@ -679,14 +672,12 @@ def _quote(
     with clock("refine"):
         wanted = {arcs[k].id for k in np.flatnonzero(seed)}
         wanted |= {a.id for a in arcs if a.tau in (src_node, dst_node) or a.sigma in (src_node, dst_node)}
-        # And every arc the client can *compute* rather than probe.
-        #
-        # The shortlist exists because a probe costs a round trip, and a
-        # derivative fitted near zero describes a different curve than the one a
-        # $2M trade rides -- so which arcs made the shortlist decided the answer.
-        # Where the pool's own invariant can be evaluated (`dev/exact_probe.py`)
-        # that costs 15 us and no round trip, so re-fit all of them every quote.
-        # The rest keep the shortlist.
+        # And every arc the client can *compute* rather than probe.  The
+        # shortlist exists because a probe costs a round trip, and a derivative
+        # fitted near zero describes a different curve than the one a $2M trade
+        # rides -- so which arcs made the shortlist decided the answer.  Where
+        # the pool's own invariant can be evaluated there is no round trip, so
+        # re-fit all of those every quote; the rest keep the shortlist.
         computes = getattr(client, "computes", None)
         if computes is not None:
             free = {a.id for a in arcs if computes(a.pool)}
@@ -724,19 +715,13 @@ def _quote(
     # --- solve (§5.4, §5.5) ----------------------------------------------
     with clock("seed"):
         seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
-        # §5.4's warm start.  Starting with all m arcs active means pivoting
-        # ~700 of them back out one at a time, each factorising a matrix the
-        # size of the whole component; starting from one path only ever adds
-        # arcs.
-        #
-        # The start is a function of *this* quote and nothing else.  A previous
-        # size's support must not be carried forward: column generation is
-        # capped at `max_rounds` and the candidate re-solves run truncated
-        # (`CANDIDATE_PIVOTS`, `partial_ok`), so the starting basis decides
-        # which candidates exist -- measured at 26.5 bp between the same $2M
-        # quote run alone and run after a $100k one.  A session may reuse
-        # anything that is a function of (universe, block), never of a previous
-        # query.
+        # §5.4's warm start, and it is a function of *this* quote and nothing
+        # else.  A previous size's support must not be carried forward: column
+        # generation is capped at `max_rounds` and the candidate re-solves run
+        # truncated, so the starting basis decides which candidates exist --
+        # measured at 26.5 bp between the same quote run alone and run after a
+        # smaller one.  A session may reuse anything that is a function of
+        # (universe, block), never of a previous query.
         best_path = k_shortest_paths(g, src_node, dst_node, k=1)
         warm_start = np.array(best_path[0]) if best_path else None
     with clock("solve"):
@@ -771,12 +756,11 @@ def _quote(
     thetas = _realised_theta(arcs, psi, nu, nodes, active)
     result.counters["max_theta"] = max(thetas.values(), default=0.0)
     # Everything the model is loading past what it measured, with no ceiling.
-    #
-    # There used to be one at THETA_ESCALATE, because re-probing an arc past the
-    # pool's own reserve does not measure it: the quotes come back saturated and
-    # `_recalibrate` reads that as a wall.  The `reserve_in` clamp below now
-    # forbids that outright, so the ceiling was left excluding exactly the arcs
-    # whose `B` is least trustworthy.
+    # There used to be one at THETA_ESCALATE, but re-probing an arc past the
+    # pool's own reserve does not measure it -- the quotes come back saturated
+    # and `_recalibrate` reads that as a wall.  The `reserve_in` clamp below now
+    # forbids that outright, so the ceiling only excluded the arcs whose `B` is
+    # least trustworthy.
     over = {k: v for k, v in thetas.items() if v > THETA_RECALIBRATE}
     if over and refit_rounds > 0:
         with clock("size_check"):
@@ -836,14 +820,10 @@ def _quote(
     if residual > tolerance:
         # Before failing, ask what accuracy the solve could have had.  A
         # Laplacian of condition number `k` yields relative error about
-        # `k * eps`, and that lands in `psi` through `psi = G(du - eps)`.  The
-        # graph tolerates `k` up to MAX_CONDITION = 1e12, where that error is
-        # 2e-4 -- four orders coarser than the flat 1e-8 above, and the two
-        # constants were never reconciled.  Whether a route lands above or below
-        # the flat bound moves with BLAS thread count and cache contents, which
-        # is what made the failure look random.
-        #
-        # `cond` is computed only here, on the path that is about to fail.
+        # `k * eps`, and the graph tolerates `k` up to MAX_CONDITION = 1e12 --
+        # four orders coarser than the flat 1e-8 above, which is why a route
+        # landing either side of the flat bound moved with BLAS thread count.
+        # `cond` is computed only here, on the path about to fail.
         conditioned = _achievable_kcl(g, report.solution.A, dst_node)
         if residual > max(tolerance, conditioned):
             _r, node, n_in, n_out = _kcl_detail(g, psi, src_node, dst_node, Psi)
@@ -1296,11 +1276,8 @@ def two_step_candidates(
 
     The two-hop half of the safety floor, model-free for the same reason: the
     quadratic element law degrades badly once a trade is large relative to the
-    pools -- measured on wstETH->WETH at 50 units against a ~900 wstETH
-    universe, the model's best paid 50.30 against 54.70 from an obvious chain.
-
-    Two batched rounds pick *which* chains to offer; the quoter decides the
-    amounts, so the ranking here only has to be roughly right.
+    pools.  Two batched rounds pick *which* chains to offer; the quoter decides
+    the amounts, so the ranking here only has to be roughly right.
     """
     src_node, dst_node = nodes.node(src_token), nodes.node(dst_token)
 
@@ -1618,12 +1595,10 @@ def _recalibrate(arcs: list[PoolArc], ladders, nodes: NodeMap) -> int:
 def _kcl_tolerance(Psi: float, g_scale: float) -> float:
     """How much KCL slop is floating-point noise rather than a bug.
 
-    The solve runs in units scaled by `g_scale`, so its roundoff is absolute
-    there and gets multiplied by `g_scale` on the way out.  A tolerance purely
-    as a fraction of `Psi` therefore tightens without limit as the trade
-    shrinks, and rejects small trades outright.  So allow both terms; this stays
-    far tighter than the failure the check exists to catch, since flow conjured
-    outside the active component is `O(Psi)`.
+    The solve runs in units scaled by `g_scale`, so a tolerance expressed purely
+    as a fraction of `Psi` tightens without limit as the trade shrinks and
+    rejects small trades outright.  Allowing both terms stays far tighter than
+    the failure this catches, since conjured flow is `O(Psi)`.
     """
     return KCL_RELATIVE + KCL_ABSOLUTE * g_scale / max(Psi, 1e-30)
 
@@ -1631,13 +1606,11 @@ def _kcl_tolerance(Psi: float, g_scale: float) -> float:
 def _achievable_kcl(g: ArcArrays, active: np.ndarray, dst: int) -> float:
     """The KCL residual a backward-stable solve could deliver on this graph.
 
-    `k * eps` is the relative error a solve of condition number `k` carries, so
-    it floors any residual computed from its output.  Returns 0 when there is
-    nothing to condition, leaving the caller's flat tolerance in charge.
-
-    The safety factor covers the gap to the error actually realised -- 0.04x to
-    33x of `k * eps` over the routes examined.  Even at `k = 1e12` this stays
-    two orders below conjured flow, which is `O(Psi)`.
+    `k * eps` floors any residual computed from a solve of condition number `k`.
+    Returns 0 when there is nothing to condition, leaving the caller's flat
+    tolerance in charge.  The safety factor covers the gap to the error actually
+    realised, 0.04x to 33x, and even at `k = 1e12` stays two orders below
+    conjured flow.
     """
     from .graph import component_of, laplacian
 
@@ -1719,11 +1692,10 @@ DEPTH_LIMIT = 1e4
 def _clamp_unphysical_depth(arcs: list[PoolArc], nu: np.ndarray, nodes: NodeMap) -> int:
     """Treat immeasurably small curvature as the zero-curvature limit.
 
-    A `B` implying a conductance far beyond the pool's own reserves is not a
-    very deep pool but a curvature below the quotes' integer noise floor.  A
-    huge finite `G` wrecks the Laplacian's conditioning for every other arc;
-    clamping to `B = 0` with a cap is the admissible limit (§2.3) and keeps the
-    arc bottomless only up to the size actually probed.
+    A `B` implying a conductance far beyond the pool's own reserves is not a very
+    deep pool but a curvature below the quotes' integer noise floor.  Clamping to
+    `B = 0` with a cap is the admissible limit (§2.3) and keeps the arc
+    bottomless only up to the size actually probed.
     """
     clamped = 0
     for arc in arcs:
