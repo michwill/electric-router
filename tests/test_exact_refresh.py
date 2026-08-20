@@ -1,21 +1,17 @@
 """A computed pool must follow the block, or it answers about a past one.
 
-`ExactQuoterClient` replaces probes with arithmetic over parameters it read
-once: balances, `D`, the fee terms.  That makes the model a snapshot of one
-block's storage, and a snapshot has no way to notice that the chain moved --
-it keeps answering, confidently and wrongly, on exactly the pools the router
-trusts most.
+`ExactQuoterClient` replaces probes with arithmetic over parameters it read once:
+balances, `D`, the fee terms.  That makes the model a snapshot of one block's
+storage, and a snapshot has no way to notice that the chain moved -- it keeps
+answering, confidently and wrongly, on exactly the pools the router trusts most.
 
 Today nothing moves: `JsonRpcTransport` pins a block at construction and never
-repins, so the models, the balances and every probe share one block by
-construction.  The hook exists for the case that breaks that -- a live wallet
-provider in the browser, where the block advances under a running session.
+repins.  The hook exists for the case that breaks that -- a live wallet provider
+in the browser, where the block advances under a running session.
 
-The test that matters is not "the field was reassigned".  It is that the
-probes the quote was actually answered from came from the new models, since a
-refresh that lands after the preparation has been re-fitted is no refresh at
-all.  So each generation records what it was asked, and the assertion is about
-who did the work.
+The test that matters is not "the field was reassigned" but that the probes the
+quote was answered from came from the new models, since a refresh landing after
+the preparation has been re-fitted is no refresh at all.
 """
 
 from __future__ import annotations
@@ -159,9 +155,8 @@ def test_the_model_cache_is_dropped_when_the_models_are():
 
     `_model` caches `(pool, kind, i, j) -> model` because the lookup cost more
     than the arithmetic it guards: 8.1 us a call against 1.8 us of maths.  The
-    models are only valid at the block they were read from, so `refresh_at`
-    has to invalidate it -- otherwise the rebuild lands and every leg keeps
-    being priced by the stale object.
+    models are only valid at the block they were read from, so `refresh_at` has
+    to invalidate it, or the rebuild lands and every leg stays stale.
     """
     first_models = ModelSet(1)
     later_models = ModelSet(2)

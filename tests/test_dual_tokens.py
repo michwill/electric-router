@@ -1,14 +1,13 @@
 """Two addresses that are one market but not one balance.
 
 `discover_aliases` merges tokens that agree to the wei -- same supply, same
-balance at every holder tried.  Gnosis EURe does not: v1 and v2 hold
-different amounts and it refuses them, which is the right call on the
-evidence it has.  They are still interchangeable, because a swap denominated
-in one settles against the other with no contract in between.  That is not
-readable, so it is declared.
+balance at every holder tried.  Gnosis EURe does not: v1 and v2 hold different
+amounts and it refuses them, which is right on the evidence it has.  They are
+still interchangeable, because a swap denominated in one settles against the
+other with no contract in between.  That is not readable, so it is declared.
 
-Held apart, `--to EURe` picks the deeper side and the market behind the
-other is unreachable: three pools become two plus an orphan.
+Held apart, `--to EURe` picks the deeper side and the market behind the other is
+unreachable: three pools become two plus an orphan.
 """
 
 from __future__ import annotations
@@ -113,16 +112,15 @@ def test_flow_leaving_both_halves_of_an_alias_is_realisable():
     """One node, two addresses, an arc drawing on each.
 
     `realize.slot` collapses an alias onto its canonical deliberately -- two
-    contracts over one balance, as gnosis's two EURe are -- so an arc whose
-    input is the alias is already drawing on the hub's slot.  The hub check
-    compared *addresses*, so that arc was sent down the spoke path and the
-    conversion leg built for it moved slot 0 to slot 0, which `Leg` refuses.
+    contracts over one balance, as gnosis's two EURe are -- so an arc whose input
+    is the alias is already drawing on the hub's slot.  The hub check compared
+    *addresses*, so that arc was sent down the spoke path and the conversion leg
+    built for it moved slot 0 to slot 0, which `Leg` refuses.
 
-    It takes both halves to reach: with flow leaving only one address the hub
-    is reassigned to that address and the comparison is true either way.  Two
-    arcs pin the hub to the canonical and put the alias on the spoke path --
-    which is the real gnosis shape, where EURe sits in two pools.  `EURe ->
-    USDC` at 10,000 died there with "leg must move between slots (got 0)".
+    It takes both halves to reach: with flow leaving only one address the hub is
+    reassigned to it and the comparison is true either way.  Two arcs pin the hub
+    to the canonical and put the alias on the spoke path -- the real gnosis shape,
+    where `EURe -> USDC` at 10,000 died with "leg must move between slots".
     """
     nodes, _ = build_node_map(pools(), chain_with_duals(), Client())
     canonical, alias = nodes.canonical(V1), V2

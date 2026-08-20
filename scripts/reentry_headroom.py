@@ -3,18 +3,18 @@
 
 Decision 3 forbids a route from touching a pool twice, because a view-only
 chained quoter cannot see its own earlier leg.  Relaxing it -- per pool *per
-pair*, with the pool's state advanced between legs -- is only worth building
-if the rule is actually binding and the flow it forbids is actually worth
-something, so this measures both before anything is built.
+pair*, with the pool's state advanced between legs -- is only worth building if
+the rule is actually binding and the flow it forbids is worth something, so this
+measures both before anything is built.
 
 The solver's own optimum ignores the rule.  Its modelled loss is therefore a
 lower bound on achievable loss, i.e. **an upper bound on the prize**: whatever
 the repaired winner gives up against it is the most a stateful double-entry
-router could ever recover, and the true figure is strictly below it because
-the model prices two arcs of one pool as though they did not interact.
+router could recover, and the true figure is strictly below it because the model
+prices two arcs of one pool as though they did not interact.
 
-Sizes are swept as a fraction of the source coin's reserve, because that --
-not a dollar amount -- is what decides whether a split is worth taking.
+Sizes are swept as a fraction of the source coin's reserve, because that -- not a
+dollar amount -- is what decides whether a split is worth taking.
 
     uv run python scripts/reentry_headroom.py [chain ...]
 """

@@ -8,15 +8,13 @@ written to satisfy.  This one poses `(P)` to OSQP, which shares no code with
     minimise   sum_p [ eps_p psi_p + psi_p^2 / (2 G_p) ]
     subject to B^T psi = s_hat,  0 <= psi <= cap
 
-That makes it the oracle a *port* has to be checked against.  Validating a
-rewrite by "does it match the Python" reproduces the Python's bugs faithfully;
-validating both against an implementation that shares nothing is the only check
-that can catch a mistake common to them.
+That makes it the oracle a *port* has to be checked against: validating a rewrite
+by "does it match the Python" reproduces the Python's bugs faithfully.
 
-The comparison is on the **objective**, not on `psi`.  Two flows can tie
-exactly -- parallel arcs with equal `eps` and `G` split arbitrarily -- so
-comparing arc-by-arc would fail on problems where both answers are right.
-Where the optimum is unique the flows are compared too.
+The comparison is on the **objective**, not on `psi`.  Two flows can tie exactly
+-- parallel arcs with equal `eps` and `G` split arbitrarily -- so comparing
+arc-by-arc would fail where both answers are right.  Where the optimum is unique
+the flows are compared too.
 """
 
 from __future__ import annotations

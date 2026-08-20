@@ -52,9 +52,9 @@ class ConvexArc:
 
         f(d) = a0 d (1 + c d)      f'' = 2 a0 c > 0
 
-    Stands in for a fee that falls with size faster than price impact bites --
-    a CryptoSwap-NG rebalancing side, a rebate tier, an RFQ ladder.  Concavity
-    fails, so the quadratic model is inadmissible and the arc must be clamped.
+    Stands in for a fee that falls with size faster than price impact bites.
+    Concavity fails, so the quadratic model is inadmissible and the arc must be
+    clamped.
     """
 
     a0: float
@@ -81,12 +81,10 @@ class DynamicFeeCPMM:
     `slope > 0` is the *rebalancing* direction: a bigger trade pushes the pool
     toward balance, raising the retention, so the effective fee falls with size
     and the arc gains a convex contribution.  `slope < 0` is the imbalancing
-    direction, where the fee rises with size and the arc is strictly better
-    behaved than a plain CPMM.
-
-    That asymmetry is the whole point: on a real dynamic-fee pool exactly one
-    of the two directions carries CONVEX_FLAG, and flagging the *pool* would
-    throw away half the routing graph for no reason.
+    direction, where the fee rises with size and the arc is better behaved than a
+    plain CPMM.  That asymmetry is the point: on a real dynamic-fee pool exactly
+    one direction carries CONVEX_FLAG, and flagging the *pool* would throw away
+    half the routing graph.
     """
 
     x_out: float

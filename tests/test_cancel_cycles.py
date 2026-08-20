@@ -1,24 +1,23 @@
 """Cancelling a circulation must not disturb anything else in the flow.
 
 `cancel_cycles` removes loops the model thinks are free money, because a router
-cannot execute a circulation as part of a one-way trade.  Subtracting the
-minimum around a directed cycle leaves conservation exactly intact, which is
-what makes the operation safe.
+cannot execute a circulation as part of a one-way trade.  Subtracting the minimum
+around a directed cycle leaves conservation exactly intact, which is what makes
+the operation safe.
 
 The cleanup afterwards was not restricted to the cycle:
 
     flow[flow <= tol] = 0.0
 
-`<= tol` catches every *negative* entry in the whole vector, and a negative
-`psi` is flow in the reverse direction, not dust -- an active-set solve that
-stops early (`reason='PARTIAL'`) legitimately leaves them.  Zeroing one strands
-its magnitude at both of its endpoints.
+`<= tol` catches every *negative* entry in the whole vector, and a negative `psi`
+is flow in the reverse direction, not dust -- an active-set solve that stops early
+(`reason='PARTIAL'`) legitimately leaves them.  Zeroing one strands its magnitude
+at both endpoints.
 
 Measured on USDC->WBTC 1M at block 25,780,887: the solve delivered conservation
-to 3.202e-10 with three negative arcs, the largest -0.130407.  After this
-function the residual was 8.404e-03 -- 0.1304 of a Psi of 15.5172 -- and §12.4
-refused the route for damage done after the solve had finished.  The guard was
-right every time; the flow handed to it was not.
+to 3.202e-10 with three negative arcs, the largest -0.130407.  After this function
+the residual was 8.404e-03, and §12.4 refused the route for damage done after the
+solve had finished.  The guard was right; the flow handed to it was not.
 """
 
 from __future__ import annotations

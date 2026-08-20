@@ -5,17 +5,15 @@ second size reuses the probes, the calibration and the price fit.  That only
 holds if quoting is *read-only* against it.
 
 It was not.  §8 re-probes at the sizes the current route realised and `merge`s
-them into the ladders, and those ladders were shared rather than copied -- so
-the next quote through the same `Prepared` recalibrated from a ladder carrying
-the previous size's points.  Measured on USDC->CRV $100k against a live node:
-252 of 862 ladders moved after a single route, and asking for the identical
-trade again returned 26 bp less.  It hid well because the loss follows
-whichever quote runs *second*, so it reads as a routing difference rather than
-as contamination -- it invalidated a gas-table comparison before it was found.
+them into the ladders, and those ladders were shared rather than copied -- so the
+next quote through the same `Prepared` recalibrated from a ladder carrying the
+previous size's points.  On USDC->CRV $100k against a live node: 252 of 862
+ladders moved after a single route, and asking for the identical trade again
+returned 26 bp less.  It hid well because the loss follows whichever quote runs
+*second*, so it reads as a routing difference rather than as contamination.
 
-`arcs` were already copied per quote for exactly this reason, with a comment
-saying so.  These tests are here so the ladders cannot quietly lose that
-treatment again.
+`arcs` were already copied per quote for exactly this reason.  These tests are
+here so the ladders cannot quietly lose that treatment again.
 """
 
 from __future__ import annotations

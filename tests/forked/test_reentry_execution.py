@@ -1,22 +1,20 @@
 """Does the reentry walk survive being executed?
 
-Every other route in this system is adjudicated by the chain: the quoter
-walks it and the answer that counts is the one that comes back.  A route
-that enters one pool twice cannot be, because a view-only quoter cannot see
-its own earlier leg -- which is the entire reason `_stateful_leg` exists.
-So the walk is the *only* thing standing between a reentry route and a
-transaction, and nothing had ever checked it against an execution.
+Every other route in this system is adjudicated by the chain: the quoter walks it
+and the answer that counts is the one that comes back.  A route that enters one
+pool twice cannot be, because a view-only quoter cannot see its own earlier leg
+-- the entire reason `_stateful_leg` exists.  So the walk is the *only* thing
+standing between a reentry route and a transaction.
 
-This does, with real `exchange`, `add_liquidity` and
-`remove_liquidity_one_coin` against 3pool on a fork, in the order the
-router emitted them.  It is the test that would have caught the withdrawal
-burning against a pre-deposit supply -- worth 107 bp on crvUSD -> sDOLA at
-2M, and worth free money to the solver, which duly went and found it.
+This checks it against real `exchange`, `add_liquidity` and
+`remove_liquidity_one_coin` against 3pool on a fork, in the order the router
+emitted them.  It is the test that would have caught the withdrawal burning
+against a pre-deposit supply -- worth 107 bp on crvUSD -> sDOLA at 2M, and worth
+free money to the solver, which duly went and found it.
 
-The tolerance is one basis point rather than one wei.  The walk prices in
-floats by design (`_price` takes the fast path; measured at 5.4e-4 bp on
-263 mainnet stableswaps), so wei-exactness is not the claim.  The claim is
-that the *state* is carried, and a dropped mint is 125 bp, not 1e-4.
+The tolerance is one basis point rather than one wei: the walk prices in floats
+by design (5.4e-4 bp on 263 mainnet stableswaps), so wei-exactness is not the
+claim.  The claim is that the *state* is carried, and a dropped mint is 125 bp.
 """
 
 from __future__ import annotations
@@ -158,12 +156,11 @@ def test_the_walk_matches_a_real_stateful_execution(forked_env, walk):
 def test_the_route_beats_neither_nothing_nor_itself(forked_env):
     """Deposit-and-withdraw through one pool must not manufacture value.
 
-    The failure that motivated all of this: 2M USDT in, more than 2M DAI
-    out, because the burn was priced against a supply that did not include
-    the mint.  Two imbalance fees are cheaper than a swap's flat fee on
-    3pool -- `fee * n / (4(n-1))` is 3/8 of it, twice -- so the round trip
-    genuinely can win, and the test is that it wins by *fees*, not by
-    conjuring principal.
+    The failure that motivated all of this: 2M USDT in, more than 2M DAI out,
+    because the burn was priced against a supply that did not include the mint.
+    Two imbalance fees are cheaper than a swap's flat fee on 3pool -- `fee * n /
+    (4(n-1))` is 3/8 of it, twice -- so the round trip genuinely can win, and the
+    test is that it wins by *fees*, not by conjuring principal.
     """
     pool = boa.loads_abi(POOL_ABI).at(POOL)
     dai = boa.loads_abi(ERC20_ABI).at(DAI)

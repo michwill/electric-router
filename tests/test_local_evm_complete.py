@@ -1,12 +1,11 @@
 """An incomplete state sweep must be visible, not quoted from.
 
-py-evm reads a slot that was never inserted as **zero**, and a zero fee, rate
-or balance is a plausible number: the quote succeeds, the arc is mis-calibrated
-or silently dropped, and the route changes with nothing raised anywhere.  That
-is what made a pinned block non-reproducible across processes -- identical code
-at block 25,769,788 returned 5,001,179.88 over 7 legs on one run and
-5,002,399.84 over 24 on the next, a 2.4 bp swing, depending only on whether the
-storage sweep had happened to succeed.
+py-evm reads a slot that was never inserted as **zero**, and a zero fee, rate or
+balance is a plausible number: the quote succeeds, the arc is mis-calibrated or
+silently dropped, and the route changes with nothing raised anywhere.  That is
+what made a pinned block non-reproducible across processes -- identical code at
+block 25,769,788 returned 5,001,179.88 over 7 legs on one run and 5,002,399.84
+over 24 on the next, depending only on whether the sweep had succeeded.
 
 So the sweep retries once, and counts whatever is still missing.  `complete` is
 what `_local_quoter` consults before handing the EVM to a route.
@@ -119,10 +118,9 @@ def test_a_transport_failure_in_the_access_list_counts_but_a_revert_does_not():
 
     A probe that reverts because the size is past what the pool holds is a real
     answer, and it arrives as a *result* with an error inside it.  A node that
-    refuses arrives as an exception, and the slots that request would have
-    named are now zeros.  Counting both would refuse the local EVM on every
-    route that probes a small pool; counting neither is what let a flaky
-    connection change a route silently.
+    refuses arrives as an exception, and the slots that request would have named
+    are now zeros.  Counting both would refuse the local EVM on every route that
+    probes a small pool; counting neither let a flaky connection change a route.
     """
     from erouter.dev.local_evm import _access_list_error, _access_list_failed
 

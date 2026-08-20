@@ -1,8 +1,8 @@
 """The flow-conservation gate against the arithmetic it is judging (§12.4).
 
 The gate asks whether the flow about to be executed conserves.  It used to ask
-with a flat 1e-8, while `graph.py` deliberately admits conductance spreads up
-to `MAX_CONDITION = 1e12` -- and a linear solve of condition number `k` carries
+with a flat 1e-8, while `graph.py` deliberately admits conductance spreads up to
+`MAX_CONDITION = 1e12` -- and a linear solve of condition number `k` carries
 relative error about `k * eps`, which at that ceiling is 2e-4.  So the check
 demanded four orders more accuracy than the graph it was checking could supply,
 and rejected healthy routes whenever their active set happened to be stiff.
@@ -10,8 +10,8 @@ and rejected healthy routes whenever their active set happened to be stiff.
 Measured on USDC->CRV $1M: residual 1.16e-07 against a 1.13e-08 tolerance, with
 the active Laplacian at `k = 2.3e9` and `k * eps = 5.2e-07`.  The solve was
 running four times better than its conditioning guaranteed, and was refused.
-Whether a route landed above or below the line moved with BLAS thread count and
-with cache contents, which is what made it look intermittent.
+Whether a route landed above or below the line moved with BLAS thread count,
+which is what made it look intermittent.
 
 These tests hold the two ends together: the bound must track `k`, and it must
 stay far below the failure the gate exists to catch.

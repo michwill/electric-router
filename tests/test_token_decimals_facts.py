@@ -2,22 +2,21 @@
 
 The Curve API omits `decimals` on its newer registries -- every `twocryptong`
 and `stableswapng` entry measured, on Ethereum, BSC and gnosis alike -- and a
-missing value defaults to 18.  `read_balances` exists to correct that from the
-token itself, and the correction is cached because decimals never change.
+missing value defaults to 18.  `read_balances` corrects that from the token
+itself, and caches it because decimals never change.
 
 Three passes write to that cache about the same address: this one, the LP-token
-pass, and the ERC4626 `asset()` pass.  Merging them at the file level replaces
-an address's whole entry, so only the last writer's facts survived -- measured
-across 20 cached chains, 674 Ethereum entries and not one still held a
-`decimals`.  A reader that then tests *address membership* rather than the fact
-it wants concludes the answer is known, never asks, and finds nothing to use.
+pass, and the ERC4626 `asset()` pass.  Merging at the file level replaces an
+address's whole entry, so only the last writer survived -- across 20 cached
+chains, 674 Ethereum entries and not one still held a `decimals`.  A reader that
+tests *address membership* rather than the fact it wants then concludes the
+answer is known, never asks, and finds nothing to use.
 
 On gnosis that made USDC.e 18 decimals in the one pool whose API entry omitted
 them.  Every amount through it was out by 1e12: `EURe -> USDC.e` calibrated to
-`a = 1.1676e-12`, i.e. `eps = +10000 bp`, a diode that drops the entire value,
-and `USDC.e -> EURe` had `B` inflated by 1e24 so its conductance fell under the
-dust floor and the arc was dropped outright.  The pool held $173k against a
-route quoting 1,920 bp of impact and the solver could not see it at all.
+`eps = +10000 bp`, a diode dropping the entire value, and the reverse had `B`
+inflated by 1e24 so the arc fell under the dust floor and was dropped.  The pool
+held $173k and the solver could not see it at all.
 """
 
 from __future__ import annotations
