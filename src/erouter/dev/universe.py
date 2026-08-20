@@ -33,10 +33,8 @@ class UniverseLoad:
         """Which pool set this is, in eight characters.
 
         The pool list comes from an API on a five-minute TTL, so it is the one
-        input to a quote that `--block` does not pin.  Two runs that disagree
-        are only comparable if this matches, and a quote is only reproducible
-        if it is recorded -- measured: a refetch that moved one pool's TVL
-        moved the answer, and one that did not, did not.
+        input to a quote that `--block` does not pin.  Two runs that disagree are
+        only comparable if this matches.
         """
         import hashlib
 
@@ -53,10 +51,9 @@ def _list_pools(chain: Chain, api: CurveApi, min_tvl: float) -> list[dict]:
     """
     if chain.lite:
         # The Lite floor is a *default*, not a ceiling on what the caller may
-        # ask for.  Taking `min()` of the two made `--min-tvl` unable to raise
-        # it at all, which hid a real problem: unichain's universe spans 20
-        # orders of magnitude in curvature and trips the §9.7 conditioning
-        # guard, and no floor the caller passed could thin it out.
+        # ask for.  Taking `min()` of the two made `--min-tvl` unable to raise it
+        # at all, which hid unichain tripping the §9.7 conditioning guard with no
+        # floor the caller passed able to thin it out.
         floor = lite.LITE_MIN_TVL if min_tvl == DEFAULT_MIN_TVL else min_tvl
         return lite.list_pools(chain.chain_id, min_tvl=floor)
     return api.list_pools(chain.chain_id, min_tvl=min_tvl)
@@ -144,37 +141,31 @@ def llamma_pools(
 ) -> list[PoolSpec]:
     """LLAMMA markets as ordinary two-coin crypto pools.
 
-    **Off by default: enabling this today makes routes much worse.**  Measured
-    at block 25,738,767, adding the 11 markets that clear a $10k floor took
-    USDC->sUSDS from 900,795 to 296,795 (-67%) and crvUSD->sDOLA from
-    3,502,562 to 1,500,637 (-57%), and made USDC->WETH and crvUSD->CRV fail
-    outright on the §12.4 conservation and pin-detachment guards.
+    **Off by default: enabling this today makes routes much worse.**  Measured at
+    block 25,738,767, adding the 11 markets that clear a $10k floor cost
+    USDC->sUSDS 67% and crvUSD->sDOLA 57%, and made USDC->WETH and crvUSD->CRV
+    fail the §12.4 conservation and pin-detachment guards outright.
 
     The cause is calibration, not plumbing.  LLAMMA is a *banded* AMM, and the
     reserve we size probes from is the market's borrowed balance -- 3.40 crvUSD
-    on the sUSDS market -- so the whole grid lands inside a single band where
-    the curve is nearly linear.  It fits `a = 0.9927, B = 5.8e-3` with no cap,
-    the model computes `G ~ 171`, and the solver posts millions through a
-    three-crvUSD venue.  This is §2.5's "most dangerous single mis-calibration"
-    with the peg replaced by a band, and the symptoms are the ones §2.5 and R3
-    predict: the two directions of the WETH market disagree on `a` by 7x, and
-    one arc calibrates to `a = 0` outright.
+    on the sUSDS market -- so the whole grid lands inside a single band where the
+    curve is nearly linear.  It fits no cap, the model computes `G ~ 171`, and the
+    solver posts millions through a three-crvUSD venue.  This is §2.5's "most
+    dangerous single mis-calibration" with the peg replaced by a band.
 
-    Making it usable needs band-aware capacity -- a real `cap` from the
-    liquidity actually standing in reachable bands, so §2.3's clamp can bound
-    it -- not a wider probe grid.  The plumbing here is correct and stays, so
-    that work has somewhere to land.
+    Making it usable needs band-aware capacity -- a real `cap` from the liquidity
+    actually standing in reachable bands, so §2.3's clamp can bound it -- not a
+    wider probe grid.  The plumbing here is correct and stays, so that work has
+    somewhere to land.
 
-    Everything downstream -- probing, calibration, the graph, realisation --
-    treats them like any other pool, because after this they *are* one: the
-    only genuinely different things are that they quote with the `uint256`
-    spelling (so the dialect is set here rather than probed) and that they
-    have no `balances()` getter, so the reserves come from the API.
+    Everything downstream treats them like any other pool, because after this they
+    *are* one: the only differences are that they quote with the `uint256`
+    spelling (so the dialect is set here rather than probed) and that they have no
+    `balances()` getter, so the reserves come from the API.
 
-    Markets with nothing on one side are dropped.  Many are empty, and an arc
-    with a zero reserve produces a zero probe grid and then a zero `a`, which
-    §R3 is explicit about: it looks like a valid quote and poisons the
-    reference-price fit.
+    Markets with nothing on one side are dropped: an arc with a zero reserve
+    produces a zero probe grid and then a zero `a`, which looks like a valid quote
+    and poisons the reference-price fit (§R3).
     """
     api = api or CurveApi()
     out: list[PoolSpec] = []
@@ -228,17 +219,13 @@ def llamma_pools(
 def _probed_dead_pools(chain) -> set[str]:
     """Pools the facts file says cannot be traded at all.
 
-    Deliberately narrow, and it took getting this wrong to see why.  The first
-    version dropped any pool with a recorded revert and no recorded gas figure
-    -- which is every pool no route happened to choose, and it would have
-    deleted both Compound pools outright.  Their `exchange_underlying` reverts
-    while their `cDAI`/`cUSDC` arcs are healthy and routed through daily; a
-    broken direction is not a broken pool.
+    Deliberately narrow.  A recorded revert bans a *direction*, not a pool: both
+    Compound pools have a reverting `exchange_underlying` and healthy
+    `cDAI`/`cUSDC` arcs routed through daily, and the first version of this would
+    have deleted them outright.
 
-    So a recorded revert bans a *direction*, not a pool, and nothing here bans
-    a pool at all.  Pool-level removal stays with the hand-written list, where
-    a human decided it.  This exists so that when arcs learn to read the broken
-    list per direction, the plumbing is already the right shape.
+    Nothing here bans a pool.  Pool-level removal stays with the hand-written
+    list, where a human decided it.
     """
     return set()
 
@@ -255,20 +242,14 @@ def _apply_filters(
 
     Off by default, because measured against the live API it drops nothing:
     `/v2/pools` already excludes all 185 flagged mainnet pools, even at
-    min_tvl=0 where it returns 2,211.  Paying an HTTP round trip on every load
-    for a filter that never fires is not worth it.
-
-    Turn it on for the case it is written for -- a universe cached before a
-    pool was flagged, since Curve's list moves on Curve's schedule -- which is
-    why it is applied on the cache and stale paths too, not only a fresh load.
+    min_tvl=0.  Turn it on for the case it is written for -- a universe cached
+    before a pool was flagged -- which is why it is applied on the cache and
+    stale paths too, not only a fresh load.
     """
     # The hand-written list plus everything a `facts` run found reverting.
-    # Measured beats hand-written: the Aave entry below started as a constant
-    # in `chains.py` after one afternoon of executing legs, which is fine until
-    # the next protocol is deprecated and nobody notices.  The probed list is
-    # regenerated with the gas figures and committed beside them, so the
-    # hand-written one is now only for pools we want gone for reasons no probe
-    # would find.
+    # Measured beats hand-written: the probed list is regenerated with the gas
+    # figures and committed beside them, so the hand-written one is now only for
+    # pools we want gone for reasons no probe would find.
     banned = {a.lower() for a in getattr(chain, "blacklist", ())}
     banned |= _probed_dead_pools(chain)   # empty by design -- see the docstring
     dropped_here = 0
@@ -317,8 +298,8 @@ def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient,
                       token_client: QuoterClient | None = None) -> int:
     """Find each pool's LP token, so deposits and withdrawals can be arcs.
 
-    The API reports `lp_token_address` for none of them -- 0 of 385 on mainnet
-    -- so it is read, in one batch, from four questions asked of every pool:
+    The API reports `lp_token_address` for none of them, so it is read in one
+    batch, from four questions asked of every pool:
 
         token()        50 mainnet pools, the older crypto ones
         lp_token()     12, the older stable ones
@@ -326,16 +307,13 @@ def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient,
         base_pool      the rest, by inference (below)
 
     The fourth is the interesting one.  Fourteen mainnet pools expose no getter
-    at all, and they include 3pool at $159M -- whose LP token connects 25
-    meta-tokens to everything else.  But a base pool's LP *is* a coin of every
-    metapool built on it, and the API does report `base_pool`, so a metapool
-    naming this pool hands over the address as its own `coins[1]`.
+    at all, and they include 3pool, whose LP token connects 25 meta-tokens to
+    everything else.  But a base pool's LP *is* a coin of every metapool built on
+    it, and the API does report `base_pool`, so a metapool naming this pool hands
+    over the address as its own `coins[1]`.
 
-    Curve's MetaRegistry would answer all of them, and is not used: it exists
-    on ethereum and polygon and on none of the other thirteen chains, so it
-    could not be the mechanism anywhere else.  What is left unresolved after
-    this is twelve old mainnet metapools holding $1M between them, which keep
-    their swap arcs and simply get no LP arcs.
+    Curve's MetaRegistry would answer all of them and is not used: it exists on
+    ethereum and polygon and on none of the other thirteen chains.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
@@ -385,9 +363,8 @@ def resolve_lp_tokens(pools: list[PoolSpec], client: QuoterClient,
         # A cached zero is not a fact, it is the shape of a missed read: the
         # local EVM holds pool storage, and an LP token that lives at its own
         # address answers `decimals()` out of storage it does not have.  Zero
-        # decimals is legal for an ERC20 and has never been legal for a Curve
-        # LP token, so it is read again rather than believed -- which is also
-        # what heals the three mainnet entries this already poisoned.
+        # decimals is legal for an ERC20 and has never been legal for a Curve LP
+        # token, so it is read again rather than believed.
         decimals = int(cached.get("lp_decimals") or 18)
         if not address and pool.address.lower() in found:
             address, decimals = found[pool.address.lower()]
@@ -524,13 +501,10 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
 
     **The coin's own `decimals()` rides along, and it wins.**  The API is a
     directory, not an oracle: it omits `decimals` altogether on its newer
-    registries -- every `twocryptong` and `stableswapng` entry measured, on
-    Ethereum, BSC and gnosis alike -- and a missing value defaults to 18.  A
-    decimals error is not a small error: gnosis USDC.e really has 6, so every
-    amount through that pool came out 1e12 wrong, which left one direction with
-    `eps = +10000 bp` and threw the other away as dust.  It costs one more call
-    per coin in a batch that is already going out, and `decimals` never
-    changes, so this is the cheapest possible place to catch it.
+    registries -- every `twocryptong` and `stableswapng` entry measured -- and a
+    missing value defaults to 18.  That is not a small error: gnosis USDC.e really
+    has 6, so every amount through that pool came out 1e12 wrong.  It costs one
+    more call per coin in a batch already going out, and `decimals` never changes.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
@@ -539,10 +513,9 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
     # feed, and probing for them would only overwrite good numbers with none.
     pools = [p for p in pools if not p.balances]
 
-    # Three calls per coin, not two: what the pool says it has, in both
-    # spellings, and what the coin says it holds.  The third rides the same
-    # batch, so knowing whether a pool's accounting is real costs no extra
-    # round trip -- measured, it was 3,653 ms as a separate pass.
+    # Three calls per coin, not two: what the pool says it has, in both spellings,
+    # and what the coin says it holds.  The third rides the same batch, so knowing
+    # whether a pool's accounting is real costs no extra round trip.
     facts = TokenFactsCache()
     known = facts.load(chain_id) if chain_id is not None else {}
     learned: dict[str, dict] = {}
@@ -552,8 +525,6 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
     # out of a warmed local EVM has the pools' storage and not the tokens': an
     # unloaded account answers `balanceOf` with zero, which reads as a pool
     # holding nothing, and `check_reserves_are_real` then drops it as insolvent.
-    # Measured on gnosis, that took five pools out and left no path at all.
-    #
     # So the token calls go to `token_client` -- the wire, when there is one --
     # while the pool calls stay wherever the caller pointed them.
     tokens = token_client if token_client is not None else client
@@ -572,13 +543,12 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
             # Only for a coin whose decimals nobody has read yet.  A placeholder
             # keeps the stride so the unpacking below stays simple.
             #
-            # Ask whether the *fact* is known, not whether the address is.
-            # Other passes cache other things about the same token -- an
-            # ERC4626 `asset`, a pool's `lp_token` -- so an address can be
-            # present with no `decimals` in it, and testing membership then
-            # skips the read and finds nothing to use.  It fails silent and
-            # sticky: the API's value stands, and it stands on every later run
-            # too.  This is also what heals a cache an older build poisoned.
+            # Ask whether the *fact* is known, not whether the address is: other
+            # passes cache other things about the same token -- an ERC4626
+            # `asset`, a pool's `lp_token` -- so an address can be present with no
+            # `decimals` in it, and testing membership then skips the read and
+            # finds nothing to use.  It fails silent and sticky, and this is also
+            # what heals a cache an older build poisoned.
             unknown = coin is not None and "decimals" not in known.get(
                 coin.address.lower(), {})
             token_calls.append(Call(target, encode_call("decimals()")) if unknown
@@ -624,10 +594,8 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
                     # token: an account the local EVM has not loaded answers
                     # every getter with zero, and zero decimals is legal enough
                     # for an ERC20 that nothing downstream would question it.
-                    # Refusing it keeps the API's value, which is a guess that
-                    # gets re-checked, rather than caching a wrong fact for
-                    # good -- the same rule `resolve_lp_tokens` already applies
-                    # to `lp_decimals`, and for the same reason.
+                    # Refusing it keeps the API's guess, which gets re-checked,
+                    # rather than caching a wrong fact for good.
                     if 1 <= said <= 36:
                         learned[coins[k].address.lower()] = {"decimals": said}
             if said is not None and 1 <= said <= 36 and said != coins[k].decimals:
@@ -667,16 +635,12 @@ def check_reserves_are_real(
     never asks the token whether those coins exist.  When an issuer retires or
     migrates a token out from under a pool, the accounting keeps its old number
     and the pool goes on quoting against liquidity it cannot pay: the sUSD/sUSDe
-    pool reports 421,778 sUSD and holds zero, quotes 652 sUSD for 100 sUSDe, and
-    reverts with `sUSD retired` on execution.  A quote that cannot settle is
-    worse than no quote, and this is one batched call per coin to find them.
+    pool reports 421,778 sUSD, holds zero, quotes 652 sUSD for 100 sUSDe, and
+    reverts with `sUSD retired` on execution.  A quote that cannot settle is worse
+    than no quote, and this is one batched call per coin to find them.
 
-    Curve's own solver has no such check: it routed WETH->USDC through a lending
-    pool whose `exchange_underlying` reverts, and reported the quote validated.
-
-    Pools listing WETH may legitimately hold *native* ETH instead (E11), which
-    is 29 of the 31 apparent shortfalls on mainnet, so that is checked before
-    anything is dropped.
+    Pools listing WETH may legitimately hold *native* ETH instead (E11), which is
+    29 of the 31 apparent shortfalls on mainnet, so that is checked first.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
@@ -702,19 +666,14 @@ def check_reserves_are_real(
 
     warnings: list[str] = []
 
-    # A pool that holds nothing cannot trade, whatever an index says it is
-    # worth.  The check below only looks at pools reporting *more* than they
-    # hold, so one reporting zero is never short and never flagged -- it is
-    # simply empty, and it stays in the universe on the strength of a TVL
-    # figure that came from an API rather than from the chain.
-    #
-    # Measured: `WETH/USDC Curve StableNG`
-    # (0x68A67937620aF5DbF4093D0022B79CC1e92060f2) is listed by
-    # prices.curve.finance/v2 at $37,798.92, which clears the $10k floor, while
-    # both `balances()` are zero, `totalSupply()` is zero and
-    # `get_virtual_price()` reverts.  The legacy api.curve.finance reports the
-    # same pool as `usdTotal: 0`, so the two endpoints disagree and only the
-    # one the universe is built from is wrong.
+    # A pool that holds nothing cannot trade, whatever an index says it is worth.
+    # The check below only looks at pools reporting *more* than they hold, so one
+    # reporting zero is never short and never flagged -- it is simply empty, and
+    # it stays in the universe on the strength of a TVL figure that came from an
+    # API rather than from the chain.  Measured on `WETH/USDC Curve StableNG`
+    # (0x68A67937620aF5DbF4093D0022B79CC1e92060f2), listed at $37,798.92 with both
+    # `balances()` zero and `get_virtual_price()` reverting, while the legacy
+    # api.curve.finance reports the same pool as `usdTotal: 0`.
     #
     # It could not have produced a quote -- the invariant needs every balance
     # positive -- so this costs no output.  What it costs is arcs enumerated,
