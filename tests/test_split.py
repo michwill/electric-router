@@ -544,3 +544,49 @@ def test_handed_curves_that_miss_the_chain_are_resampled():
     assert not report.reused
     assert quoter.probe_calls > before       # it went and sampled properly
     assert report.after >= baseline
+
+
+def test_a_candidate_scouts_the_same_alone_as_in_company():
+    """Candidates are independent answers, not terms in a shared one.
+
+    `scout` samples one probe batch for the whole ballot, and it used to size
+    each arc's ladder to the widest size *any* plan asked for.  `sizes()` spreads
+    its nodes between `top/span` and `top`, so a second plan wanting more moved
+    every sample point under the first one and changed what it tuned to -- which
+    made a candidate's result depend on which rivals happened to share its
+    batch.  On crvUSD -> sDOLA that was the difference between adopting a
+    challenger and not.
+    """
+    from erouter.core.split import scout
+
+    narrow = [leg(0, 2, 5_000, POOL_A), leg(0, 2, 0, POOL_B)]
+    # Deliberately hungrier on the arcs it shares with `narrow`, so a batch-wide
+    # ladder top would be set by this plan and not by that one.
+    hungry = [leg(0, 2, 3_000, POOL_A), leg(0, 2, 3_000, POOL_B),
+              leg(0, 2, 0, POOL_C)]
+    narrow_plan = (narrow, 2, [500_000, 500_000], [400_000, 400_000])
+    hungry_plan = (hungry, 2, [3_000_000, 3_000_000, 4_000_000],
+                   [2_500_000, 2_500_000, 3_500_000])
+
+    alone = scout([narrow_plan], PoolQuoter(), amount_in=1_000_000)
+    together = scout([narrow_plan, hungry_plan], PoolQuoter(), amount_in=1_000_000)
+
+    mine = next(f for f in alone if f.index == 0)
+    ours = next(f for f in together if f.index == 0)
+    assert ours.predicted == mine.predicted
+    assert [one.bps for one in ours.legs] == [one.bps for one in mine.legs]
+
+
+def test_scouting_in_company_still_costs_one_batch():
+    """Independence must not be bought by giving every plan its own round trip."""
+    from erouter.core.split import scout
+
+    narrow = [leg(0, 2, 5_000, POOL_A), leg(0, 2, 0, POOL_B)]
+    hungry = [leg(0, 2, 3_000, POOL_A), leg(0, 2, 3_000, POOL_B),
+              leg(0, 2, 0, POOL_C)]
+    client = PoolQuoter()
+    scout([(narrow, 2, [500_000, 500_000], [400_000, 400_000]),
+           (hungry, 2, [3_000_000, 3_000_000, 4_000_000],
+            [2_500_000, 2_500_000, 3_500_000])],
+          client, amount_in=1_000_000)
+    assert client.probe_calls == 1

@@ -16,6 +16,7 @@ which is also what runs when a leg refuses to probe.
 """
 from __future__ import annotations
 
+import math
 import os
 
 from dataclasses import dataclass, field, replace
@@ -270,6 +271,21 @@ def batch_budget(client: QuoterClient, legs: int) -> int:
 
 
 # ------------------------------------------------------- sampled-curve search
+
+
+#: Ladder tops are rounded up onto powers of this, so a plan's sample grid is
+#: decided by what that plan needs rather than by what its neighbours in the
+#: batch need.  Two keeps the batching tight -- a bucket never over-samples by
+#: more than a factor of two -- while collapsing the near-duplicate tops that
+#: nested candidates produce.
+_BUCKET = 2.0
+
+
+def _ladder_bucket(top: float) -> float:
+    """`top` rounded up to a power of `_BUCKET`, for a batch-independent grid."""
+    if not (top > 0) or not math.isfinite(top):
+        return 0.0
+    return float(_BUCKET ** math.ceil(math.log(top, _BUCKET)))
 
 
 def reachable_tops(
@@ -1008,29 +1024,47 @@ def scout(plans, client: QuoterClient, *, amount_in: int,
     Returns a `ScoutResult` per usable candidate with the *predicted* output --
     nothing here may be believed without a real quote, which the caller takes.
     """
-    tops: dict[tuple, float] = {}
+    # One ladder per (arc, size bucket), and the bucket comes from the plan's
+    # *own* requirement.
+    #
+    # Sizing each arc's ladder to the widest size any plan needed made a
+    # candidate's tuning depend on which other candidates happened to be in the
+    # batch: `sizes()` spreads its nodes between `top/span` and `top`, so a
+    # second plan wanting more moved every sample point under the first one and
+    # changed what it tuned to.  Candidates are supposed to be independent --
+    # each one is a different answer to the same question, not a term in a
+    # shared one -- and `tests/test_split.py` pins that now.
+    #
+    # Rounding the top up onto a fixed lattice keeps the batch: plans wanting
+    # similar sizes still land in one bucket and are sampled once, and a bucket
+    # is at most a factor `_BUCKET` above what was asked for, which the ladder
+    # covers by construction.
+    wanted: dict[tuple, float] = {}
+    per_plan: list[list[tuple] | None] = []
     for legs, _dst, nominal_in, nominal_out in plans:
         try:
             reach = reachable_tops(legs, nominal_in, nominal_out, amount_in)
         except (ValueError, ZeroDivisionError):
+            per_plan.append(None)
             continue
+        mine: list[tuple] = []
         for leg, top in zip(legs, reach, strict=True):
-            key = (leg.target.lower(), int(leg.kind), leg.i, leg.j)
-            tops[key] = max(tops.get(key, 0.0), float(top))
-    if not tops:
+            bucket = _ladder_bucket(float(top))
+            key = (leg.target.lower(), int(leg.kind), leg.i, leg.j, bucket)
+            wanted[key] = bucket
+            mine.append(key)
+        per_plan.append(mine)
+    if not wanted:
         return []
 
-    # One synthetic leg per distinct arc, laddered to the widest size any
-    # candidate could hand it.  A curve sampled wide still serves a narrower
-    # use: it is a function of the input, and the extra nodes only sit above.
-    keys = list(tops)
+    keys = list(wanted)
     probe_legs = [
         Leg(target=key[0], kind=ArcKind(key[1]), i=key[2], j=key[3],
             n=max(key[2], key[3]) + 1, src_slot=0, dst_slot=1)
         for key in keys
     ]
     points = _probe_ladders(
-        probe_legs, client, [curve_mod.sizes(tops[key]) for key in keys],
+        probe_legs, client, [curve_mod.sizes(wanted[key]) for key in keys],
         report, optional=True,
     )
     if points is None:
@@ -1042,11 +1076,10 @@ def scout(plans, client: QuoterClient, *, amount_in: int,
 
     out: list[ScoutResult] = []
     for index, (legs, dst_slot, _nominal_in, _nominal_out) in enumerate(plans):
+        if per_plan[index] is None:
+            continue
         try:
-            curves = [
-                shared[(leg.target.lower(), int(leg.kind), leg.i, leg.j)]
-                for leg in legs
-            ]
+            curves = [shared[key] for key in per_plan[index]]
         except KeyError:  # an arc the batch could not price
             continue
         groups = split_groups(legs)
