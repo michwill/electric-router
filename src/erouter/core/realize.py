@@ -62,6 +62,10 @@ class RealizedLeg:
     #: `theta` after it rescales the amounts.  Without it `theta` describes the
     #: flow the arc was realised at rather than the one being quoted.
     reserve_in: int = 0
+    #: The pool's TVL, for `route_conductance`.  Deliberately the pool's own
+    #: size rather than anything fitted: it is what lets a topology be weighed
+    #: without going through the split the model happened to give it.
+    tvl_usd: float = 0.0
     #: False when the arc behind this leg carries no calibration -- the
     #: model-free `direct`/`two-step` candidates, built at `psi = 1` with
     #: `B = 0`.  Their `eps` and `impact_frac` are placeholders, not
@@ -592,6 +596,7 @@ def _arc_leg(
         theta=theta,
         psi=psi,
         reserve_in=arc.reserve_in,
+        tvl_usd=arc.tvl_usd,
         modelled=arc.G > 0,
     )
 
@@ -839,6 +844,79 @@ def check_one_arc_per_pool(route: RealizedRoute) -> list[str]:
         except (MultiPortError, ValueError):
             bad.append(pool)
     return sorted(bad)
+
+
+def route_conductance(route: RealizedRoute) -> float:
+    """The route as a resistor network: `1/TVL` per pool, src to dst.
+
+    The same reading the rest of the router uses, applied to a whole candidate
+    rather than one arc.  Series hops add resistance and parallel branches add
+    conductance, so a topology that splits across deep pools scores above one
+    that funnels everything through a thin series chain -- which is what "this
+    candidate could carry the trade if it were split properly" means, said in
+    the units the model is already written in.
+
+    **TVL, not the fitted `G`.**  The scout exists because the model's split is
+    not to be trusted on wide topologies; ranking those candidates by a number
+    the same model produced would inherit the error being corrected.  The pool's
+    own size is independent of it.
+
+    Node merges are shorts (`eps = 0`, `G = infinity`, §3.1), so their slots are
+    joined rather than given an edge.  Returns 0 when src cannot reach dst
+    through pools with a size to speak of.
+    """
+    if not route.legs:
+        return 0.0
+    parent: dict[int, int] = {}
+
+    def find(x: int) -> int:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    slots = {0, route.dst_slot}
+    for realized in route.legs:
+        slots.add(realized.leg.src_slot)
+        slots.add(realized.leg.dst_slot)
+    for realized in route.legs:
+        if realized.is_conversion:
+            a, b = find(realized.leg.src_slot), find(realized.leg.dst_slot)
+            if a != b:
+                parent[a] = b
+    src, dst = find(0), find(route.dst_slot)
+    if src == dst:
+        return math.inf  # nothing but merges between the two ends
+
+    nodes = sorted({find(s) for s in slots})
+    index = {node: k for k, node in enumerate(nodes)}
+    laplacian = np.zeros((len(nodes), len(nodes)))
+    for realized in route.legs:
+        if realized.is_conversion or realized.tvl_usd <= 0:
+            continue
+        a = index[find(realized.leg.src_slot)]
+        b = index[find(realized.leg.dst_slot)]
+        if a == b:
+            continue
+        laplacian[a, a] += realized.tvl_usd
+        laplacian[b, b] += realized.tvl_usd
+        laplacian[a, b] -= realized.tvl_usd
+        laplacian[b, a] -= realized.tvl_usd
+
+    # Ground the destination and inject a unit current at the source: the
+    # potential left at the source *is* the effective resistance.
+    keep = [k for k in range(len(nodes)) if k != index[dst]]
+    if not keep:
+        return 0.0
+    rhs = np.zeros(len(keep))
+    rhs[keep.index(index[src])] = 1.0
+    try:
+        potential = np.linalg.solve(laplacian[np.ix_(keep, keep)], rhs)
+    except np.linalg.LinAlgError:
+        return 0.0  # src and dst are in different components
+    resistance = float(potential[keep.index(index[src])])
+    return 1.0 / resistance if resistance > 0 else 0.0
 
 
 def max_theta(route: RealizedRoute) -> float:

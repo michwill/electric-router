@@ -52,6 +52,7 @@ from .realize import (
     check_one_arc_per_pool,
     prune_dust,
     realize,
+    route_conductance,
 )
 from .refit import RefitReport, refit
 from .risk import REVERT_COST_BP, RiskTable
@@ -60,7 +61,7 @@ from .solve import SolveReport, active_set_solve, solve
 from .split import ScoutResult as ScoutSplits
 from .split import optimise as optimise_splits
 from .split import scout as scout_splits
-from .split import should_optimise
+from .split import should_optimise, split_groups
 from .types import ArcKind, PoolArc, Probe
 from .verify import (
     IMPACT_FRACTION,
@@ -1056,9 +1057,31 @@ def _quote(
     return result
 
 
-#: A candidate has to be this many legs wider than the winner before it is worth
-#: scouting: the model's split error grows with the number of branches.
-SCOUT_WIDER_BY = 3
+def scout_priority(route) -> float:
+    """How promising this candidate is as a scout entrant, or 0 to skip it.
+
+    Two things decide it.
+
+    First, there has to be something to re-split: `split.scout` drops any plan
+    whose legs form no split group, because there are no weights to move.
+    Choosing entrants on anything else spends slots in the shared batch on plans
+    it will throw away -- measured on crvUSD -> sDOLA at $2M, six entrants
+    picked by leg count yielded **one** usable plan.
+
+    Second, among those, how much the topology could carry if it *were* split
+    properly.  That is `route_conductance`: the route read as a resistor network
+    with `1/TVL` per pool, so series hops add resistance and parallel branches
+    add conductance.  It rewards branching and depth together, which leg count
+    only gestured at -- ten hops through dust scores below two through the
+    deepest pools on the chain, and that is the right way round.
+    """
+    if route is None or not route.legs:
+        return 0.0
+    if not split_groups([rl.leg for rl in route.legs]):
+        return 0.0
+    return route_conductance(route)
+
+
 #: How many of the widest candidates go into the shared batch.  They ride one
 #: probe batch between them, so this is cheap to raise; three covered every
 #: case measured.
@@ -1087,12 +1110,16 @@ def _scout_wider(
     winner, route = result.winner, result.route
     if winner is None or route is None or pool_set is None:
         return
-    incumbent_legs = len(route.legs)
+    # Only topologies with more capacity than the one we hold.  That is the
+    # same statement the leg-count gate was reaching for -- a candidate whose
+    # own split is hiding it -- but made in conductance, where a deep two-way
+    # branch outranks a long thin chain instead of losing to it.
+    held = route_conductance(route)
     wider = sorted(
         (c for c in pool_set.candidates
          if c.ok and c.route and c is not winner
-         and len(c.route.legs) >= incumbent_legs + SCOUT_WIDER_BY),
-        key=lambda c: -len(c.route.legs),
+         and scout_priority(c.route) > held),
+        key=lambda c: -scout_priority(c.route),
     )[:SCOUT_CANDIDATES]
     if not wider:
         return
