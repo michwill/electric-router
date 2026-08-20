@@ -1,45 +1,20 @@
 """How often a pool's own minimum-out would trip before the route lands.
 
-Each leg goes out with a minimum-out at a fraction of that pool's fee, which
-is where sandwiching stops paying.  The same number is the revert threshold:
-move further than that between quoting and inclusion and the leg fails.  What
-this module measures is `p` per arc -- the chance of that -- so `core/risk.py`
-can price a route as `output * product(1 - p_i) - gas`.
+Each leg carries a minimum-out at a fraction of the pool's fee; moving past it
+between quote and inclusion reverts the leg.  This estimates `p` per arc so
+`core/risk.py` can price a route as `output * product(1 - p_i) - gas`.
+Horizon is two minutes -- a wallet confirmation plus propagation.
 
-The horizon is two minutes: a user confirming in a wallet plus propagation, not
-the multi-hour spans `drift` samples.  So the rate series is resampled at
-five-block steps and the windows scored are two steps wide.
+Counting breaches directly cannot work at ~25 samples: zero events claims
+"never", and Jeffreys smoothing puts an unbreached pool at 2%, or 22% over
+twelve legs.  So the process is modelled instead, as the data shows it: rates
+jump when someone trades rather than diffusing.  That factors into
+`P(window contains a move) * P(a move exceeds the bound)` -- the first counted
+per arc, the second a shape pooled across the universe from *nonzero* moves
+standardised by their own arc's scale, with a Hill power-law tail.
 
-**Counting breaches directly does not work at this sample size.**  Two dozen
-windows cannot separate "never" from "rarely": zero events would claim a pool
-provably never moves, and the honest smoothing that avoids that claim --
-Jeffreys' `(k + 1/2) / (n + 1)` -- puts an unbreached pool at 2%, which over a
-twelve-leg route reads as a 22% loss.  Both answers are artefacts of counting
-rare events with a short ruler, and both dwarf the routing gains being judged.
-
-So the process is modelled instead, and the model is the one the data shows: a
-rate does not diffuse, it **jumps when someone trades**.  Most minutes a pool
-sees nothing and its rate is unchanged to the last integer; the risk is that a
-window catches a trade large enough to move it past the bound.  That factors:
-
-    p = P(the window contains a move) * P(a move is bigger than the bound)
-
-The first is counted per arc -- it is common enough to count.  The second is a
-shape, estimated from every *nonzero* move in the universe standardised by its
-own arc's typical move, which is thousands of observations rather than two
-dozen, and continued past the edge of the sample as a power law (Hill).  Crypto
-moves are fat-tailed and a normal tail would understate a wide bound by orders
-of magnitude.
-
-Standardising only the nonzero moves is what makes the pooling legitimate, and
-an earlier version that skipped it was badly wrong: with the median move of a
-quiet pool at zero, its scale fell to the floor, its occasional trade became a
-four-hundred-sigma event, and the tail fitted to *that* priced 3pool -- which
-never breached in the sample -- at 4.5% a leg.
-
-Per arc rather than per pool.  TriCRV's CRV/ETH rate and its crvUSD/ETH rate do
-not move alike, the minimum-out is per leg, and taking a pool's worst arc would
-charge every route the worst of them.
+Per arc, not per pool: one pool's two rates need not move alike, and the
+minimum-out is per leg.
 """
 
 from __future__ import annotations
@@ -59,74 +34,30 @@ FINE_BLOCKS = tuple(k * STEP_BLOCKS for k in range(SAMPLES))
 HORIZON = 2
 #: The minimum-out, as a fraction of the pool's own fee.
 BOUND_OF_FEE = 0.2
-#: An absolute floor under that, in basis points, for arcs whose rate actually
-#: moves.
-#
-# A fraction of the fee is the right *shape* for the bound -- it is what makes
-# sandwiching unprofitable -- but it is not a survivable one on a pool whose fee
-# is small against its own volatility.  TricryptoUSDC charges 3.3 bp, so 20% of
-# it is 0.65 bp, against a rate that jumps ~0.9 bp when someone trades: routes
-# through it failed more often than they landed.
-#
-# Measured over one sampling pass at block 25,760,310, scoring every candidate
-# floor against the same series -- P(a route trips a minimum-out in two
-# minutes):
-#
-#     floor    USDC->WETH 100k   WETH->USDC 30   stETH->WETH   USDC->USDT 5M
-#     0.5 bp             70.5%           58.0%          0.4%            0.0%
-#     1.0 bp             60.2%           55.6%          0.2%            0.0%
-#     2.0 bp             24.3%           31.7%          0.1%            0.0%
-#     5.0 bp              5.1%            1.5%          0.0%            0.0%
-#    10.0 bp              0.7%            0.5%          0.0%            0.0%
-#
-# The knee is between 1 and 2 bp.  5 bp sits well past it, which is the point:
-# the estimate is noisy enough between sampling windows -- TricryptoUSDC read
-# 0.7% at a 2 bp bound in one half hour and 8.7% at 3 bp in the next -- that a
-# floor chosen at the knee would land on the wrong side of it half the time.
-#
-# Applied only to the pools on the exception list -- see `wide_bound_pools`.
-# On a pegged pair this would be a large allowance against a spread of one or
-# two, and most pools do not need it: a volatile pool usually charges enough
-# that 20% of its fee already clears this.
-#
-# This has to match whatever the executor actually sets, since it is the
-# executor's parameter being modelled.  It also means the sandwich argument on
-# a listed pool rests on the absolute size of the bound rather than on its
-# ratio to the fee: 5 bp of a $10k trade is not worth sandwiching, 5 bp of a
-# $10M trade might be.
+#: Absolute floor under that, for arcs whose rate really moves.  A fraction of
+#: the fee is the right shape but not survivable where the fee is small against
+#: the pool's own volatility: TricryptoUSDC's 3.3 bp fee gives a 0.65 bp bound
+#: against a rate that jumps ~0.9 bp per trade.  5 bp sits well past the knee
+#: (1-2 bp) on purpose -- the estimate is noisy enough between sampling windows
+#: that a floor at the knee would land on the wrong side of it half the time.
+#: Must match what the executor actually sets.  Applied only to
+#: `wide_bound_pools`; on a pegged pair it would be a huge allowance.
 BOUND_FLOOR_BP = 5.0
-#: What counts as a pair whose rate moves, in basis points over the ~4-hour
-#: drift series.
-#
-# Measured, the two populations do not overlap -- there is a factor of eight
-# between the loosest pair anyone would call pegged and the tightest anyone
-# would call volatile:
-#
-#     wstETH/pufETH 0.000   tBTC/WBTC 0.000   crvUSD/sfrxUSD 0.050
-#     USDC/crvUSD   0.196   USDC/USDT 0.349   crvUSD/frxUSD  0.526
-#     ---------------------------------------------------------------
-#     WETH/WBTC     4.088   USDC/WETH 37.343  crvUSD/CRV    79.336
-#
-# So the cut is not delicate.  It is deliberately made against the *pair*,
-# aggregated over every pool that holds it, rather than against one pool's own
-# recent trading: quiet pools are common, and a pool that saw no trade in half
-# an hour looks pegged whatever it trades.  An earlier per-arc test did exactly
-# that and put 156 arcs on volatile pairs -- including TricryptoINV's USDC/INV,
-# whose rate moves 1,178 bp in four hours -- on the tight side with a 0.75 bp
-# bound and a measured risk of zero.
+#: What counts as a pair whose rate moves, in bp over the ~4-hour drift series.
+#: The populations do not overlap -- pegged pairs sit under 0.6, volatile ones
+#: above 4 -- so the cut is not delicate.  Made against the *pair* across every
+#: pool holding it, not one pool's recent trading: a quiet pool looks pegged
+#: whatever it trades.
 PAIR_DRIFT_CUT_BP = 2.0
 #: How often a fee-derived bound may trip before the pool is listed anyway.
-#
-# The pair test is about the market; this one is about the pool.  A vault pair
-# accruing, an internal rebalance, an oracle step -- all move a pool's own rate
-# without moving the pair, and on a sub-basis-point bound any of them is enough
-# to fail a route.  One in a hundred attempts is already far more than the
-# ranking term can price.
+#: The pair test is about the market; this is about the pool -- an accruing
+#: vault, a rebalance or an oracle step moves a pool's rate without moving the
+#: pair, and on a sub-bp bound any of them fails a route.
 TIGHT_TRIP_CUT = 0.01
 #: Below this a rate is not moving as far as our own quotes can resolve.
 SCALE_FLOOR_BP = 0.005
 #: Never claim an arc is safer than this: the tail is extrapolated past the
-#: data, and the extrapolation is not to be trusted to four figures.
+#: data and is not to be trusted to four figures.
 RISK_FLOOR = 1e-5
 RISK_CEILING = 0.95
 
@@ -191,28 +122,18 @@ def wide_bound_pools(series, fees: dict[str, float], tight: dict | None = None, 
                      floor_bp: float = BOUND_FLOOR_BP) -> dict[str, dict]:
     """Pools whose own fee does not buy them a survivable minimum-out.
 
-    A fraction of the fee is the right rule nearly everywhere, because a pool
-    that trades a volatile pair usually charges for it -- Yield Basis WETH's
-    218 bp fee puts its bound at 43.7 and nothing else is needed.  The
-    exceptions are pools that charge like a stablecoin venue and move like
-    something else, and there are few enough of them to name.
+    A fraction of the fee works nearly everywhere -- a pool trading a volatile
+    pair usually charges for it.  The exceptions charge like a stablecoin venue
+    and move like something else.  A pool already clearing the floor is never
+    listed.
 
-    A pool whose fee already clears the floor is never listed: it gains
-    nothing.  Past that there are two ways to qualify, and both are needed
-    because each misses what the other catches:
+    Two ways to qualify, both needed:
 
-    * **its pair moves** -- `series` is the long-horizon drift sample, and the
-      question is what the pair does across every pool that holds it.  Half an
-      hour of one quiet pool cannot answer that: a per-arc version of this test
-      left 156 arcs on volatile pairs holding sub-basis-point bounds, including
-      TricryptoINV's USDC/INV at 0.75 bp against a rate that moves 1,178 bp in
-      four hours.
-    * **the tight bound was seen to trip** -- `tight` is `breach_risk` scored
-      at the fee-derived bound, so this catches a pool whose own rate wobbles
-      more than its pair does.  Curve.fi Strategic USD Reserve charges 0.1 bp,
-      putting its bound at 0.02, and trips a fifth of the time while trading
-      USDC against USDT -- a pair that by any reasonable measure is pegged.
-      The pair test alone leaves it binding every route it appears in.
+    * **its pair moves**, measured across every pool holding the pair.  One
+      quiet pool over half an hour cannot answer this -- a per-arc version left
+      156 arcs on volatile pairs holding sub-bp bounds.
+    * **the tight bound was seen to trip**, which catches a pool whose own rate
+      wobbles more than its pair does.
 
     Returns `{address: {"fee_bp", "drift_bp", "tight_p", "pair"}}`, so the
     committed list says why a pool is on it and a human can disagree in a diff.
