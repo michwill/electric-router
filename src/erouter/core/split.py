@@ -2,21 +2,17 @@
 
 The model decides *which* pools; this decides *how much* through each.  With the
 topology fixed the output is a smooth function of the weights alone, and the
-model's `O(theta^2)` error -- 36 bp past 50% of pool depth -- has no business
-near that decision.  Preferred to re-fitting the model (§8) because it cannot go
-infeasible and cannot lose: only a strict improvement, measured by a real chained
-quote, is accepted.
+model's `O(theta^2)` error has no business near that decision.  Preferred to
+re-fitting the model (§8) because it cannot go infeasible and cannot lose: only a
+strict improvement, measured by a real chained quote, is accepted.
 
 **Sample the legs; do not chain them.**  A chained quote costs a round trip per
 iteration, since leg `k`'s input is leg `k-1`'s output; probing one pool at many
-sizes does not chain, so a whole route's curves arrive in one `probe_batch` and
-composition happens in Python.  See `curves.py` for what gets interpolated.
+sizes does not chain, so a whole route's curves arrive in one `probe_batch`.
 
-**The curves check themselves against the chain before being trusted.**
-`baseline` is a real chained quote at known weights, so composing at those
-weights compares like with like for free.  A curve set that misses gets one dense
-pass, then the chained hill-climb takes over -- which is also what runs when a
-leg refuses to probe.
+**The curves check themselves against the chain before being trusted.**  A curve
+set that misses gets one dense pass, then the chained hill-climb takes over --
+which is also what runs when a leg refuses to probe.
 """
 from __future__ import annotations
 
@@ -118,18 +114,12 @@ POLISH_SWEEPS = 2
 POLISH_WINDOW = 0.05
 #: Skip the polish when the curves already agree with the chain this closely.
 #
-# Polish corrects interpolation drift, and the run measures that drift for free:
-# `check_bp` composes the curves at the weights a real chained quote was taken
-# at.  Each polish evaluation is a chained `quote_routes` -- ~3.2 ms in-process,
-# a round trip on the wire -- so this is the most expensive thing the router does
-# per basis point, and measured, the drift is usually small enough to buy
-# nothing.
-#
-# The drift is only a *ceiling* on what polish can find, and a loose one: 40% of
-# the check in one case, 2.5% in another.  So the threshold sits well below the
-# 1.0 bp at which `_trusted_curves` stops believing the curves at all, and above
-# the drift seen when polishing was worthless -- reused curves (`scout`) come off
-# a shared ladder and check correspondingly worse.
+# Each polish evaluation is a chained `quote_routes`, which makes it the most
+# expensive thing the router does per basis point, and the drift it corrects is
+# usually small enough to buy nothing.  That drift is only a *ceiling* on what
+# polish can find, and a loose one.  So the threshold sits well below the 1.0 bp
+# at which `_trusted_curves` stops believing the curves at all, and above the
+# drift seen when polishing was worthless.
 POLISH_CHECK_BP = 0.25
 # With an exact finish available, the curves only have to be right enough to
 # land in the correct basin, so the dense second sampling pass is not needed.
@@ -288,9 +278,9 @@ def reachable_tops(
     """The largest input each leg can be handed, over the whole weight simplex.
 
     A leg can take at most its source slot's entire balance, so one forward pass
-    bounds every leg, taking each feeder's rate from the realised amounts.
-    Linear rates over-state a concave leg's output, which keeps this an upper
-    bound -- all it has to be, since it only decides where the ladder stops.
+    bounds every leg.  Linear rates over-state a concave leg's output, which keeps
+    this an upper bound -- all it has to be, since it only decides where the
+    ladder stops.
     """
     cap: dict[int, float] = {0: float(amount_in)}
     tops: list[float] = []
@@ -476,14 +466,11 @@ def make_evaluator(legs: list[Leg], groups: list[list[int]], curves,
     """`walk(_fractions(...))`, specialised for the inner loop.
 
     The search calls this ~100,000 times on a wide route, and the reference pair
-    spends most of that rebuilding what never changes: the grouped-index set, the
-    fractions list, three numpy calls on arrays of two to five elements, a dict
-    of balances.  None of it can be vectorised across legs -- the walk is
-    sequential by construction -- so this hoists the invariants out of the loop
-    and keeps the arithmetic identical.
-
-    `walk` and `_fractions` stay as the readable definition of what this
-    computes, and `test_split.py` holds the two to each other.
+    spends most of that rebuilding what never changes.  None of it can be
+    vectorised across legs -- the walk is sequential by construction -- so this
+    hoists the invariants out of the loop and keeps the arithmetic identical.
+    `walk` and `_fractions` stay as the readable definition, and `test_split.py`
+    holds the two to each other.
     """
     count = len(legs)
     grouped = {k for run in groups for k in run}
@@ -647,12 +634,10 @@ def optimise(
 ) -> tuple[list[Leg], SplitReport]:
     """Re-split a finished route.  Returns the best legs found and a report.
 
-    `curves` lets a caller hand over a sample it already paid for -- the scout
-    holds one per candidate.  They are still checked against the chain; only the
-    sampling is skipped.
-
-    Sampled curves when the caller can supply the realised per-leg amounts; the
-    chained hill-climb otherwise, and whenever a leg refuses to probe.
+    `curves` lets a caller hand over a sample it already paid for.  They are still
+    checked against the chain; only the sampling is skipped.  Sampled curves when
+    the caller can supply the realised per-leg amounts; the chained hill-climb
+    otherwise, and whenever a leg refuses to probe.
     """
     groups = split_groups(legs)
     report = SplitReport(groups=len(groups), before=baseline)
@@ -787,10 +772,10 @@ def polish(
 ) -> tuple[list, int]:
     """Finish on the true chained function, not on an interpolant.
 
-    Only worth doing where a quote is cheap: each evaluation here is a real
+    Only worth doing where a quote is cheap: each evaluation is a real
     `quote_routes`.  The window is deliberately small -- the curve search has
     already chosen the basin, and this decides only where inside it the answer
-    sits, which is exactly what interpolation error was distorting.
+    sits.
     """
     calls = [0]
 
