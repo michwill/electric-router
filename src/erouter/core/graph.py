@@ -39,8 +39,8 @@ def arc_params(
     For a constant-product pool G collapses to TVL/4 -- the elementary
     "resistance of a pool is 4/TVL" result.
 
-    `eps` may be negative: that is a favourably dislocated pool, an EMF, and it
-    is exactly how arbitrage enters the routing problem.
+    `eps` may be negative: that is a favourably dislocated pool, an EMF, and it is
+    exactly how arbitrage enters the routing problem.
 
     B == 0 is the admissible zero-curvature limit (§2.3), giving G = inf here;
     `ceiling_conductance` bounds it afterwards.  B < 0 is *not* admissible and
@@ -70,12 +70,11 @@ def ceiling_conductance(
     A 1e-30 floor on B becomes a 1e30 conductance and destroys the condition
     number of the whole Laplacian, which is worse than the defect it patches.
 
-    Only clamped arcs (`G = inf`) are actually affected: every finite arc is by
-    definition at or below the maximum.  Do **not** be tempted to lower this
-    ceiling to bound the condition number -- flattening real conductances makes
-    every deep pool look identical, and the solver then splits arbitrarily
-    among them instead of by depth.  Bound the spread from below instead
-    (see `dust_floor` in `build`).
+    Only clamped arcs (`G = inf`) are affected: every finite arc is by definition
+    at or below the maximum.  Do **not** lower this ceiling to bound the condition
+    number -- flattening real conductances makes every deep pool look identical,
+    and the solver then splits arbitrarily among them instead of by depth.  Bound
+    the spread from below instead (see `dust_floor` in `build`).
     """
     finite = np.isfinite(G) & ~flagged
     reference = G[finite].max() if finite.any() else 1.0
@@ -103,11 +102,10 @@ class ArcArrays:
     # index -> original arc indices (a merged duplicate group has several)
     sources: list[list[int]] = field(default_factory=list)
     dropped: dict[int, str] = field(default_factory=dict)
-    # Somewhere for an accelerator to keep a resident copy of this graph
-    # across the ~90 solves one quote runs over it.  `slots=True` means there
-    # is otherwise nowhere to put it, and the attempt fails silently: the
-    # cache measured 0 hits in 132 solves and re-packed the arcs every time.
-    # Not part of the value -- excluded from `__eq__` and `repr`.
+    # Somewhere for an accelerator to keep a resident copy of this graph across
+    # the ~90 solves one quote runs over it.  `slots=True` means there is
+    # otherwise nowhere to put it, and the attempt fails silently.  Not part of
+    # the value -- excluded from `__eq__` and `repr`.
     accel: object | None = field(default=None, repr=False, compare=False)
 
     @property
@@ -168,41 +166,35 @@ def build(
 
     # --- §9.6 dust ------------------------------------------------------
     #
-    # §9.6's floor is `1e-6 * Psi`.  On a real universe that is not enough on
-    # its own: measured on Ethereum, genuine conductances span 4e10 (a $45k
-    # pool against a deep stableswap near its peg, which is ~1e4x deeper than
-    # a constant-product pool of the same TVL), so `max/min` can breach
-    # §12.4's 1e12 bound without anything being wrong.
+    # §9.6's floor is `1e-6 * Psi`.  On a real universe that is not enough on its
+    # own: genuine conductances span 4e10 on Ethereum -- a $45k pool against a
+    # deep stableswap near its peg -- so `max/min` can breach §12.4's 1e12 bound
+    # without anything being wrong.
     #
     # Raise the floor rather than lower the ceiling.  An arc with
-    # `G = 1e-4 * Psi` carrying even a 0.1% share would lose ~0.5% to impact,
-    # so it can never be part of a sensible route -- dropping it costs nothing
-    # and keeps the Laplacian well conditioned.
+    # `G = 1e-4 * Psi` carrying even a 0.1% share would lose ~0.5% to impact, so
+    # it can never be part of a sensible route.
     base_floor = dust_floor * Psi
     floor = base_floor
     finite_G = G[np.isfinite(G)]
     positive_G = finite_G[finite_G > 0]
     # Measured over the arcs that will survive the floor, not over every arc.
     #
-    # What this catches is a `B` floored instead of a `G` ceilinged, which puts
-    # a spike at the *top* -- a 1e-30 floor becoming a 1e30 conductance.  The
-    # bottom is a different animal: a dust pool that is almost entirely on one
-    # side genuinely quotes a huge rate, and `a` is then correct rather than
-    # broken.  Measured on `oBTC/sbtcCRV` holding 0.0105 oBTC against 1.39
-    # crvRenWSBTC, a probe of 0.0000105 oBTC really does return 9.55x, and the
-    # local EVM and the chain agree on it to the wei.  Its `G` was 4.1e-16
-    # against a floor of 1e-4, so the arc was about to be dropped anyway --
-    # but the spread was computed first and the whole quote died on an
-    # assertion about a pool no route could have used.
+    # What this catches is a `B` floored instead of a `G` ceilinged, which puts a
+    # spike at the *top*.  The bottom is a different animal: a dust pool almost
+    # entirely on one side genuinely quotes a huge rate, and `a` is then correct
+    # rather than broken -- measured on `oBTC/sbtcCRV`, where a tiny probe really
+    # does return 9.55x and the chain agrees to the wei.  Such an arc is about to
+    # be dropped by the floor anyway, but the spread was computed first and the
+    # whole quote died on an assertion about a pool no route could have used.
     usable_G = positive_G[positive_G >= base_floor]
     if usable_G.size > 1:
         raw_spread = float(usable_G.max() / usable_G.min())
         if raw_spread > PATHOLOGICAL_CONDITION:
             # No real universe looks like this: the widest genuine spread
             # measured on Ethereum is ~4e10.  A spread of 1e15+ means B was
-            # floored instead of G being ceilinged -- a 1e-30 floor becomes a
-            # 1e30 conductance.  Say so, rather than letting the adaptive dust
-            # floor "fix" it by dropping every other arc.
+            # floored instead of G being ceilinged.  Say so, rather than letting
+            # the adaptive dust floor "fix" it by dropping every other arc.
             raise ValueError(
                 f"max(G)/min(G) = {raw_spread:.3e} before flooring; "
                 "something is being clamped in the wrong space (§9.7)"
@@ -291,9 +283,6 @@ def build(
         # here would contradict the rule that produced the state: a badly
         # conditioned solve is recoverable and the §12.4 KCL residual check
         # adjudicates it, whereas a graph with no path is simply no route.
-        # Measured in a 200-pair survey: one long-tail pair reached 1.96e13
-        # and died on this assertion with a `ValueError`, which callers
-        # handling `RoutingError` do not catch.
         arrays.ill_conditioned = condition
     return arrays
 
@@ -323,10 +312,10 @@ def laplacian(
 ) -> np.ndarray:
     """L = B^T diag(G) B restricted to `keep`, assembled in O(nnz).
 
-    Built directly on the *kept* index space rather than as an n x n matrix
-    that is then sliced.  The active set is usually a handful of nodes out of
-    ~300, so allocating the full matrix every pivot dominated the solve --
-    measured at ~10x the cost of the factorisation itself.
+    Built directly on the *kept* index space rather than as an n x n matrix that
+    is then sliced.  The active set is usually a handful of nodes out of ~300, so
+    allocating the full matrix every pivot dominated the solve -- measured at ~10x
+    the cost of the factorisation itself.
 
     An arc with exactly one endpoint kept still contributes its diagonal term:
     that is what grounds the system at `dst`.
@@ -364,13 +353,10 @@ def component_of(root: int, tau: np.ndarray, sig: np.ndarray, n: int) -> np.ndar
     if len(tau) == 0:
         return seen
     # Iterate to a fixed point; the arc count is small and this is branch-free.
-    #
-    # Both directions in one sweep, over an arc list doubled once up front,
-    # rather than two half-sweeps per iteration.  The fixed point is the same
-    # and the arrays are tiny -- which is the point: at this size the cost is
-    # numpy's per-call dispatch, not the work, so halving the number of calls
-    # inside the loop is most of what there is to win.  Called 679 times in a
-    # route, once per pivot per §9.4.
+    # Both directions in one sweep, over an arc list doubled once up front, rather
+    # than two half-sweeps per iteration: at this size the cost is numpy's
+    # per-call dispatch, not the work.  Called 679 times in a route, once per
+    # pivot per §9.4.
     src = np.concatenate((tau, sig))
     dst = np.concatenate((sig, tau))
     for _ in range(n):

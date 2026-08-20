@@ -1,28 +1,24 @@
 """Execution gas, as a cost and as a pruning bound (spec §11.1).
 
-§11.1 keeps gas *out of the convex core*, and that is not squeamishness: a
-fixed cost per arc is a step function, so the moment gas enters the objective
-the program stops being convex and becomes mixed-integer.  The Laplacian
-structure -- the entire reason this router is fast -- depends on it staying
-out.
+§11.1 keeps gas *out of the convex core*, and that is not squeamishness: a fixed
+cost per arc is a step function, so the moment gas enters the objective the
+program stops being convex and becomes mixed-integer.  The Laplacian structure --
+the entire reason this router is fast -- depends on it staying out.
 
-But gas can bound the problem from outside without entering it, and that is
-worth more than it sounds.  A leg that carries less *value* than the leg costs
-to execute cannot pay for itself under any circumstances: even capturing 100%
-of the flow through it as profit would not cover the gas.  That makes
+But gas can bound the problem from outside without entering it.  A leg that
+carries less *value* than the leg costs to execute cannot pay for itself under
+any circumstances, which makes
 
     psi_min = gas_leg * gas_price / eth_per_value_unit
 
-a **sound** floor rather than a heuristic one -- it can never prune an arc that
-belonged in the answer, because no arc below it can contribute more than it
-costs.  It is also loose, deliberately: the true threshold is higher (an extra
-leg wins only by the few bp of impact it saves, not by its whole flow), but a
-loose sound bound is worth more than a tight unsound one.
+a **sound** floor rather than a heuristic one.  It is also loose, deliberately:
+the true threshold is higher, but a loose sound bound is worth more than a tight
+unsound one.
 
-The per-kind numbers are curve_solver's, which are calibrated against a
-deployed router rather than guessed from quote gas.  Quote gas is the wrong
-measure: `get_dy` is a view call, while `exchange` pays for transfers and
-storage writes it never touches.
+The per-kind numbers are curve_solver's, calibrated against a deployed router
+rather than guessed from quote gas.  Quote gas is the wrong measure: `get_dy` is
+a view call, while `exchange` pays for transfers and storage writes it never
+touches.
 """
 
 from __future__ import annotations
@@ -79,42 +75,33 @@ def route_gas(kinds, *, legs: int | None = None) -> int:
 class GasTable:
     """Per-leg gas that was *executed* rather than assumed.
 
-    The flat per-kind figures above are wrong in a biased direction and wrong
-    by different amounts per pool.  Measured against the same block (see
-    `dev/gas_probe.py`): 3pool DAI>USDC 118,778, 3pool USDC>USDT 121,702,
-    crvUSD/USDC 124,839, TricryptoUSDC 155,891 -- all priced at a flat 102,000,
-    so the error runs from +16% to +53%, and a crypto pool costs a third more
-    than a stable one while the table charges them the same.
+    The flat per-kind figures above are wrong in a biased direction and by
+    different amounts per pool: measured against one block (`dev/gas_probe.py`),
+    four pools priced at a flat 102,000 ran from +16% to +53%, and a crypto pool
+    costs a third more than a stable one while the table charges them the same.
 
     Two things this deliberately does not claim:
 
     - **A measurement is per direction, not per pool.**  USDT's transfer costs
       more than DAI's, and the same pool differs by ~3,000 gas between its own
       pairs, so the key carries `(i, j)`.  A per-pool figure is accepted as a
-      fallback under `(-1, -1)` for arcs no route exercised.
-    - **Each leg was measured cold, alone.**  A later leg in a real route
-      inherits warm accounts from its predecessors and costs less, so a sum
-      over legs is an upper bound.  Erring high is the safe direction: gas
-      enters only as a candidate-ranking term and as the §11.1 pruning floor,
-      and over-charging a leg can only make the router prefer a shorter route
-      or decline to prune, never invent a route that does not pay.
+      fallback under `(-1, -1)`.
+    - **Each leg was measured cold, alone.**  A later leg in a real route inherits
+      warm accounts and costs less, so a sum over legs is an upper bound.  Erring
+      high is the safe direction: over-charging a leg can only make the router
+      prefer a shorter route or decline to prune, never invent a route that does
+      not pay.
 
-    Lookup walks from the specific to the general, so a pool that appeared
-    after the last calibration is still priced from something we measured
-    rather than from the flat guess:
+    Lookup walks from the specific to the general, so a pool that appeared after
+    the last calibration is still priced from something measured:
 
     1. this direction of this pool, measured;
-    2. any direction of this pool, under `(-1, -1)` -- a new pair on a known
-       pool;
+    2. any direction of this pool, under `(-1, -1)`;
     3. the measured median for this arc kind -- a wholly new pool;
-    4. the static per-kind figure, which by then means we have measured
-       nothing of this kind at all.
+    4. the static per-kind figure.
 
-    Tier 3 is what makes a new pool cheap to price correctly.  The caller is
-    expected to narrow it further where it can: `dev/gas_cache.py` fills tier 2
-    for every pool in the universe from the median of its own *class*, since a
-    tricrypto pool resembles other tricrypto pools far more than it resembles
-    the all-kinds median.
+    Tier 3 is what makes a new pool cheap to price correctly.  `dev/gas_cache.py`
+    narrows it further, filling tier 2 from the median of each pool's own *class*.
     """
 
     __slots__ = ("kinds", "legs")
@@ -142,20 +129,16 @@ class GasTable:
 
 #: The empty table: every leg falls back to the static per-kind figure.
 #
-# Measuring gas turned out to buy accuracy rather than output.  Both tables
-# were run over USDC->WETH at $10k and $100k, at 1, 5, 20 and 50 gwei, with
-# both routes priced under the *measured* figures so the comparison was between
-# two routes rather than two beliefs: the chosen route was identical every
-# time, net delta +0.00 bp throughout.  A wider sweep moved one case in ten per
-# gas price, never by more than 3.2 bp of gross output.
+# Measuring gas turned out to buy accuracy rather than output.  Both tables were
+# run over USDC->WETH at $10k and $100k across four gas prices, with both routes
+# priced under the *measured* figures so the comparison was between two routes
+# rather than two beliefs: the chosen route was identical every time.  A wider
+# sweep moved one case in ten per gas price, never by more than 3.2 bp.
 #
 # That is not the same as gas being inert.  The gas *price* clearly steers the
-# router -- the same $10k trade takes 790k gas at 1 gwei and 251k at 5 -- but
-# the 1.3x to 3.2x correction between these two tables is smaller than the
-# output gap between the candidates it has to choose among, so it rarely
-# decides anything.  The value is in the figures being true: what a quote
-# reports, what a pool deployed tomorrow inherits, and what a leg cap will be
-# built on.
+# router, but the correction between these two tables is smaller than the output
+# gap between the candidates it has to choose among.  The value is in the figures
+# being true: what a quote reports, and what a leg cap will be built on.
 STATIC = GasTable()
 
 
@@ -192,20 +175,16 @@ def shape_cost(
     """What a route's shape costs to prefer, in the output token.
 
     Two charges answer the same question, so only the larger is levied.  Gas is
-    what a leg costs to execute; `leg_cost_bp` is what it costs in branching
-    risk -- one more pool between signing and landing, one more way to revert --
-    and that risk does scale with the trade, which is why the premium is
-    proportional.  Charging both double-counted at both ends: at $10k the gas
-    dominates and the premium is noise on top of it, at $5M the premium
-    dominates and the gas is noise on top of that.
+    what a leg costs to execute; `leg_cost_bp` is what it costs in branching risk
+    -- one more pool between signing and landing -- and that risk scales with the
+    trade, which is why the premium is proportional.  Charging both
+    double-counted at both ends: at $10k the gas dominates, at $5M the premium
+    does.
 
     The fixed part of a plan -- the transaction itself, plus the overhead of
     splitting at all -- is gas with no branching counterpart, so it is charged
-    whole.  Conversions carry gas but no premium: a wrap is a leg to the
-    executor and not a choice the router is making (§11.1).
-
-    With no gas price to work from, `per_gas` is zero and this reduces to the
-    premium alone, which is what it was before gas could be valued.
+    whole.  Conversions carry gas but no premium: a wrap is a leg to the executor
+    and not a choice the router is making (§11.1).
     """
     table = table or STATIC
     legs = list(legs)
