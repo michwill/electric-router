@@ -13,10 +13,10 @@ import os
 # Before numpy loads, and therefore before anything that imports it.
 #
 # **For reproducibility, not speed.**  A threaded reduction sums in whatever
-# order the threads finish, so the §12.4 flow-conservation residual moves
-# between runs -- on one pair it straddled the tolerance and the route failed
-# with eight threads and succeeded with one.  Each pivot is `n` = 5-10 (§9.4),
-# where threading is pure overhead anyway.  EROUTER_BLAS_THREADS overrides.
+# order the threads finish, so the §12.4 flow-conservation residual moves between
+# runs -- on one pair it straddled the tolerance and the route failed with eight
+# threads and succeeded with one.  Each pivot is `n` = 5-10 (§9.4), where
+# threading is pure overhead anyway.  EROUTER_BLAS_THREADS overrides.
 _THREADS = os.environ.get("EROUTER_BLAS_THREADS", "1")
 for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
              "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
@@ -46,16 +46,14 @@ def _rpc_url(chain, args) -> str:
     """Where to reach the chain: the flag, then the table, then `networks.py`.
 
     **The committed scoped endpoint is the default**, so what runs here is what
-    production runs.  It is enough: measured on all fifteen chains, a direct
+    production runs, and it is enough: measured on all fifteen chains, a direct
     `eth_call` to a pool answers HTTP 403 while the same quote through the
-    deployed quoter succeeds, and the storage reads the local EVM needs are
-    served.  Developing against a wider key than production gets is how a
-    dependency on that width goes unnoticed until it ships.
+    deployed quoter succeeds.  Developing against a wider key than production
+    gets is how a dependency on that width goes unnoticed until it ships.
 
-    `--private` takes the `networks.py` endpoint instead -- a local node is far
-    faster for bulk work like `gascal` or a cold `warmcache`, and deployments
-    need it, since the scoped key does not serve `eth_sendRawTransaction`.
-    `--rpc-url` still wins over both.
+    `--private` takes the `networks.py` endpoint instead -- faster for bulk work,
+    and required for deployments, since the scoped key does not serve
+    `eth_sendRawTransaction`.  `--rpc-url` still wins over both.
     """
     override = getattr(args, "rpc_url", None)
     if override:
@@ -317,10 +315,10 @@ def cmd_probe(args: argparse.Namespace) -> int:
 def _floor_shown(chain, asked: float) -> str:
     """The floor that was really applied, which is not always the one asked for.
 
-    A Curve Lite deployment is smaller than the $10,000 default -- fantom's 321
-    pools come to $0.9M between them -- so `lite.list_pools` drops the floor to
-    zero rather than return an empty universe.  Printing the requested figure
-    there would describe a filter that did not run.
+    A Curve Lite deployment is smaller than the $10,000 default, so
+    `lite.list_pools` drops the floor to zero rather than return an empty
+    universe.  Printing the requested figure there would describe a filter that
+    did not run.
     """
     from .lite import LITE_MIN_TVL
 
@@ -332,15 +330,13 @@ def _floor_shown(chain, asked: float) -> str:
 def _certificate_note(result) -> str | None:
     """Why there is no proof, and what the relaxation's own bound was.
 
-    "RESTRICTED" on its own reads worse than it is.  It says the winning
-    candidate was a restriction of the full program -- almost always because
-    `C0`, the only candidate that can carry the certificate, put flow through
-    one pool twice and a view-only chained quote cannot see its own earlier
-    leg.  The gap is the §5.5 bound on what the relaxation still had on the
-    table, which is the number that says whether the missing proof matters.
+    "RESTRICTED" on its own reads worse than it is.  It says the winning candidate
+    was a restriction of the full program -- almost always because `C0`, the only
+    candidate that can carry the certificate, put flow through one pool twice.
+    The gap is the §5.5 bound on what the relaxation still had on the table.
 
-    It bounds the *relaxation*, not the executed route: the winner is a
-    different candidate, quoted on-chain.  So it is reported as what it is.
+    It bounds the *relaxation*, not the executed route: the winner is a different
+    candidate, quoted on-chain.  So it is reported as what it is.
     """
     reason = result.certificate_reason
     if reason is None:
@@ -388,13 +384,11 @@ def _fold(symbol: str) -> str:
 def _resolve_token(nodes, symbol_or_address: str, pools, chain=None) -> str:
     """Address, or the highest-TVL token with that symbol.
 
-    The **native token resolves to its wrapper**, which the node map has
-    already merged into one node (§3.1), so asking for one is asking for the
-    other.  Mainnet hides this: pools hold native ETH under the sentinel
-    address, so `--from ETH` finds a coin and works.  Gnosis has no such pool
-    -- every pool holds WXDAI -- so `--from XDAI` reported the chain's own gas
-    token as "not in the universe", which is both wrong and the first thing
-    somebody tries.
+    The **native token resolves to its wrapper**, which the node map has already
+    merged into one node (§3.1), so asking for one is asking for the other.
+    Mainnet hides this: pools hold native ETH under the sentinel address, so
+    `--from ETH` finds a coin and works.  Gnosis has no such pool, so `--from
+    XDAI` reported the chain's own gas token as "not in the universe".
     """
     if symbol_or_address.startswith("0x") and len(symbol_or_address) == 42:
         address = symbol_or_address.lower()
@@ -685,18 +679,14 @@ def _confirm_against_chain(result, rpc, chain, evm, nodes, pools, quiet=False,
 
     The local EVM is exact when its state is complete, so a disagreement is a
     statement about the prefetch, not about the route.  One `eth_call` to the
-    quoter -- the only address a scoped key need allow -- turns a silent few
-    basis points into something that repairs itself.
+    quoter -- the only address a scoped key need allow -- turns a silent few basis
+    points into something that repairs itself.
 
-    `used_chain` is that sentence read backwards.  When every candidate was
-    priced by the exact models -- `ExactQuoterClient` walked them and sent
-    nothing -- no EVM state was consulted, so there is no prefetch for this
-    call to be checking and it is a round trip spent to confirm arithmetic
-    against itself.  Measured on crvUSD->sDOLA, that is every quote up to
-    $100,000: 0 routes sent, and a confirmation costing 170-340 ms against a
-    227-296 ms route, which agreed and learned nothing every time.  Above
-    that the models start refusing sizes, the EVM answers, and the check
-    earns its keep again.
+    `used_chain` is that sentence read backwards.  When every candidate was priced
+    by the exact models, no EVM state was consulted, so there is no prefetch for
+    this call to check and it is a round trip spent confirming arithmetic against
+    itself -- measured on crvUSD->sDOLA, that is every quote up to $100,000.
+    Above that the models start refusing sizes and the check earns its keep.
     """
     from ..core.pipeline import build_arcs
     from .boa_host import quoter_client
@@ -889,12 +879,12 @@ def cmd_route(args: argparse.Namespace) -> int:
         # values loaded before it.
         with _boot("arc slots"):
             _learn_arcs(evm, rpc, chain, load, nodes, quiet=False)
-    # The local EVM comes first, and that ordering is measured.  The models
-    # are built *from* the storage the warm fetches, so building them first
-    # does not remove the read -- it moves it from one batched pass to several
-    # hundred per-pool getter calls, which on the scoped endpoint turned
-    # startup into minutes.  The verdict cache's value is the *gate* (2,406
-    # probes down to 84), which does not depend on the ordering.
+    # The local EVM comes first, and that ordering is measured.  The models are
+    # built *from* the storage the warm fetches, so building them first does not
+    # remove the read -- it moves it from one batched pass to several hundred
+    # per-pool getter calls, which on the scoped endpoint turned startup into
+    # minutes.  The verdict cache's value is the *gate*, which does not depend on
+    # the ordering.
     if evm is not None:
         client = reader
     elif args.local:
@@ -911,11 +901,10 @@ def cmd_route(args: argparse.Namespace) -> int:
             client, evm = local, getattr(local, "transport", None)
 
     # Stableswap is computed rather than probed where its own parameters
-    # reproduce its own `get_dy` to the wei -- exact at any size, where the
-    # fitted quadratic is not, and it is the sizes near a pool's reserves that
-    # the quadratic gets wrong by orders of magnitude.  Everything else keeps
-    # being measured.  See `dev/stable_params.py` for why each pool has to
-    # prove itself before it is believed.
+    # reproduce its own `get_dy` to the wei -- exact at any size, where the fitted
+    # quadratic is not, and it is the sizes near a pool's reserves that the
+    # quadratic gets wrong by orders of magnitude.  See `dev/stable_params.py`
+    # for why each pool has to prove itself before it is believed.
     exact = two = tri = None
     verdicts = None
     if getattr(args, "exact", True):
@@ -948,8 +937,8 @@ def cmd_route(args: argparse.Namespace) -> int:
             # size; the directions are decided separately, since a vault can
             # quote a deposit exactly and charge on the way out.  Both places a
             # vault appears are collected -- as a wrapper *arc*, and for merged
-            # ones as a conversion *leg* -- because arcs alone missed scrvUSD,
-            # sDOLA and ynETHx, the three that actually block routes.
+            # ones as a conversion *leg* -- because arcs alone missed the three
+            # that actually block routes.
             from ..core.pipeline import build_arcs as _build_arcs
             _refs, _ = _build_arcs(load.pools, nodes)
             _lp_pools = {r.pool.lower() for r in _refs
@@ -1083,14 +1072,13 @@ def cmd_route(args: argparse.Namespace) -> int:
 
 def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                  stake_arcs=None) -> int:
-    """Quote sizes as they are typed, reusing everything that does not depend on one.
+    """Quote sizes as they are typed, reusing what does not depend on one.
 
     The expensive half of a route -- probing every arc and fitting reference
-    prices -- is a function of the block and the pair, never of the amount, so
-    it is paid once here.  What is left per keystroke is the solve, which also
-    starts from the previous size's active set: the KKT system is affine in
-    `Psi` within one active set, so a nearby amount usually keeps the same arcs
-    conducting and converges almost immediately.
+    prices -- is a function of the block and the pair, never of the amount, so it
+    is paid once here.  What is left per keystroke is the solve, which starts from
+    the previous size's active set: the KKT system is affine in `Psi` within one
+    active set, so a nearby amount usually keeps the same arcs conducting.
     """
     from decimal import Decimal, InvalidOperation
 
@@ -1183,9 +1171,8 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
 def _stage_line(result, elapsed: float) -> str:
     """Where the quote's milliseconds went, biggest first.
 
-    Without this the only honest answer to "did the accelerator do anything"
-    is to re-run under a profiler, and the stage timings the pipeline already
-    records go unread.  `rest` is the part no stage claimed -- rendering,
+    Without this the only honest answer to "did the accelerator do anything" is to
+    re-run under a profiler.  `rest` is the part no stage claimed -- rendering,
     marshalling, and the pipeline's own bookkeeping.
     """
     from ..core import accel
@@ -1221,11 +1208,10 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
     """Draw one route and, if asked, write its JSON.
 
     `lean` is the interactive view: the amount and the route, nothing else.
-    Repeating the loss ledger, the diagnostics table and the candidate list
-    after every keystroke buries the one thing being compared between sizes.
-    Warnings stay -- those are the ones worth interrupting for -- but the ones
-    raised while *preparing* are size-independent and identical on every quote,
-    so `suppress` carries them and they are reported once at startup instead.
+    Repeating the loss ledger and the candidate list after every keystroke buries
+    the one thing being compared between sizes.  Warnings stay, but the ones
+    raised while *preparing* are size-independent and identical on every quote, so
+    `suppress` carries them and they are reported once at startup.
     """
     import json
 
@@ -1307,16 +1293,14 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
 def _token_holders(pools, token: str, avoid=()) -> list[str]:
     """Pools holding `token`, deepest first -- funding candidates for a fork.
 
-    The universe already knows who holds what, so a token `boa.deal` cannot
-    write needs no discovery service: the pools this route was built from hold
-    it by definition, and the deepest one is least disturbed by lending a
-    trade's worth of it.
+    The universe already knows who holds what, so a token `boa.deal` cannot write
+    needs no discovery service: the pools this route was built from hold it by
+    definition, and the deepest one is least disturbed by lending a trade's worth.
 
-    **Never a pool the route itself trades through.**  Funding is a real
-    transfer out of the holder, so borrowing from a pool on the route would
-    price the trade against reserves the quote never saw -- the execution would
-    disagree with the quote for a reason the harness created, and it would do
-    it in the direction that looks like a modelling error.
+    **Never a pool the route itself trades through.**  Funding is a real transfer
+    out of the holder, so borrowing from a pool on the route would price the trade
+    against reserves the quote never saw -- and would do it in the direction that
+    looks like a modelling error.
     """
     skip = {a.lower() for a in avoid}
     key = token.lower()
@@ -1342,14 +1326,12 @@ def _report_execution(result, chain, rpc, nodes, dst, pools) -> None:
 
     Quoting walks the route with chained `staticcall`, which cannot see its own
     earlier leg.  For most routes that is exact and this reports a flat zero.
-    Where it is not -- a pool entered twice, a multi-port element, a transfer
-    that reverts only when value actually moves -- this is the only thing that
-    can tell the difference between a good route and a good-looking one.
+    Where it is not -- a pool entered twice, a multi-port element, a transfer that
+    reverts only when value actually moves -- this is the only thing that can tell
+    a good route from a good-looking one.
 
     Forking needs unrestricted access, so it reads the endpoint out of
-    `networks.py` rather than using the committed scoped one, which serves only
-    whitelisted contracts.  Without a `networks.py` there is nothing to say and
-    it says so.
+    `networks.py` rather than the committed scoped one.
     """
     from . import config
     from .executor import execute, fork
@@ -1423,10 +1405,10 @@ def _hot_functions(fn, limit: int = 12, reference_ms: float | None = None) -> No
     """Function-level self time inside one route.
 
     Stage timings say *which phase*; this says *which line*.  cProfile inflates
-    the total, and by how much depends on the call count and the machine -- it
-    has been 3x and 15x on the same code -- so the inflation is measured
-    against the un-profiled wall and printed, rather than asserted.  Only the
-    shares are meaningful.
+    the total, and by how much depends on the call count and the machine -- it has
+    been 3x and 15x on the same code -- so the inflation is measured against the
+    un-profiled wall and printed, rather than asserted.  Only the shares mean
+    anything.
     """
     import cProfile
     import pstats
@@ -1457,12 +1439,11 @@ def _hot_functions(fn, limit: int = 12, reference_ms: float | None = None) -> No
 def cmd_bench(args: argparse.Namespace) -> int:
     """Where a route's time goes, cold and warm.
 
-    Two phases, because they have opposite shapes and different audiences.
-    *Cold* is an app's first quote: probing the universe dominates and it is
-    almost entirely network, so it moves with your connection, not with the
-    solver.  *Warm* is every quote after that in a session -- `prepare()`
-    reused, probes cached -- and it is almost entirely compute.  A session pays
-    cold once and warm per keystroke.
+    Two phases, because they have opposite shapes and different audiences.  *Cold*
+    is an app's first quote: probing the universe dominates and it is almost
+    entirely network.  *Warm* is every quote after that in a session -- `prepare()`
+    reused, probes cached -- and is almost entirely compute.  A session pays cold
+    once and warm per keystroke.
     """
     import statistics
     import time as _time
@@ -1678,8 +1659,6 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     Driven by realised routes rather than a synthetic ladder, because gas is
     state-dependent in ways a ladder cannot reach: a crypto pool may rebalance
     inside `exchange` and cost tens of thousands more, and only at some sizes.
-    The legs a route actually chose, at the sizes it chose, are the sample that
-    matters.
 
     Everything runs in revm against local state, so a full pass costs no round
     trips beyond the ones routing already pays.
@@ -2110,22 +2089,20 @@ def _route_options(args=None) -> dict:
 def _risk_table(chain, args=None):
     """Per-pool minimum-out risk, measured, or nothing at all.
 
-    Every leg executes with a minimum-out at a fraction of its pool's fee, so
-    the route lands only if none of those pools moves past its own bound in the
-    minute or two before inclusion.  `core/risk.py` turns that into the
-    quantity worth ranking on -- expected output rather than quoted output --
-    and this hands it the measured probabilities.
+    Every leg executes with a minimum-out at a fraction of its pool's fee, so the
+    route lands only if none of those pools moves past its own bound in the minute
+    or two before inclusion.  `core/risk.py` turns that into the quantity worth
+    ranking on -- expected output rather than quoted output.
 
-    Returning `None` when nothing has been measured is deliberate.  An empty
-    table is not a table of zeros: it would price every pool at the default and
-    charge a long route several percent on the strength of no evidence.  A
-    *partial* table is different -- there the default is filling a gap in a real
-    measurement, which is what it is for.
+    Returning `None` when nothing has been measured is deliberate.  An empty table
+    is not a table of zeros: it would price every pool at the default and charge a
+    long route several percent on the strength of no evidence.  A *partial* table
+    is different -- there the default is filling a gap in a real measurement.
 
-    This replaces a per-pair `min_gain_bp` floor derived from drift.  That
-    number was sound as a measurement and wrong as an instrument: it could only
-    say "long routes are suspect", where the pool it should have been indicting
-    was TriCRV specifically.  The drift series is still collected.
+    This replaces a per-pair `min_gain_bp` floor derived from drift, which was
+    sound as a measurement and wrong as an instrument: it could only say "long
+    routes are suspect", where the pool it should have indicted was one specific
+    pool.  The drift series is still collected.
     """
     from .facts import FactsCache
 
@@ -2158,12 +2135,10 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
 
     Two of the three costs of warming a local EVM answer questions that do not
     change between blocks -- which slots a pool reads, and the code that reads
-    them.  This resolves them once so a checkout starts warm and a session pays
+    them -- so resolving them once means a checkout starts warm and a session pays
     only for the storage sweep.
 
-    Incremental by construction: a pool already in the cache is not listed
-    again, so adding a newly deployed pool costs an access list for that pool
-    rather than for the universe.
+    Incremental by construction: a pool already in the cache is not listed again.
     """
     import time as _time
 
@@ -2286,11 +2261,10 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
         stats = evm.warm(list(recorder.calls))
     else:
         # The recorded calls all target the quoter, and off mainnet the quoter
-        # is not deployed -- it rides along as an `eth_call` state override,
-        # which `eth_createAccessList` cannot accept.  Those requests execute
-        # against an address with no code and return an empty list: measured
-        # on arbitrum, 34 pools yielded 1 account and 0 slots.  Ask the pools
-        # for their own `get_dy` instead; it reads the same storage.
+        # is not deployed -- it rides along as an `eth_call` state override, which
+        # `eth_createAccessList` cannot accept.  Those requests execute against an
+        # address with no code and return an empty list.  Ask the pools for their
+        # own `get_dy` instead; it reads the same storage.
         from ..core.pipeline import build_arcs as _build_arcs
 
         refs, _ = _build_arcs(load.pools, nodes)
