@@ -166,3 +166,91 @@ def test_probe_cache_is_keyed_by_block_and_by_batch(tmp_path):
 
     CachedQuoterClient(inner, 1, 100, cache=cache).probe(probes)  # hit
     assert inner.calls == 2
+
+
+# --------------------------------------------------- the two-hop half of it
+
+CRVUSD = "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e"
+SUSDE = "0x9d39a5de30e57443bff2a8307a4256c8797a3497"
+#: Enough distinct dead ends to overrun the `3 * limit` cut round A takes.
+CHEAP = [f"0x{0xcd00 + k:040x}" for k in range(24)]
+
+
+class _Quoter:
+    """Every swap is 1:1 in *canonical units*, so a cheap token pays out many.
+
+    That is the whole point: `to_canonical_wei` counts tokens, and a token worth
+    a millionth of a dollar therefore reports a millionfold "output".
+    """
+
+    def __init__(self, per_unit: dict[str, int]):
+        self.per_unit = per_unit
+        self.probes = 0
+
+    def probe(self, probes):
+        from erouter.core.quoter import Quote, Status
+
+        self.probes += len(probes)
+        return [Quote(Status.VALUE, p.dx * self.per_unit.get(p.pool.lower(), 1))
+                for p in probes]
+
+
+def test_two_step_finds_the_middle_that_can_actually_reach_the_destination():
+    """Reachability decides who is probed, not who quotes the largest number.
+
+    Round A used to keep the best `3 * limit` middles by output and only then
+    ask where they could go.  Output is a token count, so a token trading at a
+    fraction of a cent sorts above every stable by being numerous -- measured on
+    USDC -> sUSDe at $1,000 the list ran CXD at 2,513,355 units, then HLX, FIDU,
+    STG, and the only three middles that could reach sUSDe were all cut.  The
+    two-hop floor came back empty for a pair with an obvious two-hop route.
+    """
+    from erouter.core.pipeline import two_step_candidates
+
+    # Many cheap dead ends off USDC, and one real bridge through crvUSD.
+    dead_ends = [pool(f"0x{k:040x}", [(USDC, "USDC", 6), (CHEAP[k], f"CHEAP{k}", 18)],
+                      name=f"dead{k}") for k in range(len(CHEAP))]
+    bridge = pool("0x" + "b1" * 20, [(USDC, "USDC", 6), (CRVUSD, "crvUSD", 18)],
+                  name="USDC/crvUSD")
+    exit_ = pool("0x" + "e1" * 20, [(CRVUSD, "crvUSD", 18), (SUSDE, "sUSDe", 18)],
+                 name="sUSDe/crvUSD")
+    pools = [*dead_ends, bridge, exit_]
+    nodes = nodes_for(pools)
+    nu = np.ones(len(nodes.canonical_of) + 40)
+    # The dead ends pay a millionfold in units; the bridge pays 1:1.
+    quoter = _Quoter({p.address.lower(): 1_000_000 for p in dead_ends})
+
+    out, chains = two_step_candidates(
+        pools, nodes, nu, quoter, USDC, SUSDE, 1000 * 10**6)
+
+    assert out, "the only two-hop route in the universe was not offered"
+    assert len(chains[0]) == 2
+    used = {arc.pool.lower() for arc in chains[0]}
+    assert used == {bridge.address.lower(), exit_.address.lower()}
+
+
+def test_two_step_does_not_probe_middles_that_lead_nowhere():
+    """Intersecting first is cheaper, not just righter."""
+    from erouter.core.pipeline import two_step_candidates
+
+    dead_ends = [pool(f"0x{k:040x}", [(USDC, "USDC", 6), (CHEAP[k], f"CHEAP{k}", 18)],
+                      name=f"dead{k}") for k in range(len(CHEAP))]
+    bridge = pool("0x" + "b1" * 20, [(USDC, "USDC", 6), (CRVUSD, "crvUSD", 18)])
+    exit_ = pool("0x" + "e1" * 20, [(CRVUSD, "crvUSD", 18), (SUSDE, "sUSDe", 18)])
+    pools = [*dead_ends, bridge, exit_]
+    quoter = _Quoter({})
+    two_step_candidates(pools, nodes_for(pools), np.ones(64), quoter,
+                        USDC, SUSDE, 1000 * 10**6)
+    # One probe out of USDC through the bridge, one on through the exit.  The
+    # dead ends are known to be dead without asking the chain at all.
+    assert quoter.probes == 2, f"probed {quoter.probes}, expected 2"
+
+
+def test_two_step_is_empty_when_nothing_bridges_the_pair():
+    from erouter.core.pipeline import two_step_candidates
+
+    pools = [pool("0x" + "b1" * 20, [(USDC, "USDC", 6), (CRVUSD, "crvUSD", 18)]),
+             pool("0x" + "d1" * 20, [(DAI, "DAI", 18), (SUSDE, "sUSDe", 18)])]
+    out, chains = two_step_candidates(pools, nodes_for(pools), np.ones(16),
+                                      _Quoter({}), USDC, SUSDE, 1000 * 10**6)
+    assert out == [] and chains == []

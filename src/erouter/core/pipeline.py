@@ -1364,6 +1364,32 @@ def two_step_candidates(
         for node_id in per_node:
             holders.setdefault(node_id, []).append(index)
 
+    # Which middles can even reach `dst`?  Pure indexing, no probes -- and it
+    # has to happen *before* the ranking below, not after.
+    #
+    # Round A used to quote every token one hop from the source and keep the
+    # best `3 * limit` of them by output.  Two things went wrong together.  The
+    # output is `to_canonical_wei`, a count of tokens rather than a value, so a
+    # token that trades at a fraction of a cent sorts above every stable simply
+    # by being numerous -- measured on USDC -> sUSDe at $1,000, the top of the
+    # list was CXD at 2,513,355 units, then HLX, FIDU and STG.  And the cut was
+    # taken without asking where any of them could go next.  Of 52 middles
+    # quoted, exactly three could reach sUSDe -- DAI, reUSD and crvUSD -- and
+    # all three were cut, so the two-hop floor came back empty for a pair with
+    # an obvious two-hop route.
+    #
+    # Intersecting first fixes the ranking by making it almost irrelevant: what
+    # survives is measured in hundreds, not tens of thousands, so the cut rarely
+    # binds and every chain that reaches `dst` gets its round-B quote.  It is
+    # also strictly cheaper -- 66 probes became a handful on that pair.
+    reaching = {
+        node_id for node_id in holders
+        if node_id not in (src_node, dst_node)
+        and any(dst_node in slots_of[index] for index in holders[node_id])
+    }
+    if not reaching:
+        return [], []
+
     # --- round A: src -> M ------------------------------------------------
     probes: list[Probe] = []
     first: list[tuple[PoolSpec, int, int, int]] = []
@@ -1374,7 +1400,7 @@ def two_step_candidates(
                 if j == i or not nodes.has(coin.address):
                     continue
                 middle = nodes.node(coin.address)
-                if middle in (src_node, dst_node):
+                if middle not in reaching:
                     continue
                 probes.append(
                     Probe(pool.address, pool.swap_kind, i, j, pool.n_coins, amount_in)
