@@ -21,17 +21,14 @@ stated on every row rather than corrected for.
 from __future__ import annotations
 
 import argparse
-import sys
 import time
-from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO / "src"))
-sys.path.insert(0, str(REPO / "scripts"))
+# `router_pairs` is a sibling script rather than a module: `scripts/` is not a
+# package, and the directory of the script being run is already first on
+# `sys.path`, so it needs no help to be found.
+from router_pairs import AMOUNT_WORD, ROUTERS, _word, decode
 
-from router_pairs import AMOUNT_WORD, ROUTERS, _word, decode  # noqa: E402
-
-from erouter.core.keccak import keccak256  # noqa: E402
+from erouter.core.keccak import keccak256
 
 TRANSFER = "0x" + keccak256(b"Transfer(address,address,uint256)").hex()
 

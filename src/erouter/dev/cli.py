@@ -8,32 +8,22 @@ support, and the Curve API behind its User-Agent requirement.
 
 from __future__ import annotations
 
+import argparse
+import contextlib
+import importlib
 import os
+import re
+import sys
+import time
 
-# Before numpy loads, and therefore before anything that imports it.
-#
-# **For reproducibility, not speed.**  A threaded reduction sums in whatever
-# order the threads finish, so the §12.4 flow-conservation residual moves between
-# runs -- on one pair it straddled the tolerance and the route failed with eight
-# threads and succeeded with one.  Each pivot is `n` = 5-10 (§9.4), where
-# threading is pure overhead anyway.  EROUTER_BLAS_THREADS overrides.
-_THREADS = os.environ.get("EROUTER_BLAS_THREADS", "1")
-for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-    os.environ.setdefault(_var, _THREADS)
+from . import chains as chain_table
+from . import config
+from .curve_api import CurveApi, CurveApiError
+from .facts import FactsCache, apply_broken_facts
+from .rpc import JsonRpcTransport, RpcError
 
-import argparse  # noqa: E402
-import contextlib  # noqa: E402
-import importlib  # noqa: E402
-import re  # noqa: E402
-import sys  # noqa: E402
-import time  # noqa: E402
-
-from . import chains as chain_table  # noqa: E402
-from . import config  # noqa: E402
-from .curve_api import CurveApi, CurveApiError  # noqa: E402
-from .facts import FactsCache, apply_broken_facts  # noqa: E402
-from .rpc import JsonRpcTransport, RpcError  # noqa: E402
+# BLAS threads are pinned by `erouter/__init__.py`, which runs before this
+# module and therefore before numpy.  See the note there.
 
 OK = "\x1b[32m✔\x1b[0m"
 BAD = "\x1b[31m✘\x1b[0m"

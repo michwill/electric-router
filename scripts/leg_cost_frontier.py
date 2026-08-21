@@ -18,30 +18,16 @@ legs are worth tens of them.
 from __future__ import annotations
 
 import argparse
-import os
 
-# The same five variables `erouter.dev.cli` pins, and for the same reason: a
-# threaded reduction sums in whatever order the threads finish, so the residual
-# moves between runs.  This script measures a frontier one basis point wide, so
-# it wants that determinism more than the CLI does, not less.
-_THREADS = os.environ.get("EROUTER_BLAS_THREADS", "1")
-for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
-             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
-    os.environ.setdefault(_var, _THREADS)
-
-from erouter.core.pipeline import RoutingError, prepare, route  # noqa: E402
-from erouter.dev import chains, config  # noqa: E402
-from erouter.dev.boa_host import quoter_client  # noqa: E402
-from erouter.dev.cli import _local_quoter  # noqa: E402
-from erouter.dev.facts import FactsCache  # noqa: E402
-from erouter.dev.probe_cache import CachedQuoterClient  # noqa: E402
-from erouter.dev.rpc import JsonRpcTransport  # noqa: E402
-from erouter.dev.universe import (  # noqa: E402
-    load_pools,
-    read_balances,
-    resolve_dialects,
-)
-from erouter.dev.wrappers import build_node_map, build_stake_arcs  # noqa: E402
+from erouter.core.pipeline import RoutingError, prepare, route
+from erouter.dev import chains, config
+from erouter.dev.boa_host import quoter_client
+from erouter.dev.cli import _local_quoter
+from erouter.dev.facts import FactsCache
+from erouter.dev.probe_cache import CachedQuoterClient
+from erouter.dev.rpc import JsonRpcTransport
+from erouter.dev.universe import load_pools, read_balances, resolve_dialects
+from erouter.dev.wrappers import build_node_map, build_stake_arcs
 
 TOKENS = {
     "USDC": ("0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48", 6),
