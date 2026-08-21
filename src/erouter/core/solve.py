@@ -44,6 +44,25 @@ DEGENERACY_SCREEN = 1e-4
 # a cycle.  Bland changes the pivot sequence, so it deserves a few iterations to
 # break out on its own; measured cycles repeat every 2 pivots and never recover.
 CYCLE_PATIENCE = 3
+# How many times a cycling basis is perturbed before the patience above applies.
+#
+# Degeneracy is what makes the basis repeat: several arcs tie on the quantity the
+# pivot rule ranks, so which one moves is arbitrary and the sequence can return
+# to where it was.  The textbook remedy is to break every tie in advance by
+# shifting each arc's cost by a distinct vanishing amount, and it is what the
+# Rust solver gets by accident -- its rank-1 Cholesky update leaves a different
+# rounding in `u` than a fresh factorisation, and that noise is enough to fall
+# out of the cycle.  Measured: with rank-1 disabled the two agree to 1.3e-9 and
+# cycle identically; with it on, Rust converges on solves where Python gives up.
+#
+# So do deliberately what it does by luck.  Deterministic, so two runs at one
+# block still agree to the wei.
+PERTURB_ROUNDS = 4
+# The first shift, relative to the largest `eps` in the graph.  Far below `TOL`
+# and further below a basis point, so the perturbed problem is the same problem;
+# each round multiplies by ten in case the first was inside the noise it meant
+# to clear.
+PERTURB_SCALE = 1e-11
 
 # The compiled solve is **opt-in**, and stays that way until it agrees with the
 # reference on the paths that matter.
@@ -232,6 +251,10 @@ def active_set_solve(
     cycles = 0
 
     reseeded = False
+    # `eps` the pivot rule actually sees.  Identical to the graph's until a cycle
+    # forces a perturbation, and rebound to a shifted copy after.
+    eps = g.eps
+    perturbed = 0
     for _ in range(maxit):
         idx = np.flatnonzero(A)
 
@@ -259,7 +282,7 @@ def active_set_solve(
 
         rhs = s_hat.copy()
         if idx.size:
-            fee_flow = g.G[idx] * g.eps[idx]
+            fee_flow = g.G[idx] * eps[idx]
             np.add.at(rhs, g.tau[idx], fee_flow)
             np.subtract.at(rhs, g.sig[idx], fee_flow)
         uidx = np.flatnonzero(U)
@@ -306,13 +329,13 @@ def active_set_solve(
         psi = np.zeros(m)
         psi[U] = psi_upper[U]
         if idx.size:
-            psi[idx] = g.G[idx] * (u[g.tau[idx]] - u[g.sig[idx]] - g.eps[idx])
+            psi[idx] = g.G[idx] * (u[g.tau[idx]] - u[g.sig[idx]] - eps[idx])
         # §9.4: nodes outside `dst`'s component carry zero flow by construction.
         # Without this an arc with both ends outside gets u = 0 at both, so a
         # favourable eps yields psi = -G*eps > 0 -- flow conjured from nothing,
         # satisfying no conservation law and impossible to order for execution.
         psi[~(comp[g.tau] & comp[g.sig])] = 0.0
-        rho = u[g.tau] - u[g.sig] - g.eps
+        rho = u[g.tau] - u[g.sig] - eps
 
         # A repeated basis means the pivot sequence is going in circles.  The
         # first remedy is Bland's rule (lowest index), which guarantees
@@ -328,6 +351,18 @@ def active_set_solve(
         # conservation exactly, only optimality is incomplete.
         signature = (A.tobytes(), U.tobytes())
         if signature in seen_bases:
+            if bland and perturbed < PERTURB_ROUNDS:
+                # Break the ties that let the basis return here.  A distinct
+                # shift per arc, monotone in index so it is reproducible, and
+                # small enough that the perturbed optimum is the real one to
+                # far more digits than any quote can carry.
+                perturbed += 1
+                scale = PERTURB_SCALE * (10.0 ** (perturbed - 1))
+                spread = float(np.max(np.abs(g.eps))) if g.m else 0.0
+                eps = g.eps + scale * max(spread, 1.0) * (
+                    np.arange(1, g.m + 1, dtype=float) / g.m)
+                seen_bases.clear()
+                continue
             if bland:
                 cycles += 1
                 if cycles >= CYCLE_PATIENCE:
