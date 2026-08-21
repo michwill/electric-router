@@ -192,10 +192,8 @@ def build_exact_lending(pools, client, *, block: int, quiet: bool = True):
 def _pick_variant(pool, held: int, shaped: dict, client) -> StableSwap | None:
     """The variant that reproduces this pool's own `get_dy`, or `None`.
 
-    Both directions, because the parameter under test here is a *rate*, and a
-    rate read from the wrong place or scaled the wrong way is not symmetric: it
-    inflates one leg and deflates the other.  Checking only `0 -> 1` is the one
-    shape of error this reader is most likely to make and least able to see.
+    Both directions: the parameter under test is a *rate*, and a mis-scaled one
+    inflates one leg and deflates the other, so `0 -> 1` alone cannot see it.
     """
     probes = []
     for i, j in ((0, 1), (1, 0)):

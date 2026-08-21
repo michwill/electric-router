@@ -1219,17 +1219,12 @@ WARNINGS_SHOWN = 8
 
 
 def _shown_warnings(warnings, suppress: set[str] | None) -> list[str]:
-    """The warning lines worth a terminal, most general first.
+    """The warning lines worth a terminal, route-level first.
 
-    A note about one arc of 876 was competing on equal terms with a note about
-    the route on screen, and losing on arrival order rather than on importance:
-    twenty `only 0 probes` lines filled the budget and pushed the §12.1 size
-    escalation off the bottom.  That escalation was the one line that explained
-    a 972 bp gap between the modelled loss and the real one, and nobody could
-    see it.
-
-    So the per-arc notes collapse to a single line and go last.  Nothing is
-    lost -- `--json` still carries every one of them, individually.
+    Filled in arrival order, twenty `only 0 probes` notes took the whole budget
+    and pushed the §12.1 size escalation -- the line explaining a 972 bp gap --
+    off the bottom.  Per-arc notes now collapse to one and go last; `--json`
+    still carries each.
     """
     kept = [w for w in warnings if not suppress or w not in suppress]
     per_arc = [w for w in kept if _ARC_NOTE.match(w)]

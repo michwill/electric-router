@@ -64,20 +64,11 @@ def _stable(pool) -> bool:
 
 
 def _decode_rates(blob: bytes | None, n_coins: int) -> tuple[int, ...]:
-    """`stored_rates()`, whichever array shape the pool returns.
+    """`stored_rates()`, dynamic on the ng pools and fixed on the older ones.
 
-    The ng pools return a `DynArray`, which arrives as an offset, a length and
-    then the items.  The older factory pools return `uint256[N_COINS]`, which
-    for two coins is 64 bytes with no header at all -- and those are precisely
-    the pools where the rate is not the decimal correction, because a plain pool
-    only grew a `stored_rates` when someone attached a rate oracle to it.
-    Demanding a header dropped them in silence and valued ETHx at one ETH: a
-    9.5% error the pool announces and we were not reading.
-
-    Length alone cannot separate the two shapes -- 128 bytes is a two-coin
-    dynamic array and a four-coin fixed one.  A dynamic array announces itself,
-    first word the offset 32 and second its own length, and no rate is ever 32,
-    so read the header where it is there and the bare words where it is not.
+    Length cannot separate them -- 128 bytes is a two-coin `DynArray` and a
+    four-coin `uint256[N_COINS]` -- so the header decides.  Demanding one valued
+    ETHx at par, 9.5% out.
     """
     if not blob:
         return ()
@@ -309,11 +300,9 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
                 out.by_pool.update(rated)
                 out.rejected = [(a, w) for a, w in out.rejected
                                 if a.lower() not in rated]
-                # The refusal recorded a moment ago was about the *plain*
-                # reading, and this reader has just overturned it.  Left
-                # standing it is written to `unquotable`, and `skip` reads that
-                # before the gate on the next run -- so the pool never reaches
-                # `rejected` and never reaches this line again.
+                # Withdraw the refusal this reader just overturned.  Left
+                # standing, `skip` fires before the gate next run, the pool
+                # never reaches `rejected`, and `rejected` is what feeds here.
                 if cache is not None:
                     for key in rated:
                         cache.readmit(key)

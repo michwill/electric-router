@@ -64,10 +64,8 @@ MATH_SOURCES = (
     ("dev", "stable_params.py"),
     ("dev", "twocrypto_params.py"),
     ("dev", "tricrypto_params.py"),
-    # The rate readers decide which variant a wrapped-token or oracle-priced
-    # pool is built from, so their source participates in the comparison
-    # exactly as the invariants do.  Left out, editing the list of getters a
-    # rate can come from left every verdict on every chain standing.
+    # Decides which variant a wrapped-token or oracle-priced pool is built
+    # from, so it decides verdicts as much as the invariants do.
     ("dev", "lending_params.py"),
 )
 
@@ -247,24 +245,14 @@ class ExactCache:
             self.pending_unquotable[key] = balance_key(balances)
 
     def readmit(self, pool: str) -> None:
-        """Forget a refusal that a later reader overturned in the same run.
+        """Forget a refusal a later reader overturned in the same run.
 
-        The ordinary reading refuses a pool whose value is not one -- rETH,
-        ankrETH, RAI -- because a decimals-only rate cannot reproduce it, and
-        `lending_params` then rebuilds it from the wrapper and it reproduces
-        exactly.  Nothing used to undo the refusal, so it was written to
-        `unquotable`; on the next run `skip` fired *before* the gate, the pool
-        never reached `rejected`, and the retry that rescues it is fed from
-        `rejected`.  A pool that models perfectly was locked out of its own
-        second chance, permanently: `ETH/aETH` sat there with no verdict and an
-        entry in `unquotable` while reproducing its own `get_dy` to the wei at
-        every size asked.
-
-        No verdict is recorded in its place.  A verdict is matched against the
-        variants `build_exact_pools` offers, and these models are built
-        somewhere else, so a remembered one could never match and `trust` would
-        send the pool back through the gate regardless.  What must not survive
-        is the refusal.
+        No verdict replaces it: `trust` matches against the variants
+        `build_exact_pools` offers and these models are built elsewhere, so a
+        remembered one could never match.  What must not survive is the
+        refusal -- `skip` reads it before the gate, and the reader that rescues
+        these pools is fed from `rejected`.  `ETH/aETH` sat in `unquotable` for
+        that reason while reproducing its own `get_dy` to the wei.
         """
         key = pool.lower()
         self.refused.pop(key, None)

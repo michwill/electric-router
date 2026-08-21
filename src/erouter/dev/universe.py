@@ -744,38 +744,23 @@ def check_reserves_are_real(
 def check_the_invariant_answers(
     pools: list[PoolSpec], client: QuoterClient
 ) -> list[str]:
-    """Find pools that cannot solve their own invariant at the numbers they hold.
+    """Find pools with no `D` at the numbers they hold, for the blacklist.
 
-    A stableswap or cryptoswap prices everything -- `get_dy`, a deposit, its own
-    LP token -- by solving `D` over its balances, and it publishes that solution
-    as `get_virtual_price()`.  When *that* reverts there is no `D` to be had and
-    nothing downstream can quote.  `WETH/yETH` is the expensive one: 43,294 wei
-    of WETH against a coin whose supply is 2.35e56, carried at $2.1M because the
-    index prices that coin.
+    A pool that cannot publish `get_virtual_price()` cannot quote anything.
+    `WETH/yETH` is the expensive case: 43,294 wei of WETH against a coin whose
+    supply is 2.35e56, carried at $2.1M because the index prices that coin.
 
-    **The second call is the whole point.**  Every LLAMMA reverts here and every
-    LLAMMA quotes -- it has no `D` and no virtual price, by construction -- so a
-    rule written on the first call alone drops $24M of crvUSD liquidity on
-    mainnet alone.  A pool is asked for a quote before it is named, and that
-    costs one probe on the three pools in 541 that get this far.
+    **The second call is the whole point.** Every LLAMMA reverts here and every
+    LLAMMA quotes -- it has no `D` by construction -- so the first call alone
+    drops $24M of crvUSD liquidity on mainnet.  Not the "huge supply" tell
+    either: `BABYPEPE/SPANK` holds 6.4e12 tokens and trades.
 
-    Deliberately not the "huge supply" tell.  `BABYPEPE/SPANK` holds 6.4e12
-    tokens and trades, `QOM/O/CAW` 6.4e12, `REAL/iBBT` 1.1e11 against $3.4M --
-    there is no threshold that separates them from yETH's 9.9e16 except one
-    chosen to fit yETH, and a meme coin's supply is not evidence of anything.
-
-    **This runs in `scripts/find_broken_pools.py`, not on the route path**, and
-    that is measured rather than tidy-minded.  `get_virtual_price` solves the
-    invariant, so 386 of them cost 800 ms on the wire against the 181 ms the
-    reserve check takes -- to drop one pool whose arcs the probe grid was
-    already discarding for ~3.5 ms of probes.  The local EVM cannot stand in for
-    the wire either: it reverts on 17 healthy pools it holds no oracle or base
-    pool for, $7M of them.  So the survey is run when someone asks, and what it
-    finds goes in the chain's `blacklist`, which is where this repository has
-    always kept a pool-level removal a human decided on.
-
-    Zeroing the balances is how a drop is expressed, as in the reserve check
-    above: `build_arcs` offers nothing from a coin with no reserve.
+    Off the route path deliberately: `get_virtual_price` solves the invariant,
+    so 386 of them cost 800 ms against the reserve check's 181 ms, to save the
+    ~3.5 ms of probes the grid spends reaching the same conclusion.  The local
+    EVM cannot stand in -- it reverts on 17 healthy pools it holds no base pool
+    or oracle for.  `scripts/find_broken_pools.py` runs it; the finding goes in
+    `chains.py`.  Zeroing balances is how a drop is expressed, as above.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
@@ -793,8 +778,8 @@ def check_the_invariant_answers(
     if not silent:
         return warnings
 
-    # From the fullest side, so the probe fails on the pool's arithmetic rather
-    # than on an empty reserve.
+    # From the fullest side, so a failure is the arithmetic and not an empty
+    # reserve.
     probes = []
     for pool in silent:
         i = max(range(len(pool.balances)), key=lambda k: pool.balances[k])

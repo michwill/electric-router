@@ -18,17 +18,9 @@ from .rendermodel import format_units
 def _loss_bp(result, ledger: dict[str, float] | None, total_bp: float) -> dict:
     """What the trade cost, chain first and model beside it.
 
-    `fee` and `impact` are the model's decomposition and stay the model's --
-    there is no way to split a verified figure into a diode and a resistor term,
-    since the chain reports one number.  So they sum to `modelled_total` and not
-    to `total`.
-
-    `model_delta` is `modelled_total - verified_total`, the same number the
-    terminal draws, so the two can never disagree.  **Negative means the model
-    was optimistic** -- it expected to lose less than the trade actually cost --
-    which past ~10% of a pool's reserve it will be (§12.1).  Positive is the
-    ordinary sign: §3.6 says the quadratic overstates loss by construction, so a
-    healthy trade beats its own model by a fraction of a bp.
+    `fee` and `impact` sum to `modelled_total`, never to `total`: the chain
+    reports one number.  `model_delta` is `modelled - verified`, so negative is
+    §12.1's optimistic model past a tenth of reserve and positive is §3.6's.
     """
     out = {
         "total": round(total_bp, 4),
@@ -64,20 +56,10 @@ def to_json(
     verified_out: int | None = None,
     ledger: dict[str, float] | None = None,
 ) -> dict[str, Any]:
-    """The route as JSON.  **`amount_out` is what the chain said**, where it said
-    anything; `modelled_out` is what the model expected.
-
-    That ordering is not cosmetic.  The two agree to a fraction of a bp on an
-    ordinary trade, so which one carries the plain name never mattered -- until
-    `ETH -> ETHx` at 241% of the pool's reserve, where the model expected 91.15
-    ETHx and the chain paid 82.50.  The terminal always showed both, labelled.
-    The JSON put the model's number under `amount_out` and the truth under
-    `verified_out`, so a caller reading the obvious field got one 10% too high,
-    and `loss_bp.total` said 24.7 bp for a trade that cost 970.
-
-    `ledger` carries the reference-price loss the terminal draws, computed once
-    by the caller so the two cannot drift.  Without it only the modelled
-    decomposition can be reported, and it is named as such.
+    """`amount_out` is the chain's figure where there is one, `modelled_out` the
+    model's.  They agree to a fraction of a bp until they do not: `ETH -> ETHx`
+    at 241% of reserve modelled 91.15 against 82.50 paid.  `ledger` is the
+    terminal's own, passed in so the two cannot drift.
     """
     route = result.route
     nodes = result.nodes

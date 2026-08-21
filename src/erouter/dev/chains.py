@@ -39,14 +39,10 @@ class Chain:
     # upload), and boa stays in the request path, which the browser build cannot
     # have.
     quoter: str = ""
-    # Pools no probe should be spent on and no route should reach, for a reason
-    # a human decided on.  Two kinds so far, and neither is the reserve check --
-    # these hold what they claim.  One quotes fine and cannot be traded, because
-    # the failure is a layer down in a protocol that will not accept a deposit,
-    # and only executing finds it.  The other cannot solve its own invariant at
-    # the numbers it holds, so it never quotes at all; the probe grid discards
-    # its arcs every run and it goes on being carried at whatever the index
-    # thinks its coins are worth.  `scripts/find_broken_pools.py` finds those.
+    # Pools no probe should be spent on, removed by hand.  Not the reserve
+    # check -- these hold what they claim.  Two kinds: quotes but cannot be
+    # traded (only executing finds it), and cannot solve its own invariant so
+    # never quotes at all (`scripts/find_broken_pools.py` finds those).
     blacklist: tuple[str, ...] = ()
     # Pools worth re-testing on every `facts` build, whether or not they are
     # currently routable: deprecated lending protocols whose `exchange` quotes
@@ -199,14 +195,9 @@ CHAINS: dict[str, Chain] = {
             # pool's own balances and never touches Aave -- answers happily.
             # Curve's own solver excludes it for the same reason.
             "0xDeBF20617708857ebe4F679508E7b7863a8A8EeE",
-            # Curve.fi Factory Plain Pool: yETH.  Holds 43,294 wei of WETH
-            # against a coin whose supply is 2.35e56, and carried at $2,123,962
-            # because the index prices that coin.  Its `get_virtual_price()`
-            # reverts and so does its own `get_dy` at one wei: there is no `D`
-            # at the numbers it holds, so nothing can quote it and the probe
-            # grid discarded its arcs every run.  Found by
-            # `scripts/find_broken_pools.py`; two of 541 pools across seventeen
-            # chains fail that way, and it is the only one on mainnet.
+            # Curve.fi yETH: 43,294 wei of WETH against a coin whose supply is
+            # 2.35e56, carried at $2,123,962 by the index.  Its virtual price
+            # and its own get_dy both revert -- no `D` at what it holds.
             "0x69ACcb968B19a53790f43e57558F5E443A91aF22",
         ),
         wsteth_pairs=((WSTETH, STETH),),
@@ -337,10 +328,8 @@ CHAINS: dict[str, Chain] = {
         quoter=QUOTER,
         public_rpc=scoped_rpc("avalanche"),
         blacklist=(
-            # Curve.fi Factory Plain Pool: UST (wormhole), $2,004.  Same shape
-            # as mainnet's yETH: neither `get_virtual_price()` nor its own
-            # `get_dy` can be solved from what it holds.  See
-            # `scripts/find_broken_pools.py`.
+            # Curve.fi UST (wormhole), $2,004.  Mainnet's yETH shape: neither
+            # its virtual price nor its own get_dy can be solved.
             "0xB89B080Bb9fb489516FC7Fc98bC4eb3f5A92c54E",
         ),
     ),

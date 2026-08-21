@@ -75,14 +75,12 @@ class RealizedLeg:
 
     @property
     def is_conversion(self) -> bool:
-        """A leg the node merge emitted, rather than a pool the solver chose.
+        """A leg the node merge emitted, not a pool the solver chose.
 
         Exactly the six kinds `Conversion.forward_kind`/`reverse_kind` produce.
-        The wstETH pair was missing, so its legs were treated as swaps: rescaled
-        from an `amount_out` no calibration ever set, which is zero.  A route
-        through wstETH then lost that whole branch from `modelled_out` -- 42.18
-        WETH realised, 33.98 modelled, and a loss ledger reading 2,036 bp on a
-        98 bp trade.
+        With the wstETH pair missing, its legs were rescaled as swaps from an
+        `amount_out` no calibration set -- zero -- and a route through wstETH
+        lost that branch: 42.18 realised, 33.98 modelled.
         """
         return self.kind in (
             ArcKind.WRAP_NATIVE,
