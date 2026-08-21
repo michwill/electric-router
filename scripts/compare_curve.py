@@ -17,6 +17,9 @@ chain whose pools move does not quietly stop being tested.  One volatile pair pe
 chain is quoted too, marked `*` and excluded from the tally.
 
     python scripts/compare_curve.py [--chain all|ethereum|...] [--sizes 10000,100000]
+
+`--sizes` are amounts of the *source* token and may be fractional, which is what
+a token worth more than a dollar needs to be compared at a sane trade size.
 """
 
 from __future__ import annotations
@@ -70,7 +73,7 @@ def _resolve(symbol: str, holders: dict) -> str:
     return max(matches, key=lambda a: holders[a][2])
 
 
-def pairs_for(chain, pools, sizes: tuple[int, ...], pair: str = ""):
+def pairs_for(chain, pools, sizes: tuple[float, ...], pair: str = ""):
     """(src, dst, amount, volatile) for one chain, from its own universe.
 
     `pair` names one explicitly as `SRC->DST`, by symbol or address, for asking
@@ -113,7 +116,7 @@ def pairs_for(chain, pools, sizes: tuple[int, ...], pair: str = ""):
     return out, holders
 
 
-def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict],
+def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
                   pair: str = "") -> None:
     from erouter.core.pipeline import RoutingError, prepare, route
     from erouter.core.quoter import QuoterClient
@@ -186,8 +189,14 @@ def compare_chain(name: str, sizes: tuple[int, ...], rows: list[dict],
     for src, dst, amount, volatile in cases:
         src_symbol, src_decimals, _ = holders[src]
         dst_symbol, dst_decimals, _ = holders[dst]
-        wei = amount * 10**src_decimals
-        label = f"{src_symbol}->{dst_symbol} {amount:,}" + (" *" if volatile else "")
+        # Sizes are in units of the *source* token, so a token worth more than a
+        # dollar needs a fraction of one to be a comparable trade.  Asking for
+        # `1,000,000 WBTC` is not a hard routing problem, it is an impossible
+        # one, and both routers answer it with noise -- which reads as a 69,045
+        # bp win if nobody checks what was asked.
+        wei = int(amount * 10**src_decimals)
+        shown = f"{amount:,.6g}" if amount != int(amount) else f"{int(amount):,}"
+        label = f"{src_symbol}->{dst_symbol} {shown}" + (" *" if volatile else "")
         row = {"chain": name, "case": label, "volatile": volatile}
         try:
             theirs, their_ms = ask_curve(api, src, dst, wei)
@@ -236,7 +245,7 @@ def main() -> int:
                              "instead of the chain's curated stables")
     args = parser.parse_args()
 
-    sizes = tuple(int(s) for s in args.sizes.split(","))
+    sizes = tuple(float(s) for s in args.sizes.split(","))
     wanted = (SUPPORTED if args.chain == "all"
               else tuple(c.strip() for c in args.chain.split(",") if c.strip()))
     rows: list[dict] = []
