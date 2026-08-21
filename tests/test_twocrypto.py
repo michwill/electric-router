@@ -13,22 +13,21 @@ from __future__ import annotations
 
 import pytest
 
-from erouter.core.twocrypto import (MAX_FEE, MIN_FEE, Twocrypto,
-                                    TwocryptoError)
+from erouter.core.twocrypto import MAX_FEE, MIN_FEE, Twocrypto, TwocryptoError
 
 #: `Yield Basis WETH`, an FX Swap on mainnet.
-YB_WETH = dict(
-    balances=(1195163862946386689613, 2295927389925329891241),
-    precisions=(1, 1),
-    price_scale=1000000000000000000,
-    d=3491091252871716580854,
-    amp=200000000,
-    gamma=1000000000000000,
-    mid_fee=3000000,
-    out_fee=30000000,
-    fee_gamma=10000000000000000,
-    stable=True,
-)
+YB_WETH = {
+    "balances": (1195163862946386689613, 2295927389925329891241),
+    "precisions": (1, 1),
+    "price_scale": 1000000000000000000,
+    "d": 3491091252871716580854,
+    "amp": 200000000,
+    "gamma": 1000000000000000,
+    "mid_fee": 3000000,
+    "out_fee": 30000000,
+    "fee_gamma": 10000000000000000,
+    "stable": True,
+}
 
 
 def pool(**kw) -> Twocrypto:
@@ -173,21 +172,21 @@ def test_a_policy_that_charges_nothing_leaves_the_native_fee_curve():
 # where 0.3.1 had written `10**18 + (2 * 10**18) * K0 / _g1k0`.  41 mainnet pools
 # take the first spelling and this one takes the second; see
 # `core/cryptoswap._newton_y` for why the 4e-10 difference is not rounding.
-EURE_3CRV = dict(
-    balances=(168024079489927527752180, 182559895614877999742329),
-    precisions=(1, 1),
-    price_scale=871840195201223331,
-    d=327186996362370014692089,
-    amp=20000000,
-    gamma=10000000000000000,
-    mid_fee=3000000,
-    out_fee=45000000,
-    fee_gamma=300000000000000000,
-    stable=False,
-    legacy_fee=True,
-    v21=True,
-    legacy_pool=True,
-)
+EURE_3CRV = {
+    "balances": (168024079489927527752180, 182559895614877999742329),
+    "precisions": (1, 1),
+    "price_scale": 871840195201223331,
+    "d": 327186996362370014692089,
+    "amp": 20000000,
+    "gamma": 10000000000000000,
+    "mid_fee": 3000000,
+    "out_fee": 45000000,
+    "fee_gamma": 300000000000000000,
+    "stable": False,
+    "legacy_fee": True,
+    "v21": True,
+    "legacy_pool": True,
+}
 
 #: `(i, j, dx) -> get_dy`, read from the pool itself at that block.
 EURE_3CRV_QUOTES = [

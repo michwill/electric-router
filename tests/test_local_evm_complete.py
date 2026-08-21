@@ -13,11 +13,13 @@ what `_local_quoter` consults before handing the EVM to a route.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 pytest.importorskip("pyrevm")
 
-from erouter.dev.local_evm import LocalEvm, WarmStats  # noqa: E402
+from erouter.dev.local_evm import LocalEvm, WarmStats
 
 ACCOUNT = "0x" + "ab" * 20
 BLOCK = 25_769_788
@@ -58,7 +60,7 @@ class Rpc:
 
 
 class Cache:
-    funded: set[str] = set()
+    funded: ClassVar[set[str]] = set()
 
     def __init__(self, slots):
         self._slots = slots

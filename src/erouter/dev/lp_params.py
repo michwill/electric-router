@@ -118,7 +118,7 @@ def build_exact_lp(pools, swaps, client, *, quiet: bool = True) -> ExactLP:
             out.rejected.append((pool.address, "pool would not quote the check"))
             continue
         failed = ""
-        for kind, size, i, answer in points:
+        for _kind, size, i, answer in points:
             try:
                 mine = model.calc_withdraw_one_coin(size, i)
             except (StableSwapError, ZeroDivisionError) as exc:
@@ -156,7 +156,7 @@ def _admit_deposits(built, client, out: ExactLP) -> None:
     regardless, because `add_liquidity` always charges.
     """
     probes, at = [], []
-    for pool, model in built:
+    for pool, _model in built:
         kind = ArcKind.DEPOSIT_DYN if pool.dynamic_arrays else ArcKind.DEPOSIT_FIXED
         for frac in CHECK_FRACTIONS:
             if not pool.balances or not pool.balances[0]:

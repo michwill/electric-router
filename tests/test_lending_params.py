@@ -7,8 +7,6 @@ and that its coin list runs past its balances.
 
 from __future__ import annotations
 
-import pytest
-
 from erouter.core.stableswap import PRECISION, StableSwap
 from erouter.dev.lending_params import LENDING_PRECISION, VARIANTS, candidates
 
@@ -64,8 +62,8 @@ def test_the_variants_cover_both_deployed_shapes():
 
 def test_keeping_the_wei_is_worth_exactly_one_wei():
     """`subtract_one` is the whole difference between the two roundings."""
-    shaped = dict(balances=(10**24, 10**24), rates=(PRECISION, PRECISION),
-                  amp=10_000, fee=4_000_000, a_precision=100)
+    shaped = {"balances": (10**24, 10**24), "rates": (PRECISION, PRECISION),
+                  "amp": 10_000, "fee": 4_000_000, "a_precision": 100}
     keeps = StableSwap(subtract_one=False, **shaped)
     rounds = StableSwap(subtract_one=True, **shaped)
     dx = 10**21
@@ -91,7 +89,7 @@ def test_the_wrapper_rate_sources_cover_the_deployed_shapes():
     """
     from erouter.dev.lending_params import RATE_SOURCES
 
-    sources = {sig: convert for sig, convert in RATE_SOURCES}
+    sources = dict(RATE_SOURCES)
     assert "getExchangeRate()" in sources
     assert sources["getExchangeRate()"](11 * 10**17) == 11 * 10**17
 
@@ -112,5 +110,5 @@ def test_a_zero_ratio_does_not_divide_by_zero():
     """A wrapper answering zero is not a rate of infinity."""
     from erouter.dev.lending_params import RATE_SOURCES
 
-    sources = {sig: convert for sig, convert in RATE_SOURCES}
+    sources = dict(RATE_SOURCES)
     assert sources["ratio()"](0) == 0

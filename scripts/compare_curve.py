@@ -170,15 +170,15 @@ def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
     from erouter.core.quoter import QuoterClient
     from erouter.dev import chains as chain_table
     from erouter.dev.cli import _local_quoter, _rpc_url
-    from erouter.dev.probe_cache import CachedQuoterClient
     from erouter.dev.facts import FactsCache, apply_broken_facts
+    from erouter.dev.probe_cache import CachedQuoterClient
     from erouter.dev.rpc import JsonRpcTransport
     from erouter.dev.universe import (
+        check_reserves_are_real,
         load_pools,
         read_balances,
-        resolve_dialects,
-        check_reserves_are_real,
         resolve_deposit_gates,
+        resolve_dialects,
         resolve_lp_tokens,
     )
     from erouter.dev.wrappers import (

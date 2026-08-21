@@ -70,7 +70,7 @@ def revert_text(message: str) -> str:
     for literal in re.findall(r"b'(?:[^'\\]|\\.)*'", message):
         try:
             raw = ast.literal_eval(literal)
-        except Exception:                                  # noqa: BLE001
+        except Exception:
             continue
         if raw[:4].hex() == ERROR_SELECTOR and len(raw) >= 68:
             length = int.from_bytes(raw[36:68], "big")
@@ -112,13 +112,20 @@ def sweep(chain_name: str, size: float, quiet: bool,
     import boa
 
     from erouter.dev import chains as chain_table
-    from erouter.dev import config, executor as ex
-    from erouter.dev.boa_host import CONTRACT as QUOTER_SRC, quoter_client
+    from erouter.dev import config
+    from erouter.dev import executor as ex
+    from erouter.dev.boa_host import CONTRACT as QUOTER_SRC
+    from erouter.dev.boa_host import quoter_client
     from erouter.dev.facts import FactsCache
     from erouter.dev.rpc import JsonRpcTransport
-    from erouter.dev.universe import (check_reserves_are_real, load_pools,
-                                      read_balances, resolve_deposit_gates,
-                                      resolve_dialects, resolve_lp_tokens)
+    from erouter.dev.universe import (
+        check_reserves_are_real,
+        load_pools,
+        read_balances,
+        resolve_deposit_gates,
+        resolve_dialects,
+        resolve_lp_tokens,
+    )
 
     chain = chain_table.CHAINS[chain_name]
     rpc = JsonRpcTransport(chain.public_rpc, chain_id=chain.chain_id)
@@ -172,7 +179,7 @@ def sweep(chain_name: str, size: float, quiet: bool,
                    "known_broken": facts.is_broken(pool.address, kind, li, lj)}
             try:
                 view = quoter.quote_route([leg.as_tuple()], dx, 1)
-            except Exception as exc:                        # noqa: BLE001
+            except Exception as exc:
                 row.update(outcome="NO_QUOTE", detail=f"view raised: {str(exc)[:60]}")
                 rows.append(row)
                 continue
@@ -190,7 +197,7 @@ def sweep(chain_name: str, size: float, quiet: bool,
                     try:
                         ex._fund(boa, token, who, dx, funding, chain.wrapped,
                                  holders=holders.get(token_in.lower(), []))
-                    except Exception as exc:                # noqa: BLE001
+                    except Exception as exc:
                         row.update(outcome="UNFUNDED", detail=str(exc)[:90])
                         rows.append(row)
                         continue
@@ -198,7 +205,7 @@ def sweep(chain_name: str, size: float, quiet: bool,
                         token.approve(executor.address, dx)
                         got = executor.execute_route(
                             [leg.as_tuple()], [token_in, token_out], dx, 1, 0)
-            except Exception as exc:                        # noqa: BLE001
+            except Exception as exc:
                 text = str(exc)
                 ran = any(marker in text for marker in EVM_MARKERS)
                 if not ran and any(noise in text for noise in TRANSPORT_NOISE):
@@ -233,7 +240,7 @@ def record(rows: list[dict], apply: bool) -> int:
         chain = chain_table.CHAINS[name]
         cache = FactsCache.load(chain.chain_id, chain.name.lower())
 
-        def key(row):
+        def key(row, cache=cache):
             return cache.key(row["pool"], int(ArcKind[row["kind"]]), row["i"], row["j"])
 
         broken = {key(r): (r.get("detail") or "reverted")[:80]
@@ -272,7 +279,7 @@ def main() -> int:
     for name in wanted:
         try:
             rows += sweep(name, args.size, args.quiet, only)
-        except Exception as exc:                            # noqa: BLE001
+        except Exception as exc:
             print(f"\n  {name}: {type(exc).__name__}: {str(exc)[:140]}", flush=True)
 
     from collections import Counter

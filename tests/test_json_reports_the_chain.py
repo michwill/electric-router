@@ -14,6 +14,8 @@ a caller most needs the answer to be the real one.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 from erouter.core.schema import _loss_bp, to_json
 
 
@@ -31,10 +33,10 @@ class _Result:
     impact_fraction = 0.05
     impact_reference_in = 0
     impact_reference_out = 0
-    arcs: list = []
-    counters: dict = {}
-    timings: dict = {}
-    warnings: list = []
+    arcs: ClassVar[list] = []
+    counters: ClassVar[dict] = {}
+    timings: ClassVar[dict] = {}
+    warnings: ClassVar[list] = []
 
     def __init__(self, modelled_out: int):
         self.route = _Route(modelled_out)
@@ -42,17 +44,17 @@ class _Result:
 
 
 class _Route:
-    legs: list = []
-    paths: list = []
-    potentials: dict = {}
-    slots: dict = {}
+    legs: ClassVar[list] = []
+    paths: ClassVar[list] = []
+    potentials: ClassVar[dict] = {}
+    slots: ClassVar[dict] = {}
 
     def __init__(self, modelled_out: int):
         self.modelled_out = modelled_out
 
 
 class _Nodes:
-    tokens_of: dict = {}
+    tokens_of: ClassVar[dict] = {}
 
     def decimals(self, _token) -> int:
         return 18

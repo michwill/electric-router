@@ -21,7 +21,7 @@ import numpy as np
 
 from .calibrate import Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
-from .gas import GasTable, min_useful_flow, plan_gas, shape_cost, value_per_gas
+from .gas import GasTable, min_useful_flow, shape_cost, value_per_gas
 from .graph import MAX_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
@@ -47,9 +47,9 @@ from .quoter import MAX_LEGS, QuoterClient
 from .realize import (
     RealizedRoute,
     _forward_simulate,
-    conversion_route,
     cancel_cycles,
     check_one_arc_per_pool,
+    conversion_route,
     prune_dust,
     realize,
     route_conductance,

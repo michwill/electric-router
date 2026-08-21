@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -49,11 +48,12 @@ def measure(chain_name: str, size: float, only: set[str] | None, quiet: bool):
     import boa
 
     from erouter.dev import chains as chain_table
-    from erouter.dev import config, executor as ex
-    from erouter.dev.boa_host import CONTRACT as QUOTER_SRC, quoter_client
+    from erouter.dev import config
+    from erouter.dev import executor as ex
+    from erouter.dev.boa_host import CONTRACT as QUOTER_SRC
+    from erouter.dev.boa_host import quoter_client
     from erouter.dev.rpc import JsonRpcTransport
-    from erouter.dev.universe import (load_pools, read_balances, resolve_dialects,
-                                      resolve_lp_tokens)
+    from erouter.dev.universe import load_pools, read_balances, resolve_dialects, resolve_lp_tokens
 
     chain = chain_table.CHAINS[chain_name]
     rpc = JsonRpcTransport(chain.public_rpc, chain_id=chain.chain_id)
@@ -83,7 +83,7 @@ def measure(chain_name: str, size: float, only: set[str] | None, quiet: bool):
               f"size {size:.2%} of reserve ===", flush=True)
 
     rows = []
-    for index, pool in enumerate(specs, 1):
+    for _index, pool in enumerate(specs, 1):
         if not pool.balances or not any(pool.balances):
             continue
         swap = (ArcKind.SWAP_STABLE if pool.dialect is Dialect.STABLE
@@ -118,7 +118,7 @@ def measure(chain_name: str, size: float, only: set[str] | None, quiet: bool):
                         token.approve(executor.address, dx)
                         got = executor.execute_route(
                             [leg.as_tuple()], [token_in, token_out], dx, 1, 0)
-            except Exception as exc:                   # noqa: BLE001
+            except Exception as exc:
                 # Keep the revert reason, not just the exception class.  A
                 # third of these are pools that genuinely cannot be traded and
                 # the rest are worth looking at, and "23 would not run" cannot
@@ -197,7 +197,7 @@ def main() -> int:
             print(f"\n  {exc}")
             breaches += 1                # unmeasured is not the same as clean
             continue
-        except Exception as exc:         # noqa: BLE001
+        except Exception as exc:
             print(f"\n  {name}: {type(exc).__name__}: {str(exc)[:100]}")
             breaches += 1
             continue

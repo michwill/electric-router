@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from erouter.core import accel, graph
-from erouter.core.seed import MAX_HOPS, ShortestPath, build_adjacency, spfa
+from erouter.core.seed import ShortestPath, build_adjacency, spfa
 
 pytestmark = pytest.mark.skipif(
     not accel.available(), reason="the Rust search is not installed")
@@ -45,12 +45,12 @@ def same(a: ShortestPath, b: ShortestPath) -> None:
 
 
 CASES = {
-    "two lanes": dict(tau=[0, 0], sig=[1, 1], a=[0.999, 0.99]),
-    "series": dict(tau=[0, 0, 1], sig=[2, 1, 2], a=[0.99, 0.9995, 0.9995]),
-    "diamond": dict(tau=[0, 0, 1, 2], sig=[1, 2, 3, 3],
-                    a=[0.999, 0.998, 0.9995, 0.9999]),
-    "unreachable": dict(tau=[0], sig=[1], a=[0.999], n=3),
-    "battery": dict(tau=[0, 0, 1], sig=[2, 1, 2], a=[0.99, 1.001, 1.001]),
+    "two lanes": {"tau": [0, 0], "sig": [1, 1], "a": [0.999, 0.99]},
+    "series": {"tau": [0, 0, 1], "sig": [2, 1, 2], "a": [0.99, 0.9995, 0.9995]},
+    "diamond": {"tau": [0, 0, 1, 2], "sig": [1, 2, 3, 3],
+                    "a": [0.999, 0.998, 0.9995, 0.9999]},
+    "unreachable": {"tau": [0], "sig": [1], "a": [0.999], "n": 3},
+    "battery": {"tau": [0, 0, 1], "sig": [2, 1, 2], "a": [0.99, 1.001, 1.001]},
 }
 
 

@@ -46,11 +46,11 @@ def plan_for(curves, amount_in):
     ev = split.make_evaluator.__wrapped__ if hasattr(split.make_evaluator, "__wrapped__") \
         else split.make_evaluator
     del ev
-    return dict(curves=[(list(c.x), list(c.u), list(c.slope), c.rate0, c.tail)
+    return {"curves": [(list(c.x), list(c.u), list(c.slope), c.rate0, c.tail)
                         for c in curves],
-                src_of=src_of, dst_of=dst_of, static_share=[None] * n,
-                heads=heads, tails=tails, slots=2, dst_slot=1,
-                amount_in=float(amount_in))
+                "src_of": src_of, "dst_of": dst_of, "static_share": [None] * n,
+                "heads": heads, "tails": tails, "slots": 2, "dst_slot": 1,
+                "amount_in": float(amount_in)}
 
 
 def reference(plan, start, free, **kw):

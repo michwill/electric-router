@@ -17,16 +17,13 @@ conversion is emitted at all.
 
 from __future__ import annotations
 
-import os
-
 import math
-from collections.abc import Collection
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from . import accel as _accel
-
 from .multiport import MultiPortError, element_of
 from .nodes import NodeMap
 from .types import ArcKind, Leg, PoolArc
@@ -724,7 +721,7 @@ def conversion_route(
         legs=legs, dst_slot=slot, src_token=src, dst_token=dst,
         amount_in=amount_in,
         slots={src: 0} if not legs else {src: 0, dst: slot},
-        node_of_slot={index: node for index in range(slot + 1)},
+        node_of_slot=dict.fromkeys(range(slot + 1), node),
     )
     route.modelled_out = _forward_simulate(route, nodes) if legs else amount_in
     return route

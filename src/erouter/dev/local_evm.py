@@ -23,6 +23,7 @@ disagrees with the chain.  It matters for state a cached slot list cannot predic
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -322,10 +323,8 @@ class LocalEvm:
                      for k in missing])
                 for k, value in zip(missing, again, strict=True):
                     if isinstance(value, str):
-                        try:
+                        with contextlib.suppress(ValueError):
                             values[k] = int(value, 16)
-                        except ValueError:
-                            pass
             for (address, slot), value in zip(flat, values, strict=True):
                 if value is None:
                     self.stats.errors.append(f"slot {address[:10]}:{slot} unreadable")

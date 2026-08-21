@@ -75,7 +75,7 @@ def test_a_branch_rounded_to_nothing_is_skipped_not_fatal():
 
 def test_a_reverting_leg_kills_the_route():
     legs = [leg(bps=5_000, dst=1), leg(bps=0, dst=2)]
-    assert walk_route(legs, 1_000, 2, lambda l, dx: 0 if l.dst_slot == 2 else dx) == 0
+    assert walk_route(legs, 1_000, 2, lambda one, dx: 0 if one.dst_slot == 2 else dx) == 0
 
 
 def test_the_answer_is_the_destination_slot_not_the_last_leg():

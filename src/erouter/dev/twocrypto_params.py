@@ -110,7 +110,7 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
             if answer.ok and len(answer.data) >= 64:
                 try:
                     got = decode(["uint256[2]"], answer.data)[0]
-                except Exception:  # noqa: BLE001
+                except Exception:
                     continue
                 precisions[pool.address.lower()] = (int(got[0]), int(got[1]))
     # The pre-factory generation keeps its precisions internal, with no getter
@@ -137,7 +137,7 @@ def build_exact_twocrypto(pools, client, *, quiet: bool = True,
     for pool, policy in with_policy:
         if not (policy.ok and policy.uint()):
             continue
-        where = "0x%040x" % policy.uint()
+        where = f"0x{policy.uint():040x}"
         xp = [int(b) for b in pool.balances[:2]]
         for scale_by in (1, 10):
             probes.append(Call(where, encode_call(

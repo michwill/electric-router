@@ -30,21 +30,21 @@ import pytest
 
 pytest.importorskip("hypothesis")
 
-from hypothesis import HealthCheck, settings  # noqa: E402
-from hypothesis import strategies as st  # noqa: E402
-from hypothesis.stateful import (  # noqa: E402
+from hypothesis import HealthCheck, settings
+from hypothesis import strategies as st
+from hypothesis.stateful import (
     RuleBasedStateMachine,
     initialize,
     invariant,
     rule,
 )
 
-from erouter.core.nodes import NodeMap  # noqa: E402
-from erouter.core.pipeline import RoutingError, prepare, route  # noqa: E402
-from erouter.core.pools import Coin, PoolSpec  # noqa: E402
-from erouter.core.quoter import Quote  # noqa: E402
-from erouter.core.transport import Status  # noqa: E402
-from erouter.core.types import Dialect  # noqa: E402
+from erouter.core.nodes import NodeMap
+from erouter.core.pipeline import RoutingError, prepare, route
+from erouter.core.pools import Coin, PoolSpec
+from erouter.core.quoter import Quote
+from erouter.core.transport import Status
+from erouter.core.types import Dialect
 
 DECIMALS = 18
 UNIT = 10**DECIMALS

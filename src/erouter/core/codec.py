@@ -20,7 +20,6 @@ which is what makes the two Curve dialects a one-line difference.
 from __future__ import annotations
 
 import functools
-
 from typing import Any
 
 from .keccak import keccak256
@@ -220,7 +219,7 @@ def decode(types: list[str], data: bytes) -> list[Any]:
 # ----------------------------------------------------------------- signatures
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def selector(signature: str) -> bytes:
     """First 4 bytes of keccak256 of a canonical signature.
 
@@ -233,7 +232,7 @@ def selector(signature: str) -> bytes:
     return keccak256(signature.encode())[:4]
 
 
-@functools.lru_cache(maxsize=None)
+@functools.cache
 def _signature_types(signature: str) -> tuple[str, ...]:
     """Parsed once per signature, for the same reason `selector` is cached."""
     body = signature[signature.index("(") + 1 : signature.rindex(")")]

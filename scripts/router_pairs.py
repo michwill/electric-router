@@ -104,7 +104,8 @@ def _from_chain(name: str, router: str, span: int):
     only way to see optimism and base at all.
     """
     from erouter.core.keccak import keccak256
-    from erouter.dev import chains as chain_table, config
+    from erouter.dev import chains as chain_table
+    from erouter.dev import config
     from erouter.dev.rpc import JsonRpcTransport
 
     chain = chain_table.get(name)
@@ -207,7 +208,7 @@ def main() -> int:
     for name in args.chains or list(ROUTERS):
         try:
             found += survey(name, key, args.pages, args.top, args.span)
-        except Exception as exc:                       # noqa: BLE001
+        except Exception as exc:
             print(f"  {name:<10} skipped: {str(exc)[:70]}")
 
     OUT.parent.mkdir(parents=True, exist_ok=True)

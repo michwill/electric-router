@@ -11,7 +11,7 @@ What must not move is anything that reads an account the warm never loaded.
 
 from __future__ import annotations
 
-import pytest
+from typing import ClassVar
 
 from erouter.dev import cli
 
@@ -49,7 +49,7 @@ def test_a_covered_cache_allows_the_early_warm(monkeypatch):
 def test_no_state_cache_means_no_early_warm(monkeypatch):
     """`_state_cache_for` answers None rather than an empty cache."""
     class Empty:
-        accounts: dict = {}
+        accounts: ClassVar[dict] = {}
 
         @classmethod
         def load(cls, *a, **k):

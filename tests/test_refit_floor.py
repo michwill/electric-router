@@ -45,11 +45,11 @@ class Chain:
 
 
 def arc(**kw) -> PoolArc:
-    base = dict(
-        id="0xpool:0>1", pool="0x" + "11" * 20, kind=ArcKind.SWAP_STABLE,
-        i=0, j=1, n_coins=2, token_in="0x" + "22" * 20, token_out="0x" + "33" * 20,
-        tau=0, sigma=1, a=TRUE_A, B=TRUE_B, calib_delta=1_000_000.0,
-    )
+    base = {
+        "id": "0xpool:0>1", "pool": "0x" + "11" * 20, "kind": ArcKind.SWAP_STABLE,
+        "i": 0, "j": 1, "n_coins": 2, "token_in": "0x" + "22" * 20, "token_out": "0x" + "33" * 20,
+        "tau": 0, "sigma": 1, "a": TRUE_A, "B": TRUE_B, "calib_delta": 1_000_000.0,
+    }
     base.update(kw)
     a = PoolArc(**base)
     a.decimals_in = a.decimals_out = DECIMALS

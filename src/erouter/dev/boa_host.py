@@ -13,8 +13,8 @@ path with no chain; it is also the fallback for a node that rejects overrides.
 from __future__ import annotations
 
 import functools
-from pathlib import Path
 import pathlib
+from pathlib import Path
 from typing import Any
 
 from ..core.quoter import QuoterClient

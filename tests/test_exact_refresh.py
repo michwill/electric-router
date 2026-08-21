@@ -21,8 +21,7 @@ import pytest
 from erouter.core.pipeline import route
 from erouter.core.types import ArcKind
 from erouter.dev.exact_probe import ExactQuoterClient
-
-from test_session_invariance import (  # noqa: E402
+from test_session_invariance import (
     CURVES_,
     DST,
     NODES_,
@@ -102,7 +101,7 @@ def _run(*, models_block: int, now: int, rebuild=None):
 
 
 def test_models_are_rebuilt_when_the_block_moves():
-    wrapped, first, later, result = _run(models_block=1_000_000, now=1_000_007)
+    wrapped, _first, later, result = _run(models_block=1_000_000, now=1_000_007)
 
     assert later, "the block moved and nothing rebuilt the models"
     assert wrapped.models_block == 1_000_007

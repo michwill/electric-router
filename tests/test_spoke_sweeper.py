@@ -41,8 +41,9 @@ def assert_one_sweeper_per_group(route: RealizedRoute) -> None:
 def test_a_group_never_has_two_sweepers(monkeypatch):
     """The property, over the realiser's own output on a branching route."""
     import numpy as np
-    from test_realize import arc, base_nodes, POOL_A, POOL_B, POOL_C, CRVUSD, WETH, USDC
+
     from erouter.core.realize import realize
+    from test_realize import CRVUSD, POOL_A, POOL_B, POOL_C, USDC, WETH, arc, base_nodes
 
     nodes = base_nodes()
     arcs = [arc(POOL_A, CRVUSD, USDC, nodes),
@@ -58,8 +59,9 @@ def test_a_group_never_has_two_sweepers(monkeypatch):
 def test_two_arcs_off_one_spoke_do_not_both_sweep():
     """The measured shape: two pools drawing from the same intermediate slot."""
     import numpy as np
-    from test_realize import arc, merged_nodes, POOL_A, POOL_B, POOL_C, CRVUSD, SCRVUSD, WETH, USDC
+
     from erouter.core.realize import realize
+    from test_realize import CRVUSD, POOL_A, POOL_B, POOL_C, SCRVUSD, USDC, WETH, arc, merged_nodes
 
     nodes = merged_nodes()
     # Both of these leave the scrvUSD side of the merged crvUSD node, so both

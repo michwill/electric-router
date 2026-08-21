@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import math
 import os
-
 from dataclasses import dataclass, field, replace
 
 import numpy as np
 
 from . import accel as _accel
-
 from . import curves as curve_mod
 from .quoter import MAX_ALL_LEGS, MAX_ROUTES, QuoterClient
 from .types import ArcKind, Leg, Probe
@@ -545,13 +543,13 @@ def make_evaluator(legs: list[Leg], groups: list[list[int]], curves,
     # What the compiled ascent needs to run this same walk itself.  Attached
     # rather than returned so the four `_ascend` call sites are unchanged and
     # an evaluator from anywhere else simply has no plan and stays in Python.
-    evaluate.plan = dict(
-        curves=[(list(c.x), list(c.u), list(c.slope), c.rate0, c.tail)
+    evaluate.plan = {
+        "curves": [(list(c.x), list(c.u), list(c.slope), c.rate0, c.tail)
                 for c in curves],
-        src_of=src_of, dst_of=dst_of, static_share=list(static),
-        heads=heads, tails=tails, slots=slots, dst_slot=dst_slot,
-        amount_in=start,
-    )
+        "src_of": src_of, "dst_of": dst_of, "static_share": list(static),
+        "heads": heads, "tails": tails, "slots": slots, "dst_slot": dst_slot,
+        "amount_in": start,
+    }
     return evaluate
 
 

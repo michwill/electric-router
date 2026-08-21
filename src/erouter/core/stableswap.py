@@ -261,7 +261,7 @@ class StableSwap:
         out = raw * PRECISION // self.rates[j]
         return out - out * self.fee // FEE_DENOMINATOR
 
-    def exchange(self, i: int, j: int, dx: int) -> tuple[int, "StableSwap"]:
+    def exchange(self, i: int, j: int, dx: int) -> tuple[int, StableSwap]:
         """`(dy, the pool after the trade)` -- what `exchange` would leave.
 
         A view-only chained quoter cannot see its own earlier leg, which is why a
@@ -516,7 +516,7 @@ class StableSwapLP:
         diff = d1 - d0 if deposit else d0 - d1
         return diff * self.total_supply // d0
 
-    def add_liquidity(self, amounts: list[int]) -> tuple[int, "StableSwapLP"]:
+    def add_liquidity(self, amounts: list[int]) -> tuple[int, StableSwapLP]:
         """`(LP minted, the pool after)` -- what `add_liquidity` really does.
 
         Not the same number as `calc_token_amount`, and the gap is the point:
@@ -653,10 +653,7 @@ class StableSwapLP:
 
         reduced = list(xp)
         for j in range(n):
-            if j == i:
-                expected = xp[j] * d1 / d0 - new_y
-            else:
-                expected = xp[j] - xp[j] * d1 / d0
+            expected = xp[j] * d1 / d0 - new_y if j == i else xp[j] - xp[j] * d1 / d0
             reduced[j] -= fee * expected / FEE_DENOMINATOR
         dy = reduced[i] - solve_y_d_fast(amp, ap, reduced, d1, i, n)
         return int((dy - 1.0) * PRECISION / p.rates[i])
@@ -677,10 +674,7 @@ class StableSwapLP:
 
         reduced = list(xp)
         for j in range(n):
-            if j == i:
-                expected = xp[j] * d1 // d0 - new_y
-            else:
-                expected = xp[j] - xp[j] * d1 // d0
+            expected = xp[j] * d1 // d0 - new_y if j == i else xp[j] - xp[j] * d1 // d0
             reduced[j] -= fee * expected // FEE_DENOMINATOR
         dy = reduced[i] - solve_y_d(p.amp, p.a_precision, reduced, d1, i, n)
         # One wei less, as the pool does, and back out of `xp` space.

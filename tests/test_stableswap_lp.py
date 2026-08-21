@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import pytest
 
-from erouter.core.stableswap import (StableSwap, StableSwapError, StableSwapLP,
-                                     solve_y_d)
+from erouter.core.stableswap import StableSwap, StableSwapError, StableSwapLP, solve_y_d
 
 UNIT = 10**18
 BALANCED = StableSwap(
@@ -118,15 +117,15 @@ def test_the_float_withdrawal_tracks_the_integer_one(frac):
 # number, and the pool it leaves behind is what a second leg must be priced
 # against.
 
-GNOSIS_3POOL = dict(
-    balances=(142638 * 10**18, 153563 * 10**6, 246110 * 10**6),
-    rates=(10**18, 10**30, 10**30),
-    amp=200 * 100,
-    fee=3 * 10**6,
-    a_precision=100,
-    fee_on_xp=True,
-    admin_fee=5 * 10**9,
-)
+GNOSIS_3POOL = {
+    "balances": (142638 * 10**18, 153563 * 10**6, 246110 * 10**6),
+    "rates": (10**18, 10**30, 10**30),
+    "amp": 200 * 100,
+    "fee": 3 * 10**6,
+    "a_precision": 100,
+    "fee_on_xp": True,
+    "admin_fee": 5 * 10**9,
+}
 
 
 def _lp(**over):
@@ -193,7 +192,7 @@ def test_advancing_needs_the_admin_fee_and_a_supply():
         empty.add_liquidity([10**18, 0, 0])
 
 
-def test_a_deposit_that_does_not_move_the_invariant_is_refused():
+def test_add_liquidity_refuses_a_deposit_that_moves_nothing():
     import pytest
 
     from erouter.core.stableswap import StableSwapError
@@ -246,6 +245,6 @@ def test_the_float_path_tracks_the_integer_one():
             f"off the integer one at {size}")
 
 
-def test_a_deposit_that_does_not_move_the_invariant_is_refused():
+def test_the_charged_getter_refuses_a_deposit_that_moves_nothing():
     with pytest.raises(StableSwapError):
         lp().calc_token_amount_charged([0, 0, 0])

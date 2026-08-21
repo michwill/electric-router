@@ -78,8 +78,8 @@ def test_nothing_readable_yields_no_candidate():
 
 
 def _shaped() -> dict:
-    return dict(balances=(10**24, 10**24), rates=(10**18, 10**18), amp=2000 * 100,
-                fee=4_000_000, offpeg_fee_multiplier=0, a_precision=100)
+    return {"balances": (10**24, 10**24), "rates": (10**18, 10**18), "amp": 2000 * 100,
+                "fee": 4_000_000, "offpeg_fee_multiplier": 0, "a_precision": 100}
 
 
 class _Pool:

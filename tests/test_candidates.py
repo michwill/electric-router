@@ -5,8 +5,13 @@ from __future__ import annotations
 import numpy as np
 
 from erouter.core import graph
-from erouter.core.candidates import (CandidateSet, conflicting_pools, generate,
-                                     keep_only, repair_order)
+from erouter.core.candidates import (
+    CandidateSet,
+    conflicting_pools,
+    generate,
+    keep_only,
+    repair_order,
+)
 from erouter.core.solve import active_set_solve
 from erouter.core.types import ArcKind, PoolArc
 from erouter.core.verify import verify

@@ -57,10 +57,8 @@ LADDERS = {
 def ladder(name):
     sizes, quotes = LADDERS[name]
     x = np.asarray(sizes, float)
-    if quotes is None:                      # a CPMM, x0 = y0 = 1e6
-        y = 1e6 * x / (1e6 + x)
-    else:
-        y = np.asarray(quotes, float)
+    # `None` stands for a CPMM with x0 = y0 = 1e6.
+    y = 1e6 * x / (1e6 + x) if quotes is None else np.asarray(quotes, float)
     return x, y
 
 
@@ -103,8 +101,8 @@ def test_random_ladders_agree(seed):
     depth = 10 ** rng.integers(3, 7)
     y = depth * x / (depth + x) * (1.0 - rng.random(n) * 1e-3)
     y = np.maximum.accumulate(y) if rng.random() < 0.5 else y
-    kw = dict(structural_flag=bool(rng.random() < 0.3),
-              quantum=float(rng.choice([0.0, 1e-9, 1e-3])))
+    kw = {"structural_flag": bool(rng.random() < 0.3),
+              "quantum": float(rng.choice([0.0, 1e-9, 1e-3]))}
     try:
         want = calibrate(x, y, **kw)
     except CalibrationError:

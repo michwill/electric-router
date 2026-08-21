@@ -36,18 +36,15 @@ FRACTIONS = (0.01, 0.05, 0.20, 0.50, 1.00)
 
 
 def study(name: str, rows: list[dict]) -> None:
-    from erouter.core.candidates import conflicting_pools
-    from erouter.core.pipeline import RoutingError, prepare, route
+    from erouter.core.pipeline import prepare
     from erouter.core.quoter import QuoterClient
     from erouter.dev import chains as chain_table
     from erouter.dev.cli import _local_quoter, _rpc_url
     from erouter.dev.facts import FactsCache
     from erouter.dev.lite import LITE_MIN_TVL
     from erouter.dev.rpc import JsonRpcTransport
-    from erouter.dev.universe import (load_pools, read_balances,
-                                      resolve_dialects, resolve_lp_tokens)
-    from erouter.dev.wrappers import (build_node_map, build_stake_arcs,
-                                      build_transmuter_arcs)
+    from erouter.dev.universe import load_pools, read_balances, resolve_dialects, resolve_lp_tokens
+    from erouter.dev.wrappers import build_node_map, build_stake_arcs, build_transmuter_arcs
 
     chain = chain_table.CHAINS[name]
     args = argparse.Namespace(rpc=None, block=None, private=False)
@@ -72,7 +69,8 @@ def study(name: str, rows: list[dict]) -> None:
     # the deepest tokens on the chain and route every ordered pair.
     holders: dict[str, tuple] = {}
     for pool in load.pools:
-        for coin, bal in zip(pool.coins, pool.balances):
+        # Ragged on purpose: `balances` is empty until something reads it.
+        for coin, bal in zip(pool.coins, pool.balances, strict=False):
             key = coin.address.lower()
             symbol, decimals, tvl = holders.get(key, (coin.symbol, coin.decimals, 0.0))
             holders[key] = (symbol, decimals, tvl + (pool.tvl_usd if bal else 0.0))
@@ -80,7 +78,8 @@ def study(name: str, rows: list[dict]) -> None:
                  key=lambda a: -holders[a][2])[:TOP_TOKENS]
     by_address = {c.address.lower(): (c, b)
                   for pool in load.pools
-                  for c, b in zip(pool.coins, pool.balances) if b}
+                  for c, b in zip(pool.coins, pool.balances, strict=False)
+                  if b}
     print(f"  {name}: {len(load.pools)} pools, {len(top)} tokens, "
           f"{len(top) * (len(top) - 1)} ordered pairs", flush=True)
 
@@ -93,7 +92,7 @@ def study(name: str, rows: list[dict]) -> None:
             try:
                 prepare(load.pools, nodes, client, src_token=src.address,
                         dst_token=dst.address, extra_arcs=stake)
-            except Exception:  # noqa: BLE001 -- an unroutable pair is not a case
+            except Exception:  # an unroutable pair is not a case
                 continue
             sweep(name, load, nodes, client, stake, src, dst, reserve, rows)
 
@@ -138,7 +137,7 @@ def main(argv: list[str]) -> int:
     for name in names:
         try:
             study(name, rows)
-        except Exception as exc:  # noqa: BLE001 -- a chain failing is a row
+        except Exception as exc:  # a chain failing is a row
             print(f"  {name}: failed: {str(exc)[:70]}", flush=True)
     header = (f"\n  {'chain':<10}{'case':<34}{'pools 2x':>9}{'certificate':>14}"
               f"{'ceiling':>11}")

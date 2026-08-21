@@ -25,7 +25,6 @@ arcs forbidden outright (column generation, one-arc-per-pool repair).
 from __future__ import annotations
 
 import os
-
 from dataclasses import dataclass, field
 
 import numpy as np

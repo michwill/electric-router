@@ -92,10 +92,9 @@ def _code_only(source: str) -> bytes:
     docstrings = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
-                             ast.ClassDef)):
-            if ast.get_docstring(node, clean=False) is not None:
-                first = node.body[0]
-                docstrings.add((first.lineno, first.col_offset))
+                             ast.ClassDef)) and ast.get_docstring(node, clean=False) is not None:
+            first = node.body[0]
+            docstrings.add((first.lineno, first.col_offset))
 
     kept: list[str] = []
     for token in tokenize.generate_tokens(io.StringIO(source).readline):
@@ -127,7 +126,7 @@ def math_fingerprint() -> str:
             continue
         try:
             digest.update(_code_only(source))
-        except (SyntaxError, tokenize.TokenError):   # noqa: F821 -- see below
+        except (SyntaxError, tokenize.TokenError):
             digest.update(source.encode())          # unparseable: hash it whole
     return digest.hexdigest()[:16]
 

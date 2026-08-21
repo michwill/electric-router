@@ -123,7 +123,7 @@ def serves_prestate(url: str, timeout: float = 10.0) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as reply:
             return "result" in json.loads(reply.read())
-    except Exception:                              # noqa: BLE001
+    except Exception:
         return False
 
 
@@ -221,7 +221,7 @@ def execute(
                     wire, tokens, amount, route.dst_slot, 0,
                     value=amount if native_in else 0,
                 )
-    except Exception as exc:                       # noqa: BLE001 -- see docstring
+    except Exception as exc:                       # see docstring
         result.error = f"{type(exc).__name__}: {exc}".strip()[:400]
     return result
 
@@ -257,7 +257,7 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
     try:
         boa.deal(token, who, amount, adjust_supply=False)
         return
-    except Exception as exc:                       # noqa: BLE001
+    except Exception as exc:
         first = str(exc)
         result.warnings.append(
             f"balance slot not found for {token.address}, adjusting supply "
@@ -266,7 +266,7 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
     try:
         boa.deal(token, who, amount)
         return
-    except Exception:                              # noqa: BLE001
+    except Exception:
         pass
     # **Take it from someone who has it.**  `boa.deal` finds the balance slot by
     # brute force, and a token that packs its balances or computes them -- gnosis
@@ -285,7 +285,7 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
                 continue
             with boa.env.prank(holder):
                 boa.loads_abi(TRANSFER_ABI).at(token.address).transfer(who, amount)
-        except Exception:                          # noqa: BLE001
+        except Exception:
             continue
         if token.balanceOf(who) >= amount:
             result.warnings.append(

@@ -433,15 +433,15 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
     never seen is discovered here and written back.
     """
     try:
-        from .local_evm import LocalEvm
+        # Imported to be *tried*: a local EVM that will not import is the
+        # thing this branch is deciding, and pyrevm is an optional wheel.
+        from .local_evm import LocalEvm  # noqa: F401
         from .state_cache import StateCache
     except ImportError as exc:
         if not quiet:
             print(f"  {WARN} local EVM unavailable ({exc}); quoting over the wire")
         return None
 
-    from ..core.pipeline import build_arcs
-    from .boa_host import quoter_client
 
     cache = StateCache.load(chain.chain_id, chain.name.lower())
     if not cache.accounts:
@@ -456,7 +456,7 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
         try:
             return _warm_once(rpc, chain, load, nodes, cache, quiet=quiet,
                               fresh_quoter=fresh_quoter)
-        except Exception as exc:  # noqa: BLE001 - reported and retried below
+        except Exception as exc:  # reported and retried below
             last = exc
             if not quiet and attempt + 1 < WARM_ATTEMPTS:
                 print(f"  {WARN} local EVM warm failed "
@@ -464,8 +464,8 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
     if not quiet:
         print(f"  {BAD} local EVM warm failed {WARM_ATTEMPTS} times "
               f"({type(last).__name__}: {str(last)[:60]})")
-        print(f"       quoting over the wire would answer differently; "
-              f"re-run, or --no-local to accept that")
+        print("       quoting over the wire would answer differently; "
+              "re-run, or --no-local to accept that")
     if _TRACEBACK:
         import traceback
         traceback.print_exception(last)
@@ -534,8 +534,12 @@ def _wrapper_signature(nodes, wrappers, stake_arcs) -> str:
 
 def _build_wrappers(load, chain, reader, facts, token_client=None):
     """The node map and the stake/transmuter/lending arcs, off one client."""
-    from .wrappers import (build_lending_arcs, build_node_map, build_stake_arcs,
-                           build_transmuter_arcs)
+    from .wrappers import (
+        build_lending_arcs,
+        build_node_map,
+        build_stake_arcs,
+        build_transmuter_arcs,
+    )
 
     nodes, wrappers = build_node_map(load.pools, chain, reader, facts=facts,
                                      token_client=token_client)
@@ -563,7 +567,7 @@ def _learn_wrappers(evm, cache, rpc, calls, signature) -> None:
     try:
         needs = evm.list_state(list(calls))
         evm.warm(list(calls))
-    except Exception:  # noqa: BLE001 - a warm that fails is not a failed quote
+    except Exception:  # a warm that fails is not a failed quote
         return
     cache.learn_wrapper_needs(needs, signature)
     cache.save()
@@ -757,15 +761,9 @@ def cmd_route(args: argparse.Namespace) -> int:
         check_reserves_are_real,
         load_pools,
         read_balances,
-        resolve_dialects,
         resolve_deposit_gates,
+        resolve_dialects,
         resolve_lp_tokens,
-    )
-    from .wrappers import (
-        build_lending_arcs,
-        build_node_map,
-        build_stake_arcs,
-        build_transmuter_arcs,
     )
 
     chain = chain_table.get(args.chain)
@@ -917,16 +915,15 @@ def cmd_route(args: argparse.Namespace) -> int:
     exact = two = tri = None
     verdicts = None
     if getattr(args, "exact", True):
+        from ..core.types import ArcKind as _ArcKind
+        from .crypto_lp_params import build_exact_crypto_lp
         from .exact_cache import ExactCache
         from .exact_probe import ExactQuoterClient
+        from .lp_params import build_exact_lp
         from .stable_params import build_exact_pools
-
         from .tricrypto_params import build_exact_tricrypto
         from .twocrypto_params import build_exact_twocrypto
-        from .lp_params import build_exact_lp
-        from .crypto_lp_params import build_exact_crypto_lp
         from .vault_params import build_exact_vaults
-        from ..core.types import ArcKind as _ArcKind
 
         # Read through the *unwrapped* quoter, and keep it for rebuilds.  The
         # gate that admits a pool works by disagreeing with it, so running it
@@ -1444,7 +1441,7 @@ def _report_execution(result, chain, rpc, nodes, dst, pools) -> None:
                          wrapped=chain.wrapped, expect_block=rpc.block,
                          holders=_token_holders(pools, result.src_token,
                                                 avoid=result.route.pools_used))
-    except Exception as exc:                       # noqa: BLE001
+    except Exception as exc:
         print(f"  {BAD} execute: {type(exc).__name__}: {exc}")
         return
     took = (time.monotonic() - started) * 1000
@@ -2297,7 +2294,7 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
         try:
             blob = rpc.fetch("eth_getCode", [quoter, hex(rpc.block)])
             code = bytes.fromhex(blob[2:] if blob.startswith("0x") else blob)
-        except Exception as exc:                   # noqa: BLE001
+        except Exception as exc:
             code = b""
             print(f"  {WARN} could not read the quoter's code: {exc}")
         if code:

@@ -9,6 +9,8 @@ differently, so it turned a transient into a silently different number.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 from erouter.dev import cli
@@ -55,14 +57,14 @@ class _Chain:
 
 
 class _Load:
-    pools: list = []
+    pools: ClassVar[list] = []
 
 
 @pytest.fixture(autouse=True)
 def _a_state_cache(monkeypatch):
     """`_local_quoter` returns early without one, before any attempt."""
     class Cache:
-        accounts = {"0x1": {}}
+        accounts: ClassVar[dict] = {"0x1": {}}
 
         @classmethod
         def load(cls, *a, **k):

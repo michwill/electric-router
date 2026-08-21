@@ -92,7 +92,7 @@ def build_exact_tricrypto(pools, client, *, quiet: bool = True,
             if answer.ok and len(answer.data) >= 96:
                 try:
                     got = decode(["uint256[3]"], answer.data)[0]
-                except Exception:  # noqa: BLE001
+                except Exception:
                     continue
                 precisions[pool.address.lower()] = tuple(int(v) for v in got)
     for pool in wanted:

@@ -64,7 +64,7 @@ def main() -> int:
             client = quoter_client(rpc, chain)
             resolve_dialects(load.pools, client, chain, use_cache=True)
             read_balances(load.pools, client, None, chain.chain_id, token_client=client)
-        except Exception as exc:                       # noqa: BLE001
+        except Exception as exc:
             print(f"{name:<12} skipped: {str(exc)[:70]}")
             continue
 

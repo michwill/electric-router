@@ -553,7 +553,7 @@ def test_a_route_delivering_the_other_alias_still_lands_in_the_slot_read():
 
 
 def test_both_alias_addresses_map_to_one_slot():
-    nodes, route = _to_eure(EURE_1)
+    _nodes, route = _to_eure(EURE_1)
     assert route.slots.get(EURE_2.lower()) is None or (
         route.slots[EURE_2.lower()] == route.slots[EURE_1.lower()])
     assert len(set(route.slots.values())) == len(route.slots)

@@ -69,8 +69,8 @@ def _arcs(**kw):
     return {(a.token_in.lower(), a.token_out.lower()): a for a in got}
 
 
-LIVE = dict(usdc_held=10_332_754_020_000, usdce_held=0,
-            usdce_allowance=77_477_341_960_000)
+LIVE = {"usdc_held": 10_332_754_020_000, "usdce_held": 0,
+            "usdce_allowance": 77_477_341_960_000}
 
 
 def test_the_mint_direction_is_capped_by_the_allowance_not_the_reserve():

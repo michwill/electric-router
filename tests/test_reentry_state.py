@@ -15,8 +15,6 @@ being free, which is exactly the shape of a route worth distrusting.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from erouter.core.stableswap import StableSwap, StableSwapLP

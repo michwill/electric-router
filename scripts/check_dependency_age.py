@@ -36,10 +36,9 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -117,7 +116,7 @@ def check(label: str, packages, published, cutoff: datetime) -> tuple[int, int]:
     print(f"\n  {label}: {len(packages)} locked, {len(young)} younger than the "
           f"window, {len(unknown)} could not be dated")
     for name, version, when in sorted(young, key=lambda row: row[2], reverse=True):
-        age = datetime.now(timezone.utc) - when
+        age = datetime.now(UTC) - when
         print(f"    TOO YOUNG  {name} {version}  published "
               f"{when:%Y-%m-%d %H:%M}Z ({age.days}d {age.seconds // 3600}h ago)")
     for name, version, why in unknown:
@@ -133,7 +132,7 @@ def main() -> int:
     parser.add_argument("--python", action="store_true", help="only uv.lock")
     args = parser.parse_args()
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+    cutoff = datetime.now(UTC) - timedelta(days=args.days)
     print(f"  nothing published after {cutoff:%Y-%m-%d %H:%M}Z "
           f"(the last {args.days} days) may be locked")
 

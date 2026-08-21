@@ -324,10 +324,7 @@ def get_y(ann: int, gamma: int, x: list[int], d: int, i: int,
     sqrt_val = _isqrt(sqrt_arg)
 
     b_cbrt = cbrt(b) if b > 0 else -cbrt(-b)
-    if delta1 > 0:
-        second_cbrt = cbrt((delta1 + sqrt_val) // 2)
-    else:
-        second_cbrt = -cbrt((sqrt_val - delta1) // 2)
+    second_cbrt = cbrt((delta1 + sqrt_val) // 2) if delta1 > 0 else -cbrt((sqrt_val - delta1) // 2)
 
     c1 = _sdiv(_sdiv(b_cbrt**2, PRECISION) * second_cbrt, PRECISION)
     if c1 == 0:

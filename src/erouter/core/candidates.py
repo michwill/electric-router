@@ -22,16 +22,14 @@ can find the interior optimum.
 
 from __future__ import annotations
 
-from collections.abc import Collection
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from .graph import ArcArrays
-from .quoter import MAX_LEGS, MAX_SLOTS
 from .multiport import MultiPortError, element_of_arcs
-from .realize import (ADVANCEABLE, RealizedRoute, cancel_cycles,
-                      prune_dust)
+from .quoter import MAX_LEGS, MAX_SLOTS
+from .realize import RealizedRoute, cancel_cycles, prune_dust
 from .seed import k_shortest_paths
 from .solve import Solution, active_set_solve
 from .types import PoolArc
@@ -195,7 +193,7 @@ def _spread(top_k: tuple[int, ...], budget: int) -> set[int]:
     if budget >= len(levels) or budget <= 1:
         return set(levels)
     step = (len(levels) - 1) / (budget - 1)
-    return {levels[int(round(i * step))] for i in range(budget)}
+    return {levels[round(i * step)] for i in range(budget)}
 
 
 #: Flow below this share of the trade is not a decision the solve made -- it is

@@ -18,6 +18,7 @@ were each established by measurement against the local Erigon node:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -163,10 +164,8 @@ def _forget_ceiling(url: str) -> None:
     caps = _read_caps()
     if caps.pop(_endpoint_key(url), None) is None:
         return
-    try:
+    with contextlib.suppress(OSError):
         CAPS_PATH.write_text(json.dumps(caps, indent=1, sort_keys=True) + "\n")
-    except OSError:
-        pass
 
 
 

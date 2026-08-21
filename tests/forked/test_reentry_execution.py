@@ -26,8 +26,7 @@ from erouter.core.types import ArcKind, Leg
 from erouter.dev.exact_probe import ExactQuoterClient
 from erouter.dev.lp_params import build_exact_lp
 from erouter.dev.stable_params import build_exact_pools
-from erouter.dev.universe import (parse_universe, read_balances,
-                                  resolve_dialects, resolve_lp_tokens)
+from erouter.dev.universe import parse_universe, read_balances, resolve_dialects, resolve_lp_tokens
 
 pytestmark = pytest.mark.forked
 
@@ -145,10 +144,10 @@ def test_the_walk_matches_a_real_stateful_execution(forked_env, walk):
 
     executed = [swapped, minted, withdrawn]
     names = ("swap USDT->DAI", "deposit USDT->3Crv", "withdraw 3Crv->DAI")
-    worst = max(_bp(m, e) for m, e in zip(modelled, executed))
+    worst = max(_bp(m, e) for m, e in zip(modelled, executed, strict=True))
     detail = "\n".join(
         f"    {name:22} modelled {m:>28,}  executed {e:>28,}  {_bp(m, e):+.4f} bp"
-        for name, m, e in zip(names, modelled, executed))
+        for name, m, e in zip(names, modelled, executed, strict=True))
     assert worst < TOLERANCE_BP, (
         f"the reentry walk disagrees with execution by {worst:.4f} bp:\n{detail}")
 

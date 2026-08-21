@@ -109,7 +109,7 @@ def verify_with_retries(contract, etherscan, attempts: int = 6, pause: int = 10)
             boa_verify(contract, etherscan, wait=True)
             print("  verified")
             return
-        except Exception as exc:            # noqa: BLE001 - classified below
+        except Exception as exc:            # classified below
             text = str(exc).lower()
             if any(phrase in text for phrase in ALREADY_VERIFIED):
                 print("  already verified")

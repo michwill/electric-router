@@ -25,15 +25,15 @@ downstream could tell which half it was reading.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 from ..core.quoter import Quote
 from ..core.stableswap import StableSwapError, StableSwapLP
+from ..core.transport import Status
 from ..core.tricrypto import TricryptoError
 from ..core.twocrypto import TwocryptoError
-from ..core.vault import VaultError
-from ..core.transport import Status
 from ..core.types import ArcKind
+from ..core.vault import VaultError
 from ..core.walk import LegUnquotable, walk_route
 
 #: Kinds priced by a rate rather than by pool state, so a route may cross one
@@ -293,23 +293,21 @@ class ExactQuoterClient:
         """Which model serves this pool and direction, worked out from scratch."""
         if kind in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM):
             return self.vaults.get(pool, kind) if self.vaults is not None else None
-        if self.lp is not None:
-            if kind is ArcKind.WITHDRAW_STABLE:
-                model = self.lp.get(pool)
-                return _Withdraw(model) if model is not None else None
+        if self.lp is not None and kind is ArcKind.WITHDRAW_STABLE:
+            model = self.lp.get(pool)
+            return _Withdraw(model) if model is not None else None
         if kind is ArcKind.WITHDRAW_CRYPTO and self.crypto_lp is not None:
             model = self.crypto_lp.get(pool)
             return _Withdraw(model) if model is not None else None
-        if self.lp is not None:
-            if kind in (ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
-                        ArcKind.DEPOSIT_FIXED_NOFLAG):
-                # The deposit direction is admitted on its own evidence: a pool
-                # whose withdrawal does not reproduce may still deposit exactly,
-                # and on the legacy pools the model is the *only* honest path,
-                # since their own `calc_token_amount` omits the fee that
-                # `add_liquidity` charges.
-                model = self.lp.get_deposit(pool)
-                return _Deposit(model) if model is not None else None
+        if self.lp is not None and kind in (ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,
+                    ArcKind.DEPOSIT_FIXED_NOFLAG):
+            # The deposit direction is admitted on its own evidence: a pool
+            # whose withdrawal does not reproduce may still deposit exactly,
+            # and on the legacy pools the model is the *only* honest path,
+            # since their own `calc_token_amount` omits the fee that
+            # `add_liquidity` charges.
+            model = self.lp.get_deposit(pool)
+            return _Deposit(model) if model is not None else None
         if kind is ArcKind.SWAP_CRYPTO:
             if i == j:
                 return None
@@ -444,7 +442,7 @@ class ExactQuoterClient:
         this pool is not one the models can advance, so the caller falls back
         to the sweep it would have done anyway.
         """
-        from ..core.multiport import LP, MultiPort, MultiPortError, Port, best_split
+        from ..core.multiport import MultiPort, MultiPortError, Port, best_split
 
         model = self.exact.get(pool) if self.exact else None
         if model is None or pool.lower() not in self.reentrant_pools:

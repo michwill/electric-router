@@ -24,7 +24,7 @@ def test_a_route_warning_outranks_twenty_arc_warnings():
     """The regression, stated as the line that went missing."""
     escalation = ("Curve.fi Factory Pool: E is taking 241.0% of its own reserve "
                   "(§12.1)")
-    shown = _shown_warnings(_arc_notes(20) + [escalation], None)
+    shown = _shown_warnings([*_arc_notes(20), escalation], None)
     assert escalation in shown, (
         "the §12.1 size escalation was pushed off the display by per-arc notes "
         "that arrived first"
@@ -32,7 +32,7 @@ def test_a_route_warning_outranks_twenty_arc_warnings():
 
 
 def test_the_arc_warnings_collapse_to_one_line_and_go_last():
-    shown = _shown_warnings(_arc_notes(20, pools=8) + ["a route-level note"], None)
+    shown = _shown_warnings([*_arc_notes(20, pools=8), "a route-level note"], None)
     assert shown[0] == "a route-level note"
     assert len(shown) == 2
     assert "20 arc(s) across 8 pool(s)" in shown[-1]
@@ -57,6 +57,6 @@ def test_a_calibration_failure_is_still_a_per_arc_note():
     """`calibrate_arcs` writes two shapes; both name one arc and both collapse."""
     lines = ["0x" + "ab" * 20 + ":0:0>1: only 0 probes",
              "0x" + "ab" * 20 + ":0:1>0: need at least 2 probes at distinct sizes"]
-    shown = _shown_warnings(lines + ["route note"], None)
+    shown = _shown_warnings([*lines, "route note"], None)
     assert shown[0] == "route note"
     assert "2 arc(s) across 1 pool(s)" in shown[-1]

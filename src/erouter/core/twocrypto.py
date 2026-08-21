@@ -35,9 +35,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .cryptoswap import MAX_GAMMA_SMALL, newton_y_fast, CryptoSwapError, _newton_y
+from .cryptoswap import MAX_GAMMA_SMALL, CryptoSwapError, _newton_y, newton_y_fast
 from .cryptoswap import get_y as crypto_get_y
-from .stableswap import solve_y_fast, StableSwapError, solve_y
+from .stableswap import StableSwapError, solve_y, solve_y_fast
 
 PRECISION = 10**18
 FEE_PRECISION = 10**10

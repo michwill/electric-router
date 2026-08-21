@@ -50,8 +50,12 @@ def reference(g, src, dst, Psi):
     # B^T: one row per node, +1 where the arc arrives, -1 where it leaves.
     rows, cols, vals = [], [], []
     for p in range(m):
-        rows.append(int(g.tau[p])); cols.append(p); vals.append(1.0)
-        rows.append(int(g.sig[p])); cols.append(p); vals.append(-1.0)
+        rows.append(int(g.tau[p]))
+        cols.append(p)
+        vals.append(1.0)
+        rows.append(int(g.sig[p]))
+        cols.append(p)
+        vals.append(-1.0)
     incidence = sparse.csc_matrix((vals, (rows, cols)), shape=(n, m))
     s_hat = np.zeros(n)
     s_hat[src] += Psi
@@ -82,21 +86,21 @@ def reference(g, src, dst, Psi):
 # rest of the tests use and the one that makes `s_hat[src] = +Psi` come out.
 CASES = {
     # A single pool: the answer is forced, so any disagreement is a units bug.
-    "one arc": dict(tau=[0], sig=[1], a=[1.0], B=[1.0], Psi=0.25),
+    "one arc": {"tau": [0], "sig": [1], "a": [1.0], "B": [1.0], "Psi": 0.25},
     # Two lanes of different depth: the split is the whole question.
-    "parallel": dict(tau=[0, 0], sig=[1, 1], a=[1.0, 1.0], B=[1.0, 2.0], Psi=1.0),
+    "parallel": {"tau": [0, 0], "sig": [1, 1], "a": [1.0, 1.0], "B": [1.0, 2.0], "Psi": 1.0},
     # Unequal `a`: the diode decides whether the dearer lane opens at all.
-    "diode": dict(tau=[0, 0], sig=[1, 1], a=[1.0, 0.9999], B=[1.0, 1.0], Psi=0.5),
+    "diode": {"tau": [0, 0], "sig": [1, 1], "a": [1.0, 0.9999], "B": [1.0, 1.0], "Psi": 0.5},
     # Two hops against one: 0->1->2 versus 0->2 direct.
-    "series": dict(tau=[0, 0, 1], sig=[2, 1, 2], a=[0.997, 0.9995, 0.9995],
-                   B=[1.0, 1.0, 1.0], Psi=0.4),
+    "series": {"tau": [0, 0, 1], "sig": [2, 1, 2], "a": [0.997, 0.9995, 0.9995],
+                   "B": [1.0, 1.0, 1.0], "Psi": 0.4},
     # A capped lane: the bound has to bind in both solvers.
-    "capped": dict(tau=[0, 0], sig=[1, 1], a=[1.0, 0.999], B=[1.0, 1.0],
-                   cap=[0.2, np.inf], Psi=1.0),
+    "capped": {"tau": [0, 0], "sig": [1, 1], "a": [1.0, 0.999], "B": [1.0, 1.0],
+                   "cap": [0.2, np.inf], "Psi": 1.0},
     # Five arcs over four nodes, the shape a real split takes.
-    "network": dict(tau=[0, 0, 1, 2, 0], sig=[1, 2, 3, 3, 3],
-                    a=[0.9995, 0.9990, 0.9995, 0.9998, 0.996],
-                    B=[1.0, 2.0, 1.0, 3.0, 0.5], Psi=2.0),
+    "network": {"tau": [0, 0, 1, 2, 0], "sig": [1, 2, 3, 3, 3],
+                    "a": [0.9995, 0.9990, 0.9995, 0.9998, 0.996],
+                    "B": [1.0, 2.0, 1.0, 3.0, 0.5], "Psi": 2.0},
 }
 
 

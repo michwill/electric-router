@@ -77,7 +77,8 @@ def test_an_alias_pair_emits_no_leg_and_loses_nothing():
 
 
 def test_a_token_to_itself_is_still_refused():
-    from erouter.core.pipeline import RoutingError, route as route_fn
+    from erouter.core.pipeline import RoutingError
+    from erouter.core.pipeline import route as route_fn
 
     nodes = vault_nodes()
     with pytest.raises(RoutingError, match="itself"):

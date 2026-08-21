@@ -19,9 +19,8 @@ allowed to be approximate and is not allowed to be slow.
 
 from __future__ import annotations
 
-import os
-
 import heapq
+import os
 from collections import deque
 from dataclasses import dataclass, field
 

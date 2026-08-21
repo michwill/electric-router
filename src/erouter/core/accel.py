@@ -18,6 +18,7 @@ browser, and in a Web Worker.
 
 from __future__ import annotations
 
+import contextlib
 
 import numpy as np
 
@@ -64,10 +65,9 @@ def problem_for(g):
         cap,
         int(g.n_nodes),
     )
-    try:
+    # A graph that will not hold it is not an error; the cache is a bonus.
+    with contextlib.suppress(AttributeError, TypeError):
         g.accel = (key, problem)
-    except (AttributeError, TypeError):  # a graph that will not hold it
-        pass
     return problem
 
 

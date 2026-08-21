@@ -269,7 +269,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
     if block and only is None:
         try:
             lent, refused = build_exact_lending(pools, client, block=int(block))
-        except Exception as exc:  # noqa: BLE001 - a reader must not fail a quote
+        except Exception as exc:  # a reader must not fail a quote
             lent, refused = {}, [("lending", str(exc))]
         out.by_pool.update(lent)
         out.checked += len(lent) + len(refused)
@@ -294,7 +294,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
                     virtual={token: virtual[owner.lower()]
                              for token, owner in issuer.items()
                              if owner.lower() in virtual})
-            except Exception:  # noqa: BLE001 - a reader must not fail a quote
+            except Exception:  # a reader must not fail a quote
                 rated = {}
             if rated:
                 out.by_pool.update(rated)

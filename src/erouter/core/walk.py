@@ -61,10 +61,8 @@ def walk_route(
             base = bal.get(src, 0)
 
         have = bal.get(src, 0)
-        if leg.bps == 0:
-            dx = have  # the last leg out of a node sweeps the remainder
-        else:
-            dx = min(base * leg.bps // BPS, have)
+        # `bps == 0` is the last leg out of a node, sweeping the remainder.
+        dx = have if leg.bps == 0 else min(base * leg.bps // BPS, have)
         if dx == 0:
             continue
 

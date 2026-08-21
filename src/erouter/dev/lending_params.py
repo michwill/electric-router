@@ -28,7 +28,7 @@ from __future__ import annotations
 from ..core.codec import encode_call
 from ..core.probe import Probe
 from ..core.quoter import Call
-from ..core.stableswap import PRECISION, StableSwap, StableSwapError
+from ..core.stableswap import StableSwap, StableSwapError
 from ..core.types import ArcKind
 
 #: `LENDING_PRECISION` in the pools' own words: the rate of a coin that is not
@@ -170,14 +170,14 @@ def build_exact_lending(pools, client, *, block: int, quiet: bool = True):
         for i in range(held):
             mul = 10 ** (18 - _underlying_decimals(pool, held, i))
             rates.append(mul * rates_of.get(key, {}).get(i, LENDING_PRECISION))
-        shaped = dict(
-            balances=tuple(int(b.uint()) for b in balances),
-            rates=tuple(rates),
-            amp=amp,
-            fee=fee.uint(),
-            offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
-            a_precision=a_precision,
-        )
+        shaped = {
+            "balances": tuple(int(b.uint()) for b in balances),
+            "rates": tuple(rates),
+            "amp": amp,
+            "fee": fee.uint(),
+            "offpeg_fee_multiplier": offpeg.uint_or(0) or 0,
+            "a_precision": a_precision,
+        }
         picked = _pick_variant(pool, held, shaped, client)
         if picked is None:
             notes.append((pool.address, "no variant reproduces its own get_dy"))
@@ -286,7 +286,7 @@ def build_exact_rate_pools(pools, client, *, addresses, virtual=None,
     snapped: dict[str, int] = {}
     holders = [(p, a) for p, a in zip(wanted, snaps, strict=True) if a.ok and a.uint()]
     if holders:
-        answers = client.raw([Call("0x%040x" % a.uint(),
+        answers = client.raw([Call(f"0x{a.uint():040x}",
                                    encode_call("snappedRedemptionPrice()"))
                               for _, a in holders])
         for (pool, _), answer in zip(holders, answers, strict=True):
@@ -325,10 +325,10 @@ def build_exact_rate_pools(pools, client, *, addresses, virtual=None,
                 rates.append(virtual[coin.address.lower()])
             else:
                 rates.append(base)
-        shaped = dict(balances=tuple(int(b) for b in pool.balances),
-                      rates=tuple(rates), amp=amp, fee=fee.uint(),
-                      offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
-                      a_precision=a_precision)
+        shaped = {"balances": tuple(int(b) for b in pool.balances),
+                      "rates": tuple(rates), "amp": amp, "fee": fee.uint(),
+                      "offpeg_fee_multiplier": offpeg.uint_or(0) or 0,
+                      "a_precision": a_precision}
         picked = _pick_variant(pool, len(pool.coins), shaped, client)
         if picked is not None:
             made[key] = picked

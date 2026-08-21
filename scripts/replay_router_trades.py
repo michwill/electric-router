@@ -29,8 +29,9 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
-from erouter.core.keccak import keccak256
-from router_pairs import AMOUNT_WORD, ROUTERS, _word, decode
+from router_pairs import AMOUNT_WORD, ROUTERS, _word, decode  # noqa: E402
+
+from erouter.core.keccak import keccak256  # noqa: E402
 
 TRANSFER = "0x" + keccak256(b"Transfer(address,address,uint256)").hex()
 
@@ -72,7 +73,8 @@ def _paid(receipt: dict, router: str, token: str, wrapped: str) -> int:
 
 
 def trades(name: str, span: int, limit: int) -> list[dict]:
-    from erouter.dev import chains as chain_table, config
+    from erouter.dev import chains as chain_table
+    from erouter.dev import config
     from erouter.dev.rpc import JsonRpcTransport
 
     _, router = ROUTERS[name]
@@ -96,7 +98,7 @@ def trades(name: str, span: int, limit: int) -> list[dict]:
     receipts = rpc.fetch_multi([("eth_getTransactionReceipt", [h]) for h in hashes])
 
     out = []
-    for tx, receipt in zip(txs, receipts):
+    for tx, receipt in zip(txs, receipts, strict=True):
         if not isinstance(tx, dict) or not isinstance(receipt, dict):
             continue
         if receipt.get("status") != "0x1":
@@ -200,7 +202,7 @@ def main() -> int:
                 result = route(load.pools, nodes, quoter, src_token=src, dst_token=dst,
                                amount_in=trade["amount"], extra_arcs=stake,
                                gas_price_wei=trade["gas_price"])
-            except (RoutingError, Exception) as exc:      # noqa: BLE001
+            except (RoutingError, Exception) as exc:
                 rows.append(row | {"note": f"ours: {str(exc)[:44]}"})
                 continue
             ours = result.verified_out or 0
@@ -223,7 +225,6 @@ def main() -> int:
                   f"{row['note']:>50}")
             continue
         slack = row["slack_bp"]
-        mark = "!" if slack < FLOOR_SLACK_BP else " "
         print(f"  {row['chain']:<10}{row['block']:>12,}  {row['case']:<30}"
               f"{row['theirs']:>17,.8g}{row['ours']:>17,.8g}{row['bp']:>+9.1f}bp"
               f"{slack:>+9.2f}bp"

@@ -11,8 +11,6 @@ still have to be loaded, which is exactly what a token or vault needs.
 
 from __future__ import annotations
 
-import pytest
-
 from erouter.dev.local_evm import LocalEvm
 
 
