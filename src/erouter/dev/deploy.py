@@ -271,7 +271,7 @@ def send_create2(url: str, chain, account, payload: bytes, gas: int) -> str:
     raise SystemExit(f"  ! no receipt for {tx_hash} after two minutes")
 
 
-def fork_at_head(url: str, chain_id: int) -> int:
+def fork_at_head(url: str, chain_id: int, holding: str = "") -> int:
     """Fork a few blocks behind head, and say where.
 
     `allow_dirty` because a sweep forks once per chain and the previous fork
@@ -280,14 +280,32 @@ def fork_at_head(url: str, chain_id: int) -> int:
     carried over -- each fork starts from that chain's head.  Pinned to a real
     block rather than boa's default `safe` tag, which polygon's endpoint does
     not serve and which would drop that chain.
+
+    `holding` is an address the fork must already have code at, for the case
+    that lag is not a safety margin but the whole problem: a contract broadcast
+    seconds ago is not in a block five back.  On ethereum that is a minute, and
+    a fork taken there answers every call to it with `0x`, which decodes into a
+    `DecodeError` that reads like a broken contract.  Wait for it instead.
     """
     import boa
 
     from erouter.dev.rpc import JsonRpcTransport
 
-    head = JsonRpcTransport(url, chain_id=chain_id).pin.block
-    boa.fork(url, block_identifier=head - 5, allow_dirty=True)
-    return head - 5
+    rpc = JsonRpcTransport(url, chain_id=chain_id)
+    at = rpc.pin.block - 5
+    if holding:
+        for _ in range(30):
+            answer = rpc.fetch("eth_getCode", [holding, hex(at)]) or "0x"
+            if len(answer) > 2:
+                break
+            sleep(2)
+            at = JsonRpcTransport(url, chain_id=chain_id).pin.block
+        else:
+            raise SystemExit(
+                f"  ! {holding} still has no code at block {at:,} after a "
+                f"minute; the deployment landed but this node has not caught up")
+    boa.fork(url, block_identifier=at, allow_dirty=True)
+    return at
 
 
 def deploy_one(target: Target, name: str, args, account=None) -> int:
@@ -384,10 +402,13 @@ def deploy_one(target: Target, name: str, args, account=None) -> int:
         return 1
     print(f"  runtime matches the compiled bytecode ({len(expected):,} bytes)")
 
-    if target.check is not None:
-        code = target.check(address, chain, url, args, on_fork=not args.broadcast)
-        if code:
-            return code
+    unproven = False
+    if target.check is not None and target.check(
+            address, chain, url, args, on_fork=not args.broadcast):
+            # The contract is on chain and its runtime matched; only the trade
+            # that would have proved it usable could not be made.  Worth an
+            # exit code, but not worth calling the deployment a failure.
+            unproven = True
 
     if args.broadcast and args.verify:
         from boa.explorer import Etherscan
@@ -408,7 +429,7 @@ def deploy_one(target: Target, name: str, args, account=None) -> int:
     else:
         print("\n  fork rehearsal only -- nothing was broadcast.")
         print("  re-run with --broadcast (and --verify) when you want it on chain.")
-    return 0
+    return 2 if unproven else 0
 
 
 def run(target: Target, description: str) -> int:
@@ -476,9 +497,17 @@ def run(target: Target, description: str) -> int:
         print()
 
     if len(wanted) > 1:
-        done = [n for n, code in results.items() if code == 0]
-        print(f"  {len(done)}/{len(wanted)} chains carry the {target.label}")
+        # Two different failures, and conflating them once reported fifteen
+        # landed deployments as three.  Code 2 means the contract is on chain
+        # with a matching runtime and only the trade could not be made.
+        landed = [n for n, code in results.items() if code in (0, 2)]
+        unproven = [n for n, code in results.items() if code == 2]
+        print(f"  {len(landed)}/{len(wanted)} chains carry the {target.label}")
         for name, code in results.items():
-            if code != 0:
-                print(f"    ! {name}")
+            if code == 1:
+                print(f"    ! {name} -- did not deploy")
+        if unproven:
+            print(f"  {len(unproven)} deployed but unproven: {', '.join(unproven)}")
+            print(f"    the {target.label} is there and its runtime matches; no "
+                  f"trade could be made to exercise it")
     return 0 if all(code == 0 for code in results.values()) else 1

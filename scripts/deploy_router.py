@@ -32,7 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 CONTRACT = REPO / "contracts" / "ElectricRouter.vy"
-SALT_PHRASE = "erouter.ElectricRouter.v1"
+SALT_PHRASE = "erouter.ElectricRouter.v2"
 #: A thousandth of the pool's reserve: small enough not to move it, far enough
 #: above dust that the output is a number rather than a rounding artifact.
 SANITY_SHARE = 1e-4
@@ -115,7 +115,9 @@ def check(address: str, chain, url: str, args, *, on_fork: bool) -> int:
     from erouter.dev.router import send
 
     if args.broadcast:
-        fork_at_head(url, chain.chain_id)
+        # Holding the router: a fork five blocks back predates a deployment
+        # mined seconds ago, and every call to it would answer `0x`.
+        fork_at_head(url, chain.chain_id, holding=address)
     router = boa.loads_partial(SOURCE.read_text()).at(address)
     who = boa.env.generate_address()
 

@@ -1,6 +1,8 @@
 # pragma version 0.4.3
 """
 @title RouteExecutor
+@author Curve.Fi
+@license GNU Affero General Public License v3.0 only
 @notice Executes the same routing DAG `RouteQuoter` quotes, for real.
 @dev A sibling rather than an extra entry point on the quoter, deliberately:
 

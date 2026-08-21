@@ -1,6 +1,8 @@
 # pragma version 0.4.3
 """
 @title ElectricRouter
+@author Curve.Fi
+@license GNU Affero General Public License v3.0 only
 @notice Executes a routing DAG: a list of pools, and one packed word per pool.
 @dev Three things separate this from `RouteExecutor`, which measures routes on a
      fork and is not a router:
