@@ -77,6 +77,15 @@ class Chain:
     # thousand blocks where ETH moves 125.  Membership is not measurable by
     # execution the way redemption is -- it is a claim about what a token is for.
     stables: tuple[str, ...] = ()
+    # Tokens that hold a peg to a currency that is not the dollar.  Kept apart
+    # from `stables` because a pair of these is not a pair of dollars -- EUR/USD
+    # moves, and a claim that it does not would be false.  What they share is
+    # that a pool holding two of them is a *currency* pair however the pool
+    # computes, which is what the minimum-rate floor turns on: the 5 bp
+    # allowance exists for a price that runs away between quote and block, and
+    # a franc against a euro does not do that.  Declared, like `stables`: this
+    # is a claim about what a token is for.
+    forex: tuple[str, ...] = ()
     # A committed endpoint, for a checkout with no `networks.py`.  Safe to be
     # public: the key serves reads only, plus `eth_call` restricted to the quoter
     # address, which is a stateless view contract that can move nothing.
@@ -176,6 +185,16 @@ CHAINS: dict[str, Chain] = {
             "0x4c9EDD5852cd905f086C759E8383e09bff1E68B3",   # USDe
             "0xdC035D45d973E3EC169d2276DDab16f1e407384F",   # USDS
             "0x40D16FC0246aD3160Ccc09B8D0D3A2cD28aE6C2f",   # GHO
+            "0xCAcd6fd266aF91b8AeD52aCCc382b4e165586E29",   # frxUSD
+        ),
+        forex=(
+            "0xdB25f211AB05b1c97D595516F45794528a807ad8",   # EURS
+            "0xB58E61C3098d85632Df34EecfB899A1Ed80921cB",   # ZCHF
+            "0x1cfa5641c01406aB8AC350dEd7d735ec41298372",   # CJPY
+            "0x27f6c8289550fCE67f6B50BeD1F519966aFE5287",   # tGBP
+            "0xd2a530170D71a9Cfe1651Fb468E2B98F7Ed7456b",   # AUDF
+            "0x16F93eBC5320C89EfC8701577efe49d14A276a06",   # CADD
+            "0xc00db6b41473d065027F5Ed6fAdA20fde75f142e",   # KRWQ
         ),
         wrappers=(
             ("0x5d3a536E4D6DbD6114cc1Ead35777bAB948E3643",   # cDAI
@@ -214,6 +233,12 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="ARBITRUM",
         native_symbol="ETH",
         wrapped="0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+        stables=(
+            "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",   # USDC
+        ),
+        forex=(
+            "0x0c06cCF38114ddfc35e07427B9424adcca9F44F8",   # EURe
+        ),
         quoter=QUOTER,
         public_rpc=scoped_rpc("arbitrum"),
     ),
@@ -234,6 +259,12 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="BASE",
         native_symbol="ETH",
         wrapped="0x4200000000000000000000000000000000000006",
+        stables=(
+            "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",   # USDC
+        ),
+        forex=(
+            "0x60a3E35Cc302bFA44Cb288Bc5a4F316Fdb1adb42",   # EURC
+        ),
         quoter=QUOTER,
         public_rpc=scoped_rpc("base"),
     ),
@@ -258,6 +289,18 @@ CHAINS: dict[str, Chain] = {
             ("0xcB444e90D8198415266c6a2724b7900fb12FC56E",
              "0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430"),
         ),
+        stables=(
+            "0xDDAfbb505ad214D7b80b1f830fcCc89B60fb7A83",   # USDC
+            "0x2a22f9c3b484c3629090FeED35F17Ff8F88f76F0",   # USDC.e
+            "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d",   # WXDAI
+        ),
+        forex=(
+            # Both Monerium EURe contracts: one market, two addresses.
+            "0x420CA0f9B9b604cE0fd9C18EF134C705e5Fa3430",
+            "0xcB444e90D8198415266c6a2724b7900fb12FC56E",
+            "0xD4dD9e2F021BB459D5A5f6c24C12fE09c5D45553",   # ZCHF
+            "0xFECB3F7c54E2CAAE9dC6Ac9060A822D47E053760",   # BRLA
+        ),
         quoter=QUOTER,
         public_rpc=scoped_rpc("gnosis"),
     ),
@@ -268,6 +311,14 @@ CHAINS: dict[str, Chain] = {
         rpc_attr="POLYGON",
         native_symbol="POL",
         wrapped="0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270",  # WPOL (ex-WMATIC)
+        stables=(
+            "0x80Eede496655FB9047dd39d9f418d5483ED600df",   # frxUSD
+        ),
+        forex=(
+            "0x27f6c8289550fCE67f6B50BeD1F519966aFE5287",   # tGBP
+            "0xd2a530170D71a9Cfe1651Fb468E2B98F7Ed7456b",   # AUDF
+            "0x44C3950a6Ed303c863A6568EA18c1A01e504FFd2",   # KRWQ
+        ),
         quoter=QUOTER,
         public_rpc=scoped_rpc("polygon"),
     ),

@@ -23,7 +23,7 @@ never treat "did not revert" as "answered".
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 
 from .types import ArcKind, Dialect
@@ -57,15 +57,24 @@ def registry_key(pool_type: str | None) -> str:
     return (pool_type or "").lower().replace("_", "-")
 
 
-def volatile_pools(pools) -> set[str]:
+def volatile_pools(pools, pegged: Collection[str] = ()) -> set[str]:
     """Pools whose pair is not a peg, for sizing a route's slippage floor.
 
-    The registry class, because nothing in an arc distinguishes a pegged pair
-    from an oraclised stableswap holding a volatile one -- which is precisely
-    the shape of the pools that rug on broadcast, and precisely why those are
+    The registry class decides it, because nothing in an arc distinguishes a
+    pegged pair from an oraclised stableswap holding a volatile one -- which is
+    the shape of the pools that rug on broadcast, and the reason those are
     excluded by address rather than by inference.
+
+    `pegged` overturns the class where the *pair* says otherwise.  A currency
+    pair computed by the cryptoswap invariant is still a currency pair: gnosis
+    trades USDC.e against EURe in a twocrypto pool, and a euro does not run
+    away from a dollar between the quote and the block the way ETH does.  The
+    list is a declaration for the same reason `Chain.stables` is.
     """
-    return {p.address.lower() for p in pools if p.key in CRYPTO_POOL_TYPES}
+    money = {token.lower() for token in pegged}
+    return {p.address.lower() for p in pools
+            if p.key in CRYPTO_POOL_TYPES
+            and not (p.coins and all(c.address.lower() in money for c in p.coins))}
 
 
 

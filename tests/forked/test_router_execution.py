@@ -95,8 +95,9 @@ def routes(universe, exact_client):
 
 
 @pytest.fixture(scope="module")
-def volatile(universe):
-    return volatile_pools(universe[0])
+def volatile(universe, chain):
+    """A currency pair is bounded as a stable one however its pool computes."""
+    return volatile_pools(universe[0], chain.stables + chain.forex)
 
 
 @pytest.fixture(scope="module")

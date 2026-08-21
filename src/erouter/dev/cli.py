@@ -1310,7 +1310,7 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
 
     call = None
     if getattr(args, "calldata", None):
-        call = _report_calldata(result, args, nodes, dst, load.pools)
+        call = _report_calldata(result, args, chain, nodes, dst, load.pools)
 
     if args.json:
         payload = to_json(
@@ -1364,7 +1364,7 @@ def _token_holders(pools, token: str, avoid=()) -> list[str]:
            [a for _, a in sorted(on_route, reverse=True)]
 
 
-def _report_calldata(result, args, nodes, dst, pools):
+def _report_calldata(result, args, chain, nodes, dst, pools):
     """Pack the winning route for `ElectricRouter` and print what it commits to.
 
     The per-leg minimum rates are the point, so each is shown against the fee
@@ -1381,9 +1381,11 @@ def _report_calldata(result, args, nodes, dst, pools):
     if args.min_out_bp is not None:
         min_out = int(result.route.modelled_out * (1 - args.min_out_bp / 1e4))
     try:
-        call = encode_route(result.route, receiver=args.receiver,
-                            volatile=volatile_pools(pools), naming=args.calldata,
-                            min_out=min_out, quoted_out=result.verified_out)
+        call = encode_route(
+            result.route, receiver=args.receiver,
+            volatile=volatile_pools(pools, chain.stables + chain.forex),
+            naming=args.calldata, min_out=min_out,
+            quoted_out=result.verified_out)
     except EncodingError as exc:
         print(f"  {BAD} calldata: {exc}")
         return None

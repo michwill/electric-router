@@ -159,6 +159,17 @@ than inferred, because nothing in an arc distinguishes a pegged pair from an
 oraclised stableswap holding a volatile one -- and that second shape is the one
 that rugs on broadcast.
 
+**A currency pair is bounded as a stable one, however its pool computes.**
+`core.pools.volatile_pools` takes the chain's `stables + forex` and drops any
+crypto-class pool whose coins are all somebody's money: gnosis trades USDC.e
+against EURe in a twocrypto pool, and a euro does not run away from a dollar
+between the quote and the block the way ETH does.  Measured on mainnet
+EURS/USDC, which is a `crypto` pool: 0.60 bp granted rather than 5, and the fee
+that trade pays there is 44.90 bp against a 3 bp `mid_fee` -- so this is where
+bounding on the least fee earns the most.  `Chain.forex` is a declaration for
+the same reason `Chain.stables` is; a survey by symbol also picks up a Pendle
+principal token and two yield-bearing vaults, none of which are currencies.
+
 **`fee` is the least the pool can charge, not what the leg pays.**  That is the
 whole of it: the attacker front-runs and unwinds in small, balanced trades and
 is charged near `mid_fee`, while the leg they wrap around pays the dynamic fee
