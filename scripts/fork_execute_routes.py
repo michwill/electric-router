@@ -158,10 +158,10 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
                                                      min_tvl=args.min_tvl))
     except (RpcError, CurveApiError, OSError) as exc:
         print(f"{chain.name}: unreachable -- {str(exc)[:80]}\n")
-        return 0, 0, 0, set(), []
+        return 0, 0, 0, set(), set(), []
     if not specs:
         print(f"{chain.name}: no pools above the floor\n")
-        return 0, 0, 0, set(), []
+        return 0, 0, 0, set(), set(), []
 
     resolve_dialects(specs, base, chain)
     read_balances(specs, base, None, chain.chain_id, token_client=base)

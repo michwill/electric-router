@@ -459,7 +459,15 @@ rates were derived at one, and a dynamic fee moves with the trade.  Re-encode.
 
 **The router is not deployed yet.**  `ElectricRouter` has no address in this
 repo; `core.schema.ROUTER_ADDRESS` is empty on purpose, because a wrong address
-there is a burnt transaction.  Changing the contract changes its CREATE2 address.
+there is a burnt transaction.
+
+`scripts/deploy_router.py --chain all --create2` is what will put it on chain,
+at the same address on every one of them.  That address is already determined --
+CREATE2 fixes it from the proxy, the salt `erouter.ElectricRouter.v1`, and the
+initcode -- so **changing the contract changes where it lands**, which is why
+the salt carries a version rather than the code being edited under a live one.
+Until a broadcast happens the address is a prediction, not a deployment; the
+script rehearses on a fork by default and says which it did.
 
 **32 legs, 31 named tokens.**  Beyond that the encoder refuses rather than
 truncating.
