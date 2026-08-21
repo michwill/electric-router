@@ -327,3 +327,22 @@ def test_a_pool_with_no_lp_getter_says_so(world, trader):
     with boa.reverts("lp token unknown -- name it in tokens"):
         send(world, trader, [step(world.legacy, ArcKind.WITHDRAW_STABLE, i=0, j=1, n=2)],
              10**18)
+
+
+@pytest.mark.parametrize("n", [0, 1, 9, 15])
+def test_a_deposit_with_an_impossible_coin_count_is_refused(world, trader, n):
+    """`N` is part of `add_liquidity`'s signature, so there is a selector for
+    2..8 and nothing outside it.  The table has holes; this is the guard."""
+    with boa.reverts("coin count outside 2..8"):
+        send(world, trader,
+             [step(world.stable, ArcKind.DEPOSIT_FIXED, i=0, j=0, n=n)], 10**18)
+
+
+def test_the_selector_table_agrees_with_the_signature_it_stands_for():
+    """A table is only better than a branch if it is indexed right."""
+    from erouter.core.codec import selector
+
+    router = boa.loads(CONTRACT.read_text(), name="ElectricRouter")
+    for n in range(2, 9):
+        want = selector(f"add_liquidity(uint256[{n}],uint256)")
+        assert router.eval(f"ADD_LIQUIDITY[{n}]") == want, f"N={n}"

@@ -54,6 +54,21 @@ ONE: constant(uint256) = 10**18
 # The sentinel Curve uses for native ETH in `coins()`.
 NATIVE: public(constant(address)) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 
+#: `add_liquidity(uint256[N],uint256)`, indexed by N.  The width is part of the
+#: signature, so there is one selector per coin count and no way to compute it;
+#: a table is what that fact looks like.  Slots 0 and 1 are unreachable.
+ADD_LIQUIDITY: constant(bytes4[MAX_COINS + 1]) = [
+    empty(bytes4),
+    empty(bytes4),
+    method_id("add_liquidity(uint256[2],uint256)", output_type=bytes4),
+    method_id("add_liquidity(uint256[3],uint256)", output_type=bytes4),
+    method_id("add_liquidity(uint256[4],uint256)", output_type=bytes4),
+    method_id("add_liquidity(uint256[5],uint256)", output_type=bytes4),
+    method_id("add_liquidity(uint256[6],uint256)", output_type=bytes4),
+    method_id("add_liquidity(uint256[7],uint256)", output_type=bytes4),
+    method_id("add_liquidity(uint256[8],uint256)", output_type=bytes4),
+]
+
 # --- leg kinds (must match erouter.core.types.ArcKind) ---------------------
 
 SWAP_STABLE: constant(uint8) = 0
@@ -101,7 +116,16 @@ event Routed:
 @internal
 @view
 def _ask(target: address, data: Bytes[68]) -> (bool, Bytes[32]):
-    """One staticcall that never reverts.  Empty returndata is not a value.
+    """One staticcall that never reverts, for the getters where the *absence*
+    of an answer is the answer.
+
+    Only the discovery below uses it: which spelling of `coins` a pool was
+    compiled with, whether it is its own LP token, what a wrapper is a claim
+    on.  Vyper has no `try` around an external call and an interface cannot
+    express "or else", so a reverting probe has to be caught rather than
+    declared.  Anything the router simply needs is a plain typed call.
+
+    Empty returndata is not a value.
 
     A Curve pool answers an unimplemented function with empty data rather than
     a revert, and decoding `0x` gives zero -- which as an address is a token
@@ -120,15 +144,11 @@ def _ask(target: address, data: Bytes[68]) -> (bool, Bytes[32]):
 @internal
 @view
 def _held(token: address) -> uint256:
+    """What the router is holding.  A plain call: unlike the getters below,
+    there is no question here whose answer is a revert."""
     if token == NATIVE:
         return self.balance
-    ok: bool = False
-    out: Bytes[32] = b""
-    ok, out = self._ask(
-        token, concat(method_id("balanceOf(address)"), abi_encode(self))
-    )
-    assert ok, "balanceOf"
-    return abi_decode(out, uint256)
+    return staticcall IERC20(token).balanceOf(self)
 
 
 @internal
@@ -320,27 +340,6 @@ def _amounts(i: uint8, n: uint8, dx: uint256) -> Bytes[256]:
     return slice(abi_encode(words), 0, 32 * convert(n, uint256))
 
 
-@internal
-@pure
-def _add_liquidity(n: uint8) -> Bytes[4]:
-    """`N` is part of the signature, so there is one selector per width."""
-    if n == 2:
-        return method_id("add_liquidity(uint256[2],uint256)")
-    if n == 3:
-        return method_id("add_liquidity(uint256[3],uint256)")
-    if n == 4:
-        return method_id("add_liquidity(uint256[4],uint256)")
-    if n == 5:
-        return method_id("add_liquidity(uint256[5],uint256)")
-    if n == 6:
-        return method_id("add_liquidity(uint256[6],uint256)")
-    if n == 7:
-        return method_id("add_liquidity(uint256[7],uint256)")
-    if n == 8:
-        return method_id("add_liquidity(uint256[8],uint256)")
-    raise "coin count outside 2..8"
-
-
 # --------------------------------------------------------------- one leg
 
 
@@ -417,10 +416,11 @@ def _run(step: Step, dx: uint256) -> uint256:
         )
 
     elif kind == DEPOSIT_FIXED or kind == DEPOSIT_FIXED_NOFLAG:
+        assert step.n >= 2 and step.n <= 8, "coin count outside 2..8"
         raw_call(
             step.pool,
             concat(
-                self._add_liquidity(step.n),
+                ADD_LIQUIDITY[step.n],
                 self._amounts(step.i, step.n, dx),
                 abi_encode(empty(uint256)),
             ),
