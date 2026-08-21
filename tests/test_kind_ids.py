@@ -1,12 +1,14 @@
-"""The contract's leg kinds and `ArcKind` must agree, number for number.
+"""The contracts' leg kinds and `ArcKind` must agree, number for number.
 
-They are two hand-maintained lists of the same thing: `core.types.ArcKind`
-decides what a leg *is*, `RouteQuoter.vy` decides what call to make for it, and
-the only thing joining them is an integer.  Drift does not fail loudly -- a leg
-is simply priced as a different operation, and the quote comes back plausible.
+Three hand-maintained lists of the same thing: `core.types.ArcKind` decides
+what a leg *is*, `RouteQuoter.vy` decides what call to price it with, and
+`ElectricRouter.vy` decides what call to execute it with.  The only thing
+joining them is an integer.  Drift does not fail loudly -- a leg is simply
+priced or executed as a different operation, and the answer comes back
+plausible.
 
-Read from the Vyper source as text rather than by compiling it, so this costs
-nothing and runs in the offline suite where it belongs.
+Read from the Vyper sources as text rather than by compiling them, so this
+costs nothing and runs in the offline suite where it belongs.
 """
 
 from __future__ import annotations
@@ -18,31 +20,51 @@ import pytest
 
 from erouter.core.types import ArcKind
 
-CONTRACT = Path(__file__).resolve().parents[1] / "contracts" / "RouteQuoter.vy"
+CONTRACTS = Path(__file__).resolve().parents[1] / "contracts"
+NAMES = ("RouteQuoter", "ElectricRouter")
 DECLARATION = re.compile(
-    r"^([A-Z0-9_]+): public\(constant\(uint8\)\) = (\d+)", re.MULTILINE)
+    r"^([A-Z0-9_]+): (?:public\()?constant\(uint8\)\)? = (\d+)", re.MULTILINE)
 
 
-def declared() -> dict[str, int]:
-    text = CONTRACT.read_text(encoding="utf-8")
+def declared(name: str = "RouteQuoter") -> dict[str, int]:
+    text = (CONTRACTS / f"{name}.vy").read_text(encoding="utf-8")
     found = dict(DECLARATION.findall(text))
-    return {name: int(value) for name, value in found.items()
-            if not name.startswith("STATUS_")}
+    return {key: int(value) for key, value in found.items()
+            if not key.startswith("STATUS_")}
 
 
-def test_every_contract_kind_exists_in_core_with_the_same_number():
-    for name, value in declared().items():
-        assert name in ArcKind.__members__, f"{name} is priced but not modelled"
+@pytest.mark.parametrize("contract", NAMES)
+def test_every_contract_kind_exists_in_core_with_the_same_number(contract):
+    for name, value in declared(contract).items():
+        assert name in ArcKind.__members__, f"{name} is in {contract}, not in core"
         assert int(ArcKind[name]) == value, (
-            f"{name}: contract says {value}, core says {int(ArcKind[name])} -- "
-            "a leg of this kind would be priced as a different operation"
+            f"{name}: {contract} says {value}, core says {int(ArcKind[name])} -- "
+            "a leg of this kind would be handled as a different operation"
         )
 
 
-def test_every_core_kind_the_quoter_must_price_is_declared():
+@pytest.mark.parametrize("contract", NAMES)
+def test_every_core_kind_is_declared(contract):
     """`WRAP_NATIVE` and friends need no call, but they still need a number."""
     for kind in ArcKind:
-        assert kind.name in declared(), f"{kind.name} is modelled but not priced"
+        assert kind.name in declared(contract), (
+            f"{kind.name} is modelled and {contract} has never heard of it")
+
+
+def test_the_encoder_knows_how_to_place_every_kind():
+    """`_DERIVE` says which token each side of a leg is; a gap is a refusal."""
+    from erouter.core.routecall import _DERIVE
+
+    for kind in ArcKind:
+        assert kind in _DERIVE, f"{kind.name} cannot be encoded for the router"
+
+
+def test_the_router_executes_every_kind_it_declares():
+    """A declared kind with no branch in `_run` would revert at the last moment."""
+    text = (CONTRACTS / "ElectricRouter.vy").read_text(encoding="utf-8")
+    body = text[text.index("def _run("):text.index("def execute(")]
+    for kind in ArcKind:
+        assert f"kind == {kind.name}" in body, f"{kind.name} is declared, not executed"
 
 
 def test_fourteen_stays_reserved():

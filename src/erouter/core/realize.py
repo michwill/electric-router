@@ -66,6 +66,11 @@ class RealizedLeg:
     #: size rather than anything fitted: it is what lets a topology be weighed
     #: without going through the split the model happened to give it.
     tvl_usd: float = 0.0
+    #: The pool's measured retention, `sqrt(a_forward * a_reverse)`, so a
+    #: minimum rate can be set from the fee the pool is charging right now
+    #: rather than from a fee parameter nobody read.  NaN where the opposite
+    #: direction was not calibrated, and on legs that are not pool swaps.
+    gamma_live: float = math.nan
     #: False when the arc behind this leg carries no calibration -- the
     #: model-free `direct`/`two-step` candidates, built at `psi = 1` with
     #: `B = 0`.  Their `eps` and `impact_frac` are placeholders, not
@@ -625,6 +630,7 @@ def _arc_leg(
         psi=psi,
         reserve_in=arc.reserve_in,
         tvl_usd=arc.tvl_usd,
+        gamma_live=arc.gamma_live,
         modelled=arc.G > 0,
     )
 

@@ -329,7 +329,32 @@ def calibrate_arcs(
             dropped.append(f"{ref.id}: {exc}")
             continue
         arcs.append(_to_arc(pool, i, j, ref, fit, nodes))
+    pair_directions(arcs)
     return arcs, dropped
+
+
+def pair_directions(arcs: list[PoolArc]) -> int:
+    """Link each arc to its opposite and record the fee the pair measures.
+
+    `gamma_live = sqrt(a_f * a_r)` reads a pool's *current* retention off two
+    tiny probes, with no fee parameter and no ABI knowledge of the fee law
+    (spec 2.6).  The node-merge rescaling cancels in the product, so it is the
+    same number in canonical coordinates as in the pool's own.
+
+    Only same-kind pairs qualify: a deposit's opposite is a withdrawal, and
+    round-tripping those measures two fees plus an imbalance, not one fee.
+    """
+    by_id = {arc.id: arc for arc in arcs}
+    paired = 0
+    for arc in arcs:
+        other = by_id.get(f"{arc.pool.lower()}:{int(arc.kind)}:{arc.j}>{arc.i}")
+        if other is None:
+            continue
+        arc.reverse_id = other.id
+        if arc.a > 0 and other.a > 0:
+            arc.gamma_live = math.sqrt(arc.a * other.a)
+            paired += 1
+    return paired
 
 
 def _client_block(client) -> int:
