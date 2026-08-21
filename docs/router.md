@@ -151,10 +151,33 @@ tolerance = max(FEE_SHARE * fee, floor)
 ```
 
 with `FEE_SHARE = 0.2`, `floor` of 5 bp on a volatile pair and 0.1 bp
-otherwise.  The reasoning is that a sandwich has to trade through the pool
-twice, so it pays roughly twice the fee to move the price; granting a fifth of
-one fee leaves it far short of profitable.  The 0.1 bp floor is not slippage at
-all -- it is room for the wei a wrap or a rebasing token rounds away.
+otherwise.  The 0.1 bp floor is not slippage at all -- it is room for the wei a
+wrap or a rebasing token rounds away.
+
+**What that buys is a ceiling on extraction, not immunity.**  It is tempting to
+argue that a sandwich pays the fee twice on its own size and so cannot profit
+against a tolerance below twice the fee.  That is not what happens.  The
+attacker's cost is indeed two fees on their own size, but their gain is the
+price displacement the *victim* causes, so on a constant-product pool the attack
+is profitable whenever
+
+```
+victim's trade  >  2 * fee * the pool's reserve
+```
+
+and the tolerance appears nowhere in it.  A tighter bound cannot make an attack
+unprofitable; it makes it smaller.  Measured over a grid of fees and sizes, that
+rule calls every case but the boundary one, and it is pinned in
+`tests/test_sandwich.py`.
+
+What the bound does give is exact: **the victim either settles at no worse than
+`(1 - t)` of its quote, or it does not settle.**  The front-run can only be as
+large as the bound will still let through, so the extraction is capped at `t` of
+the trade -- and measured, it comes to almost exactly that, scaling linearly
+with `t` and with nothing else.  A fifth of the fee is therefore a fifth of the
+fee in what it lets through, and the 5 bp floor on a pool charging less than
+25 bp is the looser of the two by exactly `5 / (0.2 * fee)`: twenty-five times
+as much on a 1 bp pool.  That is the compromise, as a number.
 
 **`fee` is the fee at this trade's size, not the marginal one.**  A dynamic fee
 is a property of the trade: measured on mainnet TricryptoUSDC, `mid_fee` is 3 bp
@@ -297,3 +320,7 @@ truncating.
 It cannot tell a pool that will honour its quote from one that will move on
 broadcast -- see the blacklist and the reserve check in [`theory.md`](theory.md),
 none of which is a proof either.
+
+**Nor is it a guarantee against being sandwiched**, only against being
+sandwiched for more than `t`.  Whoever sets `volatile` is choosing how much,
+per pool.

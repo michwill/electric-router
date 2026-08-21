@@ -11,9 +11,12 @@ returned less than modelled, which is the only reason to prefer it.
 
 **Every leg gets its own minimum rate.**  A single end-to-end bound lets a route
 give everything away in one pool and win it back in another -- the shape of a
-sandwich.  The bound per leg is a fraction of the fee that pool is measured to
-be charging right now (`gamma_live`), because a sandwich is only worth running
-when it can move the price by more than the fee it pays to do so.
+sandwich.  The bound is a fraction of the fee that pool is measured to be
+charging *on this trade*, and what it buys is a ceiling on how much a sandwich
+can take: the front-run can only be as large as the bound will still settle.  It
+does not make the attack unprofitable -- that turns on the victim's size against
+the pool's depth and has nothing to do with the tolerance.  See `docs/router.md`
+and `tests/test_sandwich.py`.
 """
 
 from __future__ import annotations
@@ -60,7 +63,7 @@ SIGNATURES = (
 SIGNATURE = SIGNATURES[-1]
 
 #: How much of a pool's own fee a sandwich is allowed to take before the leg
-#: refuses.  Below the fee by construction: at the fee the attack breaks even.
+#: refuses -- and, measured, almost exactly how much one does take when it can.
 FEE_SHARE = 0.2
 
 #: Floors on that tolerance, in bp.  The volatile one is a real slippage
