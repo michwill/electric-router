@@ -10,7 +10,9 @@ dropped rather than reported.
 
 The hosted deployment serves one host per chain -- `ethereum`, `arbitrum`,
 `gnosis`, `base`, `optimism` at `<chain>.router.curve.finance` -- and those five
-are the whole comparable set.
+are the whole comparable set.  A host can be up and still have no universe: it
+then answers every pair with "no routes found" and `snapshot_block` 0, which is
+reported as a dead deployment rather than as a routing verdict.
 
 Pairs come from each chain's own universe rather than a hardcoded list, so a
 chain whose pools move does not quietly stop being tested.  One volatile pair per
@@ -261,7 +263,13 @@ def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
             continue
         block = int(theirs.get("snapshot_block") or 0)
         their_out = int(theirs.get("expected_out") or 0)
-        if their_out == 0 or block <= 0:
+        if block <= 0:
+            # Block 0 is not a routing answer.  The deployment has no snapshot,
+            # so it says "no routes found" to every pair on the chain -- which
+            # reads exactly like a verdict on the pair and is not one.
+            rows.append(row | {"note": "solver: no snapshot on this deployment"})
+            continue
+        if their_out == 0:
             rows.append(row | {"note": f"solver: {theirs.get('error', 'no route')}"[:44]})
             continue
         try:
