@@ -402,6 +402,7 @@ def prepare(
     # Laplacian's conditioning for everything else.
     with clock("component"):
         arcs = _restrict_to_component(arcs, dst_node, nodes.n_nodes, scratch)
+        arcs = _prune_dead_end_nodes(arcs, src_node, dst_node, scratch)
     if not arcs:
         raise RoutingError(f"{nodes.symbol(dst_token)} is not reachable from any pool")
     if not any(a.tau == src_node or a.sigma == src_node for a in arcs):
@@ -1788,6 +1789,49 @@ def _kcl_detail(
     n_out = int(np.count_nonzero((g.tau == worst) & live))
     n_in = int(np.count_nonzero((g.sig == worst) & live))
     return float(err[worst]), worst, n_in, n_out
+
+
+def _prune_dead_end_nodes(
+    arcs: list[PoolArc], src_node: int, dst_node: int, result: RouteResult
+) -> list[PoolArc]:
+    """Drop arcs into nodes no route can pass *through*.
+
+    A node that is neither endpoint has to be entered through one pool and left
+    through another.  Decision 3 gives a route at most one arc per pool, and for
+    a two-coin pool the only other coin is the one the flow just arrived from,
+    so a second arc of that pool is where it came from rather than onward.  A
+    node touched by exactly one pool can therefore only ever be an endpoint --
+    not "is unlikely to help", cannot appear.
+
+    The same holds where a single pool has three coins and could technically
+    serve both hops: `A -> v -> B` inside one pool is dominated by `A -> B`
+    inside it, since the pool prices the pair directly.
+
+    This is what keeps the long tail of single-pool tokens out of the search on
+    structure rather than by a list of names.  Measured on mainnet, HLX, CXD,
+    FIDU and STG each sit in exactly one pool, and the two-hop floor was ranking
+    them above crvUSD because their tokens are numerous -- the ranking was fixed
+    separately, but they should never have been on the ballot to rank.
+
+    Iterated, because removing a node can leave its neighbour with one pool.
+    Endpoints are never pruned: quoting `HLX -> USDC` is a fair question and its
+    single pool is the answer.
+    """
+    live = list(arcs)
+    ends = {src_node, dst_node}
+    for _ in range(len(live) + 1):
+        touching: dict[int, set[str]] = {}
+        for arc in live:
+            pool = arc.pool.lower()
+            touching.setdefault(arc.tau, set()).add(pool)
+            touching.setdefault(arc.sigma, set()).add(pool)
+        dead = {node for node, pools in touching.items()
+                if node not in ends and len(pools) < 2}
+        if not dead:
+            break
+        live = [a for a in live if a.tau not in dead and a.sigma not in dead]
+    result.counters["arcs_dead_end"] = len(arcs) - len(live)
+    return live
 
 
 def _restrict_to_component(
