@@ -28,6 +28,7 @@ import argparse
 import json
 import sys
 import time
+import urllib.error
 import urllib.request
 from itertools import pairwise
 from pathlib import Path
@@ -45,6 +46,12 @@ DEFAULT_SIZES = (10_000, 100_000, 1_000_000)
 #: Sizes are in units of the source token, which is always a stable here, so
 #: they read as dollars.  A chain thinner than this simply reports the loss.
 TIMEOUT_S = 180
+#: Past this the row is not a comparison.  One side has returned something no
+#: one would execute -- 21,689 USDC for 200,336 USDai, on a pair the other side
+#: routes at 6.6 bp of impact -- and averaging it in would flatter whoever
+#: happened to survive.  Set well above an ordinary large-trade gap: 100 bp on a
+#: thin pair is a real difference, not a failure.
+BLOWOUT_BP = 1_000.0
 
 
 def ask_curve(api: str, src: str, dst: str, wei: int) -> tuple[dict, float]:
@@ -56,8 +63,17 @@ def ask_curve(api: str, src: str, dst: str, wei: int) -> tuple[dict, float]:
         api, data=body, headers={"content-type": "application/json",
                                  "User-Agent": "erouter/compare"})
     started = time.perf_counter()
-    with urllib.request.urlopen(request, timeout=TIMEOUT_S) as resp:
-        payload = json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_S) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        # It answers a routing failure with 404 and a body that says which.
+        # Reporting the status code instead reads as "the host is missing".
+        body = exc.read()
+        try:
+            payload = json.loads(body)
+        except ValueError:
+            raise
     return payload, (time.perf_counter() - started) * 1000
 
 
@@ -71,6 +87,38 @@ def _resolve(symbol: str, holders: dict) -> str:
     if not matches:
         raise KeyError(f"{symbol!r} is not a coin of any pool in the universe")
     return max(matches, key=lambda a: holders[a][2])
+
+
+ROUTER_PAIRS = REPO / "data" / "router-pairs.json"
+
+#: Symbols whose price moves against a dollar between the solver's snapshot and
+#: our block, which is worth 1.8-27.7 bp and always flatters us.  Their rows are
+#: shown and not scored.  Cross-currency counts too: EURe against USDC is a real
+#: pair and still not a like-for-like unit.
+VOLATILE = {"WETH", "ETH", "WBTC", "CBBTC", "CRV", "CVX", "OP", "GNO", "OSGNO",
+            "CBETH", "SUPEROETHB", "YB", "EURE", "WSTETH", "STETH"}
+
+
+def router_pairs_for(name: str, holders: dict, multiples: tuple[float, ...]):
+    """Pairs the deployed Router was really asked for, at what it was asked.
+
+    `scripts/router_pairs.py` writes the file; the size is that pair's median
+    router trade, so the benchmark is sized the way the venue actually is.
+    """
+    if not ROUTER_PAIRS.is_file():
+        raise SystemExit("no data/router-pairs.json -- run scripts/router_pairs.py")
+    out = []
+    for row in json.loads(ROUTER_PAIRS.read_text()):
+        if row["chain"] != name:
+            continue
+        src, dst = row["src"].lower(), row["dst"].lower()
+        if src not in holders or dst not in holders:
+            continue
+        units = {holders[src][0].upper(), holders[dst][0].upper()}
+        volatile = bool(units & VOLATILE)
+        for multiple in multiples:
+            out.append((src, dst, row["median_amount"] * multiple, volatile))
+    return out
 
 
 def pairs_for(chain, pools, sizes: tuple[float, ...], pair: str = ""):
@@ -117,7 +165,7 @@ def pairs_for(chain, pools, sizes: tuple[float, ...], pair: str = ""):
 
 
 def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
-                  pair: str = "") -> None:
+                  pair: str = "", from_router: bool = False) -> None:
     from erouter.core.pipeline import RoutingError, prepare, route
     from erouter.core.quoter import QuoterClient
     from erouter.dev import chains as chain_table
@@ -146,6 +194,8 @@ def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
     args = argparse.Namespace(rpc=None, block=None, private=True)
     load = load_pools(chain, min_tvl=10_000.0 if not chain.lite else 1_000.0)
     cases, holders = pairs_for(chain, load.pools, sizes, pair)
+    if from_router:
+        cases = router_pairs_for(name, holders, sizes)
     if not cases:
         print(f"  {name}: no stable pair in the universe to compare")
         return
@@ -243,6 +293,10 @@ def main() -> int:
     parser.add_argument("--pair", default="",
                         help="one pair as SRC->DST, by symbol or address, "
                              "instead of the chain's curated stables")
+    parser.add_argument("--from-router", action="store_true",
+                        help="quote the pairs the deployed Curve Router was "
+                             "really asked for; --sizes become multiples of "
+                             "each pair's median router trade")
     args = parser.parse_args()
 
     sizes = tuple(float(s) for s in args.sizes.split(","))
@@ -251,27 +305,43 @@ def main() -> int:
     rows: list[dict] = []
     for name in wanted:
         try:
-            compare_chain(name, sizes, rows, args.pair)
+            compare_chain(name, sizes, rows, args.pair, args.from_router)
         except Exception as exc:
             print(f"  {name}: failed: {str(exc)[:70]}")
 
-    header = (f"\n  {'chain':<10}{'case':<26}{'curve_solver':>17}{'electric':>17}"
+    header = (f"\n  {'chain':<10}{'case':<30}{'curve_solver':>17}{'electric':>17}"
               f"{'diff':>10}{'legs':>7}{'ms t/e':>11}")
     print(header)
     print("  " + "-" * (len(header) - 3))
     better = tied = worse = 0
     for row in rows:
         if "note" in row:
-            print(f"  {row['chain']:<10}{row['case']:<26}{row['note']:>62}")
+            print(f"  {row['chain']:<10}{row['case']:<30}{row['note']:>58}")
             continue
         bp = row["bp"]
         if not row["volatile"]:
             better += bp > 1
             tied += -1 <= bp <= 1
             worse += bp < -1
-        print(f"  {row['chain']:<10}{row['case']:<26}{row['theirs']:>17,.6f}"
+        print(f"  {row['chain']:<10}{row['case']:<30}{row['theirs']:>17,.6f}"
               f"{row['ours']:>17,.6f}{bp:>+9.1f}bp{row['legs']:>7}{row['ms']:>11}")
-    print(f"\n  stable rows: {better} better, {tied} tied (<1 bp), {worse} worse")
+    print(f"\n  scored rows: {better} better, {tied} tied (<1 bp), {worse} worse")
+    for name in wanted:
+        scored = [r["bp"] for r in rows
+                  if r["chain"] == name and "bp" in r and not r["volatile"]
+                  and abs(r["bp"]) < BLOWOUT_BP]
+        if scored:
+            print(f"    {name:<10} {len(scored):>2} rows   "
+                  f"mean {sum(scored) / len(scored):+7.2f} bp   "
+                  f"worst {min(scored):+7.2f} bp   best {max(scored):+7.2f} bp")
+    blown = [r for r in rows if "bp" in r and abs(r["bp"]) >= BLOWOUT_BP]
+    if blown:
+        print(f"\n  {len(blown)} row(s) past {BLOWOUT_BP:,.0f} bp, kept out of every "
+              f"mean: at that distance one side\n  returned a quote nobody would "
+              f"sign, so the row measures a failure and not a route.")
+        for row in blown:
+            print(f"    {row['chain']:<10}{row['case']:<30}"
+                  f"{row['theirs']:>17,.6f}{row['ours']:>17,.6f}{row['bp']:>+11.0f}bp")
     print("  * volatile pair, excluded from the tally: its row measures the "
           "solver's snapshot age\n    as much as routing.")
     return 0
