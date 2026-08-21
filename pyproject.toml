@@ -44,6 +44,22 @@ packages = ["src/erouter"]
 
 [tool.uv]
 package = true
+# Nothing published in the last week is a resolution candidate.
+#
+# A compromised release is usually caught within hours: the arrayref/internment
+# incident of 2026-08-20 had its malicious versions live for 86 to 107 minutes
+# before crates.io pulled them, and the npm incidents that motivated this ran to
+# a few hours.  A cooling-off window costs nothing -- we are not chasing
+# same-day releases of anything -- and takes the whole class off the table.
+#
+# Relative rather than a pinned date, so it stays true without being maintained.
+# `uv.lock` is committed, so this only bites when something is deliberately
+# re-resolved; `uv sync` installs what the lock already says.
+#
+# It is not a complete defence: a version that sits quietly for eight days is
+# still installable.  See `scripts/check_dependency_age.py`, which enforces the
+# same rule on `rust/Cargo.lock`, where Cargo has no equivalent setting yet.
+exclude-newer = "1 week"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
