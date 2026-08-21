@@ -190,11 +190,18 @@ def build_exact_lending(pools, client, *, block: int, quiet: bool = True):
 
 
 def _pick_variant(pool, held: int, shaped: dict, client) -> StableSwap | None:
-    """The variant that reproduces this pool's own `get_dy`, or `None`."""
+    """The variant that reproduces this pool's own `get_dy`, or `None`.
+
+    Both directions, because the parameter under test here is a *rate*, and a
+    rate read from the wrong place or scaled the wrong way is not symmetric: it
+    inflates one leg and deflates the other.  Checking only `0 -> 1` is the one
+    shape of error this reader is most likely to make and least able to see.
+    """
     probes = []
-    for frac in VARIANT_FRACTIONS:
-        dx = max(1, int(shaped["balances"][0] * frac))
-        probes.append(Probe(pool.address, ArcKind.SWAP_STABLE, 0, 1, held, dx))
+    for i, j in ((0, 1), (1, 0)):
+        for frac in VARIANT_FRACTIONS:
+            dx = max(1, int(shaped["balances"][i] * frac))
+            probes.append(Probe(pool.address, ArcKind.SWAP_STABLE, i, j, held, dx))
     truth = client.probe(probes)
     wanted = [(pr, q) for pr, q in zip(probes, truth, strict=True)
               if q.ok and q.value > 0]

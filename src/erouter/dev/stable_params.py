@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from ..core.codec import decode, encode_call
+from ..core.codec import encode_call
 from ..core.stableswap import StableSwap, StableSwapError
 from ..core.transport import Call
 from ..core.types import ArcKind, Probe
@@ -61,6 +61,33 @@ def _stable(pool) -> bool:
     """Whether this pool is worth asking about at all."""
     kind = getattr(pool, "swap_kind", None)
     return kind in (ArcKind.SWAP_STABLE, None) and len(pool.coins) in (2, 3, 4)
+
+
+def _decode_rates(blob: bytes | None, n_coins: int) -> tuple[int, ...]:
+    """`stored_rates()`, whichever array shape the pool returns.
+
+    The ng pools return a `DynArray`, which arrives as an offset, a length and
+    then the items.  The older factory pools return `uint256[N_COINS]`, which
+    for two coins is 64 bytes with no header at all -- and those are precisely
+    the pools where the rate is not the decimal correction, because a plain pool
+    only grew a `stored_rates` when someone attached a rate oracle to it.
+    Demanding a header dropped them in silence and valued ETHx at one ETH: a
+    9.5% error the pool announces and we were not reading.
+
+    Length alone cannot separate the two shapes -- 128 bytes is a two-coin
+    dynamic array and a four-coin fixed one.  A dynamic array announces itself,
+    first word the offset 32 and second its own length, and no rate is ever 32,
+    so read the header where it is there and the bare words where it is not.
+    """
+    if not blob:
+        return ()
+    words = [int.from_bytes(blob[k : k + 32], "big")
+             for k in range(0, len(blob) - 31, 32)]
+    if len(words) >= 2 + n_coins and words[0] == 32 and words[1] == n_coins:
+        return tuple(words[2 : 2 + n_coins])
+    if len(words) == n_coins:
+        return tuple(words)
+    return ()
 
 
 def build_exact_pools(pools, client, *, quiet: bool = True,
@@ -118,7 +145,7 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
     if transport is not None and hasattr(transport, "call_many"):
         wire_calls = [Call(p.address, encode_call("stored_rates()")) for p in wanted]
         for pool, answer in zip(wanted, transport.call_many(wire_calls), strict=True):
-            if answer.ok and len(answer.data) >= 96:
+            if answer.ok and len(answer.data) >= 32 * len(pool.coins):
                 rate_data[pool.address.lower()] = answer.data
 
     built: list[tuple[object, StableSwap, dict]] = []
@@ -133,13 +160,8 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
         if not fee.ok:
             continue
 
-        reported: tuple[int, ...] = ()
-        blob = rate_data.get(pool.address.lower())
-        if blob:
-            try:
-                reported = tuple(decode(["uint256[]"], blob)[0])
-            except Exception:  # noqa: BLE001 -- a pool without the getter
-                reported = ()
+        reported = _decode_rates(rate_data.get(pool.address.lower()),
+                                 len(pool.coins))
 
         # The legacy shape: the rate is only the decimal correction -- except
         # for a base-pool LP, which is worth its virtual price.
