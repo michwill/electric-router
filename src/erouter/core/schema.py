@@ -13,6 +13,7 @@ from typing import Any
 
 from .pipeline import RouteResult
 from .rendermodel import format_units
+from .routecall import SIGNATURE
 
 
 def _loss_bp(result, ledger: dict[str, float] | None, total_bp: float) -> dict:
@@ -46,6 +47,12 @@ def _loss_bp(result, ledger: dict[str, float] | None, total_bp: float) -> dict:
     return out
 
 
+#: `ElectricRouter`, deployed through the canonical CREATE2 proxy, so the
+#: address is a function of the initcode and is the same on every chain.
+#: Empty until it is deployed -- a wrong address here is a burnt transaction.
+ROUTER_ADDRESS = ""
+
+
 def to_json(
     result: RouteResult,
     *,
@@ -55,11 +62,13 @@ def to_json(
     candidates: list[dict] | None = None,
     verified_out: int | None = None,
     ledger: dict[str, float] | None = None,
+    call: Any = None,
 ) -> dict[str, Any]:
     """`amount_out` is the chain's figure where there is one, `modelled_out` the
     model's.  They agree to a fraction of a bp until they do not: `ETH -> ETHx`
     at 241% of reserve modelled 91.15 against 82.50 paid.  `ledger` is the
-    terminal's own, passed in so the two cannot drift.
+    terminal's own, passed in so the two cannot drift.  `call` is the packed
+    `RouteCall`, present only when calldata was asked for.
     """
     route = result.route
     nodes = result.nodes
@@ -111,6 +120,30 @@ def to_json(
         },
         "warnings": result.warnings,
     }
+    if call is not None:
+        payload["call"] = {
+            "signature": SIGNATURE,
+            "to": ROUTER_ADDRESS,
+            "calldata": "0x" + call.calldata(sender=call.receiver).hex(),
+            "amount_in": str(call.amount_in),
+            "token_in": call.token_in,
+            "token_out": call.token_out,
+            "pools": list(call.pools),
+            # Decimal, not hex: each is a packed word and a reader has to be
+            # able to shift it, not just paste it back.
+            "params": [str(word) for word in call.params],
+            "tokens": list(call.tokens),
+            "set_approvals": call.set_approvals,
+            "receiver": call.receiver,
+            "min_out": str(call.min_out),
+            # What the per-leg minimum rates alone promise, which is the number
+            # a caller is actually signing for.
+            "quoted_out": str(call.quoted_out),
+            "guaranteed_out": str(call.guaranteed_out),
+            "guaranteed_out_human": format_units(call.guaranteed_out, dst_dec),
+            "tolerance_bp": round(call.tolerance_bp, 4),
+            "unbounded_legs": list(call.unbounded),
+        }
 
     by_id = {arc.id: arc for arc in result.arcs}
     for index, realized in enumerate(route.legs):

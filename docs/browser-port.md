@@ -1,6 +1,7 @@
 # Porting the router into a Flet frontend
 
-Written for an agent doing the port. Read `theory.md` for what the thing is;
+Written for an agent doing the port. Read `theory.md` for what the thing is,
+and `router.md` if the frontend is going to execute rather than only quote;
 this is only what it takes to run it in a browser.
 
 The target is Flet on Pyodide in a Web Worker, whose runtime dependency list is

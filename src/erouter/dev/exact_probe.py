@@ -337,6 +337,18 @@ class ExactQuoterClient:
             return None
         return model
 
+    def fee_at(self, pool: str, kind, i: int, j: int, dx: int) -> float | None:
+        """What this pool charges on a trade of this size, or `None`.
+
+        The fee a route has to be bounded against is the one the trade itself
+        will pay, not the one two tiny probes measure -- see `core.poolfee`.
+        Only a modelled pool can answer; the rest fall back to the marginal fee.
+        """
+        from ..core.poolfee import charged_fee
+
+        model = self._model(pool, kind, i, j)
+        return None if model is None else charged_fee(model, i, j, dx)
+
     # -- verification, where every leg is a pool we can evaluate --------------
 
     def quote_routes(self, routes, amounts_in, dst_slots):

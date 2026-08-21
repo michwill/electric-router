@@ -14,14 +14,20 @@ not just end to end.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from erouter.core.pipeline import RoutingError, route
 from erouter.core.pools import parse_universe, volatile_pools
 from erouter.core.routecall import ALL, NONE, encode_route
 from erouter.dev import config
+from erouter.dev.exact_probe import ExactQuoterClient
 from erouter.dev.executor import fork
 from erouter.dev.router import deploy, send
+from erouter.dev.stable_params import build_exact_pools
+from erouter.dev.tricrypto_params import build_exact_tricrypto
+from erouter.dev.twocrypto_params import build_exact_twocrypto
 from erouter.dev.universe import read_balances, resolve_dialects, resolve_lp_tokens
 from erouter.dev.wrappers import build_node_map
 
@@ -58,12 +64,30 @@ def universe(pools, quoter_client, chain):
 
 
 @pytest.fixture(scope="module")
-def routes(universe, quoter_client):
+def exact_client(universe, quoter_client):
+    """The client the CLI routes with, because the fee at size needs a model.
+
+    A dynamic fee is a property of the trade, and only a pool the wei-exact
+    gate admitted can be asked what this trade will pay.  Without the models
+    every minimum rate falls back to the marginal fee, which is the case the
+    other assertions here would not notice.
+    """
+    specs, _ = universe
+    return ExactQuoterClient(
+        quoter_client,
+        build_exact_pools(specs, quoter_client),
+        build_exact_twocrypto(specs, quoter_client),
+        build_exact_tricrypto(specs, quoter_client),
+    )
+
+
+@pytest.fixture(scope="module")
+def routes(universe, exact_client):
     specs, nodes = universe
     out = {}
     for name, src, dst, amount in CASES:
         try:
-            out[name] = route(specs, nodes, quoter_client,
+            out[name] = route(specs, nodes, exact_client,
                               src_token=src, dst_token=dst, amount_in=amount)
         except RoutingError as exc:
             out[name] = exc
@@ -224,3 +248,39 @@ def test_a_bound_that_cannot_be_met_stops_the_route(routes, calls, forked, chain
     tampered = replace(call, params=(impossible.pack(), *call.params[1:]))
     report = send(tampered, router=forked, wrapped=chain.wrapped, expect_block=rpc.block)
     assert not report.ok and "minimum rate" in report.error, report.error
+
+
+@pytest.mark.parametrize("name", [c[0] for c in CASES])
+def test_the_bounds_are_set_against_the_fee_this_trade_pays(name, routes):
+    """A dynamic fee is a property of the trade, not of the pool.
+
+    Measured on mainnet TricryptoUSDC: `mid_fee` 3 bp, `out_fee` 30 bp, and the
+    fee it charges runs from 10.5 bp on dust to 29.6 bp at a fifth of reserve.
+    Bounding against the marginal figure would set a leg's minimum rate from a
+    fee nobody is about to pay.
+    """
+    if isinstance(routes[name], RoutingError):
+        pytest.skip(f"no route for {name}")
+    legs = [leg for leg in routes[name].route.legs if not leg.is_conversion]
+    priced = [leg for leg in legs if math.isfinite(leg.fee_frac)]
+    assert priced, f"{name}: not one leg could be priced at its own size"
+    for leg in priced:
+        assert 0.0 <= leg.fee_frac < 0.1, (
+            f"{name}: {leg.target} charges {leg.fee_frac * 1e4:.2f} bp, which "
+            f"is not a fee")
+
+
+def test_a_dynamic_fee_pool_is_not_priced_at_its_marginal_fee(routes):
+    """Somewhere across these routes, the two figures must actually differ."""
+    gaps = []
+    for result in routes.values():
+        if isinstance(result, RoutingError):
+            continue
+        for leg in result.route.legs:
+            if math.isfinite(leg.fee_frac) and math.isfinite(leg.gamma_live):
+                gaps.append(abs(leg.fee_frac - (1 - leg.gamma_live)))
+    if not gaps:
+        pytest.skip("no leg carried both figures")
+    assert max(gaps) > 1e-5, (
+        "every leg's fee at size equalled its marginal fee -- either the models "
+        "are not being asked, or no dynamic-fee pool is on any of these routes")

@@ -1079,8 +1079,51 @@ def _quote(
                      result.impact_reference_out) = measured
                     result.impact_fraction = impact_fraction
 
+    # --- what each leg is really worth at the size it ended up with -------
+    # Last, on the route as finally split, because both answers depend on the
+    # size each leg carries.
+    if result.route is not None:
+        with clock("legs"):
+            result.counters["legs_priced"] = price_legs(result.route, client)
+
     result.price_out_per_in = float(nu[src_node] / nu[dst_node]) if nu[dst_node] else 0.0
     return result
+
+
+def price_legs(route, client) -> int:
+    """Ask each leg's own pool what it pays, and what it charges to pay it.
+
+    Everything else about a route is verified end to end: the total comes back
+    from a chained walk and the per-leg figures are the quadratic's, which is
+    the right division of labour for *choosing* a route.  It is the wrong one
+    for bounding a leg -- a minimum rate set from a modelled rate is a promise
+    about a number nothing checked, and measured on a live 13-leg route those
+    numbers were out by up to 37.9 bp in both directions.
+
+    One batch, because the sizes are already known: the split is final, so
+    every leg can be quoted at once rather than chained.  Free on a pool with
+    an exact model, one round trip otherwise.
+    """
+    legs = [rl for rl in route.legs if rl.amount_in > 0]
+    if not legs:
+        return 0
+    quotes = client.probe([
+        Probe(rl.target, rl.kind, rl.leg.i, rl.leg.j, rl.leg.n, rl.amount_in)
+        for rl in legs
+    ])
+    fee_at = getattr(client, "fee_at", None)
+    priced = 0
+    for realized, quote in zip(legs, quotes, strict=True):
+        if quote.ok and quote.value > 0:
+            realized.verified_out = int(quote.value)
+            priced += 1
+        if fee_at is None or realized.is_conversion:
+            continue
+        fee = fee_at(realized.target.lower(), realized.kind, realized.leg.i,
+                     realized.leg.j, realized.amount_in)
+        if fee is not None:
+            realized.fee_frac = float(fee)
+    return priced
 
 
 def scout_priority(route) -> float:

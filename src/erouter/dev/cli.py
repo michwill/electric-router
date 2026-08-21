@@ -1308,11 +1308,15 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
     if getattr(args, "timings", False):
         print(_stage_line(result, elapsed))
 
+    call = None
+    if getattr(args, "calldata", None):
+        call = _report_calldata(result, args, nodes, dst, load.pools)
+
     if args.json:
         payload = to_json(
             result, chain=chain.name, chain_id=chain.chain_id, block=rpc.block,
             candidates=diagram.candidates, verified_out=result.verified_out,
-            ledger=ledger,
+            ledger=ledger, call=call,
         )
         text = json.dumps(payload, indent=2)
         if args.json == "-":
@@ -1358,6 +1362,59 @@ def _token_holders(pools, token: str, avoid=()) -> list[str]:
     # caveat".  `_fund` names whichever it used.
     return [a for _, a in sorted(off_route, reverse=True)] + \
            [a for _, a in sorted(on_route, reverse=True)]
+
+
+def _report_calldata(result, args, nodes, dst, pools):
+    """Pack the winning route for `ElectricRouter` and print what it commits to.
+
+    The per-leg minimum rates are the point, so each is shown against the fee
+    that leg is measured to be paying: a bound only means something next to the
+    number it came from.
+    """
+    from ..core.pools import volatile_pools
+    from ..core.routecall import EncodingError, encode_route, leg_fee, leg_out
+
+    if result.route is None or not result.route.legs:
+        print("  calldata: nothing to send (the pair is a node merge)")
+        return None
+    min_out = 0
+    if args.min_out_bp is not None:
+        min_out = int(result.route.modelled_out * (1 - args.min_out_bp / 1e4))
+    try:
+        call = encode_route(result.route, receiver=args.receiver,
+                            volatile=volatile_pools(pools), naming=args.calldata,
+                            min_out=min_out, quoted_out=result.verified_out)
+    except EncodingError as exc:
+        print(f"  {BAD} calldata: {exc}")
+        return None
+
+    decimals, symbol = nodes.decimals(dst), nodes.symbol(dst)
+    data = call.calldata(sender=args.receiver)
+    print(f"\n  ElectricRouter.execute  ·  {len(data):,} bytes  ·  "
+          f"{len(call.pools)} leg(s)  ·  {len(call.tokens)} token(s) named, "
+          f"the rest read on chain")
+    print(f"    guaranteed  {call.guaranteed_out / 10**decimals:>22,.6f} {symbol}"
+          f"   {call.tolerance_bp:.2f} bp under the quote")
+    if min_out:
+        print(f"    min_out     {min_out / 10**decimals:>22,.6f} {symbol}")
+    print(f"\n  {'pool':<42}{'i>j':>6}{'frac':>9}{'fee':>10}{'granted':>10}"
+          f"{'model':>10}")
+    for step, leg in zip(call.steps(), result.route.legs, strict=True):
+        name = (result.pool_names.get(step.pool.lower()) or step.pool)[:40]
+        rate = leg_out(leg) / leg.amount_in if leg.amount_in else 0.0
+        granted = (1 - (step.min_rate / 1e18) / rate) * 1e4 if rate else 0.0
+        # How far the route's own modelled figure sat from the pool's answer.
+        # It has no bearing on the bound -- that is set against the pool -- and
+        # it is where a leg would have been mis-bounded if it did.
+        drift = (leg.amount_out / leg_out(leg) - 1) * 1e4 if leg_out(leg) else 0.0
+        print(f"  {name:<42}{f'{step.i}>{step.j}':>6}"
+              f"{step.frac / 1e16:>8.2f}%{leg_fee(leg) * 1e4:>8.2f}bp"
+              f"{granted:>8.2f}bp{drift:>+8.2f}bp")
+    for index in call.unbounded:
+        print(f"  {WARN} leg {index} carries no minimum rate: the pair's rate in "
+              f"raw units falls below 1e-18, so only min_out guards it")
+    print(f"\n  0x{data.hex()}")
+    return call
 
 
 def _report_execution(result, chain, rpc, nodes, dst, pools) -> None:
@@ -2514,6 +2571,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="what one failed attempt costs, in basis points of the trade "
              "(default 1.0): gas plus whatever the price did while the user "
              "resubmitted. Raise it to buy safety with price")
+    route_cmd.add_argument(
+        "--calldata", nargs="?", const="needed", choices=["needed", "none", "all"],
+        help="emit calldata for ElectricRouter.execute. The argument says which "
+             "tokens to name rather than let the router read off the pool: "
+             "'none' is the shortest call there is, 'all' the cheapest to run, "
+             "'needed' (the default) names only what has no getter")
+    route_cmd.add_argument(
+        "--receiver", default="",
+        help="who the router pays (default: whoever sends the transaction, "
+             "which also shortens the calldata)")
+    route_cmd.add_argument(
+        "--min-out-bp", type=float, default=None,
+        help="an end-to-end bound as well, this far below the modelled output. "
+             "Every leg already carries its own minimum rate; this is the one "
+             "that bounds the whole trade")
     route_cmd.set_defaults(func=cmd_route)
 
     # Every subcommand takes it, so it is added in one place rather than

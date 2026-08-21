@@ -283,8 +283,7 @@ def test_the_bounds_promise_something_and_it_is_computed():
     legs = [leg(0, 1, 1000, 990, gamma=1 - 0.01),
             leg(1, 2, 990, 980, target=POOL_B, gamma=1 - 0.01)]
     r = route(legs, amount_in=1000, dst_slot=2)
-    r.modelled_out = 980
-    call = rc.encode_route(r, receiver=TOKEN[5])
+    call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=980)
     assert 0 < call.guaranteed_out < 980
     # Two legs, each granted a fifth of a 100 bp fee: about 40 bp in total.
     assert call.tolerance_bp == pytest.approx(40, abs=1.0)
@@ -313,6 +312,6 @@ def test_a_deeper_route_promises_less():
     calls = []
     for legs, dst in ((one, 1), (two, 2)):
         r = route(legs, amount_in=1000, dst_slot=dst)
-        r.modelled_out = legs[-1].amount_out
-        calls.append(rc.encode_route(r, receiver=TOKEN[5]))
+        calls.append(rc.encode_route(r, receiver=TOKEN[5],
+                                     quoted_out=legs[-1].amount_out))
     assert calls[1].tolerance_bp > calls[0].tolerance_bp

@@ -66,6 +66,19 @@ class RealizedLeg:
     #: size rather than anything fitted: it is what lets a topology be weighed
     #: without going through the split the model happened to give it.
     tvl_usd: float = 0.0
+    #: What this leg's own pool says it pays at this size, at the pinned block.
+    #: `amount_out` is the quadratic's answer and is a *choice*, accurate enough
+    #: to pick pools and split flow and no better -- measured against the exact
+    #: models on a live 13-leg route, its legs were out by up to 37.9 bp, in
+    #: both directions.  Anything that has to be true of one leg rather than of
+    #: the route reads this instead.  Zero where nothing priced it.
+    verified_out: int = 0
+    #: What this leg's own size pays in fees, read back out of the pool's exact
+    #: model.  Preferred over `gamma_live` for a minimum rate because a dynamic
+    #: fee climbs with the trade: measured, a stableswap-ng pool taken to 90% of
+    #: its reserve charges 11.09 bp against a nominal 10.00.  NaN where no model
+    #: could price the leg.
+    fee_frac: float = math.nan
     #: The pool's measured retention, `sqrt(a_forward * a_reverse)`, so a
     #: minimum rate can be set from the fee the pool is charging right now
     #: rather than from a fee parameter nobody read.  NaN where the opposite

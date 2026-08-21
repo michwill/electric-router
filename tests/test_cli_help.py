@@ -34,3 +34,17 @@ def test_every_subcommand_is_covered():
     # A guard on the guard: if the parametrisation silently found no
     # subcommands, every case above would pass while testing nothing.
     assert len(PARSERS) > 5
+
+
+def test_the_calldata_flag_takes_a_naming_mode_or_none_at_all():
+    """`--calldata` alone has to work: the mode is the exception, not the rule."""
+    from erouter.core.routecall import ALL, NEEDED, NONE
+
+    parser = dict(_subparsers(build_parser()))["route"]
+    base = ["--from", "USDC", "--to", "WETH", "--amount", "1"]
+    assert parser.parse_args(base).calldata is None
+    assert parser.parse_args([*base, "--calldata"]).calldata == NEEDED
+    for mode in (NONE, ALL):
+        assert parser.parse_args([*base, "--calldata", mode]).calldata == mode
+    with pytest.raises(SystemExit):
+        parser.parse_args([*base, "--calldata", "sometimes"])

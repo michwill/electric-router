@@ -146,11 +146,13 @@ class RouteCall:
     #: here rather than made the caller's problem to re-derive.
     token_in: str = ""
     token_out: str = ""
-    #: What the per-leg bounds alone promise, and what the route was modelled
-    #: to make.  The gap between them is the slippage the caller is granting;
+    #: What the per-leg bounds alone promise, against what the route was
+    #: quoted at.  The gap between them is the slippage the caller is granting;
     #: `min_out` is where they can take some of it back.
     guaranteed_out: int = 0
-    modelled_out: int = 0
+    #: The chained walk's figure where there was one, the model's otherwise --
+    #: the number the user was shown, so the number the tolerance is against.
+    quoted_out: int = 0
     #: Legs whose bound rounded to zero because the pair's raw-unit rate is
     #: below 1e-18.  Their neighbours and `min_out` are all that guards them.
     unbounded: tuple[int, ...] = ()
@@ -158,16 +160,22 @@ class RouteCall:
     def calldata(self, sender: str = "") -> bytes:
         """The shortest entry point that still expresses this call.
 
-        `sender` is who will be sending it: naming it lets a call paying its
-        own sender drop the receiver word, since that is the default.  Leave it
-        empty and the receiver is always sent.
+        An empty `receiver` means "whoever sends it", which is the contract's
+        own default and therefore a word that does not have to be sent.  Naming
+        `sender` buys the same saving for a call that pays its own sender.
         """
+        pays_the_sender = not self.receiver or (
+            bool(sender) and self.receiver.lower() == sender.lower())
+        if not self.receiver and self.min_out:
+            raise EncodingError(
+                "min_out needs a receiver: a call cannot default the one and "
+                "send the other")
         args = [self.amount_in, list(self.pools), list(self.params), self.set_approvals,
                 list(self.tokens), self.receiver, self.min_out]
         keep = 7
         if self.min_out == 0:
             keep = 6
-            if sender and self.receiver.lower() == sender.lower():
+            if pays_the_sender:
                 keep = 5
                 if not self.tokens:
                     keep = 4
@@ -175,10 +183,10 @@ class RouteCall:
 
     @property
     def tolerance_bp(self) -> float:
-        """How far below the model the route may land without reverting."""
-        if not self.modelled_out:
+        """How far below the quote the route may land without reverting."""
+        if not self.quoted_out:
             return 0.0
-        return (1.0 - self.guaranteed_out / self.modelled_out) * 1e4
+        return (1.0 - self.guaranteed_out / self.quoted_out) * 1e4
 
     def steps(self) -> list[Step]:
         return [unpack(word, pool) for pool, word in zip(self.pools, self.params, strict=True)]
@@ -212,15 +220,35 @@ def fractions(route: RealizedRoute) -> list[int]:
         out.append(frac)
         balances[src] = have - take
         dst = realized.leg.dst_slot
-        balances[dst] = balances.get(dst, 0) + realized.amount_out
+        balances[dst] = balances.get(dst, 0) + leg_out(realized)
     return out
+
+
+def leg_out(realized) -> int:
+    """What this leg produces: its own pool's answer, or the model's.
+
+    The two differ by tens of basis points on a cryptoswap leg, which does not
+    matter for a share of a node -- both branches out of it move together -- and
+    matters entirely for a bound on the leg itself.
+    """
+    return realized.verified_out or realized.amount_out
 
 
 # --------------------------------------------------------------- min rates
 
 
 def leg_fee(realized) -> float:
-    """What the pool is charging, measured, or zero where nothing measured it."""
+    """What this leg pays in fees, at its own size where that is known.
+
+    `fee_frac` is the pool's own model charging the real trade; `gamma_live` is
+    two tiny probes measuring the marginal fee.  They agree on a fixed-fee pool
+    and diverge on a dynamic one exactly when it matters -- the trade that skews
+    the pool is the trade the fee climbs for.  Zero when neither is available,
+    which leaves the leg on the floor rather than on a guess.
+    """
+    at_size = realized.fee_frac
+    if math.isfinite(at_size) and 0.0 <= at_size < 1.0:
+        return at_size
     gamma = realized.gamma_live
     if not math.isfinite(gamma) or not 0.0 < gamma <= 1.0:
         return 0.0
@@ -247,11 +275,11 @@ def min_rates(
     for k, realized in enumerate(route.legs):
         floor = volatile_floor_bp if realized.target.lower() in loose else floor_bp
         tol = min(1.0, max(fee_share * leg_fee(realized), floor / 1e4))
-        if realized.amount_in <= 0 or realized.amount_out <= 0:
+        if realized.amount_in <= 0 or leg_out(realized) <= 0:
             rates.append(0)
             unbounded.append(k)
             continue
-        rate = realized.amount_out * ONE // realized.amount_in
+        rate = leg_out(realized) * ONE // realized.amount_in
         bound = rate - rate * round(tol * 1e9) // 10**9
         if bound > MAX_RATE:
             raise EncodingError(
@@ -340,6 +368,7 @@ def encode_route(
     set_approvals: bool = True,
     min_out: int = 0,
     amount_in: int | None = None,
+    quoted_out: int | None = None,
     volatile: Collection[str] = (),
     naming: str = NEEDED,
     **policy,
@@ -408,6 +437,6 @@ def encode_route(
         token_in=route.legs[0].token_in.lower(),
         token_out=route.legs[-1].token_out.lower(),
         guaranteed_out=guaranteed_out(route, fracs, rates),
-        modelled_out=route.modelled_out,
+        quoted_out=route.modelled_out if quoted_out is None else quoted_out,
         unbounded=tuple(unbounded),
     )

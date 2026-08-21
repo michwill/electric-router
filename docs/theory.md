@@ -8,7 +8,8 @@ divergence here is one a measurement forced.
 [`quadratic-flow-router.md`](quadratic-flow-router.md) is the design spec and
 stays the reference for derivations and for the `§` numbers the code cites.
 This document is what to read first, and what to trust where the two disagree.
-[`browser-port.md`](browser-port.md) is what it takes to run this in Flet.
+[`browser-port.md`](browser-port.md) is what it takes to run this in Flet, and
+[`router.md`](router.md) what it takes to settle a route on chain.
 
 ---
 
@@ -87,6 +88,8 @@ size check      recalibrate by secant where θ > 3% (§12.1)
 candidates      C₀ · drops · pins · scout · split optimiser
 verify          every candidate quoted on-chain at the pinned block
 refit           at the realised size, re-solve
+legs            the winner's legs re-quoted one by one at their final
+                sizes, which is what a per-leg bound has to be set against
 ```
 
 Gas and revert risk are priced into candidate selection, not bolted on
