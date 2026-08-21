@@ -45,6 +45,61 @@
 
 from ethereum.ercs import IERC20
 
+# One pool address wears whichever of these the leg's kind says it does.  A
+# declared interface buys three things a hand-built `raw_call` does not: the
+# compiler writes the calldata, the signature is checked where it is written,
+# and the call reverts on an address with no code instead of quietly doing
+# nothing.  None of them declares a return value -- the 2021 pools have none
+# and the ng ones return `dy`, and ignoring it is what makes one call site
+# serve both.
+
+
+interface StablePool:
+    def exchange(i: int128, j: int128, dx: uint256, min_dy: uint256): payable
+    def remove_liquidity_one_coin(burn: uint256, j: int128, min_dy: uint256): nonpayable
+
+
+interface CryptoPool:
+    # Only the five-argument spelling: the four-argument one has to be tried
+    # rather than called, so it stays a `raw_call` below.
+    def exchange(i: uint256, j: uint256, dx: uint256, min_dy: uint256,
+                 use_eth: bool): payable
+    def remove_liquidity_one_coin(burn: uint256, j: uint256, min_dy: uint256): nonpayable
+
+
+interface DynPool:
+    def add_liquidity(amounts: DynArray[uint256, MAX_COINS], min_mint: uint256): nonpayable
+
+
+interface Vault:
+    def deposit(assets: uint256, receiver: address): nonpayable
+    def redeem(shares: uint256, receiver: address, owner: address): nonpayable
+
+
+interface WstETH:
+    def wrap(amount: uint256): nonpayable
+    def unwrap(amount: uint256): nonpayable
+
+
+interface LendingToken:
+    def mint(amount: uint256): nonpayable
+    def redeem(amount: uint256): nonpayable
+
+
+interface Staking:
+    def submit(referral: address): payable
+
+
+interface Wrapper:
+    def deposit(): payable
+    def withdraw(amount: uint256): nonpayable
+
+
+interface Adapter:
+    # A 1:1 token converter wearing the wrapper's kind: gnosis turns USDC.e
+    # into USDC through one, and it takes an amount and no value.
+    def deposit(amount: uint256): nonpayable
+
 MAX_LEGS: public(constant(uint256)) = 32
 MAX_TOKENS: public(constant(uint256)) = 31
 MAX_COINS: public(constant(uint256)) = 8
@@ -357,15 +412,8 @@ def _run(step: Step, dx: uint256) -> uint256:
     before: uint256 = self._held(step.token_out)
 
     if kind == SWAP_STABLE:
-        raw_call(
-            step.pool,
-            concat(
-                method_id("exchange(int128,int128,uint256,uint256)"),
-                abi_encode(
-                    convert(step.i, int128), convert(step.j, int128), dx, empty(uint256)
-                ),
-            ),
-        )
+        extcall StablePool(step.pool).exchange(
+            convert(step.i, int128), convert(step.j, int128), dx, 0)
 
     elif kind == SWAP_CRYPTO:
         ok: bool = False
@@ -389,31 +437,16 @@ def _run(step: Step, dx: uint256) -> uint256:
         # selector in `__default__`, so success is not the discriminator --
         # whether anything moved is.
         if not ok or self._held(step.token_out) == before:
-            raw_call(
-                step.pool,
-                concat(
-                    method_id("exchange(uint256,uint256,uint256,uint256,bool)"),
-                    abi_encode(
-                        convert(step.i, uint256),
-                        convert(step.j, uint256),
-                        dx,
-                        empty(uint256),
-                        False,
-                    ),
-                ),
-            )
+            extcall CryptoPool(step.pool).exchange(
+                convert(step.i, uint256), convert(step.j, uint256), dx, 0, False)
 
     elif kind == DEPOSIT_DYN:
-        raw_call(
-            step.pool,
-            concat(
-                method_id("add_liquidity(uint256[],uint256)"),
-                abi_encode(convert(64, uint256)),
-                abi_encode(empty(uint256)),
-                abi_encode(convert(step.n, uint256)),
-                self._amounts(step.i, step.n, dx),
-            ),
-        )
+        amounts: DynArray[uint256, MAX_COINS] = []
+        for k: uint256 in range(MAX_COINS):
+            if k >= convert(step.n, uint256):
+                break
+            amounts.append(dx if k == convert(step.i, uint256) else 0)
+        extcall DynPool(step.pool).add_liquidity(amounts, 0)
 
     elif kind == DEPOSIT_FIXED or kind == DEPOSIT_FIXED_NOFLAG:
         assert step.n >= 2 and step.n <= 8, "coin count outside 2..8"
@@ -427,66 +460,42 @@ def _run(step: Step, dx: uint256) -> uint256:
         )
 
     elif kind == WITHDRAW_STABLE:
-        raw_call(
-            step.pool,
-            concat(
-                method_id("remove_liquidity_one_coin(uint256,int128,uint256)"),
-                abi_encode(dx, convert(step.j, int128), empty(uint256)),
-            ),
-        )
+        extcall StablePool(step.pool).remove_liquidity_one_coin(
+            dx, convert(step.j, int128), 0)
 
     elif kind == WITHDRAW_CRYPTO:
-        raw_call(
-            step.pool,
-            concat(
-                method_id("remove_liquidity_one_coin(uint256,uint256,uint256)"),
-                abi_encode(dx, convert(step.j, uint256), empty(uint256)),
-            ),
-        )
+        extcall CryptoPool(step.pool).remove_liquidity_one_coin(
+            dx, convert(step.j, uint256), 0)
 
     elif kind == ERC4626_DEPOSIT:
-        raw_call(
-            step.pool,
-            concat(method_id("deposit(uint256,address)"), abi_encode(dx, self)),
-        )
+        extcall Vault(step.pool).deposit(dx, self)
 
     elif kind == ERC4626_REDEEM:
-        raw_call(
-            step.pool,
-            concat(
-                method_id("redeem(uint256,address,address)"), abi_encode(dx, self, self)
-            ),
-        )
+        extcall Vault(step.pool).redeem(dx, self, self)
 
     elif kind == WSTETH_WRAP:
-        raw_call(step.pool, concat(method_id("wrap(uint256)"), abi_encode(dx)))
+        extcall WstETH(step.pool).wrap(dx)
 
     elif kind == WSTETH_UNWRAP:
-        raw_call(step.pool, concat(method_id("unwrap(uint256)"), abi_encode(dx)))
+        extcall WstETH(step.pool).unwrap(dx)
 
     elif kind == LEND_MINT:
-        raw_call(step.pool, concat(method_id("mint(uint256)"), abi_encode(dx)))
+        extcall LendingToken(step.pool).mint(dx)
 
     elif kind == LEND_REDEEM:
-        raw_call(step.pool, concat(method_id("redeem(uint256)"), abi_encode(dx)))
+        extcall LendingToken(step.pool).redeem(dx)
 
     elif kind == STAKE_NATIVE:
-        raw_call(
-            step.pool,
-            concat(method_id("submit(address)"), abi_encode(empty(address))),
-            value=dx,
-        )
+        extcall Staking(step.pool).submit(empty(address), value=dx)
 
     elif kind == WRAP_NATIVE:
         if step.token_in == NATIVE:
-            raw_call(step.pool, method_id("deposit()"), value=dx)
+            extcall Wrapper(step.pool).deposit(value=dx)
         else:
-            # A 1:1 token adapter wearing the same kind: gnosis converts USDC.e
-            # to USDC through one, and it takes `deposit(uint256)` and no value.
-            raw_call(step.pool, concat(method_id("deposit(uint256)"), abi_encode(dx)))
+            extcall Adapter(step.pool).deposit(dx)
 
     elif kind == UNWRAP_NATIVE:
-        raw_call(step.pool, concat(method_id("withdraw(uint256)"), abi_encode(dx)))
+        extcall Wrapper(step.pool).withdraw(dx)
 
     else:
         raise "unknown leg kind"
