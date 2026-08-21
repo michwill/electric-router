@@ -243,7 +243,7 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
             failed += 1
             continue
         ok += 1
-        note = "; ".join(report.warnings)[:36]
+        note = "; ".join(report.warnings)[:52]
         print(f"{label:<24}{len(result.route.legs):>5}  {short:<30}"
               f"{report.drift_bp:>+10.4f}{report.gas:>11,}  ok"
               f"{'  ' + note if note else ''}")

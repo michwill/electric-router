@@ -274,8 +274,8 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
     except Exception as exc:
         first = str(exc)
         result.warnings.append(
-            f"balance slot not found for {token.address}, adjusting supply "
-            f"instead -- an LP token priced this way is diluted: {exc}"[:200]
+            f"supply adjusted to fund {token.address}, whose balance slot was "
+            f"not found -- an LP token priced this way is diluted: {exc}"[:200]
         )
     try:
         boa.deal(token, who, amount)
@@ -303,10 +303,10 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
             continue
         if token.balanceOf(who) >= amount:
             result.warnings.append(
-                f"{token.address} could not be dealt ({first[:60]}); funded by "
-                f"transfer from {holder}, which leaves that holder short -- if "
-                f"the route trades through it, the execution saw reserves the "
-                f"quote did not")
+                f"funded by transfer from {holder}: {token.address} has no "
+                f"findable balance slot ({first[:60]}).  That holder is left "
+                f"short -- if the route trades through it, the execution saw "
+                f"reserves the quote did not")
             return
     raise RuntimeError(
         f"cannot fund {token.address}: boa.deal found no balance slot and no "
