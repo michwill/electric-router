@@ -147,15 +147,17 @@ exact model that costs arithmetic; otherwise one round trip for the route.
 `erouter.core.routecall.min_rates` grants each leg
 
 ```
-tolerance = min(CAP_BP, max(FEE_SHARE * fee, FLOOR_BP))
+tolerance = max(FEE_SHARE * fee, floor)
 ```
 
-with `FEE_SHARE = 0.2`, `CAP_BP = 5`, `FLOOR_BP = 0.1`.  The floor is not
-slippage at all -- it is room for the wei a wrap or a rebasing token rounds
-away.  The cap is: a pool charging 140 bp would otherwise buy 28 bp of room,
-which is far more than that leg is worth protecting for.  Five bp was a *floor*
-here once, for volatile pairs; it granted a 1 bp pool twenty-five times what
-the fee rule does, and it granted it to whoever front-ran the trade.
+with `FEE_SHARE = 0.2`, `floor` of 5 bp on a volatile pair and 0.1 bp
+otherwise.  The 0.1 bp is not slippage at all -- it is room for the wei a wrap
+or a rebasing token rounds away.  The 5 bp is: a pair whose price genuinely
+moves between the quote and the block it lands in needs the room or it reverts
+on honest movement.  `volatile` is passed in as a set of pool addresses rather
+than inferred, because nothing in an arc distinguishes a pegged pair from an
+oraclised stableswap holding a volatile one -- and that second shape is the one
+that rugs on broadcast.
 
 **`fee` is the least the pool can charge, not what the leg pays.**  That is the
 whole of it: the attacker front-runs and unwinds in small, balanced trades and
@@ -163,39 +165,43 @@ is charged near `mid_fee`, while the leg they wrap around pays the dynamic fee
 at its own size.  Measured on TricryptoUSDC, 3 bp against 13 bp -- so bounding
 on the larger hands over the difference.  `core.poolfee.floor_fee` reads it off
 the model: `min(mid_fee, out_fee)` for the cryptoswaps, and the nominal fee for
-stableswap, whose off-peg multiplier only ever raises it.
+stableswap, whose off-peg multiplier only ever raises it.  `charged_fee`
+measures the other one, and is what the CLI shows.
 
 Everything here is computed off chain and arrives as `min_rate` in the packed
-word.  The router reads no oracle and re-derives no price; the solver's own
+word.  The router reads no oracle and re-derives no price: the solver's own
 spot quote for that leg, minus this discount, is the bound.
 
-### Whether a sandwich pays is decided by the leg, not by the bound
+### What it was measured to buy
 
-The attacker pays the fee twice on their own size and is paid the price
-displacement the *victim* causes, so with `s` the front-run, `T` the pool and
-`v` the victim's trade:
+Sandwiching the deployed TricryptoUSDC on a fork -- real contract, real dynamic
+fee -- with the bound at `0.2 * mid_fee` and no floor, and **gas free**, so
+nothing but the bound is doing the work.  The attack is three swaps on one
+pool: the attacker buys, the victim buys, the attacker sells back what it
+bought, and takes its profit in the token the victim was selling.
 
-```
-gain = (s/T) * v      cost = 2 * fee * s      profit = s * (v/T - 2 * fee)
-```
+| victim | % of pool | granted | max front-run | attacker | as bp of the trade |
+|---|---|---|---|---|---|
+| 100 | 0.01% | 0.60 bp | 56 | **−0.07** | −6.82 bp |
+| 1,000 | 0.07% | 0.60 bp | 54 | **−0.02** | −0.15 bp |
+| 5,000 | 0.33% | 0.60 bp | 50 | +0.22 | +0.43 bp |
+| 15,000 | 0.98% | 0.60 bp | 46 | +0.79 | +0.52 bp |
+| 100,000 | 6.55% | 0.60 bp | 46 | +6.19 | +0.62 bp |
+| 600,000 | 39.30% | 0.60 bp | 53 | +49.73 | +0.83 bp |
 
-The sign is set by the leg's own price impact against **twice the pool's fee**,
-and `t` is nowhere in it -- `t` bounds `s`, which scales the profit without
-changing its sign.  So:
+Two things to read off it.  **The front-run ceiling barely moves** -- about 50
+USDC across four orders of magnitude of victim -- because the room the bound
+grants is a price move, and a price move is a function of the attacker's size
+alone.  So an attacker's capital is capped by the bound while their take scales
+with the trade, which is why gas settles it at the small end: two extra
+transactions cost about a dollar, and the attack does not clear that until
+roughly a $20,000 leg.  **And the take converges on the tolerance** -- 0.6 to
+0.8 bp against 0.60 bp granted, the two differing only because profit is in
+USDC and the victim's loss is in WETH at a rate the attack moved.
 
-**A leg flatter than twice its fee cannot be sandwiched at all.**  The round
-trip loses money whatever the victim tolerates.  This is what splitting a route
-buys, and on a stableswap it is bought very cheaply: measured on live mainnet
-routes, *every* stableswap leg came in under the line -- 0.11 bp of impact at
-2.9% of the pool against a 3 bp doubled fee, 0.10 bp at 5.95%.  The invariant is
-flat; there is nothing to displace.
-
-**A leg steeper than that is attackable, and then `t` is the cap.**  Ten of
-thirty-one pool legs across four live routes sat above the line, all of them
-cryptoswap: TricryptoUSDC at 88 bp of impact against a 26 bp doubled fee,
-USD-BTC-ETH at 85 against 24.  Note it is the *low-fee* cryptoswaps that are
-exposed -- TricryptoUSDT charges 69 bp and is out of reach at the same 0.8% of
-reserve.  No tolerance fixes those; only a smaller leg does.
+The volatile floor is the same table with eight times the room.  That is the
+accepted trade for a pair that would otherwise revert on honest movement, and
+the reason it is granted to those pairs and to nothing else.
 
 ### What the bound guarantees
 

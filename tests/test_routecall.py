@@ -153,11 +153,31 @@ def test_a_thin_fee_gets_a_thin_bound_whatever_the_pair():
     assert rates[0] == pytest.approx(ONE * (1 - 0.2 * 1e-4), rel=1e-9)
 
 
-def test_a_fat_fee_is_capped_rather_than_granted_in_full():
-    """A 100 bp pool would otherwise buy 20 bp of slippage on the fee rule."""
+def test_a_fat_fee_buys_room_in_proportion():
+    """A 100 bp pool grants 20 bp, and costs 200 bp to sandwich."""
     legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 0.01)]
     rates, _ = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
-    assert rates[0] == pytest.approx(ONE * (1 - rc.CAP_BP / 1e4), rel=1e-9)
+    assert rates[0] == pytest.approx(ONE * (1 - 0.2 * 0.01), rel=1e-9)
+
+
+def test_a_volatile_pair_gets_a_floor_and_a_pegged_one_does_not():
+    """5 bp is the allowance for a price that moves on its own between the
+    quote and the block, so it is granted where prices do that and nowhere
+    else."""
+    legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 1e-4)]
+    tight, _ = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
+    loose, _ = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1),
+                            volatile=[POOL_A])
+    assert tight[0] == pytest.approx(ONE * (1 - 0.2 * 1e-4), rel=1e-9)
+    assert loose[0] == pytest.approx(ONE * (1 - rc.VOLATILE_FLOOR_BP / 1e4), rel=1e-9)
+
+
+def test_a_fee_past_the_floor_ignores_it():
+    """Above 25 bp the fee rule already grants more than 5 bp."""
+    legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 0.01)]
+    both = [rc.min_rates(route(legs, amount_in=10**18, dst_slot=1), volatile=v)[0][0]
+            for v in ((), [POOL_A])]
+    assert both[0] == both[1]
 
 
 def test_the_bound_is_set_from_the_least_the_pool_can_charge():
@@ -299,8 +319,8 @@ def test_the_bounds_promise_something_and_it_is_computed():
     r = route(legs, amount_in=one, dst_slot=2)
     call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=out)
     assert 0 < call.guaranteed_out < out
-    # Two legs on 100 bp pools, each capped at 5 bp: about 10 bp in total.
-    assert call.tolerance_bp == pytest.approx(2 * rc.CAP_BP, abs=0.1)
+    # Two legs on 100 bp pools, each granted a fifth: about 40 bp in total.
+    assert call.tolerance_bp == pytest.approx(40.0, abs=0.5)
 
 
 def test_the_promise_matches_running_the_bounds_by_hand():

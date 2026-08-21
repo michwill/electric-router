@@ -57,6 +57,17 @@ def registry_key(pool_type: str | None) -> str:
     return (pool_type or "").lower().replace("_", "-")
 
 
+def volatile_pools(pools) -> set[str]:
+    """Pools whose pair is not a peg, for sizing a route's slippage floor.
+
+    The registry class, because nothing in an arc distinguishes a pegged pair
+    from an oraclised stableswap holding a volatile one -- which is precisely
+    the shape of the pools that rug on broadcast, and precisely why those are
+    excluded by address rather than by inference.
+    """
+    return {p.address.lower() for p in pools if p.key in CRYPTO_POOL_TYPES}
+
+
 
 @dataclass(frozen=True, slots=True)
 class Coin:

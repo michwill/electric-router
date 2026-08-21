@@ -19,7 +19,7 @@ import math
 import pytest
 
 from erouter.core.pipeline import RoutingError, route
-from erouter.core.pools import parse_universe
+from erouter.core.pools import parse_universe, volatile_pools
 from erouter.core.routecall import ALL, NONE, encode_route
 from erouter.dev import config
 from erouter.dev.exact_probe import ExactQuoterClient
@@ -95,13 +95,19 @@ def routes(universe, exact_client):
 
 
 @pytest.fixture(scope="module")
-def calls(routes):
+def volatile(universe):
+    return volatile_pools(universe[0])
+
+
+@pytest.fixture(scope="module")
+def calls(routes, volatile):
     receiver = "0x" + "11" * 20
     out = {}
     for name, result in routes.items():
         if isinstance(result, RoutingError):
             continue
-        out[name] = encode_route(result.route, receiver=receiver)
+        out[name] = encode_route(result.route, receiver=receiver,
+                                 volatile=volatile)
     return out
 
 

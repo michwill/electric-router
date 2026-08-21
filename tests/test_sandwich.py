@@ -31,7 +31,7 @@ from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
 
 from erouter.core.poolfee import charged_fee
 from erouter.core.realize import RealizedLeg, RealizedRoute
-from erouter.core.routecall import CAP_BP, FEE_SHARE, FLOOR_BP, ONE, min_rates
+from erouter.core.routecall import FEE_SHARE, FLOOR_BP, ONE, VOLATILE_FLOOR_BP, min_rates
 from erouter.core.stableswap import StableSwap
 from erouter.core.types import ArcKind, Leg
 
@@ -75,17 +75,18 @@ def stable(balances=(10**24, 10**24), fee=4 * 10**6, dynamic=0) -> StableSwap:
 # ------------------------------------------------------- the policy itself
 
 
-def bound_for(amount_in: int, quoted_out: int, fee_frac: float) -> int:
+def bound_for(amount_in: int, quoted_out: int, fee_frac: float,
+              *, volatile: bool = False) -> int:
     """The `min_rate` the router would carry, from the shipping policy."""
     leg = RealizedLeg(
         leg=Leg(target=POOL, kind=ArcKind.SWAP_STABLE),
         kind=ArcKind.SWAP_STABLE, target=POOL,
         token_in="0x" + "01" * 20, token_out="0x" + "02" * 20,
         amount_in=amount_in, amount_out=quoted_out, verified_out=quoted_out,
-        fee_frac=fee_frac,
+        fee_frac=fee_frac, fee_floor=fee_frac,
     )
     route = RealizedRoute(legs=[leg], amount_in=amount_in, dst_slot=1)
-    return min_rates(route)[0][0]
+    return min_rates(route, volatile=[POOL] if volatile else [])[0][0]
 
 
 def settles(dx: int, dy: int, min_rate: int) -> bool:
@@ -169,28 +170,32 @@ def test_extraction_grows_with_the_tolerance_and_with_nothing_else():
 
 
 @pytest.mark.parametrize("fee_bp", [0.14, 0.5, 1.0, 4.0, 30.0, 100.0, 300.0])
-def test_the_bound_is_a_fifth_of_the_fee_between_a_floor_and_a_cap(fee_bp):
-    """Whatever the pair is, whatever the pool is: a fifth of what it charges.
-
-    There was a 5 bp *floor* here once, for pairs whose price moves between
-    quote and block.  It granted a 1 bp pool twenty-five times what the fee
-    rule does, and it granted it to whoever front-ran the trade.  Five bp is
-    now the ceiling instead, which is the opposite thing.
-    """
+def test_the_bound_is_a_fifth_of_the_fee(fee_bp):
+    """A fifth of the least the pool can charge, floored only by rounding."""
     victim, quote = 10**22, 10**22
     rate = bound_for(victim, quote, fee_bp / 1e4)
     granted = (1 - rate / (quote * ONE // victim)) * 1e4
-    want = min(CAP_BP, max(FEE_SHARE * fee_bp, FLOOR_BP))
-    assert granted == pytest.approx(want, rel=1e-3)
+    assert granted == pytest.approx(max(FEE_SHARE * fee_bp, FLOOR_BP), rel=1e-3)
 
 
-@pytest.mark.parametrize("fee_bp", [30.0, 100.0, 300.0])
-def test_a_fat_fee_does_not_buy_unlimited_room(fee_bp):
-    """Past 25 bp the fee rule would grant more slippage than anyone wants."""
+@pytest.mark.parametrize("fee_bp", [0.5, 1.0, 4.0, 10.0])
+def test_the_volatile_floor_is_what_it_costs(fee_bp):
+    """Below 25 bp the floor binds, and it binds by a factor worth knowing.
+
+    Measured against the deployed TricryptoUSDC: the fee rule alone grants
+    0.60 bp and a sandwich takes 0.52 bp of a $15,000 leg, so eight times the
+    room is roughly eight times the take.  That is the accepted trade for a
+    pair that would otherwise revert on honest movement.
+    """
     victim, quote = 10**22, 10**22
-    granted = (1 - bound_for(victim, quote, fee_bp / 1e4) / (quote * ONE // victim)) * 1e4
-    assert granted == pytest.approx(CAP_BP, rel=1e-3)
-    assert FEE_SHARE * fee_bp > CAP_BP, "this case is meant to be capped"
+    tight = bound_for(victim, quote, fee_bp / 1e4)
+    loose = bound_for(victim, quote, fee_bp / 1e4, volatile=True)
+    assert loose < tight
+    room = ((1 - loose / (quote * ONE // victim)) * 1e4,
+            (1 - tight / (quote * ONE // victim)) * 1e4)
+    assert room[0] == pytest.approx(VOLATILE_FLOOR_BP, rel=1e-3)
+    assert room[0] / room[1] == pytest.approx(
+        VOLATILE_FLOOR_BP / max(FEE_SHARE * fee_bp, FLOOR_BP), rel=1e-3)
 
 
 def test_a_leg_with_no_fee_to_measure_still_clears_its_own_rounding():

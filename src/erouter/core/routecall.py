@@ -24,6 +24,7 @@ do not.  See `docs/router.md` and `tests/test_sandwich.py`.
 from __future__ import annotations
 
 import math
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from .codec import encode_call
@@ -67,10 +68,14 @@ SIGNATURE = SIGNATURES[-1]
 #: refuses -- and, measured, almost exactly how much one does take when it can.
 FEE_SHARE = 0.2
 
-#: A ceiling on the tolerance, in bp, whatever the fee rule says.  A pool
-#: charging 140 bp would otherwise grant 28 bp of slippage on the fee rule
-#: alone, which is a great deal more than that leg is worth protecting for.
-CAP_BP = 5.0
+#: A floor on the tolerance for a pair whose price genuinely moves between the
+#: quote and the block it lands in, in bp.  It is a real slippage allowance and
+#: it is a real cost: measured against the deployed TricryptoUSDC, the fee rule
+#: alone grants 0.60 bp and a sandwich nets 0.52 bp of the trade at $15,000,
+#: while 5 bp lets the same attack take about eight times that.  Which is the
+#: accepted trade for a pair that would otherwise revert on honest movement --
+#: and the reason it applies to those pairs and nothing else.
+VOLATILE_FLOOR_BP = 5.0
 
 #: A floor on that tolerance, in bp, and not slippage at all: room for the wei
 #: of rounding a wrap or a rebasing token loses on the way through, and the only
@@ -283,24 +288,28 @@ def bounding_fee(realized) -> float:
 def min_rates(
     route: RealizedRoute,
     *,
+    volatile: Collection[str] = (),
     fee_share: float = FEE_SHARE,
     floor_bp: float = FLOOR_BP,
-    cap_bp: float = CAP_BP,
+    volatile_floor_bp: float = VOLATILE_FLOOR_BP,
 ) -> tuple[list[int], list[int]]:
     """`(min_rate per leg, indices left unbounded)`.
 
-    One rule, every leg: a fifth of the least that pool can charge, capped at
-    `cap_bp` and floored at the wei of rounding a wrap loses.  There was a 5 bp
-    *floor* here once, for pairs whose price really moves between quote and
-    block.  It was the wrong place for it -- on a pool charging 1 bp it granted
-    twenty-five times what the fee rule does, and it granted it to whoever
-    front-ran the trade.  A caller who wants a looser bound should ask for one.
+    A fifth of the least that pool can charge, floored at `volatile_floor_bp`
+    for a pair whose price moves on its own and at the wei of rounding for
+    everything else.
+
+    `volatile` names those pools by address.  It is data rather than something
+    inferred here: an oraclised stableswap holding a volatile pair looks
+    exactly like a pegged one from the arc alone, and that shape is the one
+    that rugs on broadcast.
     """
+    loose = {address.lower() for address in volatile}
     rates: list[int] = []
     unbounded: list[int] = []
     for k, realized in enumerate(route.legs):
-        tol = min(cap_bp / 1e4,
-                  max(fee_share * bounding_fee(realized), floor_bp / 1e4))
+        floor = volatile_floor_bp if realized.target.lower() in loose else floor_bp
+        tol = min(1.0, max(fee_share * bounding_fee(realized), floor / 1e4))
         if realized.amount_in <= 0 or leg_out(realized) <= 0:
             rates.append(0)
             unbounded.append(k)
@@ -395,6 +404,7 @@ def encode_route(
     min_out: int = 0,
     amount_in: int | None = None,
     quoted_out: int | None = None,
+    volatile: Collection[str] = (),
     naming: str = NEEDED,
     **policy,
 ) -> RouteCall:
@@ -419,7 +429,7 @@ def encode_route(
         raise EncodingError("the last leg does not produce the destination token")
 
     fracs = fractions(route)
-    rates, unbounded = min_rates(route, **policy)
+    rates, unbounded = min_rates(route, volatile=volatile, **policy)
 
     tokens: list[str] = []
 
