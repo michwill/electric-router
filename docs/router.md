@@ -147,12 +147,27 @@ exact model that costs arithmetic; otherwise one round trip for the route.
 `erouter.core.routecall.min_rates` grants each leg
 
 ```
-tolerance = max(FEE_SHARE * fee, floor)
+tolerance = min(CAP_BP, max(FEE_SHARE * fee, FLOOR_BP))
 ```
 
-with `FEE_SHARE = 0.2`, `floor` of 5 bp on a volatile pair and 0.1 bp
-otherwise.  The 0.1 bp floor is not slippage at all -- it is room for the wei a
-wrap or a rebasing token rounds away.
+with `FEE_SHARE = 0.2`, `CAP_BP = 5`, `FLOOR_BP = 0.1`.  The floor is not
+slippage at all -- it is room for the wei a wrap or a rebasing token rounds
+away.  The cap is: a pool charging 140 bp would otherwise buy 28 bp of room,
+which is far more than that leg is worth protecting for.  Five bp was a *floor*
+here once, for volatile pairs; it granted a 1 bp pool twenty-five times what
+the fee rule does, and it granted it to whoever front-ran the trade.
+
+**`fee` is the least the pool can charge, not what the leg pays.**  That is the
+whole of it: the attacker front-runs and unwinds in small, balanced trades and
+is charged near `mid_fee`, while the leg they wrap around pays the dynamic fee
+at its own size.  Measured on TricryptoUSDC, 3 bp against 13 bp -- so bounding
+on the larger hands over the difference.  `core.poolfee.floor_fee` reads it off
+the model: `min(mid_fee, out_fee)` for the cryptoswaps, and the nominal fee for
+stableswap, whose off-peg multiplier only ever raises it.
+
+Everything here is computed off chain and arrives as `min_rate` in the packed
+word.  The router reads no oracle and re-derives no price; the solver's own
+spot quote for that leg, minus this discount, is the bound.
 
 ### Whether a sandwich pays is decided by the leg, not by the bound
 
@@ -197,14 +212,31 @@ Both halves are in `tests/test_sandwich.py`, against a constant-product pool and
 a real `StableSwap`, driven through `min_rates` itself rather than a restatement
 of it.
 
-**`fee` is the fee at this trade's size, not the marginal one.**  A dynamic fee
-is a property of the trade: measured on mainnet TricryptoUSDC, `mid_fee` is 3 bp
-and `out_fee` 30 bp, and what it charges runs from 10.5 bp on dust to 29.6 bp at
-a fifth of its reserve.  `core.poolfee.charged_fee` reads it back out of the
-pool's own exact model -- quote the trade twice, once as the pool is and once
-with its fee fields zeroed, and the gap is what it took.  Falling back to
-`gamma_live`, the marginal fee two tiny probes measure, is only for pools with
-no model.
+`charged_fee` measures the other one -- what this trade pays, by quoting it
+twice, once as the pool is and once with its fee fields zeroed.  It is what the
+CLI shows and what `leg_fee` returns; it is *not* what the bound is set from.
+
+### What it was measured to buy
+
+Sandwiching the deployed pools on a fork -- real contracts, real dynamic fees,
+the attacker front-running and unwinding around a leg-sized victim, at 1 gwei
+and ETH at $4,000:
+
+| bound on | victim lost | attacker, net of gas |
+|---|---|---|
+| what the trade pays (13 bp) | 2.72 bp | **+$3.59 on a $15k leg** |
+| the least it can charge (3 bp) | 0.60 bp | **−$0.15, loses** |
+
+The attacker's *return on their own capital* barely moves -- around +180 bp
+either way -- because the tolerance scales the front-run rather than the rate
+of return.  What changes is that the front-run it permits shrinks from 204 USDC
+to 45, and two transactions of gas then cost more than the attack makes.
+
+That is a break-even, not immunity.  Gross extraction is about 0.6 bp of the
+leg and gas is flat, so on TricryptoUSDC the attack loses at a $3k leg and at a
+$15k leg, and pays from roughly $20k up -- still for no more than the tolerance.
+3pool loses at every size, by 2.9 bp of the front-run: its impact never comes
+near twice its fee.
 
 `volatile` is passed in as a set of pool addresses rather than inferred:
 `core.pools.volatile_pools` classifies by registry type, because nothing in an

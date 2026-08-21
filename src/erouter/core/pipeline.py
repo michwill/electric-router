@@ -1112,17 +1112,24 @@ def price_legs(route, client) -> int:
         for rl in legs
     ])
     fee_at = getattr(client, "fee_at", None)
+    fee_floor = getattr(client, "fee_floor", None)
     priced = 0
     for realized, quote in zip(legs, quotes, strict=True):
         if quote.ok and quote.value > 0:
             realized.verified_out = int(quote.value)
             priced += 1
-        if fee_at is None or realized.is_conversion:
+        if realized.is_conversion:
             continue
-        fee = fee_at(realized.target.lower(), realized.kind, realized.leg.i,
-                     realized.leg.j, realized.amount_in)
-        if fee is not None:
-            realized.fee_frac = float(fee)
+        where = (realized.target.lower(), realized.kind, realized.leg.i,
+                 realized.leg.j)
+        if fee_at is not None:
+            fee = fee_at(*where, realized.amount_in)
+            if fee is not None:
+                realized.fee_frac = float(fee)
+        if fee_floor is not None:
+            least = fee_floor(*where)
+            if least is not None:
+                realized.fee_floor = float(least)
     return priced
 
 

@@ -31,7 +31,7 @@ from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
 
 from erouter.core.poolfee import charged_fee
 from erouter.core.realize import RealizedLeg, RealizedRoute
-from erouter.core.routecall import FEE_SHARE, FLOOR_BP, ONE, VOLATILE_FLOOR_BP, min_rates
+from erouter.core.routecall import CAP_BP, FEE_SHARE, FLOOR_BP, ONE, min_rates
 from erouter.core.stableswap import StableSwap
 from erouter.core.types import ArcKind, Leg
 
@@ -75,8 +75,7 @@ def stable(balances=(10**24, 10**24), fee=4 * 10**6, dynamic=0) -> StableSwap:
 # ------------------------------------------------------- the policy itself
 
 
-def bound_for(amount_in: int, quoted_out: int, fee_frac: float,
-              *, volatile: bool = False) -> int:
+def bound_for(amount_in: int, quoted_out: int, fee_frac: float) -> int:
     """The `min_rate` the router would carry, from the shipping policy."""
     leg = RealizedLeg(
         leg=Leg(target=POOL, kind=ArcKind.SWAP_STABLE),
@@ -86,8 +85,7 @@ def bound_for(amount_in: int, quoted_out: int, fee_frac: float,
         fee_frac=fee_frac,
     )
     route = RealizedRoute(legs=[leg], amount_in=amount_in, dst_slot=1)
-    rates, _ = min_rates(route, volatile=[POOL] if volatile else [])
-    return rates[0]
+    return min_rates(route)[0][0]
 
 
 def settles(dx: int, dy: int, min_rate: int) -> bool:
@@ -112,15 +110,13 @@ def run_sandwich(pool, i: int, j: int, front: int, victim: int):
     front=st.integers(min_value=0, max_value=10**23),
     victim=st.integers(min_value=10**18, max_value=10**23),
     fee_bp=st.sampled_from([0.5, 1.0, 4.0, 30.0, 100.0]),
-    volatile=st.booleans(),
 )
-def test_a_settled_leg_never_fell_below_what_it_promised(front, victim, fee_bp,
-                                                         volatile):
+def test_a_settled_leg_never_fell_below_what_it_promised(front, victim, fee_bp):
     """The whole guarantee: settle, or come back with at least the bound."""
     pool = Cpmm(10**24, 10**24, int(fee_bp / 1e4 * FEE_DENOMINATOR))
     _, got, quote = run_sandwich(pool, 0, 1, front, victim)
     assume(quote > 0)
-    rate = bound_for(victim, quote, fee_bp / 1e4, volatile=volatile)
+    rate = bound_for(victim, quote, fee_bp / 1e4)
     tolerance = 1 - rate / (quote * ONE // victim)
     if not settles(victim, got, rate):
         return                                  # refused, which is the other half
@@ -169,33 +165,41 @@ def test_extraction_grows_with_the_tolerance_and_with_nothing_else():
     assert seen[-1][1] > seen[0][1], "a fatter fee should permit more, not less"
 
 
-# ------------------------------------------------- what the floor costs
+# ------------------------------------------------------------- the one rule
 
 
-@pytest.mark.parametrize("fee_bp", [0.5, 1.0, 4.0, 10.0])
-def test_the_volatile_floor_is_the_compromise_it_looks_like(fee_bp):
-    """Below 25 bp the floor binds, and it binds by a factor worth knowing.
+@pytest.mark.parametrize("fee_bp", [0.14, 0.5, 1.0, 4.0, 30.0, 100.0, 300.0])
+def test_the_bound_is_a_fifth_of_the_fee_between_a_floor_and_a_cap(fee_bp):
+    """Whatever the pair is, whatever the pool is: a fifth of what it charges.
 
-    A 1 bp pool would grant 0.2 bp on the fee rule and grants 5 bp on the
-    floor: twenty-five times as much, taken by an attacker who can get in.
-    That is the accepted trade for a pair whose price really moves between
-    quote and block -- but it is a number, not a shrug.
+    There was a 5 bp *floor* here once, for pairs whose price moves between
+    quote and block.  It granted a 1 bp pool twenty-five times what the fee
+    rule does, and it granted it to whoever front-ran the trade.  Five bp is
+    now the ceiling instead, which is the opposite thing.
     """
     victim, quote = 10**22, 10**22
-    tight = bound_for(victim, quote, fee_bp / 1e4)
-    loose = bound_for(victim, quote, fee_bp / 1e4, volatile=True)
-    assert loose < tight, "the volatile floor must be the looser of the two"
-    on_fee = max(FEE_SHARE * fee_bp, FLOOR_BP)
-    assert VOLATILE_FLOOR_BP / on_fee == pytest.approx(
-        (1 - loose / (quote * ONE // victim)) / (1 - tight / (quote * ONE // victim)),
-        rel=1e-3)
+    rate = bound_for(victim, quote, fee_bp / 1e4)
+    granted = (1 - rate / (quote * ONE // victim)) * 1e4
+    want = min(CAP_BP, max(FEE_SHARE * fee_bp, FLOOR_BP))
+    assert granted == pytest.approx(want, rel=1e-3)
 
 
-def test_above_the_floor_the_two_policies_agree():
-    """At 25 bp the fee rule overtakes 5 bp and volatility stops mattering."""
+@pytest.mark.parametrize("fee_bp", [30.0, 100.0, 300.0])
+def test_a_fat_fee_does_not_buy_unlimited_room(fee_bp):
+    """Past 25 bp the fee rule would grant more slippage than anyone wants."""
     victim, quote = 10**22, 10**22
-    assert bound_for(victim, quote, 30e-4) == bound_for(victim, quote, 30e-4,
-                                                        volatile=True)
+    granted = (1 - bound_for(victim, quote, fee_bp / 1e4) / (quote * ONE // victim)) * 1e4
+    assert granted == pytest.approx(CAP_BP, rel=1e-3)
+    assert FEE_SHARE * fee_bp > CAP_BP, "this case is meant to be capped"
+
+
+def test_a_leg_with_no_fee_to_measure_still_clears_its_own_rounding():
+    """A wrap charges nothing, and still must not revert on a wei."""
+    victim, quote = 10**22, 10**22
+    rate = bound_for(victim, quote, 0.0)
+    granted = (1 - rate / (quote * ONE // victim)) * 1e4
+    assert granted == pytest.approx(FLOOR_BP, rel=1e-3)
+    assert 0 < granted < 1.0, "a dust floor, not a slippage allowance"
 
 
 # ------------------------------------------------------- when it pays at all
@@ -315,9 +319,8 @@ class Sandwiching(RuleBasedStateMachine):
 
     @rule(front=st.integers(min_value=0, max_value=10**23),
           victim=st.integers(min_value=10**19, max_value=10**23),
-          i=st.integers(min_value=0, max_value=1),
-          volatile=st.booleans())
-    def a_sandwich_is_attempted(self, front, victim, i, volatile):
+          i=st.integers(min_value=0, max_value=1))
+    def a_sandwich_is_attempted(self, front, victim, i):
         j = 1 - i
         if max(front, victim) >= self.pool.balances[i] // 4:
             return
@@ -329,7 +332,7 @@ class Sandwiching(RuleBasedStateMachine):
             return
         if quote <= 0 or fee is None:
             return
-        rate = bound_for(victim, quote, fee, volatile=volatile)
+        rate = bound_for(victim, quote, fee)
         allowed = 1 - rate / (quote * ONE // victim)
         if not settles(victim, got, rate):
             self.refused += 1

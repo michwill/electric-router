@@ -146,19 +146,30 @@ def test_the_bound_comes_off_the_fee_the_pool_is_charging():
     assert rates[0] == pytest.approx(ONE * (1 - 0.2 * fee), rel=1e-9)
 
 
-def test_a_volatile_pair_gets_the_floor_instead():
-    legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 4e-4)]
-    rates, _ = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1),
-                            volatile=[POOL_A])
-    assert rates[0] == pytest.approx(ONE * (1 - 5e-4), rel=1e-9)
+def test_a_thin_fee_gets_a_thin_bound_whatever_the_pair():
+    """No floor above the dust one: 1 bp of fee buys 0.2 bp of tolerance."""
+    legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 1e-4)]
+    rates, _ = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
+    assert rates[0] == pytest.approx(ONE * (1 - 0.2 * 1e-4), rel=1e-9)
 
 
-def test_the_floor_only_wins_when_it_is_larger():
-    """A fat fee pool keeps its own share of the fee, floor or no floor."""
+def test_a_fat_fee_is_capped_rather_than_granted_in_full():
+    """A 100 bp pool would otherwise buy 20 bp of slippage on the fee rule."""
     legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 0.01)]
-    rates, _ = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1),
-                            volatile=[POOL_A])
-    assert rates[0] == pytest.approx(ONE * (1 - 0.2 * 0.01), rel=1e-9)
+    rates, _ = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
+    assert rates[0] == pytest.approx(ONE * (1 - rc.CAP_BP / 1e4), rel=1e-9)
+
+
+def test_the_bound_is_set_from_the_least_the_pool_can_charge():
+    """Not from what the leg pays: the attacker trades small, and is charged
+    small, while the leg it wraps pays the dynamic fee at its own size."""
+    legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 4e-4)]
+    legs[0].fee_frac = 13e-4        # what this trade pays
+    legs[0].fee_floor = 3e-4        # what the pool can drop to
+    rates, _ = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
+    assert rates[0] == pytest.approx(ONE * (1 - 0.2 * 3e-4), rel=1e-9)
+    assert rc.leg_fee(legs[0]) == pytest.approx(13e-4)
+    assert rc.bounding_fee(legs[0]) == pytest.approx(3e-4)
 
 
 def test_an_unmeasured_fee_still_leaves_room_for_rounding():
@@ -280,13 +291,16 @@ def test_a_min_out_forces_the_full_signature():
 
 def test_the_bounds_promise_something_and_it_is_computed():
     """The number a caller should read before signing, not after."""
-    legs = [leg(0, 1, 1000, 990, gamma=1 - 0.01),
-            leg(1, 2, 990, 980, target=POOL_B, gamma=1 - 0.01)]
-    r = route(legs, amount_in=1000, dst_slot=2)
-    call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=980)
-    assert 0 < call.guaranteed_out < 980
-    # Two legs, each granted a fifth of a 100 bp fee: about 40 bp in total.
-    assert call.tolerance_bp == pytest.approx(40, abs=1.0)
+    # Wei-scale amounts, because `guaranteed_out` is integer arithmetic and a
+    # thousand-wei leg loses more to truncation than to the bound.
+    one, out = 10**21, 980 * 10**18
+    legs = [leg(0, 1, one, 990 * 10**18, gamma=1 - 0.01),
+            leg(1, 2, 990 * 10**18, out, target=POOL_B, gamma=1 - 0.01)]
+    r = route(legs, amount_in=one, dst_slot=2)
+    call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=out)
+    assert 0 < call.guaranteed_out < out
+    # Two legs on 100 bp pools, each capped at 5 bp: about 10 bp in total.
+    assert call.tolerance_bp == pytest.approx(2 * rc.CAP_BP, abs=0.1)
 
 
 def test_the_promise_matches_running_the_bounds_by_hand():

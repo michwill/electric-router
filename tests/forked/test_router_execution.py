@@ -19,7 +19,7 @@ import math
 import pytest
 
 from erouter.core.pipeline import RoutingError, route
-from erouter.core.pools import parse_universe, volatile_pools
+from erouter.core.pools import parse_universe
 from erouter.core.routecall import ALL, NONE, encode_route
 from erouter.dev import config
 from erouter.dev.exact_probe import ExactQuoterClient
@@ -95,18 +95,13 @@ def routes(universe, exact_client):
 
 
 @pytest.fixture(scope="module")
-def volatile(universe):
-    return volatile_pools(universe[0])
-
-
-@pytest.fixture(scope="module")
-def calls(routes, volatile):
+def calls(routes):
     receiver = "0x" + "11" * 20
     out = {}
     for name, result in routes.items():
         if isinstance(result, RoutingError):
             continue
-        out[name] = encode_route(result.route, receiver=receiver, volatile=volatile)
+        out[name] = encode_route(result.route, receiver=receiver)
     return out
 
 
@@ -199,13 +194,13 @@ def test_every_leg_is_bounded(name, routes, calls):
 
 @pytest.mark.parametrize("name", [c[0] for c in CASES])
 def test_reading_the_coins_and_naming_them_are_the_same_route(
-        name, routes, sent, calls, forked, chain, rpc, volatile):
+        name, routes, sent, calls, forked, chain, rpc):
     """The short calldata and the long one must not be two different trades."""
     report = _live(name, routes, sent)
     if not report.ok:
         pytest.skip(f"{name} did not execute; the other test owns that failure")
     explicit = encode_route(routes[name].route, receiver=calls[name].receiver,
-                            volatile=volatile, naming=ALL)
+                            naming=ALL)
     again = send(explicit, router=forked, wrapped=chain.wrapped,
                  expect_block=rpc.block)
     assert again.ok, f"{name} named every token and would not run: {again.error}"
@@ -214,15 +209,15 @@ def test_reading_the_coins_and_naming_them_are_the_same_route(
 
 @pytest.mark.parametrize("name", [c[0] for c in CASES])
 def test_shorter_calldata_costs_more_gas(name, routes, sent, calls, forked,
-                                         chain, rpc, volatile):
+                                         chain, rpc):
     """The trade the router is asked to make, from both ends of the trade-off."""
     report = _live(name, routes, sent)
     if not report.ok:
         pytest.skip(f"{name} did not execute; the other test owns that failure")
     shortest = encode_route(routes[name].route, receiver=calls[name].receiver,
-                            volatile=volatile, naming=NONE)
+                            naming=NONE)
     longest = encode_route(routes[name].route, receiver=calls[name].receiver,
-                           volatile=volatile, naming=ALL)
+                           naming=ALL)
     short = send(shortest, router=forked, wrapped=chain.wrapped, expect_block=rpc.block)
     long = send(longest, router=forked, wrapped=chain.wrapped, expect_block=rpc.block)
     if not (short.ok and long.ok):

@@ -1371,7 +1371,6 @@ def _report_calldata(result, args, nodes, dst, pools):
     that leg is measured to be paying: a bound only means something next to the
     number it came from.
     """
-    from ..core.pools import volatile_pools
     from ..core.routecall import EncodingError, encode_route, leg_fee, leg_out
 
     if result.route is None or not result.route.legs:
@@ -1382,8 +1381,8 @@ def _report_calldata(result, args, nodes, dst, pools):
         min_out = int(result.route.modelled_out * (1 - args.min_out_bp / 1e4))
     try:
         call = encode_route(result.route, receiver=args.receiver,
-                            volatile=volatile_pools(pools), naming=args.calldata,
-                            min_out=min_out, quoted_out=result.verified_out)
+                            naming=args.calldata, min_out=min_out,
+                            quoted_out=result.verified_out)
     except EncodingError as exc:
         print(f"  {BAD} calldata: {exc}")
         return None

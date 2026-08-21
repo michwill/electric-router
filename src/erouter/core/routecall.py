@@ -24,7 +24,6 @@ do not.  See `docs/router.md` and `tests/test_sandwich.py`.
 from __future__ import annotations
 
 import math
-from collections.abc import Collection
 from dataclasses import dataclass
 
 from .codec import encode_call
@@ -68,11 +67,15 @@ SIGNATURE = SIGNATURES[-1]
 #: refuses -- and, measured, almost exactly how much one does take when it can.
 FEE_SHARE = 0.2
 
-#: Floors on that tolerance, in bp.  The volatile one is a real slippage
-#: allowance for a pair whose price moves between quote and block; the other is
-#: not slippage at all, only room for the wei of rounding a wrap or a rebasing
-#: token loses on the way through.
-VOLATILE_FLOOR_BP = 5.0
+#: A ceiling on the tolerance, in bp, whatever the fee rule says.  A pool
+#: charging 140 bp would otherwise grant 28 bp of slippage on the fee rule
+#: alone, which is a great deal more than that leg is worth protecting for.
+CAP_BP = 5.0
+
+#: A floor on that tolerance, in bp, and not slippage at all: room for the wei
+#: of rounding a wrap or a rebasing token loses on the way through, and the only
+#: thing standing under a leg whose fee could not be measured.  A pool charging
+#: anything at all clears it on the fee rule alone.
 FLOOR_BP = 0.1
 
 
@@ -242,44 +245,62 @@ def leg_out(realized) -> int:
 # --------------------------------------------------------------- min rates
 
 
+def _usable(value: float) -> bool:
+    return math.isfinite(value) and 0.0 <= value < 1.0
+
+
 def leg_fee(realized) -> float:
     """What this leg pays in fees, at its own size where that is known.
 
-    `fee_frac` is the pool's own model charging the real trade; `gamma_live` is
-    two tiny probes measuring the marginal fee.  They agree on a fixed-fee pool
-    and diverge on a dynamic one exactly when it matters -- the trade that skews
-    the pool is the trade the fee climbs for.  Zero when neither is available,
-    which leaves the leg on the floor rather than on a guess.
+    For display and diagnostics.  `fee_frac` is the pool's own model charging
+    the real trade; `gamma_live` is two tiny probes measuring the marginal fee.
+    They agree on a fixed-fee pool and diverge on a dynamic one exactly when it
+    matters -- the trade that skews the pool is the trade the fee climbs for.
     """
-    at_size = realized.fee_frac
-    if math.isfinite(at_size) and 0.0 <= at_size < 1.0:
-        return at_size
+    if _usable(realized.fee_frac):
+        return realized.fee_frac
     gamma = realized.gamma_live
     if not math.isfinite(gamma) or not 0.0 < gamma <= 1.0:
         return 0.0
     return 1.0 - gamma
 
 
+def bounding_fee(realized) -> float:
+    """What the minimum rate is set from: the least this pool can charge.
+
+    Not what the leg pays.  A sandwich front-runs and unwinds in small,
+    balanced trades and is charged near `mid_fee`, while the leg it wraps pays
+    the dynamic fee at its own size -- measured on TricryptoUSDC, 3 bp against
+    13 bp.  Bounding on the larger of the two hands the attacker the gap:
+    against the deployed pool on a fork, it cost the victim 2.72 bp instead of
+    0.60 bp for the same attack.
+    """
+    if _usable(realized.fee_floor):
+        return realized.fee_floor
+    return leg_fee(realized)
+
+
 def min_rates(
     route: RealizedRoute,
     *,
-    volatile: Collection[str] = (),
     fee_share: float = FEE_SHARE,
-    volatile_floor_bp: float = VOLATILE_FLOOR_BP,
     floor_bp: float = FLOOR_BP,
+    cap_bp: float = CAP_BP,
 ) -> tuple[list[int], list[int]]:
     """`(min_rate per leg, indices left unbounded)`.
 
-    `volatile` names the pools whose pair is not a peg, by address.  It is data
-    rather than something inferred here: an oraclised stableswap holding a
-    volatile pair looks exactly like a pegged one from the arc alone.
+    One rule, every leg: a fifth of the least that pool can charge, capped at
+    `cap_bp` and floored at the wei of rounding a wrap loses.  There was a 5 bp
+    *floor* here once, for pairs whose price really moves between quote and
+    block.  It was the wrong place for it -- on a pool charging 1 bp it granted
+    twenty-five times what the fee rule does, and it granted it to whoever
+    front-ran the trade.  A caller who wants a looser bound should ask for one.
     """
-    loose = {address.lower() for address in volatile}
     rates: list[int] = []
     unbounded: list[int] = []
     for k, realized in enumerate(route.legs):
-        floor = volatile_floor_bp if realized.target.lower() in loose else floor_bp
-        tol = min(1.0, max(fee_share * leg_fee(realized), floor / 1e4))
+        tol = min(cap_bp / 1e4,
+                  max(fee_share * bounding_fee(realized), floor_bp / 1e4))
         if realized.amount_in <= 0 or leg_out(realized) <= 0:
             rates.append(0)
             unbounded.append(k)
@@ -374,7 +395,6 @@ def encode_route(
     min_out: int = 0,
     amount_in: int | None = None,
     quoted_out: int | None = None,
-    volatile: Collection[str] = (),
     naming: str = NEEDED,
     **policy,
 ) -> RouteCall:
@@ -399,7 +419,7 @@ def encode_route(
         raise EncodingError("the last leg does not produce the destination token")
 
     fracs = fractions(route)
-    rates, unbounded = min_rates(route, volatile=volatile, **policy)
+    rates, unbounded = min_rates(route, **policy)
 
     tokens: list[str] = []
 

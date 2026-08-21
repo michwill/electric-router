@@ -24,6 +24,9 @@ from dataclasses import fields, replace
 #: fee curve and the DAO's cut of it rather than the charge itself.
 FEE_FIELDS = ("fee", "offpeg_fee_multiplier", "mid_fee", "out_fee")
 
+#: Every Curve family prices its fee in 1e10.
+FEE_DENOMINATOR = 10**10
+
 
 def fee_free(model):
     """The same pool with nothing to charge, or `None` if it cannot be made.
@@ -38,6 +41,25 @@ def fee_free(model):
         return None                                # not a dataclass model
     zeroed = {name: 0 for name in FEE_FIELDS if name in names}
     return replace(model, **zeroed) if zeroed else None
+
+
+def floor_fee(model) -> float | None:
+    """The least this pool can ever charge, or `None` if it will not say.
+
+    What a minimum rate has to be set from, because it is what the *attacker*
+    pays.  A sandwich front-runs and unwinds in small, balanced trades, so it
+    is charged near `mid_fee` while the trade it is wrapped around pays the
+    dynamic fee at its own size -- measured on TricryptoUSDC, 3 bp against
+    13 bp.  Bounding on the larger of the two hands the difference over.
+
+    Stableswap's off-peg multiplier only ever raises its fee, so the nominal
+    one is that family's floor.
+    """
+    mid, out = getattr(model, "mid_fee", None), getattr(model, "out_fee", None)
+    if mid is not None and out is not None:
+        return min(int(mid), int(out)) / FEE_DENOMINATOR
+    flat = getattr(model, "fee", None)
+    return None if flat is None else int(flat) / FEE_DENOMINATOR
 
 
 def charged_fee(model, i: int, j: int, dx: int) -> float | None:

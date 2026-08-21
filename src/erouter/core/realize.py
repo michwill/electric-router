@@ -73,6 +73,11 @@ class RealizedLeg:
     #: both directions.  Anything that has to be true of one leg rather than of
     #: the route reads this instead.  Zero where nothing priced it.
     verified_out: int = 0
+    #: The least this leg's pool can charge, which is what its minimum rate is
+    #: set from: a sandwich trades small and balanced and is charged near that,
+    #: while the leg it wraps pays the dynamic fee at its own size.  NaN where
+    #: no model could say.
+    fee_floor: float = math.nan
     #: What this leg's own size pays in fees, read back out of the pool's exact
     #: model.  Preferred over `gamma_live` for a minimum rate because a dynamic
     #: fee climbs with the trade: measured, a stableswap-ng pool taken to 90% of

@@ -57,9 +57,8 @@ def test_the_only_pull_the_router_makes_names_msg_sender():
     """A source check as well as a behavioural one: the behavioural tests can
     only probe the paths they think of, and this one covers every future edit.
     """
-    source = CONTRACT.read_text()
-    calls = re.findall(r'method_id\("transferFrom\(address,address,uint256\)"\)\s*,'
-                       r'\s*abi_encode\(([^)]*)\)', source)
+    source = " ".join(CONTRACT.read_text().split())
+    calls = re.findall(r"transferFrom\(\s*([^)]*?)\)", source)
     assert calls, "no transferFrom found -- has the router stopped pulling?"
     for args in calls:
         owner = args.split(",")[0].strip()
@@ -174,3 +173,34 @@ def test_an_infinite_allowance_is_worth_nothing_once_the_route_is_over(
     with boa.reverts():                                      # nothing left to take
         hostile.exchange(0, 1, 1, 0, sender=trader)
     assert world.is_empty()
+
+
+def test_a_token_that_reports_failure_by_returning_false_is_believed(world, trader):
+    """The other half of the USDT problem, and the one a bare `raw_call` misses.
+
+    Answering with nothing and answering `False` mean opposite things.  A
+    router that decodes neither treats a failed pull as a successful one.
+    """
+    liar = load("MockLyingToken", True)
+    liar.mint(trader, 10**20)
+    with boa.env.prank(trader):
+        liar.approve(world.router.address, 2**256 - 1)
+    pool = load("MockHostilePool", [liar.address, world.b.address],
+                world.router.address)
+    world.b.mint(pool.address, 10**18)
+    with boa.reverts("transferFrom failed"):
+        send(world, trader, [step(pool, ArcKind.SWAP_STABLE, i=0, j=1, n=2)], 10**18)
+
+
+def test_the_same_token_telling_the_truth_goes_through(world, trader):
+    """So the refusal above is the reply, not the token."""
+    honest = load("MockLyingToken", False)
+    honest.mint(trader, 10**20)
+    with boa.env.prank(trader):
+        honest.approve(world.router.address, 2**256 - 1)
+    pool = load("MockHostilePool", [honest.address, world.b.address],
+                world.router.address)
+    world.b.mint(pool.address, 10**18)
+    pool.arm(0, b"", boa.env.generate_address())
+    assert send(world, trader,
+                [step(pool, ArcKind.SWAP_STABLE, i=0, j=1, n=2)], 10**18) > 0

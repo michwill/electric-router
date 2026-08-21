@@ -13,7 +13,12 @@
         `50%` then `100%`, so the second leg cannot be starved by whatever the
         first one really returned.  `balanceOf` is the source of truth, so a
         rebasing or fee-on-transfer token is measured rather than assumed.
-     3. THE CALLER NAMES POOLS, NOT TOKENS.  `i` and `j` index the pool's own
+     3. AN ERC20'S REPLY IS CHECKED, NOT DISCARDED.  `default_return_value`
+        accepts the tokens that answer with nothing -- USDT and its
+        descendants -- while still failing on the ones that answer `False`
+        rather than reverting.  Ignoring the word entirely, which is what a
+        bare `raw_call` does, treats those two as the same.
+     4. THE CALLER NAMES POOLS, NOT TOKENS.  `i` and `j` index the pool's own
         `coins`, and the router reads them, so a caller cannot mis-state which
         token a rate applies to.  Tokens that are not pool coins -- LP tokens,
         vault assets, lending underlyings -- have no cheap getter on every
@@ -37,6 +42,8 @@
      A pair outside that band -- an 18-decimal dust token against an 8-decimal
      expensive one -- can only be bounded by its neighbours and `min_out`.
 """
+
+from ethereum.ercs import IERC20
 
 MAX_LEGS: public(constant(uint256)) = 32
 MAX_TOKENS: public(constant(uint256)) = 31
@@ -263,52 +270,28 @@ def _derive(pool: address, kind: uint8, index: uint8, entering: bool) -> address
 
 @internal
 def _allow(token: address, spender: address):
-    """Infinite allowance, set once and only when it is not already there."""
+    """Infinite allowance, set once and only when it is not already there.
+
+    Read first, so the reset through zero happens only when there is something
+    to reset -- USDT refuses a non-zero to non-zero change, and every other
+    token is charged for the extra write.
+    """
     if token == NATIVE:
         return
-    ok: bool = False
-    out: Bytes[32] = b""
-    ok, out = self._ask(
-        token,
-        concat(method_id("allowance(address,address)"), abi_encode(self, spender)),
-    )
-    if ok and abi_decode(out, uint256) == max_value(uint256):
+    held: uint256 = staticcall IERC20(token).allowance(self, spender)
+    if held == max_value(uint256):
         return
-    # USDT refuses a non-zero to non-zero change and returns nothing at all, so
-    # both the reset and the undecoded reply are load-bearing on mainnet's
-    # most-routed token.
-    ok, out = raw_call(
-        token,
-        concat(method_id("approve(address,uint256)"), abi_encode(spender, empty(uint256))),
-        max_outsize=32,
-        revert_on_failure=False,
-    )
-    ok, out = raw_call(
-        token,
-        concat(
-            method_id("approve(address,uint256)"),
-            abi_encode(spender, max_value(uint256)),
-        ),
-        max_outsize=32,
-        revert_on_failure=False,
-    )
-    assert ok, "approve failed"
+    if held != 0:
+        assert extcall IERC20(token).approve(spender, 0, default_return_value=True), (
+            "approve failed")
+    assert extcall IERC20(token).approve(
+        spender, max_value(uint256), default_return_value=True), "approve failed"
 
 
 @internal
 def _pull(token: address, owner: address, amount: uint256):
-    ok: bool = False
-    out: Bytes[32] = b""
-    ok, out = raw_call(
-        token,
-        concat(
-            method_id("transferFrom(address,address,uint256)"),
-            abi_encode(owner, self, amount),
-        ),
-        max_outsize=32,
-        revert_on_failure=False,
-    )
-    assert ok, "transferFrom failed"
+    assert extcall IERC20(token).transferFrom(
+        owner, self, amount, default_return_value=True), "transferFrom failed"
 
 
 @internal
@@ -321,15 +304,8 @@ def _pay(token: address, to: address, amount: uint256):
         # paid at all.
         raw_call(to, b"", value=amount)
         return
-    ok: bool = False
-    out: Bytes[32] = b""
-    ok, out = raw_call(
-        token,
-        concat(method_id("transfer(address,uint256)"), abi_encode(to, amount)),
-        max_outsize=32,
-        revert_on_failure=False,
-    )
-    assert ok, "transfer failed"
+    assert extcall IERC20(token).transfer(
+        to, amount, default_return_value=True), "transfer failed"
 
 
 # --------------------------------------------------------------- calldata

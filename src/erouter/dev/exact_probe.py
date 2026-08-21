@@ -340,14 +340,20 @@ class ExactQuoterClient:
     def fee_at(self, pool: str, kind, i: int, j: int, dx: int) -> float | None:
         """What this pool charges on a trade of this size, or `None`.
 
-        The fee a route has to be bounded against is the one the trade itself
-        will pay, not the one two tiny probes measure -- see `core.poolfee`.
-        Only a modelled pool can answer; the rest fall back to the marginal fee.
+        Only a modelled pool can answer; the rest fall back to the marginal fee
+        two probes measure.  See `core.poolfee`.
         """
         from ..core.poolfee import charged_fee
 
         model = self._model(pool, kind, i, j)
         return None if model is None else charged_fee(model, i, j, dx)
+
+    def fee_floor(self, pool: str, kind, i: int, j: int) -> float | None:
+        """The least this pool can charge -- what a minimum rate is set from."""
+        from ..core.poolfee import floor_fee
+
+        model = self._model(pool, kind, i, j)
+        return None if model is None else floor_fee(model)
 
     # -- verification, where every leg is a pool we can evaluate --------------
 
