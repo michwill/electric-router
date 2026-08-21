@@ -2,7 +2,12 @@
 
 **Optimal multi-pool routing via linear resistor networks with diodes**
 
-Version 1.0 · Status: design, ready to implement
+Version 1.0 · Status: **design, superseded in places by what was built**
+
+Kept as the reference for derivations and for the `§` numbers the code cites.
+Read [`theory.md`](theory.md) first: it covers the same idea and then what
+actually runs, and it is the one to trust where the two disagree.
+[`browser-port.md`](browser-port.md) is the Flet / Pyodide port.
 
 ---
 

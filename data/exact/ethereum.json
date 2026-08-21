@@ -1861,6 +1861,11 @@
    "fee_on_xp": true,
    "rates": "reported"
   },
+  "0xee04382c4ca6c450213923fe0f0dab19b0ff3939": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported"
+  },
   "0xee351f12eae8c2b8b9d1b9bfd3c5dd565234578d": {
    "family": "twocrypto",
    "legacy_fee": true,
