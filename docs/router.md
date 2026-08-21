@@ -200,6 +200,30 @@ function of the front-run's size alone.  So their capital is pinned by the bound
 while their take scales with the victim, which is why the return on capital runs
 from −0.1% to +94% down the same column.
 
+That $50 does **not** move the price for a $600,000 trade, and it is worth being
+clear about what does.  Reading the marginal price with a 1 USDC probe at each
+step of the attack:
+
+| victim | front-run | it moves the price | the victim moves it | attacker's WETH | worth before | worth after | profit |
+|---|---|---|---|---|---|---|---|
+| 5,000 | 72.14 | 1.12 bp | 71 bp | 0.030121 | 72.14 | 72.66 | +0.42 |
+| 40,000 | 68.63 | 1.08 bp | 586 bp | 0.028655 | 68.63 | 72.66 | +3.71 |
+| 100,000 | 57.82 | 0.94 bp | 1,433 bp | 0.024143 | 57.82 | 66.12 | +7.93 |
+| 600,000 | 55.50 | 0.91 bp | 9,577 bp | 0.023174 | 55.50 | 108.67 | +52.51 |
+
+The front-run moves the price by about a basis point, every time -- that is all
+the bound will license.  What revalues the attacker's stack is the *victim's
+own* trade, which at $600,000 into a $1.5M pool moves the price 96%.  The
+attacker is holding a position the bound sized across a move the victim made
+themselves, which is why the profit tracks the victim's size and not the
+front-run's.
+
+Which also says how to defeat it, and it is not a tighter bound: **split the
+trade**.  A leg at 1% of a pool moves the price 71 bp and pays the attacker
+$0.42; the same value in one 39% leg moves it 96% and pays $52.51.  The solver
+splits for output and this comes free with it -- the bottom rows of the table
+are not routes this router would emit.
+
 **At the small end it loses even for free.**  A $100 leg pays the attacker
 −0.11 USDC and a $1,000 leg −0.04, because the front-run the bound permits is
 too small for the displacement to cover its own two fees.  Two transactions of
