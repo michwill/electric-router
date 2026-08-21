@@ -218,6 +218,46 @@ attacker is holding a position the bound sized across a move the victim made
 themselves, which is why the profit tracks the victim's size and not the
 front-run's.
 
+That move is the curve and not the fee, which is worth checking rather than
+assuming -- a fee-inclusive probe cannot tell them apart, and this pool's fee
+really does climb sharply here.  Reading `fee()` and `price_scale()` off the
+pool at each step:
+
+| victim | probe moves | fee before | fee after | the fee's share | price_scale moves |
+|---|---|---|---|---|---|
+| 5,000 | 33 bp | 4.09 bp | 5.11 bp | 1.0 bp | 0 bp |
+| 15,000 | 165 bp | 4.09 bp | 9.21 bp | 5.1 bp | 0 bp |
+| 40,000 | 527 bp | 4.09 bp | 19.46 bp | 15.4 bp | 0 bp |
+| 100,000 | 1,375 bp | 4.09 bp | 27.18 bp | 23.1 bp | 0 bp |
+| 600,000 | 9,494 bp | 4.09 bp | 29.87 bp | 25.8 bp | 0 bp |
+
+The fee accounts for 26 bp of a 9,494 bp move -- a quarter of one per cent --
+and `price_scale` does not move at all, so there is no repeg in it either.  It
+is the invariant.  Trading 39% of one side of a constant-product-like curve
+gives `(1.39)^2 - 1`, about +93%, which is what came back.
+
+### Turning the dial
+
+The fifth is one point on a line, and the line is straight.  Sweeping the
+multiplier at fixed leg sizes, front-run and profit in USDC, gas free:
+
+| victim | 5% of mid_fee | 10% | 15% | 20% | 25% |
+|---|---|---|---|---|---|
+| 5,000 | 23 → +0.05 | 45 → +0.10 | 68 → +0.15 | 90 → +0.20 | 112 → +0.26 |
+| 15,000 | 14 → +0.20 | 27 → +0.40 | 41 → +0.60 | 54 → +0.80 | 68 → +0.99 |
+| 40,000 | 12 → +0.57 | 24 → +1.15 | 35 → +1.72 | 47 → +2.29 | 59 → +2.86 |
+| 100,000 | 12 → +1.55 | 24 → +3.10 | 35 → +4.65 | 47 → +6.20 | 59 → +7.75 |
+| 600,000 | 13 → +12.45 | 27 → +24.90 | 40 → +37.35 | 53 → +49.79 | 66 → +62.24 |
+
+Double the multiplier and both the permitted front-run and the profit double,
+to two significant figures, in every row.  **Spending more does not stop paying
+the attacker** -- there is no size at which their own fees overtake the gain,
+because the fee they pay is `mid_fee` on a trade small enough not to move the
+pool, and it is the same `mid_fee` the multiplier is a fraction of.
+
+So the multiplier is a dial on how much is given away and nothing else.  It buys
+no threshold, which is why the only structural defence is the size of the leg.
+
 Which also says how to defeat it, and it is not a tighter bound: **split the
 trade**.  A leg at 1% of a pool moves the price 71 bp and pays the attacker
 $0.42; the same value in one 39% leg moves it 96% and pays $52.51.  The solver
