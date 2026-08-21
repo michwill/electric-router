@@ -349,3 +349,46 @@ def test_a_deeper_route_promises_less():
         calls.append(rc.encode_route(r, receiver=TOKEN[5],
                                      quoted_out=legs[-1].amount_out))
     assert calls[1].tolerance_bp > calls[0].tolerance_bp
+
+
+# ------------------------------------------ a bound that is only rounding
+
+
+def test_a_leg_too_small_to_quantise_is_not_called_bounded():
+    """One unit of output is 1/out of the rate.  A leg producing five units
+    cannot express a 0.1 bp tolerance, and saying it does is worse than
+    saying nothing."""
+    legs = [leg(0, 1, 10**18, 5, gamma=1 - 1e-4)]
+    rates, unbounded = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
+    assert rates[0] > 0, "the number still ships"
+    assert unbounded == [0], "but it is not a bound"
+
+
+def test_a_leg_with_room_to_quantise_is_bounded():
+    legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 1e-4)]
+    _, unbounded = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
+    assert unbounded == []
+
+
+def test_the_threshold_follows_the_tolerance_not_a_constant():
+    """A volatile pair is granted 5 bp, so it can quantise 50x coarser than a
+    pegged one granted 0.1 bp before the bound stops meaning anything."""
+    coarse = [leg(0, 1, 10**18, 4_000, gamma=1 - 1e-4)]
+    tight = rc.min_rates(route(coarse, amount_in=10**18, dst_slot=1))[1]
+    loose = rc.min_rates(route(coarse, amount_in=10**18, dst_slot=1),
+                         volatile=[POOL_A])[1]
+    assert tight == [0], "0.2 bp cannot survive a 2.5 bp quantum"
+    assert loose == [], "5 bp can"
+
+
+def test_the_walk_reports_what_each_leg_will_really_enforce():
+    """`walk_bounds` is the contract's own check, run off chain: `dx` times the
+    leg's rate, floored.  On a leg carrying its modelled amount that lands at
+    roughly the leg's output, which is what makes it a sanity check rather
+    than an alarm."""
+    legs = [leg(0, 1, 10**18, 9 * 10**17, gamma=1 - 1e-4)]
+    r = route(legs, amount_in=10**18, dst_slot=1)
+    fracs, (rates, _) = rc.fractions(r), rc.min_rates(r)
+    promised, floors = rc.walk_bounds(r, fracs, rates)
+    assert promised == floors[0]
+    assert 0.99 < floors[0] / (9 * 10**17) <= 1.0

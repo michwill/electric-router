@@ -166,8 +166,8 @@ class RouteCall:
     #: The chained walk's figure where there was one, the model's otherwise --
     #: the number the user was shown, so the number the tolerance is against.
     quoted_out: int = 0
-    #: Legs whose bound rounded to zero because the pair's raw-unit rate is
-    #: below 1e-18.  Their neighbours and `min_out` are all that guards them.
+    #: Legs the bound does not really cover: its rate is zero, or too coarse
+    #: to express the tolerance.  Their neighbours and `min_out` guard them.
     unbounded: tuple[int, ...] = ()
 
     def calldata(self, sender: str = "") -> bytes:
@@ -293,7 +293,7 @@ def min_rates(
     floor_bp: float = FLOOR_BP,
     volatile_floor_bp: float = VOLATILE_FLOOR_BP,
 ) -> tuple[list[int], list[int]]:
-    """`(min_rate per leg, indices left unbounded)`.
+    """`(min_rate per leg, indices the bound does not really cover)`.
 
     A fifth of the least that pool can charge, floored at `volatile_floor_bp`
     for a pair whose price moves on its own and at the wei of rounding for
@@ -303,6 +303,13 @@ def min_rates(
     inferred here: an oraclised stableswap holding a volatile pair looks
     exactly like a pegged one from the arc alone, and that shape is the one
     that rugs on broadcast.
+
+    A leg lands in `unbounded` when its rate is too coarse for the bound to
+    mean anything, not only when the bound is zero.  `min_rate` is
+    `out * 1e18 // in`, so one unit of the output token is `1/out` of the rate;
+    a leg producing a few units quantises harder than the tolerance it is
+    trying to express, and the number that ships is rounding wearing a bound's
+    clothes.
     """
     loose = {address.lower() for address in volatile}
     rates: list[int] = []
@@ -321,27 +328,39 @@ def min_rates(
                 f"leg {k} on {realized.target} has a raw-unit rate of {rate}, "
                 f"beyond what {RATE_BITS} bits can bound")
         rates.append(bound)
-        if bound == 0:
+        # One unit of output against the room the bound is claiming to leave.
+        if bound == 0 or 1.0 / leg_out(realized) > tol:
             unbounded.append(k)
     return rates, unbounded
 
 
-def guaranteed_out(route: RealizedRoute, fracs: list[int], rates: list[int]) -> int:
-    """What the per-leg bounds alone promise, if every leg pays its minimum.
+def walk_bounds(route: RealizedRoute, fracs: list[int],
+                rates: list[int]) -> tuple[int, list[int]]:
+    """`(what the bounds promise, the minimum output each leg enforces)`.
 
     The router's own arithmetic, run with `dy = dx * min_rate / 1e18` at every
-    step.  Worth computing because the bounds compound: a thirteen-leg route
-    through pools charging over a hundred basis points grants each of them a
-    fifth of that, and the product is a number a caller should see before
-    signing rather than discover afterwards.
+    step.  Worth computing twice over.  The bounds compound, so the total is a
+    number a caller should see before signing rather than discover afterwards.
+    And the per-leg figure is the check as the contract will really apply it.
+    It is not a useful alarm from here -- `fractions` makes `dx` the leg's own
+    modelled amount, so the floor lands at roughly the leg's output every time
+    -- but it is what an executed route should be measured against, where `dx`
+    is whatever really arrived.
     """
     balances: dict[int, int] = {0: route.amount_in}
+    floors: list[int] = []
     for k, realized in enumerate(route.legs):
         src, dst = realized.leg.src_slot, realized.leg.dst_slot
         dx = balances.get(src, 0) * fracs[k] // ONE
+        floors.append(dx * rates[k] // ONE)
         balances[src] = balances.get(src, 0) - dx
-        balances[dst] = balances.get(dst, 0) + dx * rates[k] // ONE
-    return balances.get(route.dst_slot, 0)
+        balances[dst] = balances.get(dst, 0) + floors[-1]
+    return balances.get(route.dst_slot, 0), floors
+
+
+def guaranteed_out(route: RealizedRoute, fracs: list[int], rates: list[int]) -> int:
+    """What the per-leg bounds alone promise, if every leg pays its minimum."""
+    return walk_bounds(route, fracs, rates)[0]
 
 
 # --------------------------------------------------------------- token naming
@@ -430,6 +449,7 @@ def encode_route(
 
     fracs = fractions(route)
     rates, unbounded = min_rates(route, volatile=volatile, **policy)
+    promised, _floors = walk_bounds(route, fracs, rates)
 
     tokens: list[str] = []
 
@@ -471,7 +491,7 @@ def encode_route(
         min_out=min_out,
         token_in=route.legs[0].token_in.lower(),
         token_out=route.legs[-1].token_out.lower(),
-        guaranteed_out=guaranteed_out(route, fracs, rates),
+        guaranteed_out=promised,
         quoted_out=route.modelled_out if quoted_out is None else quoted_out,
         unbounded=tuple(unbounded),
     )

@@ -34,32 +34,42 @@ def _decode(output) -> str:
         return ""
 
 
-def _deepest(frame, depth: int = 0) -> tuple[int, str]:
-    """The reason raised furthest down the call tree, and how far down."""
-    best = (depth, _decode(getattr(getattr(frame, "computation", None), "output", b"")))
+def _frames(frame, depth: int = 0):
+    """Every erroring frame, deepest last."""
+    comp = getattr(frame, "computation", None)
+    if comp is not None and getattr(comp, "error", None) is not None:
+        yield depth, comp
     for child in getattr(frame, "children", ()) or ():
-        found = _deepest(child, depth + 1)
-        if found[1] and found[0] >= best[0]:
-            best = found
-    return best
+        yield from _frames(child, depth + 1)
 
 
 def revert_reason(exc: Exception) -> str:
-    """The message the revert carried, from wherever in the trace it was raised.
+    """Where the call died, and what it said if it said anything.
 
-    Worth the digging twice over.  boa leads its own rendering with every
-    argument, so a route with six pools pushes the reason past any sane
-    truncation -- and a frame with an empty selector, which is what paying
-    native out is, makes that rendering raise rather than merely be long.
+    Two reasons to dig rather than take `str(exc)`.  boa leads its rendering
+    with every argument, so a route with six pools pushes any message past a
+    sane truncation -- and a frame with an empty selector, which is what paying
+    native out is, makes that rendering raise instead of merely be long.
     """
     frame = exc.args[0] if exc.args else None
     if frame is None:
         return ""
-    outer = _decode(getattr(getattr(frame, "computation", None), "output", b""))
-    inner = _deepest(frame)[1]
-    if inner and inner != outer:
-        return f"{outer} <- {inner}" if outer else inner
-    return outer
+    said, deepest = "", None
+    for depth, comp in _frames(frame):
+        deepest = (depth, comp)
+        text = _decode(getattr(comp, "output", b""))
+        if text:
+            said = text
+    if said:
+        return said
+    if deepest is None:
+        return ""
+    _, comp = deepest
+    message = getattr(getattr(comp, "msg", None), "data", b"") or b""
+    to = bytes(getattr(getattr(comp, "msg", None), "to", b"") or b"")
+    selector = bytes(message)[:4].hex() if len(bytes(message)) >= 4 else "none"
+    return (f"reverted with no reason, deepest frame 0x{to.hex()[:8]} "
+            f"selector 0x{selector}")
 
 
 @dataclass(slots=True)

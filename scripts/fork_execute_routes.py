@@ -2,18 +2,24 @@
 
 `tests/forked/test_router_execution.py` runs four pairs and asserts.  This runs
 many and reports, which is the other half: the assertions cannot tell you what
-fraction of the venue actually executes, or which leg kinds have never been
+fraction of a venue actually executes, or which leg kinds have never been
 through the contract at all.
 
 The bounds are on.  A route that quotes and then trips its own minimum rate is
-the thing worth finding, so nothing here relaxes them.
+the thing worth finding, so nothing here relaxes them.  It found one already --
+Curve's stETH pools hold raw ether and are paid in `msg.value`, which `get_dy`
+prices exactly as it prices anything else.
 
     uv run python scripts/fork_execute_routes.py --private
+    uv run python scripts/fork_execute_routes.py --chain base --source fuzz
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import pathlib
+import random
 import time
 
 from erouter.core.pipeline import RoutingError, route
@@ -24,90 +30,145 @@ from erouter.dev import config
 from erouter.dev.boa_host import override_client
 from erouter.dev.cli import _token_holders
 from erouter.dev.crypto_lp_params import build_exact_crypto_lp
-from erouter.dev.curve_api import CurveApi
+from erouter.dev.curve_api import CurveApi, CurveApiError
 from erouter.dev.exact_probe import ExactQuoterClient
 from erouter.dev.executor import fork
 from erouter.dev.lp_params import build_exact_lp
 from erouter.dev.probe_cache import CachedQuoterClient
 from erouter.dev.router import deploy, send
-from erouter.dev.rpc import JsonRpcTransport
+from erouter.dev.rpc import JsonRpcTransport, RpcError
 from erouter.dev.stable_params import build_exact_pools
 from erouter.dev.tricrypto_params import build_exact_tricrypto
 from erouter.dev.twocrypto_params import build_exact_twocrypto
 from erouter.dev.universe import read_balances, resolve_dialects, resolve_lp_tokens
 from erouter.dev.wrappers import build_node_map
 
-#: `(from, to, human amount)`, chosen to reach different leg kinds rather than
-#: to flatter the router: native both ways, a wrapper, a vault, an LP token,
-#: a currency pair, and the plain swaps.
-PAIRS = [
-    ("USDC", "WETH", 250_000),
-    ("WETH", "USDC", 100),
-    ("ETH", "USDC", 100),
-    ("USDC", "ETH", 250_000),
-    ("USDC", "USDT", 1_000_000),
-    ("DAI", "USDC", 500_000),
-    ("USDT", "DAI", 250_000),
-    ("crvUSD", "WETH", 500_000),
-    ("crvUSD", "sDOLA", 500_000),
-    ("USDC", "crvUSD", 250_000),
-    ("USDC", "wstETH", 100_000),
-    ("wstETH", "USDC", 30),
-    ("stETH", "USDC", 30),
-    ("USDC", "scrvUSD", 100_000),
-    ("USDC", "3Crv", 100_000),
-    ("3Crv", "USDT", 100_000),
-    ("WBTC", "USDC", 2),
-    ("USDC", "WBTC", 100_000),
-    ("USDC", "EURS", 50_000),
-    ("USDC", "tBTC", 100_000),
+#: `(from symbol, to symbol, human amount)`, chosen to reach different leg
+#: kinds rather than to flatter the router: native both ways, a wrapper, a
+#: vault, an LP token, a currency pair, and the plain swaps.  Mainnet symbols.
+CURATED = [
+    ("USDC", "WETH", 250_000), ("WETH", "USDC", 100),
+    ("ETH", "USDC", 100), ("USDC", "ETH", 250_000),
+    ("USDC", "USDT", 1_000_000), ("DAI", "USDC", 500_000),
+    ("USDT", "DAI", 250_000), ("crvUSD", "WETH", 500_000),
+    ("crvUSD", "sDOLA", 500_000), ("USDC", "crvUSD", 250_000),
+    ("USDC", "wstETH", 100_000), ("wstETH", "USDC", 30),
+    ("stETH", "USDC", 30), ("USDC", "scrvUSD", 100_000),
+    ("USDC", "3Crv", 100_000), ("3Crv", "USDT", 100_000),
+    ("WBTC", "USDC", 2), ("USDC", "WBTC", 100_000),
+    ("USDC", "EURS", 50_000), ("USDC", "tBTC", 100_000),
 ]
 
+ROUTER_PAIRS = pathlib.Path(__file__).resolve().parents[1] / "data" / "router-pairs.json"
 
-def resolve(pools, symbol: str, chain) -> tuple[str, int]:
-    """Symbol -> (address, decimals), by depth, as the CLI resolves it."""
-    if symbol.upper() == chain.native_symbol.upper():
-        return chain_table.NATIVE_SENTINEL.lower(), 18
-    best: dict[str, tuple[str, int, float]] = {}
+
+def depths(pools) -> dict[str, tuple[str, int, float, int]]:
+    """Every token by address: symbol, decimals, TVL behind it, units held.
+
+    The units are what sizes a trade.  A share of what the venue actually holds
+    needs no price for the token, which is the only way to size a pair on a
+    chain nobody has curated.
+    """
+    out: dict[str, tuple[str, int, float, int]] = {}
     for pool in pools:
-        for coin in pool.coins:
-            key = coin.symbol.upper()
-            _, _, tvl = best.get(key, ("", 0, 0.0))
-            if tvl < pool.tvl_usd:
-                best[key] = (coin.address.lower(), coin.decimals, pool.tvl_usd)
+        for k, coin in enumerate(pool.coins):
+            balance = pool.balances[k] if k < len(pool.balances) else 0
+            if not balance:
+                continue
+            key = coin.address.lower()
+            symbol, decimals, tvl, held = out.get(
+                key, (coin.symbol, coin.decimals, 0.0, 0))
+            out[key] = (symbol, decimals, tvl + pool.tvl_usd, held + balance)
+    return out
+
+
+def from_curated(pools, chain) -> list[tuple[str, str, int]]:
+    """The hand-written list, resolved to addresses by depth."""
+    known = depths(pools)
+    by_symbol: dict[str, tuple[str, int]] = {}
+    for address, (symbol, decimals, _tvl, _held) in sorted(
+            known.items(), key=lambda kv: -kv[1][2]):
+        by_symbol.setdefault(symbol.upper(), (address, decimals))
+    for pool in pools:
         if pool.lp_token:
-            key = pool.name.split()[-1].upper()
-            best.setdefault(key, (pool.lp_token.lower(), pool.lp_decimals,
-                                  pool.tvl_usd))
-    hit = best.get(symbol.upper())
-    if hit is None:
-        raise KeyError(symbol)
-    return hit[0], hit[1]
+            by_symbol.setdefault(pool.name.split()[-1].upper(),
+                                 (pool.lp_token.lower(), pool.lp_decimals))
+    by_symbol.setdefault(chain.native_symbol.upper(),
+                         (chain_table.NATIVE_SENTINEL.lower(), 18))
+
+    out = []
+    for src_sym, dst_sym, human in CURATED:
+        src, dst = by_symbol.get(src_sym.upper()), by_symbol.get(dst_sym.upper())
+        if src and dst:
+            out.append((src[0], dst[0], int(human * 10**src[1])))
+    return out
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chain", default="ethereum")
-    parser.add_argument("--block", default="latest")
-    parser.add_argument("--min-tvl", type=float, default=10_000.0)
-    parser.add_argument("--private", action="store_true",
-                        help="use networks.py; a fork needs it")
-    args = parser.parse_args()
+def from_router(pools, chain) -> list[tuple[str, str, int]]:
+    """Pairs the deployed Router was really asked for, at what it was asked.
 
-    chain = chain_table.get(args.chain)
+    `scripts/router_pairs.py` writes the file.  The size is that pair's median
+    trade, so the sweep is sized the way the venue is rather than the way a
+    round number looks.
+    """
+    if not ROUTER_PAIRS.is_file():
+        return []
+    known = depths(pools)
+    out = []
+    for row in json.loads(ROUTER_PAIRS.read_text()):
+        src, dst = row["src"].lower(), row["dst"].lower()
+        if row["chain"] != chain.name or src not in known or dst not in known:
+            continue
+        # `router_pairs.py` divides by the decimals before writing, so the file
+        # is in human units and every amount here has to be put back.
+        out.append((src, dst, int(row["median_amount"] * 10**known[src][1])))
+    return out
+
+
+def fuzzed(pools, count: int, seed: int, top: int = 14) -> list[tuple[str, str, int]]:
+    """Ordered pairs over the chain's deepest tokens, sized to what they hold.
+
+    Deepest first, because a pair with nothing behind it tests the universe
+    filter rather than the router.
+    """
+    known = depths(pools)
+    ranked = sorted(known, key=lambda a: -known[a][2])[:top]
+    rng = random.Random(seed)
+    seen: set[tuple[str, str]] = set()
+    out: list[tuple[str, str, int]] = []
+    attempts = 0
+    while ranked and len(out) < count and attempts < count * 40:
+        attempts += 1
+        src, dst = rng.choice(ranked), rng.choice(ranked)
+        if src == dst or (src, dst) in seen:
+            continue
+        seen.add((src, dst))
+        out.append((src, dst, max(1, known[src][3] // 400)))    # 0.25% of holdings
+    return out
+
+
+def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
+    """Route and execute every pair for one chain.  Never raises; reports."""
     url = config.rpc_url(chain.rpc_attr) if args.private else chain.public_rpc
-    rpc = JsonRpcTransport(url, block=args.block, chain_id=chain.chain_id)
-    base = CachedQuoterClient(override_client(rpc), rpc.chain_id, rpc.block)
-
     started = time.monotonic()
-    specs = parse_universe(CurveApi().list_pools(chain.chain_id,
-                                                 min_tvl=args.min_tvl))
+    try:
+        rpc = JsonRpcTransport(url, block=args.block, chain_id=chain.chain_id)
+        base = CachedQuoterClient(override_client(rpc), rpc.chain_id, rpc.block)
+        specs = parse_universe(CurveApi().list_pools(chain.chain_id,
+                                                     min_tvl=args.min_tvl))
+    except (RpcError, CurveApiError, OSError) as exc:
+        print(f"{chain.name}: unreachable -- {str(exc)[:80]}\n")
+        return 0, 0, 0, set(), []
+    if not specs:
+        print(f"{chain.name}: no pools above the floor\n")
+        return 0, 0, 0, set(), []
+
     resolve_dialects(specs, base, chain)
     read_balances(specs, base, None, chain.chain_id, token_client=base)
     resolve_lp_tokens(specs, base, chain.chain_id, token_client=base)
     nodes, _ = build_node_map(specs, chain, base)
-    # The LP models matter here: a legacy pool s own calc_token_amount omits
-    # the fee add_liquidity charges, so a deposit quoted from the chain is
+    # The LP models matter here.  A legacy pool's own `calc_token_amount` omits
+    # the fee `add_liquidity` charges, so a deposit quoted from the chain is
     # quoted too high and trips its own bound on the way out.
     stable = build_exact_pools(specs, base)
     crypto = build_exact_tricrypto(specs, base)
@@ -117,66 +178,113 @@ def main() -> int:
         lp=build_exact_lp(with_lp, stable, base),
         crypto_lp=build_exact_crypto_lp(with_lp, crypto, base))
     loose = volatile_pools(specs, chain.stables + chain.forex)
-    print(f"{chain.name} block {rpc.block:,}, {len(specs)} pools, "
-          f"warmed in {time.monotonic() - started:.0f}s\n")
 
-    quoted = {}
-    for src_sym, dst_sym, human in PAIRS:
-        label = f"{src_sym}->{dst_sym}"
+    pairs = []
+    if args.source in ("auto", "router"):
+        pairs = from_router(specs, chain)
+    if not pairs and args.source in ("auto", "curated"):
+        pairs = from_curated(specs, chain)
+    if not pairs or args.source == "fuzz":
+        pairs += fuzzed(specs, args.fuzz, args.seed)
+    known = depths(specs)
+
+    print(f"{chain.name} block {rpc.block:,}, {len(specs)} pools, "
+          f"{len(pairs)} pairs, warmed in {time.monotonic() - started:.0f}s")
+    print(f"{'pair':<24}{'legs':>5}  {'kinds':<30}{'drift bp':>10}{'gas':>11}  verdict")
+
+    quoted = []
+    for src, dst, amount in pairs:
+        label = f"{known[src][0]}->{known[dst][0]}"[:23]
         try:
-            src, decimals = resolve(specs, src_sym, chain)
-            dst, _ = resolve(specs, dst_sym, chain)
-        except KeyError as exc:
-            quoted[label] = f"unknown symbol {exc}"
-            continue
-        try:
-            quoted[label] = route(specs, nodes, client, src_token=src,
-                                  dst_token=dst,
-                                  amount_in=int(human * 10**decimals))
+            quoted.append((label, route(specs, nodes, client, src_token=src,
+                                        dst_token=dst, amount_in=amount)))
         except RoutingError as exc:
-            quoted[label] = f"no route: {exc}"
+            quoted.append((label, f"no route: {exc}"))
 
     fork(url, rpc.block)
     router = deploy()
-    print(f"{'pair':<18}{'legs':>5}{'kinds':<34}{'drift bp':>10}{'gas':>11}  verdict")
-
     ok = failed = skipped = 0
     kinds_seen: set[str] = set()
-    for src_sym, dst_sym, _ in PAIRS:
-        label = f"{src_sym}->{dst_sym}"
-        result = quoted[label]
+    problems: list[str] = []
+    for label, result in quoted:
         if isinstance(result, str):
-            print(f"{label:<18}{'':>5}{result[:60]}")
+            print(f"{label:<24}{'':>5}  {result[:60]}")
             skipped += 1
             continue
         kinds = sorted({leg.kind.name for leg in result.route.legs})
         kinds_seen |= set(kinds)
-        short = ",".join(k.split("_")[0].lower()[:6] for k in kinds)[:32]
+        short = ",".join(k.split("_")[0].lower()[:6] for k in kinds)[:28]
         try:
             call = encode_route(result.route, receiver="0x" + "11" * 20,
                                 volatile=loose, quoted_out=result.verified_out)
         except EncodingError as exc:
-            print(f"{label:<18}{len(result.route.legs):>5}{short:<34}"
+            print(f"{label:<24}{len(result.route.legs):>5}  {short:<30}"
                   f"{'':>10}{'':>11}  cannot encode: {exc}")
+            problems.append(f"{chain.name} {label}: cannot encode: {exc}")
             failed += 1
             continue
+        if call.unbounded:
+            weak = ", ".join(str(i) for i in call.unbounded)
+            problems.append(f"{chain.name} {label}: legs {weak} carry a bound "
+                            f"too coarse to mean anything")
         report = send(call, router=router, quoted_out=result.verified_out,
                       wrapped=chain.wrapped, expect_block=rpc.block,
                       holders=_token_holders(specs, call.token_in,
                                              avoid=result.route.pools_used))
         if not report.ok:
-            print(f"{label:<18}{len(result.route.legs):>5}{short:<34}"
-                  f"{'':>10}{'':>11}  FAILED: {report.error[:40]}")
+            print(f"{label:<24}{len(result.route.legs):>5}  {short:<30}"
+                  f"{'':>10}{'':>11}  FAILED: {report.error[:46]}")
+            problems.append(f"{chain.name} {label}: {report.error[:90]}")
             failed += 1
             continue
         ok += 1
-        print(f"{label:<18}{len(result.route.legs):>5}{short:<34}"
+        note = "; ".join(report.warnings)[:36]
+        print(f"{label:<24}{len(result.route.legs):>5}  {short:<30}"
               f"{report.drift_bp:>+10.4f}{report.gas:>11,}  ok"
-              f"{'  ' + '; '.join(report.warnings)[:40] if report.warnings else ''}")
+              f"{'  ' + note if note else ''}")
+    print(f"  {ok} executed, {failed} failed, {skipped} not routed\n")
+    return ok, failed, skipped, kinds_seen, problems
 
-    print(f"\n{ok} executed, {failed} failed, {skipped} not routed")
-    print(f"leg kinds exercised: {', '.join(sorted(kinds_seen))}")
-    return 1 if failed else 0
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("chains", nargs="*", default=None,
+                        help="chains to sweep (default: every one configured)")
+    parser.add_argument("--block", default="latest")
+    parser.add_argument("--min-tvl", type=float, default=10_000.0)
+    parser.add_argument("--source", default="auto",
+                        choices=("auto", "router", "curated", "fuzz"),
+                        help="where pairs come from; auto prefers the Router's "
+                             "own history and falls back to the universe")
+    parser.add_argument("--fuzz", type=int, default=10,
+                        help="how many fuzzed pairs when there is no history")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--private", action="store_true",
+                        help="use networks.py; a fork needs it")
+    args = parser.parse_args()
+
+    names = args.chains or [n for n in chain_table.CHAINS
+                            if config.have_networks()]
+    total = [0, 0, 0]
+    kinds: set[str] = set()
+    problems: list[str] = []
+    for name in names:
+        try:
+            chain = chain_table.get(name)
+        except KeyError:
+            print(f"{name}: unknown chain\n")
+            continue
+        ok, failed, skipped, seen, bad = sweep(chain, args)
+        total = [total[0] + ok, total[1] + failed, total[2] + skipped]
+        kinds |= seen
+        problems += bad
+
+    print(f"across {len(names)} chain(s): {total[0]} executed, {total[1]} failed, "
+          f"{total[2]} not routed")
+    print(f"leg kinds exercised: {', '.join(sorted(kinds)) or 'none'}")
+    for line in problems:
+        print(f"  ! {line}")
+    return 1 if total[1] else 0
 
 
 if __name__ == "__main__":
