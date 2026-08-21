@@ -149,7 +149,10 @@ def _route():
             kind=kind, target="0x" + "aa" * 20, token_in="0x" + "01" * 20,
             token_out="0x" + "02" * 20, amount_in=10**18, amount_out=10**18)
 
-    return RealizedRoute(legs=[leg(ArcKind.SWAP_STABLE, 0),
+    # With an input, because pricing chains from it: the second leg trades
+    # what the first really paid, not what it was modelled to pay.
+    return RealizedRoute(amount_in=10**18,
+                         legs=[leg(ArcKind.SWAP_STABLE, 0),
                                leg(ArcKind.WRAP_NATIVE, 1)])
 
 
@@ -186,3 +189,41 @@ def test_a_route_with_nothing_to_price_asks_nothing():
     client = Client()
     assert price_legs(RealizedRoute(legs=[]), client) == 0
     assert client.probed == []
+
+
+def test_a_later_leg_is_priced_at_what_the_earlier_one_really_paid():
+    """The bug this chaining exists for.
+
+    Quoting every leg at its modelled input looks safe because the split is
+    final -- but the split fixes the *fractions*, and a fraction is of the
+    balance standing when the leg runs.  That balance is whatever the pool
+    upstream really paid, which is not what the quadratic said it would.
+
+    Measured on fraxtal: the first leg was modelled 153 bp high, so the last
+    was priced 10.6% below the size it was handed.  A leg trading bigger than
+    it was measured pays more impact, so its minimum rate -- 0.2 bp of room --
+    tripped and the route reverted after quoting cleanly.
+    """
+    from erouter.core.pipeline import price_legs
+
+    class Generous(Client):
+        """Pays double, so the second leg's real input is unmistakable."""
+
+        def probe(self, probes):
+            from erouter.core.quoter import Quote
+            from erouter.core.transport import Status
+
+            self.probed.extend(probes)
+            return [Quote(Status.VALUE, p.dx * 2) for p in probes]
+
+    route, client = _route(), Generous()
+    price_legs(route, client)
+
+    first, second = client.probed
+    assert first.dx == 10**18, "the first leg trades the route's input"
+    assert second.dx == 2 * 10**18, (
+        f"the second leg was priced at {second.dx}, but the first paid "
+        f"{route.legs[0].verified_out} into its slot -- pricing it at the "
+        f"modelled {route.legs[1].amount_in} bounds it at a size it never trades"
+    )
+    assert route.legs[1].verified_out == 4 * 10**18

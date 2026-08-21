@@ -1090,8 +1090,29 @@ def _quote(
     return result
 
 
+def _pricing_layers(legs) -> list[list[int]]:
+    """Leg indices grouped so no leg in a group feeds another in it.
+
+    Legs arrive topologically ordered, so a group closes as soon as one draws
+    on a slot the group has just filled.  Depth is what costs round trips here,
+    not leg count: a five-leg route with two branches is two batches.
+    """
+    layers: list[list[int]] = []
+    current: list[int] = []
+    filled: set[int] = set()
+    for k, realized in enumerate(legs):
+        if realized.leg.src_slot in filled:
+            layers.append(current)
+            current, filled = [], set()
+        current.append(k)
+        filled.add(realized.leg.dst_slot)
+    if current:
+        layers.append(current)
+    return layers
+
+
 def price_legs(route, client) -> int:
-    """Ask each leg's own pool what it pays, and what it charges to pay it.
+    """Ask each leg's own pool what it pays, at the size it will be handed.
 
     Everything else about a route is verified end to end: the total comes back
     from a chained walk and the per-leg figures are the quadratic's, which is
@@ -1100,36 +1121,109 @@ def price_legs(route, client) -> int:
     about a number nothing checked, and measured on a live 13-leg route those
     numbers were out by up to 37.9 bp in both directions.
 
-    One batch, because the sizes are already known: the split is final, so
-    every leg can be quoted at once rather than chained.  Free on a pool with
-    an exact model, one round trip otherwise.
+    **The size has to chain.**  Quoting every leg at its modelled input in one
+    batch looks safe because the split is final, but the split fixes the
+    *fractions*, not the amounts: a fraction is of the balance standing when the
+    leg runs, and that balance is whatever the pools upstream really paid.  On a
+    fraxtal route whose first leg was modelled 153 bp high, the last leg was
+    priced 10.6% below the size it was handed -- and a leg trading bigger than
+    it was measured pays more impact, so its bound tripped and the route
+    reverted after quoting cleanly.
+
+    So walk it the way the contract will: fractions of real balances, layer by
+    layer.  One round trip per layer rather than one for the route, which for a
+    branchy five-leg route is two.  Free either way on a pool with an exact
+    model.
     """
-    legs = [rl for rl in route.legs if rl.amount_in > 0]
-    if not legs:
+    from .routecall import fractions
+
+    if not route.legs:
         return 0
-    quotes = client.probe([
-        Probe(rl.target, rl.kind, rl.leg.i, rl.leg.j, rl.leg.n, rl.amount_in)
-        for rl in legs
-    ])
+    priced = 0
+    for _ in range(PRICING_ROUNDS):
+        try:
+            fracs = fractions(route)
+        except Exception:
+            # A route `fractions` refuses is one `encode_route` will refuse
+            # too.  Pricing it at modelled sizes is no worse than not pricing.
+            fracs = None
+        priced = _price_once(route, client, fracs)
+        try:
+            if fracs is None or fractions(route) == fracs:
+                break          # the split did not move, so neither will the sizes
+        except Exception:
+            break
+    return priced
+
+
+#: How many times to re-walk before accepting the sizes.  Two is enough on
+#: every route measured; a third is cheap insurance and the cap stops a route
+#: whose fractions oscillate from spinning.
+PRICING_ROUNDS = 3
+
+
+def _price_once(route, client, fracs) -> int:
+    """One walk at these fractions.  Returns how many legs the pools priced."""
+    from .routecall import ONE
+
+    legs = route.legs
+    if fracs is None:
+        fracs = [ONE] * len(legs)
+
     fee_at = getattr(client, "fee_at", None)
     fee_floor = getattr(client, "fee_floor", None)
+    balances: dict[int, int] = {route.legs[0].leg.src_slot: route.amount_in}
     priced = 0
-    for realized, quote in zip(legs, quotes, strict=True):
-        if quote.ok and quote.value > 0:
-            realized.verified_out = int(quote.value)
-            priced += 1
-        if realized.is_conversion:
-            continue
-        where = (realized.target.lower(), realized.kind, realized.leg.i,
-                 realized.leg.j)
-        if fee_at is not None:
-            fee = fee_at(*where, realized.amount_in)
-            if fee is not None:
-                realized.fee_frac = float(fee)
-        if fee_floor is not None:
-            least = fee_floor(*where)
-            if least is not None:
-                realized.fee_floor = float(least)
+
+    for layer in _pricing_layers(legs):
+        sized: list[tuple] = []
+        for k in layer:
+            realized = legs[k]
+            src = realized.leg.src_slot
+            have = balances.get(src, 0)
+            dx = have if fracs[k] >= ONE else have * fracs[k] // ONE
+            # A route with no input, or a leg whose feeders all failed to
+            # price, has nothing to chain from.  Fall back to the modelled
+            # size, which is what this did everywhere before it chained.
+            dx = dx or realized.amount_in
+            balances[src] = max(0, have - dx)
+            sized.append((k, realized, dx))
+
+        wanted = [(k, rl, dx) for k, rl, dx in sized if dx > 0]
+        quotes = client.probe([
+            Probe(rl.target, rl.kind, rl.leg.i, rl.leg.j, rl.leg.n, dx)
+            for _, rl, dx in wanted
+        ]) if wanted else []
+
+        for (_k, realized, dx), quote in zip(wanted, quotes, strict=True):
+            if quote.ok and quote.value > 0:
+                realized.verified_in = dx
+                realized.verified_out = int(quote.value)
+                priced += 1
+            else:
+                # Keep the chain going on the model's own ratio rather than
+                # dropping the rest of the route to zero: a leg nothing could
+                # price is one whose bound falls back to the model anyway.
+                realized.verified_in = 0
+                realized.verified_out = 0
+            paid = realized.verified_out or (
+                dx * realized.amount_out // realized.amount_in
+                if realized.amount_in else 0)
+            balances[realized.leg.dst_slot] = (
+                balances.get(realized.leg.dst_slot, 0) + paid)
+
+            if realized.is_conversion:
+                continue
+            where = (realized.target.lower(), realized.kind, realized.leg.i,
+                     realized.leg.j)
+            if fee_at is not None:
+                fee = fee_at(*where, dx)
+                if fee is not None:
+                    realized.fee_frac = float(fee)
+            if fee_floor is not None:
+                least = fee_floor(*where)
+                if least is not None:
+                    realized.fee_floor = float(least)
     return priced
 
 

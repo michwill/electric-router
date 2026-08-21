@@ -63,6 +63,11 @@ class RealizedLeg:
     #: size rather than anything fitted: it is what lets a topology be weighed
     #: without going through the split the model happened to give it.
     tvl_usd: float = 0.0
+    #: The size `verified_out` was measured at -- the leg's real input, which
+    #: is a fraction of whatever its feeders actually paid rather than of what
+    #: they were modelled to pay.  A rate divides one by the other, so they
+    #: have to come from the same quote.  Zero where nothing priced it.
+    verified_in: int = 0
     #: What this leg's own pool says it pays at this size, at the pinned block.
     #: `amount_out` is the quadratic's answer and is a *choice*, accurate enough
     #: to pick pools and split flow and no better -- measured against the exact

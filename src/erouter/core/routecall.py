@@ -286,6 +286,17 @@ def bounding_fee(realized) -> float:
     return leg_fee(realized)
 
 
+def leg_in(realized) -> int:
+    """The size this leg's output was measured at.
+
+    `leg_out` is the pool's own answer where there is one, and it was quoted at
+    the leg's real input rather than its modelled one.  Dividing that by the
+    modelled input would inflate the rate by exactly the gap the measurement
+    exists to close.
+    """
+    return realized.verified_in or realized.amount_in
+
+
 def min_rates(
     route: RealizedRoute,
     *,
@@ -318,11 +329,11 @@ def min_rates(
     for k, realized in enumerate(route.legs):
         floor = volatile_floor_bp if realized.target.lower() in loose else floor_bp
         tol = min(1.0, max(fee_share * bounding_fee(realized), floor / 1e4))
-        if realized.amount_in <= 0 or leg_out(realized) <= 0:
+        if leg_in(realized) <= 0 or leg_out(realized) <= 0:
             rates.append(0)
             unbounded.append(k)
             continue
-        rate = leg_out(realized) * ONE // realized.amount_in
+        rate = leg_out(realized) * ONE // leg_in(realized)
         bound = rate - rate * round(tol * 1e9) // 10**9
         if bound > MAX_RATE:
             raise EncodingError(
