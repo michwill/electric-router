@@ -376,12 +376,23 @@ def _run(step: Step, dx: uint256) -> uint256:
     """
     kind: uint256 = step.kind
     before: uint256 = self._held(step.token_out)
+    # A pool holding the native sentinel is paid in value rather than in a
+    # transfer, and hands ether back the same way.
+    native_in: uint256 = dx if step.token_in == NATIVE else 0
+    raw_ether: bool = step.token_in == NATIVE or step.token_out == NATIVE
 
     if kind == SWAP_STABLE:
         extcall StablePool(step.pool).exchange(
-            convert(step.i, int128), convert(step.j, int128), dx, 0)
+            convert(step.i, int128), convert(step.j, int128), dx, 0,
+            value=native_in)
 
     elif kind == SWAP_CRYPTO:
+        if raw_ether:
+            # No four-argument entry point takes ether: that spelling defaults
+            # `use_eth` to false, so a pool holding the sentinel has to be told.
+            extcall CryptoPool(step.pool).exchange(
+                step.i, step.j, dx, 0, True, value=native_in)
+            return self._held(step.token_out) - before
         ok: bool = False
         out: Bytes[32] = b""
         ok, out = raw_call(

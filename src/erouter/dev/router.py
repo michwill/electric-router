@@ -22,23 +22,44 @@ GAS_HEADROOM_WEI = 10**19
 REVERT_SELECTOR = bytes.fromhex("08c379a0")
 
 
-def revert_reason(exc: Exception) -> str:
-    """The router's own message, dug out of boa's call trace.
-
-    Worth the digging: the trace leads with every argument, and a route with
-    six pools pushes the reason past any sane truncation -- so a caller reading
-    `error` would see addresses where the diagnosis should be.
-    """
+def _decode(output) -> str:
+    """`Error(string)` if that is what these bytes are."""
     from ..core.codec import decode_result
 
+    if not output or bytes(output[:4]) != REVERT_SELECTOR:
+        return ""
+    try:
+        return str(decode_result(["string"], bytes(output)[4:])[0])
+    except Exception:
+        return ""
+
+
+def _deepest(frame, depth: int = 0) -> tuple[int, str]:
+    """The reason raised furthest down the call tree, and how far down."""
+    best = (depth, _decode(getattr(getattr(frame, "computation", None), "output", b"")))
+    for child in getattr(frame, "children", ()) or ():
+        found = _deepest(child, depth + 1)
+        if found[1] and found[0] >= best[0]:
+            best = found
+    return best
+
+
+def revert_reason(exc: Exception) -> str:
+    """The message the revert carried, from wherever in the trace it was raised.
+
+    Worth the digging twice over.  boa leads its own rendering with every
+    argument, so a route with six pools pushes the reason past any sane
+    truncation -- and a frame with an empty selector, which is what paying
+    native out is, makes that rendering raise rather than merely be long.
+    """
     frame = exc.args[0] if exc.args else None
-    output = getattr(getattr(frame, "computation", None), "output", b"")
-    if output[:4] == REVERT_SELECTOR:
-        try:
-            return str(decode_result(["string"], output[4:])[0])
-        except Exception:
-            pass
-    return ""
+    if frame is None:
+        return ""
+    outer = _decode(getattr(getattr(frame, "computation", None), "output", b""))
+    inner = _deepest(frame)[1]
+    if inner and inner != outer:
+        return f"{outer} <- {inner}" if outer else inner
+    return outer
 
 
 @dataclass(slots=True)
@@ -85,7 +106,7 @@ def send(
     """
     import boa
 
-    from .executor import ERC20_ABI, _fund
+    from .executor import ERC20_ABI, _fund, describe
 
     result = Sent(quoted_out=quoted_out,
                   calldata_bytes=len(call.calldata(sender=call.receiver)))
@@ -123,6 +144,5 @@ def send(
                 )
             result.gas = int(contract._computation.get_gas_used())
     except Exception as exc:
-        result.error = (revert_reason(exc)
-                        or f"{type(exc).__name__}: {exc}".strip()[:400])
+        result.error = revert_reason(exc) or describe(exc)
     return result

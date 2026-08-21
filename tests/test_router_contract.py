@@ -346,3 +346,48 @@ def test_the_selector_table_agrees_with_the_signature_it_stands_for():
     for n in range(2, 9):
         want = selector(f"add_liquidity(uint256[{n}],uint256)")
         assert router.eval(f"ADD_LIQUIDITY[{n}]") == want, f"N={n}"
+
+
+# ------------------------------------------------- pools that hold raw ETH
+
+
+@pytest.fixture
+def native_pool(world):
+    """ETH/A, priced one for one, paid in `msg.value` like Curve's stETH pools."""
+    pool = load("MockNativePool", world.a.address, [0, 10**18, 10**18, 0])
+    world.a.mint(pool.address, 10**24)
+    boa.env.set_balance(pool.address, 10**21)
+    return pool
+
+
+def test_a_pool_holding_raw_ether_is_paid_in_value(world, trader, native_pool):
+    """`get_dy` prices this identically to any other swap, so nothing upstream
+    can see that the pool wants `msg.value` rather than a transfer.  Found by
+    executing mainnet WETH -> USDC, which routes through stETH-ng."""
+    out = send(world, trader,
+               [step(native_pool, ArcKind.SWAP_STABLE, i=0, j=1, n=2)],
+               10**18, value=10**18)
+    assert out == 10**18
+    assert world.a.balanceOf(trader) > 0
+
+
+def test_a_pool_holding_raw_ether_pays_out_in_value(world, trader, native_pool):
+    before = boa.env.get_balance(trader)
+    out = send(world, trader,
+               [step(native_pool, ArcKind.SWAP_STABLE, i=1, j=0, n=2)], 10**18)
+    assert out == 10**18
+    assert boa.env.get_balance(trader) == before + 10**18
+
+
+def test_ether_is_carried_through_a_route_rather_than_only_ending_it(
+        world, trader, native_pool):
+    """The failing mainnet routes unwrapped mid-route and swapped the ether on,
+    which is the case a route that merely *ends* in ether never reaches."""
+    world.weth.deposit(value=10**18, sender=trader)
+    out = send(world, trader, [
+        step(world.weth, ArcKind.UNWRAP_NATIVE),
+        step(native_pool, ArcKind.SWAP_STABLE, i=0, j=1, n=2),
+        step(world.stable, ArcKind.SWAP_STABLE, i=0, j=1, n=3),
+    ], 10**18)
+    assert out > 0
+    assert world.is_empty()

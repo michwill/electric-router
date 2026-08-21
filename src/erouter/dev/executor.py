@@ -49,6 +49,20 @@ ERC20_ABI = """[
 
 GAS_HEADROOM_WEI = 10**19
 
+
+def describe(exc: BaseException) -> str:
+    """One line for a failure, even when the failure will not be rendered.
+
+    boa formats a `BoaError` by decoding every frame of its call trace, and a
+    frame with an empty selector -- paying native out is one -- has no method
+    id to decode, so `str(exc)` raises from inside the formatter.  A reporter
+    that cannot report is worse than a short message.
+    """
+    try:
+        return f"{type(exc).__name__}: {exc}".strip()[:400]
+    except Exception:
+        return f"{type(exc).__name__} (boa could not render its own trace)"
+
 #: `transfer`, for funding out of a holder when the balance slot cannot be
 #: found.  Declared as returning a bool, which is the common spelling; a token
 #: that returns nothing still executes, the decode is what would differ.
@@ -222,7 +236,7 @@ def execute(
                     value=amount if native_in else 0,
                 )
     except Exception as exc:                       # see docstring
-        result.error = f"{type(exc).__name__}: {exc}".strip()[:400]
+        result.error = describe(exc)
     return result
 
 
