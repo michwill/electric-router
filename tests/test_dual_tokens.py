@@ -136,3 +136,31 @@ def test_flow_leaving_both_halves_of_an_alias_is_realisable():
     for leg in route.wire_legs:
         assert leg.src_slot != leg.dst_slot, (
             f"a leg from slot {leg.src_slot} to itself cannot be executed")
+
+
+def test_flow_arriving_at_the_alias_is_realisable():
+    """The same collapse, at the other end of the route.
+
+    Asking for the alias by address means `dst_lower != dst_canonical` while
+    both sit in one slot, so the trailing conversion leg had a source and a
+    destination that were the same accumulator.  There is nothing to convert --
+    that is what declaring them duals says -- so the leg should not exist.
+
+    Found by fuzzing gnosis, where `--to` the second EURe raised out of `Leg`
+    instead of quoting.
+    """
+    nodes, _ = build_node_map(pools(), chain_with_duals(), Client())
+    canonical, alias = nodes.canonical(V1), V2
+    assert canonical.lower() != alias.lower(), "the fixture must keep two addresses"
+
+    arc = replace(_arc("0x" + "a1" * 20, canonical, nodes),
+                  token_in=OTHER, token_out=canonical,
+                  tau=nodes.node(OTHER), sigma=nodes.node(canonical))
+    route = realize([arc], np.array([1.0]), np.ones(nodes.n_nodes), nodes,
+                    src_token=OTHER, dst_token=alias, amount_in=10**20)
+
+    for leg in route.wire_legs:
+        assert leg.src_slot != leg.dst_slot, (
+            f"a leg from slot {leg.src_slot} to itself cannot be executed")
+    assert route.dst_slot == route.slots[canonical.lower()], (
+        "the alias must read the balance the legs actually delivered into")

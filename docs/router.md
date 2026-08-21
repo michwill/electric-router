@@ -124,9 +124,16 @@ dy >= dx * min_rate / 1e18
 `min_rate` is a rate between *raw* units, so it carries the decimal difference:
 USDC (6) to WETH (18) around 4,000 USD is about `2.5e26`.  128 bits covers rates
 from 1e-18 to 3.4e20; a pair outside that band -- an 18-decimal dust token
-against an 8-decimal expensive one -- can only be bounded by its neighbours and
-`min_out`, and the encoder reports those legs in `unbounded` rather than
-shipping a silent zero.
+against an 8-decimal expensive one -- cannot be bounded at all.  Neither can a
+leg producing so little that one unit of its output is more than the tolerance:
+one unit is `1/out` of the rate, so a leg making a few hundred units quantises
+harder than the room the bound is trying to leave.
+
+`encode_route` **refuses** both rather than shipping a number that reads as
+protection.  A leg worth too little to bound is a leg worth too little to
+execute, and nothing upstream can see it: `prune_dust` drops branches by their
+share of a node's outflow, in value coordinates, before anything knows what a
+leg produces in token units.
 
 ### Where the reference rate has to come from
 

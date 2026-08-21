@@ -166,8 +166,9 @@ class RouteCall:
     #: The chained walk's figure where there was one, the model's otherwise --
     #: the number the user was shown, so the number the tolerance is against.
     quoted_out: int = 0
-    #: Legs the bound does not really cover: its rate is zero, or too coarse
-    #: to express the tolerance.  Their neighbours and `min_out` guard them.
+    #: Legs the bound does not really cover.  Empty unless the caller asked
+    #: for them: `encode_route` refuses such a route by default, because a leg
+    #: producing too little to bound is a leg producing too little to want.
     unbounded: tuple[int, ...] = ()
 
     def calldata(self, sender: str = "") -> bytes:
@@ -425,6 +426,7 @@ def encode_route(
     quoted_out: int | None = None,
     volatile: Collection[str] = (),
     naming: str = NEEDED,
+    allow_unbounded: bool = False,
     **policy,
 ) -> RouteCall:
     """Encode `route` for `ElectricRouter.execute`.
@@ -449,6 +451,15 @@ def encode_route(
 
     fracs = fractions(route)
     rates, unbounded = min_rates(route, volatile=volatile, **policy)
+    if unbounded and not allow_unbounded:
+        legs = ", ".join(
+            f"{k} on {route.legs[k].target} ({route.legs[k].amount_in} in, "
+            f"{leg_out(route.legs[k])} out)" for k in unbounded)
+        raise EncodingError(
+            f"leg(s) {legs} produce too little for a minimum rate to bound -- "
+            f"one unit of the output is more than the tolerance.  A leg worth "
+            f"that little is not worth executing; re-solve without it, or pass "
+            f"allow_unbounded to ship it unprotected")
     promised, _floors = walk_bounds(route, fracs, rates)
 
     tokens: list[str] = []

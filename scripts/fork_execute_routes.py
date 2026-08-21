@@ -184,7 +184,7 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
         pairs = from_router(specs, chain)
     if not pairs and args.source in ("auto", "curated"):
         pairs = from_curated(specs, chain)
-    if not pairs or args.source == "fuzz":
+    if args.fuzz and (not pairs or args.source in ("auto", "fuzz")):
         pairs += fuzzed(specs, args.fuzz, args.seed)
     known = depths(specs)
 
@@ -203,8 +203,10 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
 
     fork(url, rpc.block)
     router = deploy()
+    by_address = {p.address.lower(): p for p in specs}
     ok = failed = skipped = 0
     kinds_seen: set[str] = set()
+    types_seen: set[str] = set()
     problems: list[str] = []
     for label, result in quoted:
         if isinstance(result, str):
@@ -213,6 +215,9 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
             continue
         kinds = sorted({leg.kind.name for leg in result.route.legs})
         kinds_seen |= set(kinds)
+        types_seen |= {by_address[leg.target.lower()].key
+                       for leg in result.route.legs
+                       if leg.target.lower() in by_address}
         short = ",".join(k.split("_")[0].lower()[:6] for k in kinds)[:28]
         try:
             call = encode_route(result.route, receiver="0x" + "11" * 20,
@@ -242,8 +247,9 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
         print(f"{label:<24}{len(result.route.legs):>5}  {short:<30}"
               f"{report.drift_bp:>+10.4f}{report.gas:>11,}  ok"
               f"{'  ' + note if note else ''}")
-    print(f"  {ok} executed, {failed} failed, {skipped} not routed\n")
-    return ok, failed, skipped, kinds_seen, problems
+    print(f"  {ok} executed, {failed} failed, {skipped} not routed")
+    print(f"  pool types: {', '.join(sorted(types_seen)) or 'none'}\n")
+    return ok, failed, skipped, kinds_seen, types_seen, problems
 
 
 def main() -> int:
@@ -267,6 +273,7 @@ def main() -> int:
                             if config.have_networks()]
     total = [0, 0, 0]
     kinds: set[str] = set()
+    types: set[str] = set()
     problems: list[str] = []
     for name in names:
         try:
@@ -274,14 +281,16 @@ def main() -> int:
         except KeyError:
             print(f"{name}: unknown chain\n")
             continue
-        ok, failed, skipped, seen, bad = sweep(chain, args)
+        ok, failed, skipped, seen, seen_types, bad = sweep(chain, args)
         total = [total[0] + ok, total[1] + failed, total[2] + skipped]
         kinds |= seen
+        types |= seen_types
         problems += bad
 
     print(f"across {len(names)} chain(s): {total[0]} executed, {total[1]} failed, "
           f"{total[2]} not routed")
     print(f"leg kinds exercised: {', '.join(sorted(kinds)) or 'none'}")
+    print(f"pool types exercised: {', '.join(sorted(types)) or 'none'}")
     for line in problems:
         print(f"  ! {line}")
     return 1 if total[1] else 0

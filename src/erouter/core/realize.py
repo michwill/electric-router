@@ -591,7 +591,10 @@ def realize(
     )
     if dst_lower != dst_canonical and hub_has_balance:
         conversion = nodes.conversion.get(dst_lower)
-        if conversion is not None:
+        # An alias needs no leg and cannot have one: `slot` already put both
+        # addresses in one accumulator, so this would move a slot to itself.
+        # Asking for gnosis's second EURe raised out of `Leg` instead.
+        if conversion is not None and not conversion.is_alias:
             route.legs.append(
                 _conversion_leg(
                     nodes, conversion, forward=False,
