@@ -36,6 +36,10 @@ REPO = Path(__file__).resolve().parent.parent.parent.parent
 # everywhere and one whitelist entry covers the lot.
 CREATE2_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C"
 
+#: How far over the chain's own estimate the gas limit is set.  Enough for a
+#: pool that shifts between estimating and mining, far below any block limit.
+GAS_MARGIN = 1.25
+
 #: Chains not worth the gas, and why.  Printed rather than silently skipped:
 #: a chain missing from a deployment sweep should say so.
 UNSUPPORTED = {
@@ -166,7 +170,11 @@ def funding_estimate(url: str, chain_id: int, payload: bytes, sender: str | None
         # Only used when the node will not estimate for an unfunded sender.
         gas = 21_000 + 200 * len(payload)
     price = rpc.gas_price()
-    return gas, price, gas * price / 1e18
+    # The *limit*, not the estimate.  A sender must hold `limit * price` up
+    # front wherever the surplus is refunded, and monad does not refund it: its
+    # receipts burn the limit exactly.  Pricing the estimate said monad needed
+    # 0.242 MON for a deployment that cost 0.303, so the next one was short.
+    return gas, price, int(gas * GAS_MARGIN) * price / 1e18
 
 
 def funding_report(target: Target, names: list[str], deployer: str, salt_phrase: str) -> int:
@@ -207,9 +215,9 @@ def funding_report(target: Target, names: list[str], deployer: str, salt_phrase:
             print(f"  {name:<11} {'':<8} {'':>14} {'':>12}   ! {str(exc)[:28]}")
             short.append(name)
             continue
-        # Twice the estimate: gas prices move between reading one and sending
-        # a transaction, and a sweep that dies half way through is worse than
-        # one that asks for a little more up front.
+        # Twice what the limit costs: gas prices move between reading one and
+        # sending a transaction, and a sweep that dies half way through is
+        # worse than one that asks for a little more up front.
         want = cost * 2
         gap = max(0.0, want - balance)
         print(f"  {name:<11} {chain.native_symbol:<8} {balance:>14.6f} {want:>12.6f} "
@@ -356,8 +364,9 @@ def deploy_one(target: Target, name: str, args, account=None) -> int:
             gas, price, cost = funding_estimate(
                 url, chain.chain_id, salt + initcode,
                 deployer.address if deployer else None)
-            print(f"  cost      {gas:,} gas at {price / 1e9:,.3f} gwei "
-                  f"= {cost:.6f} {chain.native_symbol}")
+            limit = int(gas * GAS_MARGIN)
+            print(f"  cost      {limit:,} gas limit at {price / 1e9:,.3f} gwei "
+                  f"= {cost:.6f} {chain.native_symbol} to hold")
             # Send the gas limit rather than letting it be inferred.  A node
             # that will not estimate leaves the block gas limit as the
             # fallback, and the sender must hold `limit * max_fee` up front
@@ -366,10 +375,6 @@ def deploy_one(target: Target, name: str, args, account=None) -> int:
             # it failed with "Insufficient funds for gas * price + value" while
             # the real cost was 0.364 MON.  base survives the same fallback
             # only because 400M gas at 0.01 gwei is 0.004 ETH.
-            #
-            # A quarter over the estimate: enough for a pool that shifts
-            # between estimating and mining, far below any block limit.
-            limit = int(gas * 1.25)
             print(f"  sending {len(salt) + len(initcode):,} bytes through the proxy "
                   f"with a {limit:,} gas limit")
             if args.broadcast:
