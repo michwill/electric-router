@@ -148,9 +148,6 @@ struct Step:
     pool: address
     token_in: address
     token_out: address
-    # `uint256` rather than `uint8`: every one of these is masked out of the
-    # packed word to four or five bits, so the narrower type adds a bounds
-    # check on a value that cannot fail it, and a conversion at every use.
     kind: uint256
     i: uint256
     j: uint256
@@ -174,21 +171,7 @@ event Routed:
 @internal
 @view
 def _ask(target: address, data: Bytes[68]) -> (bool, Bytes[32]):
-    """One staticcall that never reverts, for the getters where the *absence*
-    of an answer is the answer.
-
-    Only the discovery below uses it: which spelling of `coins` a pool was
-    compiled with, whether it is its own LP token, what a wrapper is a claim
-    on.  Vyper has no `try` around an external call and an interface cannot
-    express "or else", so a reverting probe has to be caught rather than
-    declared.  Anything the router simply needs is a plain typed call.
-
-    Empty returndata is not a value.
-
-    A Curve pool answers an unimplemented function with empty data rather than
-    a revert, and decoding `0x` gives zero -- which as an address is a token
-    nobody holds and as a balance is a leg that quietly does nothing.
-    """
+    """A view call by selector, or selector and data, as success plus 32 bytes."""
     ok: bool = False
     out: Bytes[32] = b""
     ok, out = raw_call(
@@ -202,8 +185,7 @@ def _ask(target: address, data: Bytes[68]) -> (bool, Bytes[32]):
 @internal
 @view
 def _held(token: address) -> uint256:
-    """What the router is holding.  A plain call: unlike the getters below,
-    there is no question here whose answer is a revert."""
+    """Balance which router is holding (either ERC20 or native token)"""
     if token == NATIVE:
         return self.balance
     return staticcall IERC20(token).balanceOf(self)
@@ -231,6 +213,7 @@ def _coin(pool: address, index: uint256) -> address:
 @internal
 @view
 def _getter(target: address, data: Bytes[68]) -> address:
+    """The same non-reverting read as `_ask`, decoded to an address."""
     ok: bool = False
     out: Bytes[32] = b""
     ok, out = self._ask(target, data)
@@ -242,14 +225,14 @@ def _getter(target: address, data: Bytes[68]) -> address:
 @internal
 @view
 def _lp_token(pool: address) -> address:
-    """The pool's own share token, which is the pool itself on the ng designs.
+    """The pool's own share token, which is the pool itself on the ng designs."""
 
-    Falling back to the pool is gated on it answering `totalSupply()`: fourteen
-    mainnet pools -- 3pool among them -- keep their LP token in a separate
-    contract and expose no getter for it at all, and quietly treating those as
-    their own share token would approve and count the wrong address.  They must
-    name it in `tokens` instead.
-    """
+    # Falling back to the pool is gated on it answering `totalSupply()`: fourteen
+    # mainnet pools -- 3pool among them -- keep their LP token in a separate
+    # contract and expose no getter for it at all, and quietly treating those as
+    # their own share token would approve and count the wrong address.  They must
+    # name it in `tokens` instead.
+
     found: address = self._getter(pool, method_id("lp_token()"))
     if found != empty(address):
         return found
@@ -360,30 +343,10 @@ def _allow(token: address, spender: address):
     if held == max_value(uint256):
         return
     if held != 0:
-        assert extcall IERC20(token).approve(spender, 0, default_return_value=True), (
-            "approve failed")
+        assert extcall IERC20(token).approve(
+            spender, 0, default_return_value=True), "approve failed"
     assert extcall IERC20(token).approve(
         spender, max_value(uint256), default_return_value=True), "approve failed"
-
-
-@internal
-def _pull(token: address, owner: address, amount: uint256):
-    assert extcall IERC20(token).transferFrom(
-        owner, self, amount, default_return_value=True), "transferFrom failed"
-
-
-@internal
-def _pay(token: address, to: address, amount: uint256):
-    if amount == 0:
-        return
-    if token == NATIVE:
-        # Full gas rather than a stipend: `execute` holds the reentrancy lock,
-        # so the only thing this buys an unusual receiver is the ability to be
-        # paid at all.
-        raw_call(to, b"", value=amount)
-        return
-    assert extcall IERC20(token).transfer(
-        to, amount, default_return_value=True), "transfer failed"
 
 
 # --------------------------------------------------------------- calldata
@@ -549,7 +512,8 @@ def execute(
         assert msg.value == amount_in, "native input needs msg.value"
     else:
         assert msg.value == 0, "route does not spend native"
-        self._pull(first.token_in, msg.sender, amount_in)
+        assert extcall IERC20(first.token_in).transferFrom(
+            msg.sender, self, amount_in, default_return_value=True), "transferFrom failed"
 
     opening: uint256 = self._held(last.token_out)
     seen: DynArray[address, 2 * MAX_LEGS] = []
@@ -581,7 +545,15 @@ def execute(
     for k: uint256 in range(2 * MAX_LEGS):
         if k >= len(seen):
             break
-        self._pay(seen[k], receiver, self._held(seen[k]))
+        amount: uint256 = self._held(seen[k])
+        token: address = seen[k]
+        if amount > 0:
+            if token == NATIVE:
+                raw_call(receiver, b"", value=amount)
+            else:
+                assert extcall IERC20(token).transfer(
+                    receiver, amount, default_return_value=True
+                ), "transfer failed"
 
     log Routed(
         sender=msg.sender,
@@ -597,5 +569,4 @@ def execute(
 @external
 @payable
 def __default__():
-    """WETH pays an unwrap back with a bare call, and so does Curve."""
     pass

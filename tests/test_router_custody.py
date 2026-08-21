@@ -60,15 +60,9 @@ def test_the_only_pull_the_router_makes_names_msg_sender():
     source = " ".join(CONTRACT.read_text().split())
     calls = re.findall(r"transferFrom\(\s*([^)]*?)\)", source)
     assert calls, "no transferFrom found -- has the router stopped pulling?"
-    for args in calls:
-        owner = args.split(",")[0].strip()
-        assert owner == "owner", f"transferFrom pulls from {owner!r}"
-
-    pulls = re.findall(r"self\._pull\(([^)]*)\)", source)
-    assert pulls, "no _pull call sites"
-    for args in pulls:
-        who = args.split(",")[1].strip()
-        assert who == "msg.sender", f"_pull is given {who!r}, not msg.sender"
+    assert len(calls) == 1, f"the router pulls in {len(calls)} places: {calls}"
+    owner = calls[0].split(",")[0].strip()
+    assert owner == "msg.sender", f"transferFrom pulls from {owner!r}"
 
 
 # --------------------------------------------------------------- callers
