@@ -71,6 +71,14 @@ TRANSFER_ABI = """[
   "inputs":[{"type":"address","name":"t"},{"type":"uint256","name":"v"}],
   "stateMutability":"nonpayable","type":"function"}]"""
 
+# An OUSD-family token names the only address allowed to mint it.
+VAULT_MINT_ABI = """[
+ {"name":"vaultAddress","outputs":[{"type":"address","name":""}],"inputs":[],
+  "stateMutability":"view","type":"function"},
+ {"name":"mint","outputs":[],
+  "inputs":[{"type":"address","name":"a"},{"type":"uint256","name":"v"}],
+  "stateMutability":"nonpayable","type":"function"}]"""
+
 # A native wrapper mints against native, so it is funded rather than dealt.
 WRAPPED_ABI = """[
  {"name":"deposit","outputs":[],"inputs":[],
@@ -282,6 +290,26 @@ def _fund(boa, token, who, amount: int, result: Execution, wrapped: str,
         return
     except Exception:
         pass
+    # **A rebasing token has no balance slot to find.**  An OUSD-family balance
+    # is `creditBalances[a] * 1e18 / creditsPerToken(a)` -- computed, not stored --
+    # so both halves of the brute force miss it, and base superOETHb reached the
+    # holder drain below.  The token names its minter, `mint` being `onlyVault`,
+    # so pranking that address creates the tokens the way the token itself does.
+    # Measured there: the pool the route prices does not move a wei and
+    # `creditsPerToken` is unchanged, so nothing is diluted.
+    try:
+        rebasing = boa.loads_abi(VAULT_MINT_ABI).at(token.address)
+        with boa.env.prank(rebasing.vaultAddress()):
+            rebasing.mint(who, amount)
+        if token.balanceOf(who) >= amount:
+            result.warnings.pop()
+            result.warnings.append(
+                f"minted through its own vault, having no balance slot to "
+                f"deal: {token.address}")
+            return
+    except Exception:
+        pass
+
     # **Take it from someone who has it.**  `boa.deal` finds the balance slot by
     # brute force, and a token that packs its balances or computes them -- gnosis
     # EURe, whose two contracts share one market -- defeats both halves of that.
