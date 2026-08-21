@@ -36,6 +36,20 @@ from ..core.transport import Status
 from ..core.types import ArcKind
 from ..core.walk import LegUnquotable, walk_route
 
+#: Kinds priced by a rate rather than by pool state, so a route may cross one
+#: twice without the second reading anything the first moved.  See `_reused`.
+RATE_KINDS = frozenset({
+    ArcKind.WRAP_NATIVE,
+    ArcKind.UNWRAP_NATIVE,
+    ArcKind.WSTETH_WRAP,
+    ArcKind.WSTETH_UNWRAP,
+    ArcKind.STAKE_NATIVE,
+    ArcKind.LEND_MINT,
+    ArcKind.LEND_REDEEM,
+    ArcKind.ERC4626_DEPOSIT,
+    ArcKind.ERC4626_REDEEM,
+})
+
 
 class _Withdraw:
     """An LP burn, in the shape every other model answers in.
@@ -439,9 +453,32 @@ class ExactQuoterClient:
 
     @staticmethod
     def _reused(legs) -> set:
-        """Pools this route enters more than once."""
+        """Pools this route enters more than once.
+
+        **Conversions do not count.**  A wrap, a lending mint or a vault
+        deposit is priced by a *rate*, not by the pool state our own earlier leg
+        moved: `previewDeposit` answers the same in a second call as in the
+        first, inside one static call, so crossing one twice is honest and the
+        chain prices it correctly.  Measured on scrvUSD: two deposits of 50% and
+        the remainder return 1,807,773.444328, to the wei what a single sweeping
+        leg returns.
+
+        Counting them was expensive.  A route with two `crvUSD -> scrvUSD` legs
+        was treated as a re-entered pool, `_stateful_leg` refused it because a
+        vault is not in `reentrant_pools`, and `quote_routes` then wrote a
+        deliberate zero rather than asking the chain -- killing the candidate.
+        On crvUSD -> sDOLA at $2M this took out five candidates in one block and
+        cost 9.67 bp against the route the same router had found a few hundred
+        blocks earlier.
+
+        The set coincides with `risk.RISKLESS` today, and for the same
+        underlying reason -- these kinds are not a market quote -- but the two
+        answer different questions and are stated separately.
+        """
         seen: dict[str, int] = {}
         for leg in legs:
+            if leg.kind in RATE_KINDS:
+                continue
             key = leg.target.lower()
             seen[key] = seen.get(key, 0) + 1
         return {pool for pool, n in seen.items() if n > 1}
