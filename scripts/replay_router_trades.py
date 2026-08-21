@@ -30,9 +30,23 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "scripts"))
 
 from erouter.core.keccak import keccak256
-from router_pairs import ROUTERS, decode
+from router_pairs import AMOUNT_WORD, ROUTERS, _word, decode
 
 TRANSFER = "0x" + keccak256(b"Transfer(address,address,uint256)").hex()
+
+#: A fill within this of its own `_min_dy` was taken for everything its
+#: slippage allowed.  Calibrated, not guessed: measured slack lands on the
+#: front end's tolerance to the second decimal -- +2.00, +3.00, +10.01, +20.04,
+#: +30.01, +60.36 bp across 21 trades -- because a healthy fill clears the floor
+#: by exactly what the caller left it.  A threshold of 10 bp therefore flagged
+#: every tight-tolerance stable trade as a victim; an extractor stops at the
+#: floor, so a real one reads ~0.00.
+FLOOR_SLACK_BP = 0.5
+
+#: ...and being at the floor is not enough on its own.  A trade can bind on its
+#: floor and still be the best available, which is what a row matching us to
+#: +0.0 bp means.  A victim is at the floor **and** far below what was there.
+VICTIM_GAP_BP = 50.0
 
 
 def _paid(receipt: dict, router: str, token: str, wrapped: str) -> int:
@@ -94,8 +108,11 @@ def trades(name: str, span: int, limit: int) -> list[dict]:
         paid = _paid(receipt, router, dst, chain.wrapped or "")
         if paid <= 0:
             continue
+        floor = int(_word(tx["input"], AMOUNT_WORD + 1), 16)   # `_min_dy`
         out.append({"hash": tx["hash"], "block": int(tx["blockNumber"], 16),
                     "src": src, "dst": dst, "amount": amount, "paid": paid,
+                    "floor": floor,
+                    "slack_bp": (paid / floor - 1) * 1e4 if floor else float("inf"),
                     "gas_price": int(tx.get("gasPrice") or "0x0", 16)})
     out.sort(key=lambda r: -r["block"])
     return out[:limit]
@@ -152,6 +169,7 @@ def main() -> int:
             dst_symbol, dst_decimals = symbols[dst]
             shown = trade["amount"] / 10**src_decimals
             row = {"chain": name, "block": trade["block"],
+                   "slack_bp": trade["slack_bp"],
                    "case": f"{src_symbol}->{dst_symbol} {shown:,.6g}"}
             # Their block minus one: the state the trade was quoted against,
             # less whatever else landed in the same block ahead of it.
@@ -195,18 +213,34 @@ def main() -> int:
             })
 
     header = (f"\n  {'chain':<10}{'block':>12}  {'case':<30}{'executed':>17}"
-              f"{'electric':>17}{'diff':>10}{'legs':>6}{'ms':>7}")
+              f"{'electric':>17}{'diff':>10}{'slack':>9}{'legs':>6}{'ms':>7}")
     print(header)
     print("  " + "-" * (len(header) - 3))
+    rows.sort(key=lambda r: (r["chain"], -r["block"]))
     for row in rows:
         if "note" in row:
             print(f"  {row['chain']:<10}{row['block']:>12,}  {row['case']:<30}"
                   f"{row['note']:>50}")
             continue
+        slack = row["slack_bp"]
+        mark = "!" if slack < FLOOR_SLACK_BP else " "
         print(f"  {row['chain']:<10}{row['block']:>12,}  {row['case']:<30}"
               f"{row['theirs']:>17,.8g}{row['ours']:>17,.8g}{row['bp']:>+9.1f}bp"
+              f"{slack:>+9.2f}bp"
               f"{row['legs']:>6}{row['ms']:>7,.0f}")
-    scored = [r["bp"] for r in rows if "bp" in r]
+    def suspect(row) -> bool:
+        return row["slack_bp"] < FLOOR_SLACK_BP and row["bp"] > VICTIM_GAP_BP
+
+    victims = [r for r in rows if "bp" in r and suspect(r)]
+    if victims:
+        print(f"\n  {len(victims)} row(s) both bound on their own `_min_dy` and came "
+              f"in over {VICTIM_GAP_BP:.0f} bp\n  below what was available -- taken for "
+              f"what their slippage allowed, so what they paid\n  is a victim's number "
+              f"and not a baseline.  Excluded below:")
+        for row in victims:
+            print(f"    {row['chain']:<10}{row['case']:<30}{row['theirs']:>17,.8g}"
+                  f"{row['ours']:>17,.8g}{row['bp']:>+11.0f}bp")
+    scored = [r["bp"] for r in rows if "bp" in r and not suspect(r)]
     if scored:
         better = sum(1 for bp in scored if bp > 1)
         tied = sum(1 for bp in scored if -1 <= bp <= 1)
