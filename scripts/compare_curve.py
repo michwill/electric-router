@@ -170,6 +170,7 @@ def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
     from erouter.core.quoter import QuoterClient
     from erouter.dev import chains as chain_table
     from erouter.dev.cli import _local_quoter, _rpc_url
+    from erouter.dev.probe_cache import CachedQuoterClient
     from erouter.dev.facts import FactsCache, apply_broken_facts
     from erouter.dev.rpc import JsonRpcTransport
     from erouter.dev.universe import (
@@ -231,7 +232,12 @@ def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
         stake = (build_stake_arcs(nodes, chain, client)
                  + build_transmuter_arcs(nodes, chain, client))
         local = _local_quoter(rpc, chain, load, nodes, quiet=True)
-        bound.update(block=block, client=local or client, nodes=nodes, stake=stake)
+        # Memoised per block, as the CLI does.  Without it every probe inside
+        # `route` is recomputed and the `ms` column reads 1,186 ms on mainnet
+        # against the 167 ms a warm quote actually takes -- it would be
+        # measuring this script rather than the router.
+        bound.update(block=block, nodes=nodes, stake=stake,
+                     client=CachedQuoterClient(local or client, chain.chain_id, block))
         return bound
 
     print(f"  {name}: {len(load.pools)} pools, {len(cases)} cases")
@@ -309,6 +315,16 @@ def main() -> int:
         except Exception as exc:
             print(f"  {name}: failed: {str(exc)[:70]}")
 
+    # Which solver the `ms` column was measured with.  Reported rather than
+    # forced: `EROUTER_ACCEL=1` is how production is run and it is 4x on the
+    # quote, so a table that does not say leaves its own timings unreadable.
+    import os
+
+    from erouter.core import accel
+
+    on = os.environ.get("EROUTER_ACCEL", "") == "1" and accel.available()
+    print(f"\n  our solver: {'compiled (rust)' if on else 'python'}"
+          f"{'' if on else '  -- set EROUTER_ACCEL=1 for the one production uses'}")
     header = (f"\n  {'chain':<10}{'case':<30}{'curve_solver':>17}{'electric':>17}"
               f"{'diff':>10}{'legs':>7}{'ms t/e':>11}")
     print(header)
