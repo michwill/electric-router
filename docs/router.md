@@ -457,17 +457,24 @@ execute against different state and the bounds are measuring a market that moved
 **Do not reuse a route.**  The fractions are fine at any size, but the minimum
 rates were derived at one, and a dynamic fee moves with the trade.  Re-encode.
 
-**The router is not deployed yet.**  `ElectricRouter` has no address in this
-repo; `core.schema.ROUTER_ADDRESS` is empty on purpose, because a wrong address
-there is a burnt transaction.
+**The router is at `0xf5438dafc165b466f4a61ce57bd3aa59bcd5979e`**, the same
+address on ethereum, arbitrum, optimism, base, gnosis, polygon, fraxtal, bsc,
+avalanche, monad, plasma, xlayer, celo, tac and sonic.  It went out through the
+canonical CREATE2 proxy under the salt `erouter.ElectricRouter.v2`, so the
+address is a function of the proxy, the salt and the initcode alone -- not of
+the chain, the deployer or a nonce.  Every one has been read back and matches
+the compiled runtime byte for byte.  `core.schema.ROUTER_ADDRESS` carries it.
 
-`scripts/deploy_router.py --chain all --create2` is what will put it on chain,
-at the same address on every one of them.  That address is already determined --
-CREATE2 fixes it from the proxy, the salt `erouter.ElectricRouter.v1`, and the
-initcode -- so **changing the contract changes where it lands**, which is why
-the salt carries a version rather than the code being edited under a live one.
-Until a broadcast happens the address is a prediction, not a deployment; the
-script rehearses on a fork by default and says which it did.
+**Editing the contract moves it.**  Vyper embeds a hash of the source in the
+*initcode*, which the deployed runtime never contains -- so a changed comment
+leaves the on-chain bytecode identical while the source stops deploying to the
+recorded address.  `tests/test_router_address.py` fails when that happens, and
+the salt carries a version so a redeployment is a deliberate new address rather
+than a silent collision.
+
+An earlier build sits at `0xd3ff6f3531efb52a63c4b08ec5eccaa90c27618d` on the
+same fifteen chains.  It works and nothing points at it; it predates the
+authorship header, and is superseded.
 
 **32 legs, 31 named tokens.**  Beyond that the encoder refuses rather than
 truncating.

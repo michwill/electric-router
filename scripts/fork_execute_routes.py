@@ -203,6 +203,14 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
 
     fork(url, rpc.block)
     router = deploy()
+    # Which router, said out loud.  `deploy` prefers the deployed address and
+    # silently compiles a copy where the fork has no code at it -- which is
+    # right, and indistinguishable in the results, so a sweep that claims to
+    # test the deployment has to show that it did.
+    from erouter.core.schema import ROUTER_ADDRESS
+    at_deployed = ROUTER_ADDRESS and str(router.address).lower() == ROUTER_ADDRESS.lower()
+    print(f"  router {router.address} "
+          f"{'(deployed)' if at_deployed else '(compiled here)'}")
     by_address = {p.address.lower(): p for p in specs}
     ok = failed = skipped = 0
     kinds_seen: set[str] = set()

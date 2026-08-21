@@ -94,9 +94,27 @@ class Sent:
         return (self.amount_out - self.quoted_out) / self.quoted_out * 1e4
 
 
-def deploy(name: str = "ElectricRouter"):
+def deploy(name: str = "ElectricRouter", *, prefer_deployed: bool = True):
+    """The router to run a route through, on the active fork.
+
+    The deployed one where the fork has it, because that is the contract a
+    caller will reach and compiling a fresh copy would only prove the source
+    compiles.  They are the same bytes -- `ROUTER_ADDRESS` is checked against
+    the compiled runtime -- so this changes which address is exercised, not
+    what runs.  Falls back to loading the source, which is what a chain
+    without a deployment and every synthetic test needs.
+    """
     import boa
 
+    from erouter.core.schema import ROUTER_ADDRESS
+
+    if prefer_deployed and ROUTER_ADDRESS:
+        try:
+            if bytes(boa.env.get_code(ROUTER_ADDRESS)):
+                return boa.loads_partial(CONTRACT.read_text(), name=name).at(
+                    ROUTER_ADDRESS)
+        except Exception:      # no fork, or an env that cannot read code
+            pass
     return boa.loads(CONTRACT.read_text(), name=name)
 
 

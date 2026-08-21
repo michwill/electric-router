@@ -49,8 +49,10 @@ def _loss_bp(result, ledger: dict[str, float] | None, total_bp: float) -> dict:
 
 #: `ElectricRouter`, deployed through the canonical CREATE2 proxy, so the
 #: address is a function of the initcode and is the same on every chain.
-#: Empty until it is deployed -- a wrong address here is a burnt transaction.
-ROUTER_ADDRESS = ""
+#: Verified byte-identical to the compiled runtime on all fifteen.  Editing
+#: the contract at all moves this, because Vyper puts a hash of the source in
+#: the initcode -- see `tests/test_router_address.py`.
+ROUTER_ADDRESS = "0xf5438dafc165b466f4a61ce57bd3aa59bcd5979e"
 
 
 def to_json(
