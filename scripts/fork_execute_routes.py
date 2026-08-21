@@ -33,6 +33,7 @@ from erouter.dev.crypto_lp_params import build_exact_crypto_lp
 from erouter.dev.curve_api import CurveApi, CurveApiError
 from erouter.dev.exact_probe import ExactQuoterClient
 from erouter.dev.executor import fork
+from erouter.dev.facts import FactsCache, apply_broken_facts
 from erouter.dev.lp_params import build_exact_lp
 from erouter.dev.probe_cache import CachedQuoterClient
 from erouter.dev.router import deploy, send
@@ -166,7 +167,14 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
     resolve_dialects(specs, base, chain)
     read_balances(specs, base, None, chain.chain_id, token_client=base)
     resolve_lp_tokens(specs, base, chain.chain_id, token_client=base)
-    nodes, _ = build_node_map(specs, chain, base)
+    # The same arcs `erouter route` withholds.  Without this the sweep offers
+    # the solver arcs production never would -- it routed USDC->USDT through a
+    # recorded STBT arc, whose transfers are permissioned, and called the
+    # revert a finding.  Said out loud, because silently routing around a
+    # withheld arc is how a fact stops being visible.
+    facts = FactsCache.load(chain.chain_id, chain.name.lower())
+    withheld = apply_broken_facts(specs, facts)
+    nodes, _ = build_node_map(specs, chain, base, facts=facts)
     # The LP models matter here.  A legacy pool's own `calc_token_amount` omits
     # the fee `add_liquidity` charges, so a deposit quoted from the chain is
     # quoted too high and trips its own bound on the way out.
@@ -188,6 +196,8 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
         pairs += fuzzed(specs, args.fuzz, args.seed)
     known = depths(specs)
 
+    if withheld:
+        print(f"  withholding {withheld} arc(s) recorded as unexecutable")
     print(f"{chain.name} block {rpc.block:,}, {len(specs)} pools, "
           f"{len(pairs)} pairs, warmed in {time.monotonic() - started:.0f}s")
     print(f"{'pair':<24}{'legs':>5}  {'kinds':<30}{'drift bp':>10}{'gas':>11}  verdict")
