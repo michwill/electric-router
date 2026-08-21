@@ -24,6 +24,7 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
 
 import argparse  # noqa: E402
 import contextlib  # noqa: E402
+import re  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
 
@@ -1210,6 +1211,38 @@ def _stage_line(result, elapsed: float) -> str:
     return f"  ms  {' · '.join(parts)}{work}   solver {solver}"
 
 
+#: A warning naming one arc, as `calibrate_arcs` writes them: `<pool>:<kind>:<i>><j>`.
+_ARC_NOTE = re.compile(r"^0x[0-9a-fA-F]{40}:\d+:\d+>\d+:")
+
+#: How many warning lines the terminal view is willing to spend.
+WARNINGS_SHOWN = 8
+
+
+def _shown_warnings(warnings, suppress: set[str] | None) -> list[str]:
+    """The warning lines worth a terminal, most general first.
+
+    A note about one arc of 876 was competing on equal terms with a note about
+    the route on screen, and losing on arrival order rather than on importance:
+    twenty `only 0 probes` lines filled the budget and pushed the §12.1 size
+    escalation off the bottom.  That escalation was the one line that explained
+    a 972 bp gap between the modelled loss and the real one, and nobody could
+    see it.
+
+    So the per-arc notes collapse to a single line and go last.  Nothing is
+    lost -- `--json` still carries every one of them, individually.
+    """
+    kept = [w for w in warnings if not suppress or w not in suppress]
+    per_arc = [w for w in kept if _ARC_NOTE.match(w)]
+    shown = [w for w in kept if not _ARC_NOTE.match(w)]
+    if per_arc:
+        pools = len({w.split(":", 1)[0] for w in per_arc})
+        shown.append(
+            f"{len(per_arc)} arc(s) across {pools} pool(s) dropped before the "
+            f"solve, mostly for want of a usable probe -- each one is in --json"
+        )
+    return shown[:WARNINGS_SHOWN]
+
+
 def _present(result, args, chain, rpc, nodes, wrappers, load,
              src, dst, amount_in, started, *, lean: bool = False,
              suppress: set[str] | None = None) -> int:
@@ -1265,7 +1298,7 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
             "probe ms": f"{result.timings.get('probe', 0):.0f}",
             "solve ms": f"{result.timings.get('solve', 0):.1f}",
         },
-        warnings=[w for w in result.warnings if not suppress or w not in suppress][:8],
+        warnings=_shown_warnings(result.warnings, suppress),
         verified_out=result.verified_out,
     )
     if result.candidates and not lean:
