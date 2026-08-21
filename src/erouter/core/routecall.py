@@ -13,10 +13,12 @@ returned less than modelled, which is the only reason to prefer it.
 give everything away in one pool and win it back in another -- the shape of a
 sandwich.  The bound is a fraction of the fee that pool is measured to be
 charging *on this trade*, and what it buys is a ceiling on how much a sandwich
-can take: the front-run can only be as large as the bound will still settle.  It
-does not make the attack unprofitable -- that turns on the victim's size against
-the pool's depth and has nothing to do with the tolerance.  See `docs/router.md`
-and `tests/test_sandwich.py`.
+can take: the front-run can only be as large as the bound will still settle.
+
+Whether there is an attack to cap is decided elsewhere.  A leg whose own price
+impact is under twice its pool's fee cannot be sandwiched profitably at all --
+which every stableswap leg we emit satisfies, and some low-fee cryptoswap legs
+do not.  See `docs/router.md` and `tests/test_sandwich.py`.
 """
 
 from __future__ import annotations

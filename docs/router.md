@@ -154,30 +154,48 @@ with `FEE_SHARE = 0.2`, `floor` of 5 bp on a volatile pair and 0.1 bp
 otherwise.  The 0.1 bp floor is not slippage at all -- it is room for the wei a
 wrap or a rebasing token rounds away.
 
-**What that buys is a ceiling on extraction, not immunity.**  It is tempting to
-argue that a sandwich pays the fee twice on its own size and so cannot profit
-against a tolerance below twice the fee.  That is not what happens.  The
-attacker's cost is indeed two fees on their own size, but their gain is the
-price displacement the *victim* causes, so on a constant-product pool the attack
-is profitable whenever
+### Whether a sandwich pays is decided by the leg, not by the bound
+
+The attacker pays the fee twice on their own size and is paid the price
+displacement the *victim* causes, so with `s` the front-run, `T` the pool and
+`v` the victim's trade:
 
 ```
-victim's trade  >  2 * fee * the pool's reserve
+gain = (s/T) * v      cost = 2 * fee * s      profit = s * (v/T - 2 * fee)
 ```
 
-and the tolerance appears nowhere in it.  A tighter bound cannot make an attack
-unprofitable; it makes it smaller.  Measured over a grid of fees and sizes, that
-rule calls every case but the boundary one, and it is pinned in
-`tests/test_sandwich.py`.
+The sign is set by the leg's own price impact against **twice the pool's fee**,
+and `t` is nowhere in it -- `t` bounds `s`, which scales the profit without
+changing its sign.  So:
 
-What the bound does give is exact: **the victim either settles at no worse than
-`(1 - t)` of its quote, or it does not settle.**  The front-run can only be as
-large as the bound will still let through, so the extraction is capped at `t` of
-the trade -- and measured, it comes to almost exactly that, scaling linearly
-with `t` and with nothing else.  A fifth of the fee is therefore a fifth of the
-fee in what it lets through, and the 5 bp floor on a pool charging less than
-25 bp is the looser of the two by exactly `5 / (0.2 * fee)`: twenty-five times
-as much on a 1 bp pool.  That is the compromise, as a number.
+**A leg flatter than twice its fee cannot be sandwiched at all.**  The round
+trip loses money whatever the victim tolerates.  This is what splitting a route
+buys, and on a stableswap it is bought very cheaply: measured on live mainnet
+routes, *every* stableswap leg came in under the line -- 0.11 bp of impact at
+2.9% of the pool against a 3 bp doubled fee, 0.10 bp at 5.95%.  The invariant is
+flat; there is nothing to displace.
+
+**A leg steeper than that is attackable, and then `t` is the cap.**  Ten of
+thirty-one pool legs across four live routes sat above the line, all of them
+cryptoswap: TricryptoUSDC at 88 bp of impact against a 26 bp doubled fee,
+USD-BTC-ETH at 85 against 24.  Note it is the *low-fee* cryptoswaps that are
+exposed -- TricryptoUSDT charges 69 bp and is out of reach at the same 0.8% of
+reserve.  No tolerance fixes those; only a smaller leg does.
+
+### What the bound guarantees
+
+Exactly this: **the victim either settles at no worse than `(1 - t)` of its
+quote, or it does not settle.**  The front-run can only be as large as the bound
+will still let through, so extraction is capped at `t` of the trade -- and
+measured, it comes to almost exactly `t`, scaling linearly with it and with
+nothing else.  A fifth of the fee is a fifth of the fee in what it lets through,
+and the 5 bp floor on a pool charging under 25 bp is looser by exactly
+`5 / (0.2 * fee)`: twenty-five times on a 1 bp pool.  That is the compromise, as
+a number.
+
+Both halves are in `tests/test_sandwich.py`, against a constant-product pool and
+a real `StableSwap`, driven through `min_rates` itself rather than a restatement
+of it.
 
 **`fee` is the fee at this trade's size, not the marginal one.**  A dynamic fee
 is a property of the trade: measured on mainnet TricryptoUSDC, `mid_fee` is 3 bp
@@ -322,5 +340,5 @@ broadcast -- see the blacklist and the reserve check in [`theory.md`](theory.md)
 none of which is a proof either.
 
 **Nor is it a guarantee against being sandwiched**, only against being
-sandwiched for more than `t`.  Whoever sets `volatile` is choosing how much,
-per pool.
+sandwiched for more than `t` -- and only on a leg steep enough to be worth
+attacking at all.  Whoever sets `volatile` is choosing how much, per pool.

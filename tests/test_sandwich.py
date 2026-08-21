@@ -201,28 +201,86 @@ def test_above_the_floor_the_two_policies_agree():
 # ------------------------------------------------------- when it pays at all
 
 
-@pytest.mark.parametrize("fee_bp", [1.0, 4.0, 30.0, 100.0])
-def test_a_sandwich_pays_on_the_pool_s_terms_not_on_ours(fee_bp):
-    """`victim > 2 * fee * reserve`, and the tolerance appears nowhere in it.
+def impact_of(pool, i: int, j: int, dx: int) -> float:
+    """The leg's own slippage: its rate at this size against its rate at dust.
 
-    Worth pinning: the rule is why a tighter bound cannot make an attack
-    unprofitable, only smaller.  Sizes are kept off the boundary, where the
-    profit is fractions of a wei either way.
+    The fee is in both and cancels, so what is left is the curve.
     """
-    reserve = 10**24
+    dust = max(1, dx // 10**6)
+    near, full = pool.get_dy(i, j, dust), pool.get_dy(i, j, dx)
+    if near <= 0 or full <= 0:
+        return 0.0
+    return 1.0 - (full / dx) / (near / dust)
+
+
+def best_bounded_attack(pool, i, j, victim, min_rate):
+    """The most an attacker can make with the victim's bound in force.
+
+    Bounded is the only interesting version.  An attacker allowed to front-run
+    the whole pool can always show a profit, and would be refused instantly.
+    """
+    reserve = pool.reserves[i] if hasattr(pool, "reserves") else pool.balances[i]
+    best = None
+    for k in range(1, 41):
+        front = int(reserve * k / 40)
+        try:
+            profit, got, _ = run_sandwich(pool, i, j, front, victim)
+        except Exception:                       # a size the pool refuses
+            continue
+        if settles(victim, got, min_rate):
+            best = profit if best is None else max(best, profit)
+    return best or 0
+
+
+@pytest.mark.parametrize("fee_bp", [1.0, 4.0, 30.0, 100.0])
+def test_a_leg_flatter_than_twice_its_fee_cannot_be_sandwiched_at_all(fee_bp):
+    """The condition is the leg's own impact against twice the pool's fee.
+
+    The attacker pays two fees on their own size and is paid the displacement
+    the victim causes, so below `impact = 2 * fee` the round trip loses whatever
+    the victim is willing to tolerate.  Above it the attack pays and the bound
+    caps it instead.  This is the property the router's splitting buys, and it
+    is why `t` scales an attack rather than preventing one.
+    """
     fee = fee_bp / 1e4
+    reserve = 10**24
     pool = Cpmm(reserve, reserve, int(fee * FEE_DENOMINATOR))
-    threshold = 2 * fee * reserve
-    for victim in (int(threshold / 4), int(threshold * 4)):
+    for share in (0.1, 0.5, 2.0, 8.0):
+        victim = int(share * 2 * fee * reserve)
         if victim < 10**18:
             continue
-        # Front-run as far as an unbounded victim would allow.
-        profit = max(run_sandwich(pool, 0, 1, front, victim)[0]
-                     for front in (10**20, 10**21, 10**22, 10**23))
-        pays = profit > 0
-        assert pays == (victim > threshold), (
-            f"{fee_bp} bp pool, victim {victim:,}: profit {profit:,}, "
-            f"threshold {threshold:,.0f}")
+        quote = pool.get_dy(0, 1, victim)
+        impact = impact_of(pool, 0, 1, victim)
+        # Unbounded, so only the economics decides.
+        profit = max(run_sandwich(pool, 0, 1, f, victim)[0]
+                     for f in (10**20, 10**21, 10**22, 10**23, 10**24))
+        assert (profit > 0) == (impact > 2 * fee), (
+            f"{fee_bp} bp pool, impact {impact * 1e4:.2f} bp against "
+            f"{2 * fee * 1e4:.2f} bp: profit {profit:,}")
+        if impact <= 2 * fee:
+            # And a fortiori with the bound on.
+            rate = bound_for(victim, quote, fee)
+            assert best_bounded_attack(pool, 0, 1, victim, rate) <= 0
+
+
+def test_a_stableswap_leg_at_the_sizes_we_route_is_out_of_reach():
+    """Where the router actually operates, the attack loses money outright.
+
+    Measured on live mainnet routes: every stableswap leg came in under
+    `impact = 2 * fee` -- 0.11 bp of impact at 2.9% of the pool against a 3 bp
+    doubled fee -- while ten of thirty-one cryptoswap legs sat above it.  The
+    difference is the invariant, not the tolerance.
+    """
+    pool = stable(fee=4 * 10**6)
+    fee = 4e-4
+    for theta in (0.001, 0.01, 0.05, 0.1):
+        victim = int(theta * pool.balances[0])
+        impact = impact_of(pool, 0, 1, victim)
+        assert impact < 2 * fee, (
+            f"a stableswap at {theta:.1%} of reserve has {impact * 1e4:.2f} bp "
+            f"of impact against a {2 * fee * 1e4:.2f} bp doubled fee")
+        rate = bound_for(victim, pool.get_dy(0, 1, victim), fee)
+        assert best_bounded_attack(pool, 0, 1, victim, rate) <= 0
 
 
 # --------------------------------------------------------------- stateful
