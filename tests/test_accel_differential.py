@@ -78,7 +78,7 @@ def test_the_port_reproduces_the_reference(name):
 @pytest.mark.parametrize("name", list(CASES))
 def test_the_port_is_optimal_against_osqp(name):
     """Catches anything the port copied faithfully from a wrong original."""
-    osqp_mod = pytest.importorskip("osqp")  # noqa: F841
+    pytest.importorskip("osqp")
     from test_solve_differential import objective, reference
 
     spec = dict(CASES[name])

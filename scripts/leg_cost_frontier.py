@@ -20,8 +20,14 @@ from __future__ import annotations
 import argparse
 import os
 
-for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
-    os.environ.setdefault(_var, "1")
+# The same five variables `erouter.dev.cli` pins, and for the same reason: a
+# threaded reduction sums in whatever order the threads finish, so the residual
+# moves between runs.  This script measures a frontier one basis point wide, so
+# it wants that determinism more than the CLI does, not less.
+_THREADS = os.environ.get("EROUTER_BLAS_THREADS", "1")
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_var, _THREADS)
 
 from erouter.core.pipeline import RoutingError, prepare, route  # noqa: E402
 from erouter.dev import chains, config  # noqa: E402

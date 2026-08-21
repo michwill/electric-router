@@ -8,12 +8,13 @@ stands for, executed in order, to the wei.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import pytest
 
-from erouter.core.multiport import LP, MultiPort, MultiPortError, Port, evaluate
+from erouter.core.multiport import LP, MultiPort, MultiPortError, Port, element_from, evaluate
 from erouter.core.stableswap import StableSwap, StableSwapLP
+from erouter.core.types import ArcKind
 
 UNIT = 10**18
 POOL = StableSwap(
@@ -197,10 +198,6 @@ def test_three_ports_are_refused():
 # ask now, in place of the old exemption -- "every leg but the last is
 # ADVANCEABLE" -- which admitted two arcs priced as independent resistors.
 
-from dataclasses import dataclass  # noqa: E402
-
-from erouter.core.multiport import element_from  # noqa: E402
-from erouter.core.types import ArcKind  # noqa: E402
 
 
 @dataclass

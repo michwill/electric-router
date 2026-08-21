@@ -24,6 +24,7 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
 
 import argparse  # noqa: E402
 import contextlib  # noqa: E402
+import importlib  # noqa: E402
 import re  # noqa: E402
 import sys  # noqa: E402
 import time  # noqa: E402
@@ -435,7 +436,7 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
     try:
         # Imported to be *tried*: a local EVM that will not import is the
         # thing this branch is deciding, and pyrevm is an optional wheel.
-        from .local_evm import LocalEvm  # noqa: F401
+        importlib.import_module(".local_evm", __package__)
         from .state_cache import StateCache
     except ImportError as exc:
         if not quiet:
@@ -1849,7 +1850,6 @@ def cmd_gascal(args: argparse.Namespace) -> int:
           f"in {_time.perf_counter() - started:.0f}s")
 
     from ..core.pools import registry_key
-    from ..core.types import ArcKind  # noqa: F401
 
     cache = FactsCache.load(chain.chain_id, chain.name.lower())
     changed = cache.learn(
