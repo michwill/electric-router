@@ -259,8 +259,8 @@ def _apply_filters(
         dropped_here = before - len(pools)
         if dropped_here:
             warnings.append(
-                f"{dropped_here} pool(s) on {chain.name}'s blacklist skipped: they quote "
-                "but cannot be traded"
+                f"{dropped_here} pool(s) on {chain.name}'s blacklist skipped: a quote "
+                "that cannot execute, or a pool with no solvable invariant"
             )
     if not enabled:
         return pools, dropped_here
@@ -736,6 +736,79 @@ def check_reserves_are_real(
             f"{pool.name or address} dropped: reports {reported / 10 ** coin.decimals:,.2f} "
             f"{coin.symbol} but holds {held / 10 ** coin.decimals:,.2f} -- its quotes "
             "are computed against tokens it cannot pay out"
+        )
+        pool.balances = tuple(0 for _ in pool.balances)
+    return warnings
+
+
+def check_the_invariant_answers(
+    pools: list[PoolSpec], client: QuoterClient
+) -> list[str]:
+    """Find pools that cannot solve their own invariant at the numbers they hold.
+
+    A stableswap or cryptoswap prices everything -- `get_dy`, a deposit, its own
+    LP token -- by solving `D` over its balances, and it publishes that solution
+    as `get_virtual_price()`.  When *that* reverts there is no `D` to be had and
+    nothing downstream can quote.  `WETH/yETH` is the expensive one: 43,294 wei
+    of WETH against a coin whose supply is 2.35e56, carried at $2.1M because the
+    index prices that coin.
+
+    **The second call is the whole point.**  Every LLAMMA reverts here and every
+    LLAMMA quotes -- it has no `D` and no virtual price, by construction -- so a
+    rule written on the first call alone drops $24M of crvUSD liquidity on
+    mainnet alone.  A pool is asked for a quote before it is named, and that
+    costs one probe on the three pools in 541 that get this far.
+
+    Deliberately not the "huge supply" tell.  `BABYPEPE/SPANK` holds 6.4e12
+    tokens and trades, `QOM/O/CAW` 6.4e12, `REAL/iBBT` 1.1e11 against $3.4M --
+    there is no threshold that separates them from yETH's 9.9e16 except one
+    chosen to fit yETH, and a meme coin's supply is not evidence of anything.
+
+    **This runs in `scripts/find_broken_pools.py`, not on the route path**, and
+    that is measured rather than tidy-minded.  `get_virtual_price` solves the
+    invariant, so 386 of them cost 800 ms on the wire against the 181 ms the
+    reserve check takes -- to drop one pool whose arcs the probe grid was
+    already discarding for ~3.5 ms of probes.  The local EVM cannot stand in for
+    the wire either: it reverts on 17 healthy pools it holds no oracle or base
+    pool for, $7M of them.  So the survey is run when someone asks, and what it
+    finds goes in the chain's `blacklist`, which is where this repository has
+    always kept a pool-level removal a human decided on.
+
+    Zeroing the balances is how a drop is expressed, as in the reserve check
+    above: `build_arcs` offers nothing from a coin with no reserve.
+    """
+    from ..core.codec import encode_call
+    from ..core.transport import Call
+
+    warnings: list[str] = []
+    live = [p for p in pools
+            if p.balances and len(p.balances) >= 2 and any(b > 0 for b in p.balances)]
+    if not live or client is None:
+        return warnings
+
+    answers = client.raw([Call(p.address, encode_call("get_virtual_price()"))
+                          for p in live])
+    silent = [pool for pool, answer in zip(live, answers, strict=True)
+              if answer.status is Status.REVERTED]
+    if not silent:
+        return warnings
+
+    # From the fullest side, so the probe fails on the pool's arithmetic rather
+    # than on an empty reserve.
+    probes = []
+    for pool in silent:
+        i = max(range(len(pool.balances)), key=lambda k: pool.balances[k])
+        j = next(k for k in range(len(pool.balances)) if k != i)
+        probes.append(Probe(pool.address, pool.swap_kind or ArcKind.SWAP_STABLE,
+                            i, j, len(pool.coins),
+                            max(1, int(pool.balances[i] * 0.001))))
+    for pool, quote in zip(silent, client.probe(probes), strict=True):
+        if quote.ok and quote.value > 0:
+            continue                       # a LLAMMA, or anything else without a D
+        warnings.append(
+            f"{pool.name or pool.address} dropped: neither its virtual price nor "
+            f"its own get_dy can be computed from the balances it holds "
+            f"(listed at ${pool.tvl_usd:,.0f})"
         )
         pool.balances = tuple(0 for _ in pool.balances)
     return warnings

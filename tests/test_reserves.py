@@ -168,7 +168,7 @@ def test_a_blacklisted_pool_never_reaches_the_universe():
     warnings: list[str] = []
     kept, dropped = _apply_filters([frozen], chain, None, warnings, enabled=False)
     assert kept == [] and dropped == 1
-    assert "cannot be traded" in warnings[0]
+    assert "blacklist" in warnings[0]
 
 
 def test_the_blacklist_is_case_insensitive():
