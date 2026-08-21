@@ -15,6 +15,45 @@ from .pipeline import RouteResult
 from .rendermodel import format_units
 
 
+def _loss_bp(result, ledger: dict[str, float] | None, total_bp: float) -> dict:
+    """What the trade cost, chain first and model beside it.
+
+    `fee` and `impact` are the model's decomposition and stay the model's --
+    there is no way to split a verified figure into a diode and a resistor term,
+    since the chain reports one number.  So they sum to `modelled_total` and not
+    to `total`.
+
+    `model_delta` is `modelled_total - verified_total`, the same number the
+    terminal draws, so the two can never disagree.  **Negative means the model
+    was optimistic** -- it expected to lose less than the trade actually cost --
+    which past ~10% of a pool's reserve it will be (§12.1).  Positive is the
+    ordinary sign: §3.6 says the quadratic overstates loss by construction, so a
+    healthy trade beats its own model by a fraction of a bp.
+    """
+    out = {
+        "total": round(total_bp, 4),
+        "modelled_total": round(total_bp, 4),
+        "fee": round(result.fee_bp, 4),
+        "impact": round(result.impact_bp, 4),
+        "verified_total": None,
+        "model_delta": None,
+    }
+    if not ledger:
+        return out
+    if ledger.get("total_bp") is not None:
+        out["modelled_total"] = round(float(ledger["total_bp"]), 4)
+        out["total"] = out["modelled_total"]
+    verified = ledger.get("verified_bp")
+    if verified is not None:
+        out["verified_total"] = round(float(verified), 4)
+        out["total"] = out["verified_total"]
+        delta = ledger.get("model_delta_bp")
+        out["model_delta"] = round(float(
+            out["modelled_total"] - out["verified_total"] if delta is None else delta
+        ), 4)
+    return out
+
+
 def to_json(
     result: RouteResult,
     *,
@@ -23,7 +62,23 @@ def to_json(
     block: int = 0,
     candidates: list[dict] | None = None,
     verified_out: int | None = None,
+    ledger: dict[str, float] | None = None,
 ) -> dict[str, Any]:
+    """The route as JSON.  **`amount_out` is what the chain said**, where it said
+    anything; `modelled_out` is what the model expected.
+
+    That ordering is not cosmetic.  The two agree to a fraction of a bp on an
+    ordinary trade, so which one carries the plain name never mattered -- until
+    `ETH -> ETHx` at 241% of the pool's reserve, where the model expected 91.15
+    ETHx and the chain paid 82.50.  The terminal always showed both, labelled.
+    The JSON put the model's number under `amount_out` and the truth under
+    `verified_out`, so a caller reading the obvious field got one 10% too high,
+    and `loss_bp.total` said 24.7 bp for a trade that cost 970.
+
+    `ledger` carries the reference-price loss the terminal draws, computed once
+    by the caller so the two cannot drift.  Without it only the modelled
+    decomposition can be reported, and it is named as such.
+    """
     route = result.route
     nodes = result.nodes
     if route is None or nodes is None:
@@ -32,6 +87,7 @@ def to_json(
     src_dec = nodes.decimals(result.src_token)
     dst_dec = nodes.decimals(result.dst_token)
     total_bp = result.fee_bp + result.impact_bp
+    delivered = route.modelled_out if verified_out is None else verified_out
 
     payload: dict[str, Any] = {
         "version": 1,
@@ -45,17 +101,15 @@ def to_json(
             "amount_in_human": format_units(result.amount_in, src_dec),
         },
         "result": {
-            "amount_out": str(route.modelled_out),
-            "amount_out_human": format_units(route.modelled_out, dst_dec),
+            "amount_out": str(delivered),
+            "amount_out_human": format_units(delivered, dst_dec),
+            "modelled_out": str(route.modelled_out),
+            "modelled_out_human": format_units(route.modelled_out, dst_dec),
             "verified_out": None if verified_out is None else str(verified_out),
             "verified": verified_out is not None,
             "certificate": result.certificate,
             "certificate_reason": result.certificate_reason,
-            "loss_bp": {
-                "total": round(total_bp, 4),
-                "fee": round(result.fee_bp, 4),
-                "impact": round(result.impact_bp, 4),
-            },
+            "loss_bp": _loss_bp(result, ledger, total_bp),
             # Quoted, not modelled: the same route re-priced at a fraction of
             # the size, so `bp` is what this trade's size cost it.
             "price_impact": None if result.price_impact_bp is None else {

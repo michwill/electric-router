@@ -1270,6 +1270,9 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
     out_human = delivered / 10 ** nodes.decimals(dst)
     in_human = amount_in / 10 ** nodes.decimals(src)
     price = in_human / out_human if out_human else 0.0
+    # Computed whether or not it is drawn: the JSON reports the same numbers,
+    # and two ledgers would be two chances to disagree.
+    ledger = _ledger(result, nodes, src, dst, in_human, out_human)
     diagram = build_diagram(
         result.route,
         nodes,
@@ -1289,7 +1292,7 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
         certificate=result.certificate,
         certificate_reason=_certificate_note(result),
         pool_names=result.pool_names,
-        ledger=None if lean else _ledger(result, nodes, src, dst, in_human, out_human),
+        ledger=None if lean else ledger,
         diagnostics={} if lean else {
             "pools": result.counters.get("pools", 0),
             "arcs calibrated": result.counters.get("arcs_calibrated", 0),
@@ -1314,6 +1317,7 @@ def _present(result, args, chain, rpc, nodes, wrappers, load,
         payload = to_json(
             result, chain=chain.name, chain_id=chain.chain_id, block=rpc.block,
             candidates=diagram.candidates, verified_out=result.verified_out,
+            ledger=ledger,
         )
         text = json.dumps(payload, indent=2)
         if args.json == "-":
