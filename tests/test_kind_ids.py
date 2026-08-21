@@ -22,15 +22,32 @@ from erouter.core.types import ArcKind
 
 CONTRACTS = Path(__file__).resolve().parents[1] / "contracts"
 NAMES = ("RouteQuoter", "ElectricRouter")
+
+#: Both contracts label the block, so the block is what gets read.  Keying on
+#: the type would be keying on a coincidence: the widths differ between them --
+#: the quoter is deployed at an address that is a function of its initcode, so
+#: its `uint8` stays put while the router's kinds are plain `uint256`.
+SECTION = "# --- leg kinds"
 DECLARATION = re.compile(
-    r"^([A-Z0-9_]+): (?:public\()?constant\(uint8\)\)? = (\d+)", re.MULTILINE)
+    r"^([A-Z0-9_]+): (?:public\()?constant\(uint(?:8|256)\)\)? = (\d+)",
+    re.MULTILINE)
 
 
 def declared(name: str = "RouteQuoter") -> dict[str, int]:
     text = (CONTRACTS / f"{name}.vy").read_text(encoding="utf-8")
-    found = dict(DECLARATION.findall(text))
-    return {key: int(value) for key, value in found.items()
-            if not key.startswith("STATUS_")}
+    start = text.index(SECTION)
+    end = text.find("\n# ---", start + 1)
+    block = text[start : end if end != -1 else len(text)]
+    return {key: int(value) for key, value in DECLARATION.findall(block)}
+
+
+def test_the_kind_section_is_where_the_kinds_are():
+    """A guard on the guard: reading the wrong block would pass every test
+    below by finding nothing to disagree with."""
+    for name in NAMES:
+        found = declared(name)
+        assert len(found) == len(ArcKind), f"{name}: found {sorted(found)}"
+        assert not any(k.startswith("MAX_") for k in found), f"{name}: {sorted(found)}"
 
 
 @pytest.mark.parametrize("contract", NAMES)

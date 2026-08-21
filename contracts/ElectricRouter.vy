@@ -126,32 +126,35 @@ ADD_LIQUIDITY: constant(bytes4[MAX_COINS + 1]) = [
 
 # --- leg kinds (must match erouter.core.types.ArcKind) ---------------------
 
-SWAP_STABLE: constant(uint8) = 0
-SWAP_CRYPTO: constant(uint8) = 1
-DEPOSIT_FIXED: constant(uint8) = 2
-DEPOSIT_DYN: constant(uint8) = 3
-DEPOSIT_FIXED_NOFLAG: constant(uint8) = 4
-WITHDRAW_STABLE: constant(uint8) = 5
-WITHDRAW_CRYPTO: constant(uint8) = 6
-ERC4626_DEPOSIT: constant(uint8) = 7
-ERC4626_REDEEM: constant(uint8) = 8
-WRAP_NATIVE: constant(uint8) = 9
-UNWRAP_NATIVE: constant(uint8) = 10
-WSTETH_UNWRAP: constant(uint8) = 11
-WSTETH_WRAP: constant(uint8) = 12
-STAKE_NATIVE: constant(uint8) = 13
-LEND_MINT: constant(uint8) = 15
-LEND_REDEEM: constant(uint8) = 16
+SWAP_STABLE: constant(uint256) = 0
+SWAP_CRYPTO: constant(uint256) = 1
+DEPOSIT_FIXED: constant(uint256) = 2
+DEPOSIT_DYN: constant(uint256) = 3
+DEPOSIT_FIXED_NOFLAG: constant(uint256) = 4
+WITHDRAW_STABLE: constant(uint256) = 5
+WITHDRAW_CRYPTO: constant(uint256) = 6
+ERC4626_DEPOSIT: constant(uint256) = 7
+ERC4626_REDEEM: constant(uint256) = 8
+WRAP_NATIVE: constant(uint256) = 9
+UNWRAP_NATIVE: constant(uint256) = 10
+WSTETH_UNWRAP: constant(uint256) = 11
+WSTETH_WRAP: constant(uint256) = 12
+STAKE_NATIVE: constant(uint256) = 13
+LEND_MINT: constant(uint256) = 15
+LEND_REDEEM: constant(uint256) = 16
 
 
 struct Step:
     pool: address
     token_in: address
     token_out: address
-    kind: uint8
-    i: uint8
-    j: uint8
-    n: uint8
+    # `uint256` rather than `uint8`: every one of these is masked out of the
+    # packed word to four or five bits, so the narrower type adds a bounds
+    # check on a value that cannot fail it, and a conversion at every use.
+    kind: uint256
+    i: uint256
+    j: uint256
+    n: uint256
     frac: uint256
     min_rate: uint256
 
@@ -208,13 +211,13 @@ def _held(token: address) -> uint256:
 
 @internal
 @view
-def _coin(pool: address, index: uint8) -> address:
+def _coin(pool: address, index: uint256) -> address:
     """`coins(index)`, in whichever spelling the pool was compiled with."""
     ok: bool = False
     out: Bytes[32] = b""
     ok, out = self._ask(
         pool,
-        concat(method_id("coins(uint256)"), abi_encode(convert(index, uint256))),
+        concat(method_id("coins(uint256)"), abi_encode(index)),
     )
     if not ok:
         ok, out = self._ask(
@@ -284,9 +287,9 @@ def _unpack(
     pool: address, word: uint256, tokens: DynArray[address, MAX_TOKENS]
 ) -> Step:
     assert word >> 215 == 0, "reserved bits set"
-    kind: uint8 = convert((word >> 200) & 31, uint8)
-    i: uint8 = convert((word >> 188) & 15, uint8)
-    j: uint8 = convert((word >> 192) & 15, uint8)
+    kind: uint256 = (word >> 200) & 31
+    i: uint256 = (word >> 188) & 15
+    j: uint256 = (word >> 192) & 15
     in_ref: uint256 = (word >> 205) & 31
     out_ref: uint256 = (word >> 210) & 31
 
@@ -297,7 +300,7 @@ def _unpack(
         kind=kind,
         i=i,
         j=j,
-        n=convert((word >> 196) & 15, uint8),
+        n=(word >> 196) & 15,
         frac=word & (2**60 - 1),
         min_rate=(word >> 60) & (2**128 - 1),
     )
@@ -321,7 +324,7 @@ def _unpack(
 
 @internal
 @view
-def _derive(pool: address, kind: uint8, index: uint8, entering: bool) -> address:
+def _derive(pool: address, kind: uint256, index: uint256, entering: bool) -> address:
     """Which token a leg spends, or produces, read off the pool itself."""
     if kind == SWAP_STABLE or kind == SWAP_CRYPTO:
         return self._coin(pool, index)
@@ -388,11 +391,11 @@ def _pay(token: address, to: address, amount: uint256):
 
 @internal
 @pure
-def _amounts(i: uint8, n: uint8, dx: uint256) -> Bytes[256]:
+def _amounts(i: uint256, n: uint256, dx: uint256) -> Bytes[256]:
     """ABI body for a single-sided `uint256[n]`: zeros except slot `i`."""
     words: uint256[MAX_COINS] = empty(uint256[MAX_COINS])
-    words[convert(i, uint256)] = dx
-    return slice(abi_encode(words), 0, 32 * convert(n, uint256))
+    words[i] = dx
+    return slice(abi_encode(words), 0, 32 * n)
 
 
 # --------------------------------------------------------------- one leg
@@ -408,7 +411,7 @@ def _run(step: Step, dx: uint256) -> uint256:
     of them a lie -- the delta is the only figure true for all three, and it is
     also what the next leg has to spend.
     """
-    kind: uint8 = step.kind
+    kind: uint256 = step.kind
     before: uint256 = self._held(step.token_out)
 
     if kind == SWAP_STABLE:
@@ -423,8 +426,8 @@ def _run(step: Step, dx: uint256) -> uint256:
             concat(
                 method_id("exchange(uint256,uint256,uint256,uint256)"),
                 abi_encode(
-                    convert(step.i, uint256),
-                    convert(step.j, uint256),
+                    step.i,
+                    step.j,
                     dx,
                     empty(uint256),
                 ),
@@ -438,14 +441,14 @@ def _run(step: Step, dx: uint256) -> uint256:
         # whether anything moved is.
         if not ok or self._held(step.token_out) == before:
             extcall CryptoPool(step.pool).exchange(
-                convert(step.i, uint256), convert(step.j, uint256), dx, 0, False)
+                step.i, step.j, dx, 0, False)
 
     elif kind == DEPOSIT_DYN:
         amounts: DynArray[uint256, MAX_COINS] = []
         for k: uint256 in range(MAX_COINS):
-            if k >= convert(step.n, uint256):
+            if k >= step.n:
                 break
-            amounts.append(dx if k == convert(step.i, uint256) else 0)
+            amounts.append(dx if k == step.i else 0)
         extcall DynPool(step.pool).add_liquidity(amounts, 0)
 
     elif kind == DEPOSIT_FIXED or kind == DEPOSIT_FIXED_NOFLAG:
@@ -465,7 +468,7 @@ def _run(step: Step, dx: uint256) -> uint256:
 
     elif kind == WITHDRAW_CRYPTO:
         extcall CryptoPool(step.pool).remove_liquidity_one_coin(
-            dx, convert(step.j, uint256), 0)
+            dx, step.j, 0)
 
     elif kind == ERC4626_DEPOSIT:
         extcall Vault(step.pool).deposit(dx, self)
