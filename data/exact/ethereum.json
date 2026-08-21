@@ -1,20 +1,16 @@
 {
  "chain_id": 1,
- "fingerprint": "a36d19e0c7a99e02",
+ "fingerprint": "8105012d58ca2413",
  "unquotable": {
   "0x06a2e1521afde7f7dc30d351dcf04408042f536e": "f347f1e25fb5",
   "0x1631d0e588d475cee4be0f51b7410daaaabd7034": "da6fd928fbd0",
   "0x2c7827010121aae14200e839f6c89913457ed34c": "5212f86ed939",
-  "0x59ab5a5b5d617e478a2479b0cad80da7e2831492": "db459209f28f",
-  "0x618788357d0ebd8a37e763adab3bc575d54c2c7d": "29f343007497",
   "0x69accb968b19a53790f43e57558f5e443a91af22": "a0f6b24bb011",
   "0x6bd88c57523bf138a19b263e8ebc8661c836b171": "f1fecbd1749e",
   "0x71db3764d6841d8b01dc27c0fd4a66a8a34b2be0": "0419c71224d1",
-  "0xa96a65c051bf88b4095ee1f2451c2a9d43f53ae2": "fb607d9c8c62",
   "0xb79bbc5c96ba248e10c1bdac1a2b83790ff22b7f": "0b14fb24060c",
   "0xd0a1d2a9350824516ae8729b8311557ba7e55bff": "b7171a650905",
-  "0xddbdcebb989b1ef804338d6c9a902f91c2738936": "8498986ca674",
-  "0xf9440930043eb3997fc70e1339dbb11f341de7a8": "f85270f40ae7"
+  "0xddbdcebb989b1ef804338d6c9a902f91c2738936": "8498986ca674"
  },
  "verdicts": {
   "0x017433c8be1ce841d2d1b9bffd577a6b74cf302c": {
@@ -258,7 +254,7 @@
   "0x21e27a5e5513d6e65c4f830167390997aa84843a": {
    "family": "stable",
    "fee_on_xp": true,
-   "rates": "plain"
+   "rates": "reported"
   },
   "0x2570f1bd5d2735314fc102eb12fc1afe9e6e7193": {
    "family": "tricrypto"
@@ -275,11 +271,6 @@
    "legacy_pool": false,
    "stable": true,
    "v21": true
-  },
-  "0x272bf7e4ce3308b1fb5e54d6a1fc32113619c401": {
-   "family": "stable",
-   "fee_on_xp": true,
-   "rates": "reported"
   },
   "0x278cfb6f06b1efc09d34fc7127d6060c61d629db": {
    "family": "stable",
@@ -687,6 +678,11 @@
    "legacy_pool": false,
    "stable": false,
    "v21": true
+  },
+  "0x59ab5a5b5d617e478a2479b0cad80da7e2831492": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported"
   },
   "0x5a8c7623fee10542614e492c670a67e3dfe922f8": {
    "family": "stable",
@@ -1775,11 +1771,6 @@
    "legacy_pool": true,
    "stable": false,
    "v21": true
-  },
-  "0xe1b96555bbeca40e583bbb41a11c68ca4706a414": {
-   "family": "stable",
-   "fee_on_xp": true,
-   "rates": "reported"
   },
   "0xe1fbaec91b8a211db901adf5acc5b31f9a988279": {
    "family": "stable",

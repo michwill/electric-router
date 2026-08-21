@@ -1,9 +1,7 @@
 {
  "chain_id": 43114,
- "fingerprint": "a36d19e0c7a99e02",
- "unquotable": {
-  "0x7f90122bf0700f9e7e1f688fe926940e8839f353": "6c5187a8682d"
- },
+ "fingerprint": "8105012d58ca2413",
+ "unquotable": {},
  "verdicts": {
   "0x1da20ac34187b2d9c74f729b85acb225d3341b25": {
    "family": "stable",

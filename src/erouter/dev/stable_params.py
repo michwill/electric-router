@@ -283,6 +283,9 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
         out.by_pool.update(lent)
         out.checked += len(lent) + len(refused)
         out.rejected.extend(refused)
+        if cache is not None:
+            for key in lent:
+                cache.readmit(key)
         if lent and not quiet:
             print(f"  exact lending: {len(lent)} wrapped-token pools")
 
@@ -306,6 +309,14 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
                 out.by_pool.update(rated)
                 out.rejected = [(a, w) for a, w in out.rejected
                                 if a.lower() not in rated]
+                # The refusal recorded a moment ago was about the *plain*
+                # reading, and this reader has just overturned it.  Left
+                # standing it is written to `unquotable`, and `skip` reads that
+                # before the gate on the next run -- so the pool never reaches
+                # `rejected` and never reaches this line again.
+                if cache is not None:
+                    for key in rated:
+                        cache.readmit(key)
                 if not quiet:
                     print(f"  exact rate pools: {len(rated)} with wrapper rates")
 

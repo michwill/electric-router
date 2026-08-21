@@ -64,6 +64,11 @@ MATH_SOURCES = (
     ("dev", "stable_params.py"),
     ("dev", "twocrypto_params.py"),
     ("dev", "tricrypto_params.py"),
+    # The rate readers decide which variant a wrapped-token or oracle-priced
+    # pool is built from, so their source participates in the comparison
+    # exactly as the invariants do.  Left out, editing the list of getters a
+    # rate can come from left every verdict on every chain standing.
+    ("dev", "lending_params.py"),
 )
 
 
@@ -240,6 +245,31 @@ class ExactCache:
         self.verdicts.pop(key, None)
         if balances is not None:
             self.pending_unquotable[key] = balance_key(balances)
+
+    def readmit(self, pool: str) -> None:
+        """Forget a refusal that a later reader overturned in the same run.
+
+        The ordinary reading refuses a pool whose value is not one -- rETH,
+        ankrETH, RAI -- because a decimals-only rate cannot reproduce it, and
+        `lending_params` then rebuilds it from the wrapper and it reproduces
+        exactly.  Nothing used to undo the refusal, so it was written to
+        `unquotable`; on the next run `skip` fired *before* the gate, the pool
+        never reached `rejected`, and the retry that rescues it is fed from
+        `rejected`.  A pool that models perfectly was locked out of its own
+        second chance, permanently: `ETH/aETH` sat there with no verdict and an
+        entry in `unquotable` while reproducing its own `get_dy` to the wei at
+        every size asked.
+
+        No verdict is recorded in its place.  A verdict is matched against the
+        variants `build_exact_pools` offers, and these models are built
+        somewhere else, so a remembered one could never match and `trust` would
+        send the pool back through the gate regardless.  What must not survive
+        is the refusal.
+        """
+        key = pool.lower()
+        self.refused.pop(key, None)
+        self.unquotable.pop(key, None)
+        self.pending_unquotable.pop(key, None)
 
     def skip(self, pool: str, balances) -> bool:
         """Whether this pool failed before, in the state it is in now.
