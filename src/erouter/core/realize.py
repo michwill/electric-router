@@ -520,12 +520,31 @@ def realize(
                              bps, deltas[k], outs[k], float(psi[k]), deltas[k] / total)
                 )
 
-        # (3) arcs that had to draw from a spoke, each its own group
+        # (3) arcs that had to draw from a spoke.  One group per spoke *slot*,
+        # not one per arc.
+        #
+        # The quoter groups by contiguous `src_slot`, so two arcs drawing from
+        # the same spoke are one `bps` group however they were emitted.  Giving
+        # each of them `bps = 0` put two sweepers in that group: the first took
+        # the whole slot and the second was left with nothing to trade, which is
+        # a leg that can never do anything.  Measured on crvUSD -> sDOLA at $2M,
+        # a candidate carried `SaveDola` and `LlamaThena` both sweeping slot 1.
+        by_spoke: dict[int, list[int]] = {}
         for k, spoke in spokes:
-            route.legs.append(
-                _arc_leg(arcs[k], nodes, spoke, slot(arcs[k].token_out),
-                         0, deltas[k], outs[k], float(psi[k]), deltas[k] / total)
-            )
+            by_spoke.setdefault(spoke, []).append(k)
+        for spoke, ks in by_spoke.items():
+            # The sweeper goes last and must be able to absorb the remainder,
+            # the same rule the hub group above follows and for the same reason.
+            ks.sort(key=lambda k: math.isfinite(arcs[k].cap))
+            drawn = sum(deltas[k] for k in ks)
+            for position, k in enumerate(ks):
+                bps = (0 if position == len(ks) - 1 or drawn <= 0
+                       else max(1, min(BPS - 1, round(BPS * deltas[k] / drawn))))
+                route.legs.append(
+                    _arc_leg(arcs[k], nodes, spoke, slot(arcs[k].token_out),
+                             bps, deltas[k], outs[k], float(psi[k]),
+                             deltas[k] / total)
+                )
 
     # --- destination ----------------------------------------------------
     dst_node = nodes.node(dst_token)
