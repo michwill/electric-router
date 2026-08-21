@@ -1419,7 +1419,25 @@ def two_step_candidates(
     if not best_first:
         return [], []
 
-    ranked = sorted(best_first.items(), key=lambda kv: -kv[1][0])[: 3 * limit]
+    def worth(item) -> float:
+        """What a hop into this middle is worth, rather than how many tokens it made.
+
+        Comparing `to_canonical_wei` across middles compares token counts, and a
+        token trading at a fraction of a cent wins every such comparison by
+        arithmetic alone -- CXD at 2,513,355 units above crvUSD at 1,000, on
+        pools of $30k and $400M respectively.  `nu` is the reference price fit
+        and exists precisely to make quantities in different tokens comparable;
+        anything that ranks across tokens has to go through it.
+
+        The reachability filter above already means this rarely decides
+        anything, since what reaches `dst` is usually fewer than the cut keeps.
+        It is here because ranking by units is wrong whether or not it binds.
+        """
+        middle, (canonical, *_rest) = item
+        units = canonical / 10 ** nodes.decimals(nodes.canonical_of[middle])
+        return units * float(nu[middle]) if middle < len(nu) else units
+
+    ranked = sorted(best_first.items(), key=lambda kv: -worth(kv))[: 3 * limit]
 
     # --- round B: M -> dst ------------------------------------------------
     probes = []

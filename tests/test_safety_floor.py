@@ -177,22 +177,34 @@ CHEAP = [f"0x{0xcd00 + k:040x}" for k in range(24)]
 
 
 class _Quoter:
-    """Every swap is 1:1 in *canonical units*, so a cheap token pays out many.
+    """Swaps at 1:1 in whole tokens, with a per-pool multiplier on the units out.
 
-    That is the whole point: `to_canonical_wei` counts tokens, and a token worth
-    a millionth of a dollar therefore reports a millionfold "output".
+    Decimals are honoured, because the bug under test is precisely a confusion
+    between a token *count* and a value: a pool whose coin trades at a millionth
+    of a dollar pays out a millionfold more units for the same money, and it is
+    that number the ranking used to sort on.
     """
 
-    def __init__(self, per_unit: dict[str, int]):
-        self.per_unit = per_unit
+    def __init__(self, pools, units_out: dict[str, tuple[int, int]] | None = None):
+        self.decimals = {p.address.lower(): [c.decimals for c in p.coins]
+                         for p in pools}
+        #: `(numerator, denominator)` on the units out, so a pool that pays a
+        #: millionfold has a partner that takes a millionfold back -- otherwise
+        #: the dust would really be worth more and the test would be wrong.
+        self.units_out = {k.lower(): v for k, v in (units_out or {}).items()}
         self.probes = 0
 
     def probe(self, probes):
         from erouter.core.quoter import Quote, Status
 
         self.probes += len(probes)
-        return [Quote(Status.VALUE, p.dx * self.per_unit.get(p.pool.lower(), 1))
-                for p in probes]
+        out = []
+        for probe in probes:
+            dec = self.decimals[probe.pool.lower()]
+            scaled = probe.dx * 10 ** dec[probe.j] // 10 ** dec[probe.i]
+            num, den = self.units_out.get(probe.pool.lower(), (1, 1))
+            out.append(Quote(Status.VALUE, scaled * num // den))
+        return out
 
 
 def test_two_step_finds_the_middle_that_can_actually_reach_the_destination():
@@ -218,7 +230,7 @@ def test_two_step_finds_the_middle_that_can_actually_reach_the_destination():
     nodes = nodes_for(pools)
     nu = np.ones(len(nodes.canonical_of) + 40)
     # The dead ends pay a millionfold in units; the bridge pays 1:1.
-    quoter = _Quoter({p.address.lower(): 1_000_000 for p in dead_ends})
+    quoter = _Quoter(pools, {p.address: (1_000_000, 1) for p in dead_ends})
 
     out, chains = two_step_candidates(
         pools, nodes, nu, quoter, USDC, SUSDE, 1000 * 10**6)
@@ -238,7 +250,7 @@ def test_two_step_does_not_probe_middles_that_lead_nowhere():
     bridge = pool("0x" + "b1" * 20, [(USDC, "USDC", 6), (CRVUSD, "crvUSD", 18)])
     exit_ = pool("0x" + "e1" * 20, [(CRVUSD, "crvUSD", 18), (SUSDE, "sUSDe", 18)])
     pools = [*dead_ends, bridge, exit_]
-    quoter = _Quoter({})
+    quoter = _Quoter(pools)
     two_step_candidates(pools, nodes_for(pools), np.ones(64), quoter,
                         USDC, SUSDE, 1000 * 10**6)
     # One probe out of USDC through the bridge, one on through the exit.  The
@@ -252,5 +264,41 @@ def test_two_step_is_empty_when_nothing_bridges_the_pair():
     pools = [pool("0x" + "b1" * 20, [(USDC, "USDC", 6), (CRVUSD, "crvUSD", 18)]),
              pool("0x" + "d1" * 20, [(DAI, "DAI", 18), (SUSDE, "sUSDe", 18)])]
     out, chains = two_step_candidates(pools, nodes_for(pools), np.ones(16),
-                                      _Quoter({}), USDC, SUSDE, 1000 * 10**6)
+                                      _Quoter(pools), USDC, SUSDE, 1000 * 10**6)
     assert out == [] and chains == []
+
+
+def test_two_step_ranks_middles_by_value_not_by_token_count():
+    """`nu` is what makes quantities in different tokens comparable.
+
+    When more middles reach the destination than the cut keeps, the ones kept
+    have to be the ones worth most -- not the ones that happen to be numerous.
+    A token trading at a millionth of a dollar wins any comparison of raw
+    `to_canonical_wei` by arithmetic alone.
+    """
+    from erouter.core.pipeline import two_step_candidates
+
+    # Five middles all reach sUSDe; four are dust that pays out a millionfold.
+    middles = [(CRVUSD, "crvUSD"), *[(CHEAP[k], f"CHEAP{k}") for k in range(4)]]
+    pools = []
+    for addr, name in middles:
+        pools.append(pool(f"0xaa{addr[-38:]}", [(USDC, "USDC", 6), (addr, name, 18)],
+                          name=f"USDC/{name}"))
+        pools.append(pool(f"0xbb{addr[-38:]}", [(addr, name, 18), (SUSDE, "sUSDe", 18)],
+                          name=f"{name}/sUSDe"))
+    nodes = nodes_for(pools)
+    # Into dust: a millionfold units.  Back out of it: a millionth, so the
+    # round trip is worth what it started as and only the *count* is inflated.
+    quoter = _Quoter(pools, {p.address: ((1_000_000, 1) if (p.name or "").startswith("USDC/")
+                                         else (1, 1_000_000))
+                             for p in pools if "CHEAP" in (p.name or "")})
+    nu = np.ones(len(nodes.canonical_of) + 8)
+    for addr, _ in middles[1:]:
+        nu[nodes.node(addr)] = 1e-7           # dust: many units, little value
+
+    # `3 * limit` = 3 keeps fewer than the five that reach, so the cut binds.
+    out, chains = two_step_candidates(pools, nodes, nu, quoter, USDC, SUSDE,
+                                      1000 * 10**6, limit=1)
+    assert out, "no chain survived the cut"
+    kept = {arc.token_in.lower() for chain in chains for arc in chain}
+    assert CRVUSD.lower() in kept, "the valuable middle was cut for numerous ones"
