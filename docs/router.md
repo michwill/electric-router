@@ -180,24 +180,34 @@ nothing but the bound is doing the work.  The attack is three swaps on one
 pool: the attacker buys, the victim buys, the attacker sells back what it
 bought, and takes its profit in the token the victim was selling.
 
-| victim | % of pool | granted | max front-run | attacker | as bp of the trade |
-|---|---|---|---|---|---|
-| 100 | 0.01% | 0.60 bp | 56 | **−0.07** | −6.82 bp |
-| 1,000 | 0.07% | 0.60 bp | 54 | **−0.02** | −0.15 bp |
-| 5,000 | 0.33% | 0.60 bp | 50 | +0.22 | +0.43 bp |
-| 15,000 | 0.98% | 0.60 bp | 46 | +0.79 | +0.52 bp |
-| 100,000 | 6.55% | 0.60 bp | 46 | +6.19 | +0.62 bp |
-| 600,000 | 39.30% | 0.60 bp | 53 | +49.73 | +0.83 bp |
+| victim | % pool | attacker buys | % pool | % of victim | in WETH | profit | ROI | bp of trade |
+|---|---|---|---|---|---|---|---|---|
+| 100 | 0.01% | 137.86 | 0.0091% | 137.9% | 0.0578 | **−0.11** | −0.1% | −10.69 bp |
+| 1,000 | 0.07% | 121.32 | 0.0080% | 12.1% | 0.0509 | **−0.04** | −0.0% | −0.43 bp |
+| 5,000 | 0.33% | 76.37 | 0.0050% | 1.53% | 0.0320 | +0.22 | +0.3% | +0.43 bp |
+| 15,000 | 0.99% | 50.65 | 0.0033% | 0.338% | 0.0212 | +0.80 | +1.6% | +0.53 bp |
+| 40,000 | 2.63% | 46.02 | 0.0030% | 0.115% | 0.0193 | +2.29 | +5.0% | +0.57 bp |
+| 100,000 | 6.57% | 46.77 | 0.0031% | 0.047% | 0.0196 | +6.21 | +13.3% | +0.62 bp |
+| 250,000 | 16.43% | 48.85 | 0.0032% | 0.020% | 0.0205 | +17.23 | +35.3% | +0.69 bp |
+| 600,000 | 39.44% | 52.95 | 0.0035% | 0.009% | 0.0222 | +49.81 | +94.1% | +0.83 bp |
 
-Two things to read off it.  **The front-run ceiling barely moves** -- about 50
-USDC across four orders of magnitude of victim -- because the room the bound
-grants is a price move, and a price move is a function of the attacker's size
-alone.  So an attacker's capital is capped by the bound while their take scales
-with the trade, which is why gas settles it at the small end: two extra
-transactions cost about a dollar, and the attack does not clear that until
-roughly a $20,000 leg.  **And the take converges on the tolerance** -- 0.6 to
-0.8 bp against 0.60 bp granted, the two differing only because profit is in
-USDC and the victim's loss is in WETH at a rate the attack moved.
+Three things to read off it.
+
+**The attacker's own trade is about $50** -- between 46 and 138 USDC, three
+thousandths of one per cent of the pool -- whatever the victim is trading.  It
+has to be: the room the bound grants is a *price move*, and a price move is a
+function of the front-run's size alone.  So their capital is pinned by the bound
+while their take scales with the victim, which is why the return on capital runs
+from −0.1% to +94% down the same column.
+
+**At the small end it loses even for free.**  A $100 leg pays the attacker
+−0.11 USDC and a $1,000 leg −0.04, because the front-run the bound permits is
+too small for the displacement to cover its own two fees.  Two transactions of
+gas -- about a dollar -- push that break-even up to roughly a $20,000 leg.
+
+**At the large end the take converges on the tolerance**: 0.6 to 0.8 bp against
+0.60 bp granted, the two differing only because the profit is in USDC and the
+victim's loss is in WETH at a rate the attack itself moved.
 
 The volatile floor is the same table with eight times the room.  That is the
 accepted trade for a pair that would otherwise revert on honest movement, and
