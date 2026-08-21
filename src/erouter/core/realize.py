@@ -75,9 +75,20 @@ class RealizedLeg:
 
     @property
     def is_conversion(self) -> bool:
+        """A leg the node merge emitted, rather than a pool the solver chose.
+
+        Exactly the six kinds `Conversion.forward_kind`/`reverse_kind` produce.
+        The wstETH pair was missing, so its legs were treated as swaps: rescaled
+        from an `amount_out` no calibration ever set, which is zero.  A route
+        through wstETH then lost that whole branch from `modelled_out` -- 42.18
+        WETH realised, 33.98 modelled, and a loss ledger reading 2,036 bp on a
+        98 bp trade.
+        """
         return self.kind in (
             ArcKind.WRAP_NATIVE,
             ArcKind.UNWRAP_NATIVE,
+            ArcKind.WSTETH_WRAP,
+            ArcKind.WSTETH_UNWRAP,
             ArcKind.ERC4626_DEPOSIT,
             ArcKind.ERC4626_REDEEM,
         )
@@ -730,9 +741,11 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
             conversion = nodes.conversion.get(realized.token_in.lower()) or nodes.conversion.get(
                 realized.token_out.lower()
             )
-            if conversion is None or realized.kind in (ArcKind.WRAP_NATIVE, ArcKind.UNWRAP_NATIVE):
+            # Direction from the conversion, not from a list of kinds: it names
+            # the two itself, so a kind added later cannot be missed.
+            if conversion is None:
                 produced = take
-            elif realized.kind is ArcKind.ERC4626_REDEEM:
+            elif realized.kind is conversion.forward_kind:
                 produced = conversion.to_canonical(take)
             else:
                 produced = conversion.from_canonical(take)
