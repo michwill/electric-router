@@ -35,8 +35,11 @@ CALLER = "0x1234567890AbcdEF1234567890aBcdef12345678"
 
 _BALANCE_OF = keccak256(b"balanceOf(address)")[:4]
 _ALLOWANCE = keccak256(b"allowance(address,address)")[:4]
-#: How far up the storage layout to look before giving up on a token.
-SLOTS_SEARCHED = 16
+#: How far up the storage layout to look before giving up on a token.  Both
+#: mappings must be found, and Compound puts allowances one slot after
+#: balances: cDAI is 14 and 15, cUSDC is 15 and 16, so at 16 cUSDC missed by a
+#: single slot and its redemption read as untestable.
+SLOTS_SEARCHED = 32
 
 SOLIDITY, VYPER = "solidity", "vyper"
 
