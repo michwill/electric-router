@@ -270,8 +270,11 @@ class RouterSession:
         """Probe and price for one (src, dst).  Independent of the amount."""
         if self.client is None or self.nodes is None:
             raise SessionError("set_pair before warm")
-        say = _reporter(progress)
-        say("prepare", 0.0)
+        # Its own 0..1 rather than the warm's phase weighting: `_reporter`
+        # maps a phase it does not know to 1.0, so a pair reported "done"
+        # before it started and a bar driven from it never moved.
+        say = progress or (lambda phase, fraction: None)
+        say("pair", 0.0)
         src, dst = src.lower(), dst.lower()
         if not self.nodes.has(src) or not self.nodes.has(dst):
             raise SessionError("token not routable in this universe")
@@ -285,7 +288,7 @@ class RouterSession:
         self.prepared = await self.evm.fill(
             self.rpc, run, block=hex(self.block), code_for=self._code_for)
         self.pair = (src, dst)
-        say("prepare", 1.0)
+        say("pair", 1.0)
         return self.prepared
 
     def quote(self, amount_in: int):
