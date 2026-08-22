@@ -23,6 +23,7 @@ claim: that the route is executable at all, and that the quote was honest.
 
 from __future__ import annotations
 
+import functools
 import pathlib
 from dataclasses import dataclass, field
 
@@ -130,6 +131,9 @@ def slot_tokens(route: RealizedRoute) -> list[str]:
     return out
 
 
+_RETRIES_INSTALLED = False
+
+
 def serves_prestate(url: str, timeout: float = 10.0) -> bool:
     """Does this node answer `debug_traceCall` with the prestate tracer?"""
     import json
@@ -149,6 +153,69 @@ def serves_prestate(url: str, timeout: float = 10.0) -> bool:
         return False
 
 
+#: Retrying one of these would broadcast twice, so a stall on one is final.
+SUBMITS = ("eth_send", "eth_sign", "personal_")
+
+
+def reads_only(args) -> bool:
+    """Is this request safe to ask twice?
+
+    `fetch` takes a method, `fetch_multi` a list of them; anything else is a
+    shape this does not know, and the safe answer for an unknown shape is no.
+    """
+    first = args[0] if args else None
+    if isinstance(first, str):
+        return not first.startswith(SUBMITS)
+    if isinstance(first, (list, tuple)):
+        return all(isinstance(m, str) and not m.startswith(SUBMITS)
+                   for m, _ in first)
+    return False
+
+
+def _with_retries(call, attempts: int, stalled: tuple):
+    """Re-ask a read, on a fresh socket, up to `attempts` times."""
+
+    @functools.wraps(call)
+    def wrapper(self, *args):
+        for attempt in range(attempts):
+            try:
+                return call(self, *args)
+            except stalled:
+                if attempt == attempts - 1 or not reads_only(args):
+                    raise
+                self._session.close()
+
+    return wrapper
+
+
+def install_read_retries(attempts: int = 4, timeout: float = 15.0) -> None:
+    """Survive an endpoint that accepts a read and never answers it.
+
+    Measured on base: `eth_getStorageAt` came back in 50 ms for 114 of 116
+    calls and hung the full 60 s for the other two, same request shape, while
+    `debug_traceCall` never missed.  So it is the socket, not the payload.  boa
+    retries nothing and keeps one session for the whole sweep, so a stall both
+    loses the route and stays in the pool.  Every request a fork makes is a
+    read; re-asking costs a round trip and nothing else.
+
+    Four attempts at 15 s keep the old 60 s ceiling, as four draws instead of
+    one.
+    """
+    global _RETRIES_INSTALLED
+    if _RETRIES_INSTALLED:
+        return
+    import boa.rpc
+    from requests import exceptions as rex
+
+    stalled = (rex.ReadTimeout, rex.ConnectionError, rex.ChunkedEncodingError)
+    boa.rpc.TIMEOUT = timeout   # looked up per call, so it bounds one attempt
+    for name in ("fetch", "fetch_multi"):
+        setattr(boa.rpc.EthereumRPC, name,
+                _with_retries(getattr(boa.rpc.EthereumRPC, name), attempts,
+                              stalled))
+    _RETRIES_INSTALLED = True
+
+
 def fork(url: str, block: int, *, prefetch: bool | None = None):
     """Point boa at the chain, at the block the quote was pinned to.
 
@@ -164,6 +231,7 @@ def fork(url: str, block: int, *, prefetch: bool | None = None):
     """
     import boa
 
+    install_read_retries()
     boa.fork(url, block_identifier=block, allow_dirty=True)
     if prefetch is None:
         prefetch = serves_prestate(url)
