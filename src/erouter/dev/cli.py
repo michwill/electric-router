@@ -1383,7 +1383,7 @@ def _report_calldata(result, args, chain, nodes, dst, pools):
     number it came from.
     """
     from ..core.pools import volatile_pools
-    from ..core.routecall import EncodingError, encode_route, leg_fee, leg_out
+    from ..core.routecall import ONE, EncodingError, encode_route, leg_fee, leg_in, leg_out
 
     if result.route is None or not result.route.legs:
         print("  calldata: nothing to send (the pair is a node merge)")
@@ -1414,8 +1414,11 @@ def _report_calldata(result, args, chain, nodes, dst, pools):
           f"{'model':>10}")
     for step, leg in zip(call.steps(), result.route.legs, strict=True):
         name = (result.pool_names.get(step.pool.lower()) or step.pool)[:40]
-        rate = leg_out(leg) / leg.amount_in if leg.amount_in else 0.0
-        granted = (1 - (step.min_rate / 1e18) / rate) * 1e4 if rate else 0.0
+        # The floor as the contract will really apply it, not the rate it was
+        # asked for: on a leg producing few enough raw units to quantise, the
+        # two differ and the floor is the one that binds.
+        floor = leg_in(leg) * step.min_rate // ONE
+        granted = (1 - floor / leg_out(leg)) * 1e4 if leg_out(leg) else 0.0
         # How far the route's own modelled figure sat from the pool's answer.
         # It has no bearing on the bound -- that is set against the pool -- and
         # it is where a leg would have been mis-bounded if it did.
@@ -1424,8 +1427,8 @@ def _report_calldata(result, args, chain, nodes, dst, pools):
               f"{step.frac / 1e16:>8.2f}%{leg_fee(leg) * 1e4:>8.2f}bp"
               f"{granted:>8.2f}bp{drift:>+8.2f}bp")
     for index in call.unbounded:
-        print(f"  {WARN} leg {index} carries no minimum rate: the pair's rate in "
-              f"raw units falls below 1e-18, so only min_out guards it")
+        print(f"  {WARN} leg {index} carries no minimum rate: the floor it "
+              f"imposes rounds to zero, so only min_out guards it")
     print(f"\n  0x{data.hex()}")
     return call
 

@@ -354,34 +354,89 @@ def test_a_deeper_route_promises_less():
     assert calls[1].tolerance_bp > calls[0].tolerance_bp
 
 
-# ------------------------------------------ a bound that is only rounding
+# ------------------------------------------ a bound the token cannot express
 
 
-def test_a_leg_too_small_to_quantise_is_not_called_bounded():
-    """One unit of output is 1/out of the rate.  A leg producing five units
-    cannot express a 0.1 bp tolerance, and saying it does is worse than
-    saying nothing."""
-    legs = [leg(0, 1, 10**18, 5, gamma=1 - 1e-4)]
-    rates, unbounded = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
-    assert rates[0] > 0, "the number still ships"
-    assert unbounded == [0], "but it is not a bound"
+def _floor(legs, **kw):
+    r = route(legs, amount_in=legs[0].amount_in, dst_slot=1)
+    rates, unbounded = rc.min_rates(r, **kw)
+    return rc.leg_in(legs[0]) * rates[0] // ONE, unbounded
 
 
-def test_a_leg_with_room_to_quantise_is_bounded():
-    legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 1e-4)]
-    _, unbounded = rc.min_rates(route(legs, amount_in=10**18, dst_slot=1))
+def test_a_tolerance_finer_than_one_unit_binds_at_the_quote():
+    """0.8 bp of 1,881 raw units is 0.15 of one, and a rate cannot say that.
+    What ships is the tightest rate that still admits the quote, so the leg
+    pays what it was quoted at to the unit and a sandwich gets nothing."""
+    legs = [leg(0, 1, 18813936625701, 1881, gamma=1 - 4e-4)]
+    floor, unbounded = _floor(legs)
+    assert floor == 1881, "the quote itself, not a unit under it"
     assert unbounded == []
 
 
-def test_the_threshold_follows_the_tolerance_not_a_constant():
-    """A volatile pair is granted 5 bp, so it can quantise 50x coarser than a
-    pegged one granted 0.1 bp before the bound stops meaning anything."""
+@pytest.mark.parametrize(("have", "want"), [
+    (18813936625701, 1881),        # tBTC -> WBTC at $1.45; lands on the quote
+    (5055147152544766989, 61),     # one rate step is five units; lands under it
+])
+def test_the_bound_is_the_largest_rate_that_still_admits_the_quote(have, want):
+    """One step higher and the leg could not settle at all.
+
+    Landing *on* the quote is not always reachable: where one step of the rate
+    is worth several units of output there is no rate in between, and the
+    largest admissible one is the whole of what can be asked for.
+    """
+    rate = rc.min_rates(route([leg(0, 1, have, want, gamma=1 - 4e-4)],
+                              amount_in=have, dst_slot=1))[0][0]
+    assert have * rate // ONE <= want
+    assert have * (rate + 1) // ONE > want
+
+
+def test_a_five_unit_leg_binds_at_five():
+    """A five-unit leg quantises so hard that 0.2 bp rounds clean away."""
+    legs = [leg(0, 1, 10**18, 5, gamma=1 - 1e-4)]
+    floor, unbounded = _floor(legs)
+    assert floor == 5 and unbounded == []
+
+
+def test_a_rate_that_underflows_to_zero_is_still_unbounded():
+    """One unit of output against 10 whole units of input: the rate rounds to
+    nothing and the check the contract runs is vacuous."""
+    legs = [leg(0, 1, 10 * 10**18, 1, gamma=1 - 1e-4)]
+    floor, unbounded = _floor(legs)
+    assert floor == 0 and unbounded == [0]
+
+
+def test_a_leg_with_room_to_quantise_keeps_the_fee_rule():
+    """Nothing above changes what a leg large enough to say 0.2 bp is granted."""
+    legs = [leg(0, 1, 10**18, 10**18, gamma=1 - 1e-4)]
+    floor, unbounded = _floor(legs)
+    assert unbounded == []
+    assert floor == pytest.approx(10**18 * (1 - 0.2e-4), rel=1e-9)
+
+
+def test_a_coarse_rate_is_reported_at_what_it_really_grants():
+    """The other end of the same problem, and the one no check ever saw.
+
+    `min_rate` is `out * 1e18 // in`, so a cheap 18-decimal token into a
+    6-decimal one leaves the *rate* with a handful of significant figures: here
+    it is 19, one step of which is 5%.  The floor lands 423 bp under the quote
+    while the fee rule asked for 0.2, and there is no rate in between -- so the
+    only defence is that `tolerance_bp` says 423 and not 0.2.
+    """
+    legs = [leg(0, 1, 446734325923758040418927, 8862689, gamma=1 - 1e-4)]
+    floor, unbounded = _floor(legs)
+    assert unbounded == [], "there is a floor, and it is not zero"
+    assert 420 < (1 - floor / 8862689) * 1e4 < 430
+    r = route(legs, amount_in=446734325923758040418927, dst_slot=1)
+    call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=8862689)
+    assert 420 < call.tolerance_bp < 430, "the report is the whole protection"
+
+
+def test_the_granularity_never_loosens_a_leg_that_could_say_more():
+    """A volatile pair is granted 5 bp; the unit rule must not cut that to
+    one unit of a 4,000-unit output, which would be 2.5 bp."""
     coarse = [leg(0, 1, 10**18, 4_000, gamma=1 - 1e-4)]
-    tight = rc.min_rates(route(coarse, amount_in=10**18, dst_slot=1))[1]
-    loose = rc.min_rates(route(coarse, amount_in=10**18, dst_slot=1),
-                         volatile=[POOL_A])[1]
-    assert tight == [0], "0.2 bp cannot survive a 2.5 bp quantum"
-    assert loose == [], "5 bp can"
+    floor, _ = _floor(coarse, volatile=[POOL_A])
+    assert floor == 3998, "5 bp of 4,000 units is two of them"
 
 
 def test_the_walk_reports_what_each_leg_will_really_enforce():
@@ -401,15 +456,30 @@ def test_a_route_with_a_leg_too_small_to_bound_is_refused():
     """A leg worth too little to bound is worth too little to execute, and
     nothing upstream sees it: prune_dust drops branches by their share of a
     node outflow, before anything knows what a leg makes in token units."""
-    legs = [leg(0, 1, 10**18, 5, gamma=1 - 1e-4)]
-    r = route(legs, amount_in=10**18, dst_slot=1)
+    legs = [leg(0, 1, 10 * 10**18, 1, gamma=1 - 1e-4)]
+    r = route(legs, amount_in=10 * 10**18, dst_slot=1)
     with pytest.raises(rc.EncodingError, match="too little"):
-        rc.encode_route(r, receiver=TOKEN[5], quoted_out=5)
+        rc.encode_route(r, receiver=TOKEN[5], quoted_out=1)
 
 
 def test_it_can_still_be_shipped_by_asking_for_it():
-    legs = [leg(0, 1, 10**18, 5, gamma=1 - 1e-4)]
-    r = route(legs, amount_in=10**18, dst_slot=1)
-    call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=5,
+    legs = [leg(0, 1, 10 * 10**18, 1, gamma=1 - 1e-4)]
+    r = route(legs, amount_in=10 * 10**18, dst_slot=1)
+    call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=1,
                            allow_unbounded=True)
     assert call.unbounded == (0,)
+
+
+def test_a_small_trade_through_a_coarse_intermediate_encodes():
+    """The tBTC -> WBTC -> USDT shape at $1.45: the intermediate is 1,881 raw
+    units, which no fee-fraction can express and which used to be refused.
+
+    The coarse leg costs nothing now that it binds at its own quote, so what
+    is left in the tolerance is the second leg's own fee rule.
+    """
+    legs = [leg(0, 1, 18813936625701, 1881, gamma=1 - 4e-4),
+            leg(1, 2, 1881, 1449003, target=POOL_B, gamma=1 - 4e-4)]
+    r = route(legs, amount_in=18813936625701, dst_slot=2)
+    call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=1449003)
+    assert call.unbounded == ()
+    assert 0.7 < call.tolerance_bp < 0.9

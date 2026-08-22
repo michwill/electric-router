@@ -124,16 +124,41 @@ dy >= dx * min_rate / 1e18
 `min_rate` is a rate between *raw* units, so it carries the decimal difference:
 USDC (6) to WETH (18) around 4,000 USD is about `2.5e26`.  128 bits covers rates
 from 1e-18 to 3.4e20; a pair outside that band -- an 18-decimal dust token
-against an 8-decimal expensive one -- cannot be bounded at all.  Neither can a
-leg producing so little that one unit of its output is more than the tolerance:
-one unit is `1/out` of the rate, so a leg making a few hundred units quantises
-harder than the room the bound is trying to leave.
+against an 8-decimal expensive one -- cannot be bounded at all, and neither can
+a leg whose floor rounds to zero.  `encode_route` **refuses** those rather than
+shipping a number that reads as protection: a leg worth too little to bound is
+a leg worth too little to execute, and nothing upstream can see it, because
+`prune_dust` drops branches by their share of a node's outflow in value
+coordinates, before anything knows what a leg produces in token units.
 
-`encode_route` **refuses** both rather than shipping a number that reads as
-protection.  A leg worth too little to bound is a leg worth too little to
-execute, and nothing upstream can see it: `prune_dust` drops branches by their
-share of a node's outflow, in value coordinates, before anything knows what a
-leg produces in token units.
+### When the token is coarser than the tolerance
+
+One unit of the output is `1/out` of the rate, so a small trade through a
+high-decimal-value intermediate cannot express the fee fraction at all.  A
+$1.45 tBTC -> WBTC -> USDT route makes **1,881 raw WBTC**; 20% of that pool's
+4 bp fee is 0.15 of one unit, and a rate has no way to say it.
+
+The bound then becomes the **tightest rate that still admits the quote**: the
+largest `min_rate` for which `dx * min_rate / 1e18` is still no more than the
+quoted output.  The leg has to pay what it was quoted at, to the unit, and a
+sandwich gets nothing at all.  (It lands *on* the quote about nine times in ten;
+where one step of the rate is worth several units of output there is no rate in
+between, and the largest admissible one is all there is to ask for.)
+
+The cost is on the other side, and it is real: the leg reverts on one unit of
+adverse movement -- 5.3 bp here -- including movement it causes itself, when an
+upstream leg overperforms and this one pays a worse marginal rate on the larger
+input.  That is the trade taken deliberately.  Granting the unit instead would
+hand 5.3 bp to a bound whose whole purpose is to be a fraction of a fee, and a
+trade this size is one the user can simply resubmit.
+
+The same thing happens from the other side, and there it is worse.  `min_rate`
+is `out * 1e18 // in`, so when `in` dwarfs `out` -- a cheap 18-decimal token
+into a 6-decimal one -- the *rate* is left with a handful of significant
+figures.  At `in = 4.5e23`, `out = 8.9e6` the rate is **19**, one step of which
+is 5%, and the floor lands 423 bp under the quote however thin a tolerance was
+asked for.  There is no rate in between, so the only defence is that
+`tolerance_bp` reports 423 and not 0.2.  Read the floor, never the fraction.
 
 ### Where the reference rate has to come from
 

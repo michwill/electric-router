@@ -14,6 +14,9 @@ give everything away in one pool and win it back in another -- the shape of a
 sandwich.  The bound is a fraction of the fee that pool is measured to be
 charging *on this trade*, and what it buys is a ceiling on how much a sandwich
 can take: the front-run can only be as large as the bound will still settle.
+Where the output token is too coarse to express that fraction -- a trade small
+enough that its intermediate is a few thousand raw units -- the leg is bounded
+at the quote itself, which is the tightest rate that still admits it.
 
 Whether there is an attack to cap is decided elsewhere.  A leg whose own price
 impact is under twice its pool's fee cannot be sandwiched profitably at all --
@@ -166,7 +169,7 @@ class RouteCall:
     #: The chained walk's figure where there was one, the model's otherwise --
     #: the number the user was shown, so the number the tolerance is against.
     quoted_out: int = 0
-    #: Legs the bound does not really cover.  Empty unless the caller asked
+    #: Legs whose bound imposes no floor at all.  Empty unless the caller asked
     #: for them: `encode_route` refuses such a route by default, because a leg
     #: producing too little to bound is a leg producing too little to want.
     unbounded: tuple[int, ...] = ()
@@ -316,12 +319,24 @@ def min_rates(
     exactly like a pegged one from the arc alone, and that shape is the one
     that rugs on broadcast.
 
-    A leg lands in `unbounded` when its rate is too coarse for the bound to
-    mean anything, not only when the bound is zero.  `min_rate` is
-    `out * 1e18 // in`, so one unit of the output token is `1/out` of the rate;
-    a leg producing a few units quantises harder than the tolerance it is
-    trying to express, and the number that ships is rounding wearing a bound's
-    clothes.
+    A tolerance finer than one unit of the output token cannot be expressed as
+    a rate -- `min_rate` is `out * 1e18 // in`, so one unit is `1/out` of it,
+    and a leg making a few thousand units quantises harder than the room the
+    fee rule asks for.  What ships then is the tightest rate that still admits
+    the quote, so the leg has to pay what it was quoted at to the unit.  That
+    is a real cost on the other side: the leg reverts on a unit of adverse
+    movement, including movement it causes itself when an upstream leg
+    overperforms and this one pays a worse marginal rate on the larger input.
+    It is the trade taken deliberately, because the alternative is granting a
+    whole unit -- 5.3 bp on a 1,881-unit leg -- to a bound whose entire purpose
+    is to be small.
+
+    A leg lands in `unbounded` only when the floor its bound really imposes
+    rounds to nothing, which is a bound guarding nothing.  Everything short of
+    that ships, so the number to read is the floor and not the fraction: where
+    `in` dwarfs `out` the *rate* keeps only a few significant figures, and one
+    step of it can be percent-sized whatever `tol` asked for.  `tolerance_bp`
+    is read off `walk_bounds` for that reason.
     """
     loose = {address.lower() for address in volatile}
     rates: list[int] = []
@@ -333,15 +348,22 @@ def min_rates(
             rates.append(0)
             unbounded.append(k)
             continue
-        rate = leg_out(realized) * ONE // leg_in(realized)
-        bound = rate - rate * round(tol * 1e9) // 10**9
+        want, have = leg_out(realized), leg_in(realized)
+        share = round(tol * 1e9)
+        rate = want * ONE // have
+        bound = rate - rate * share // 10**9
+        # A tolerance worth less than one unit of the output token has no rate
+        # to be written as.  Take the tightest one that still admits the quote:
+        # the largest `bound` whose floor is `want` where the rate can land
+        # there, and the largest whose floor is under it where it cannot.
+        if want * share < 10**9:
+            bound = ((want + 1) * ONE - 1) // have
         if bound > MAX_RATE:
             raise EncodingError(
                 f"leg {k} on {realized.target} has a raw-unit rate of {rate}, "
                 f"beyond what {RATE_BITS} bits can bound")
         rates.append(bound)
-        # One unit of output against the room the bound is claiming to leave.
-        if bound == 0 or 1.0 / leg_out(realized) > tol:
+        if have * bound // ONE <= 0:
             unbounded.append(k)
     return rates, unbounded
 
@@ -468,9 +490,9 @@ def encode_route(
             f"{leg_out(route.legs[k])} out)" for k in unbounded)
         raise EncodingError(
             f"leg(s) {legs} produce too little for a minimum rate to bound -- "
-            f"one unit of the output is more than the tolerance.  A leg worth "
-            f"that little is not worth executing; re-solve without it, or pass "
-            f"allow_unbounded to ship it unprotected")
+            f"the floor it imposes rounds to nothing, so the check is vacuous. "
+            f"A leg worth that little is not worth executing; re-solve without "
+            f"it, or pass allow_unbounded to ship it unprotected")
     promised, _floors = walk_bounds(route, fracs, rates)
 
     tokens: list[str] = []

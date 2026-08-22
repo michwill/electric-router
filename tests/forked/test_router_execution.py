@@ -38,6 +38,7 @@ WETH = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
 USDT = "0xdac17f958d2ee523a2206206994597c13d831ec7"
 CRVUSD = "0xf939e0a03fb07f59a73314e73794be0e57ac1b4e"
 DAI = "0x6b175474e89094c44da98b954eedeac495271d0f"
+TBTC = "0x18084fba666a33d37592fa2633fd49a74dd93a88"
 
 #: The router's own arithmetic is wei-exact; what is not is the model of a pool
 #: entered twice.  Same tolerance as the executor test, for the same reason.
@@ -48,6 +49,11 @@ CASES = [
     ("USDC -> USDT", USDC, USDT, 1_000_000 * 10**6),
     ("DAI -> USDC", DAI, USDC, 500_000 * 10**18),
     ("crvUSD -> WETH", CRVUSD, WETH, 500_000 * 10**18),
+    # $1.45, and the reason it is here is the intermediate: WBTC has 8
+    # decimals, so this leg makes about 1,900 raw units and no fraction of a
+    # fee can be expressed against it.  The bound falls back to one unit, and
+    # this is what proves that bound is real rather than a way of shipping.
+    ("tBTC -> USDT (dust)", TBTC, USDT, 18813936625701),
 ]
 
 
