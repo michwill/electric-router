@@ -1,11 +1,13 @@
 {
  "chain_id": 1,
- "fingerprint": "68a341ec1a0b8e74",
+ "fingerprint": "031b6a743c1012b3",
  "unquotable": {
   "0x06a2e1521afde7f7dc30d351dcf04408042f536e": "f347f1e25fb5",
   "0x1631d0e588d475cee4be0f51b7410daaaabd7034": "da6fd928fbd0",
   "0x2c7827010121aae14200e839f6c89913457ed34c": "5212f86ed939",
+  "0x3e01dd8a5e1fb3481f0f589056b428fc308af0fb": "499c306e2664",
   "0x52ea46506b9cc5ef470c5bf89f17dc28bb35d85c": "67ca545a932d",
+  "0x618788357d0ebd8a37e763adab3bc575d54c2c7d": "462aa00c6300",
   "0x6bd88c57523bf138a19b263e8ebc8661c836b171": "f1fecbd1749e",
   "0x71db3764d6841d8b01dc27c0fd4a66a8a34b2be0": "0419c71224d1",
   "0xa2b47e3d5c44877cca798226b7b8118f9bfb7a56": "9bdd08f34334",
@@ -474,11 +476,6 @@
    "legacy_pool": false,
    "stable": false,
    "v21": true
-  },
-  "0x3e01dd8a5e1fb3481f0f589056b428fc308af0fb": {
-   "family": "stable",
-   "fee_on_xp": true,
-   "rates": "meta"
   },
   "0x413928a25d6ea1a26f2625d633207755f67bf97c": {
    "family": "stable",

@@ -81,6 +81,102 @@ def _decode_rates(blob: bytes | None, n_coins: int) -> tuple[int, ...]:
     return ()
 
 
+#: Compound's `exchangeRateStored` is scaled by this, and a pool with no
+#: lending coin uses it unchanged -- `LENDING_PRECISION` in the deployed source.
+LENDING_PRECISION = 10**18
+
+
+def _lending_rates(pools, client, block: int) -> dict[str, tuple[int, ...]]:
+    """Rates for the pools that hold a lending token, as the pool builds them.
+
+    A Compound pool's `_stored_rates` is `PRECISION_MUL[i] * rate`, where the
+    rate is `exchangeRateStored` carried forward to this block:
+
+        rate += rate * supplyRatePerBlock * (block - accrualBlockNumber) / 1e18
+
+    which is why one read of the exchange rate is not enough -- the pool accrues
+    interest between the cToken's last accrual and now, and skipping it is 1 bp
+    of error rather than a rounding one.  `PRECISION_MUL` corrects for the
+    *underlying* decimals, not the wrapped ones: cUSDC has eight, USDC six.
+
+    Only pools whose `underlying_coins` differ from `coins` are asked at all, so
+    a universe of ordinary pools pays one batch of reverts for the question.
+    """
+    SPELLINGS = ("underlying_coins(uint256)", "underlying_coins(int128)")
+
+    # Index zero, both spellings: two calls to learn whether a pool has an
+    # underlying view at all.  Asking every index of every pool costs about
+    # 2,300 reverts on ethereum to find four pools.
+    first = client.raw([Call(pool.address, encode_call(sig, 0))
+                        for pool in pools for sig in SPELLINGS])
+    speaks: dict[str, str] = {}
+    for k, pool in enumerate(pools):
+        for n, sig in enumerate(SPELLINGS):
+            answer = first[2 * k + n]
+            if answer.ok and answer.data and len(answer.data) >= 32:
+                speaks[pool.address.lower()] = sig
+                break
+    if not speaks:
+        return {}
+
+    rest = [p for p in pools if p.address.lower() in speaks and len(p.coins) > 1]
+    got = client.raw([Call(p.address, encode_call(speaks[p.address.lower()], k))
+                      for p in rest for k in range(1, len(p.coins))])
+
+    per_pool: dict[str, list[str]] = {}
+    at = 0
+    for pool in rest:
+        n = len(pool.coins)
+        head = first[2 * list(pools).index(pool) + SPELLINGS.index(
+            speaks[pool.address.lower()])]
+        found = ["0x" + head.data[-20:].hex().lower()]
+        for _ in range(1, n):
+            answer = got[at]
+            at += 1
+            found.append("0x" + answer.data[-20:].hex().lower()
+                         if answer.ok and answer.data and len(answer.data) >= 32
+                         else "")
+        own = [c.address.lower() for c in pool.coins]
+        if all(found) and found != own:
+            per_pool[pool.address.lower()] = found
+    if not per_pool:
+        return {}
+
+    # The underlying's decimals set `PRECISION_MUL`; the wrapped coin answers
+    # the three Compound getters, or does not and is not a lending coin.
+    wanted = sorted({a for v in per_pool.values() for a in v})
+    holders = sorted(per_pool)
+    reads = [Call(a, encode_call("decimals()")) for a in wanted]
+    for address in holders:
+        pool = next(p for p in pools if p.address.lower() == address)
+        for coin in pool.coins:
+            reads += [Call(coin.address, encode_call("exchangeRateStored()")),
+                      Call(coin.address, encode_call("supplyRatePerBlock()")),
+                      Call(coin.address, encode_call("accrualBlockNumber()"))]
+    answers = client.raw(reads)
+    decimals = {a: answers[k].uint_or(18) for k, a in enumerate(wanted)}
+
+    out: dict[str, tuple[int, ...]] = {}
+    at = len(wanted)
+    for address in holders:
+        pool = next(p for p in pools if p.address.lower() == address)
+        rates, lending = [], False
+        for k in range(len(pool.coins)):
+            stored, supply, accrued = answers[at], answers[at + 1], answers[at + 2]
+            at += 3
+            rate = LENDING_PRECISION
+            if stored.ok and stored.uint_or(0):
+                lending = True
+                rate = stored.uint()
+                rate += (rate * supply.uint_or(0)
+                         * max(0, block - accrued.uint_or(block)) // LENDING_PRECISION)
+            mul = 10 ** max(0, 18 - decimals.get(per_pool[address][k], 18))
+            rates.append(mul * rate)
+        if lending:
+            out[address] = tuple(rates)
+    return out
+
+
 def build_exact_pools(pools, client, *, quiet: bool = True,
                       cache=None, resample=(), only=None) -> ExactPools:
     """Model every stableswap whose parameters reproduce its own `get_dy`."""
@@ -139,6 +235,10 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
             if answer.ok and len(answer.data) >= 32 * len(pool.coins):
                 rate_data[pool.address.lower()] = answer.data
 
+    block = getattr(getattr(client, "transport", None), "block", 0) or getattr(
+        client, "block", 0) or 0
+    lending = _lending_rates(wanted, client, int(block)) if block else {}
+
     built: list[tuple[object, StableSwap, dict]] = []
     for k, pool in enumerate(wanted):
         precise, plain, fee, offpeg, admin = answers[5 * k : 5 * k + 5]
@@ -168,6 +268,9 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
         candidates.append(("plain", plain))
         if meta != plain:
             candidates.append(("meta", meta))
+        lent = lending.get(pool.address.lower())
+        if lent and lent != plain:
+            candidates.append(("lending", lent))
 
         # Which convention this pool follows is asked, not assumed: the variants
         # are cheap to evaluate and only one of them can reproduce the chain to
