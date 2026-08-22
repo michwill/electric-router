@@ -65,11 +65,16 @@ def _u8(values):
 
 
 def _bytes(buffer) -> bytes:
-    """A `Float64Array`/`Uint8Array` as Python bytes, and the handle released."""
-    try:
-        return buffer.to_bytes()
-    finally:
-        buffer.destroy()
+    """A `Float64Array` or `Uint8Array` as Python bytes.
+
+    Not destroyed afterwards, and that is deliberate rather than an omission:
+    a Pyodide `JsBuffer` has `to_bytes` and no `destroy` -- `AttributeError:
+    destroy` was what the browser answered for every quote, while the same
+    code answered fine in CPython, because there is no JsBuffer there to
+    differ.  Each of these is a fresh TypedArray the getter just made, so
+    letting the JS collector have it is also the right thing.
+    """
+    return buffer.to_bytes()
 
 
 def _nan(value) -> float:
