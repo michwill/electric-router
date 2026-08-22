@@ -287,6 +287,10 @@ class DialectAudit:
     no_answer: list[PoolSpec] = field(default_factory=list)
     empty_returndata: int = 0
     seconds: float = 0.0
+    #: One line per pool whose coin list the API over-reported; see
+    #: `resolve_coin_counts`.  Surfaced rather than counted, because a pool
+    #: whose N moved is a pool whose arcs and invariant both moved with it.
+    coin_notes: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -420,8 +424,14 @@ def resolve_dialects(
     `Status.WRONG_ABI` -- succeeded but returned nothing -- is deliberately not
     treated as an answer; 60 Ethereum pools rely on that distinction and one is
     outright mis-typed by the API.
+
+    Coin counts are settled first, because a probe of coin `j` is meaningless
+    until `j` is known to be a coin -- see `resolve_coin_counts`.  Here rather
+    than in each caller: fourteen places resolve a universe and all of them
+    come through this one.
     """
     audit = DialectAudit()
+    audit.coin_notes = resolve_coin_counts(pools, client)
     cache = cache or DialectCache()
     known = cache.load(chain.chain_id) if use_cache else {}
 
@@ -483,6 +493,81 @@ def resolve_dialects(
     if fresh and use_cache:
         cache.save(chain.chain_id, fresh)
     return audit
+
+
+#: How far past the API's count to look.  Nothing needs it -- the API has never
+#: reported *fewer* coins than a pool has, on any chain measured -- but a silent
+#: truncation would be the one failure this cannot detect on its own.
+COIN_PROBE_SLACK = 2
+
+
+def resolve_coin_counts(pools: list[PoolSpec], client: QuoterClient) -> list[str]:
+    """Truncate each pool's coins to the ones the pool itself reports.
+
+    The Prices listing appends a lending pool's *underlying* view to its coins
+    and marks it nowhere: `is_metapool` is false, `base_pool` is null, and
+    `pool_index` just counts on past the real coins.  So `cDAI/cUSDC/USDT`
+    arrives with five coins and answers `coins(3)` with a revert, and the four
+    ethereum and three polygon pools shaped like that were contributing 19 arcs
+    naming indices that do not exist.  They quote `REVERTED` and are dropped,
+    which is why nothing has broken -- but the guard is an accident, and the
+    padded coin list also fails `all(balances)`, which is what kept those pools
+    from ever reaching the exact-model gate.
+
+    A metapool's tail is handled in `PoolSpec.from_api`, which keeps the first
+    two; this is the case that has no flag to key on.
+
+    N is not cosmetic -- it is in the stableswap invariant and in the
+    `uint256[N]` an `add_liquidity` sends -- so it comes from the pool.  Both
+    spellings are asked: the older lending pools index with `int128` and answer
+    every `coins(uint256)` with a revert, which would otherwise read as a pool
+    with no coins at all.  Returns a note per pool that changed.
+    """
+    from ..core.codec import encode_call
+    from ..core.transport import Call
+
+    wanted = [p for p in pools if p.coins]
+    if not wanted:
+        return []
+    plan = [(spec, sig, k)
+            for spec in wanted
+            for sig in ("coins(uint256)", "coins(int128)")
+            for k in range(len(spec.coins) + COIN_PROBE_SLACK)]
+    answers = client.raw([Call(spec.address, encode_call(sig, k))
+                          for spec, sig, k in plan])
+
+    seen: dict[str, dict[str, dict[int, str]]] = {}
+    for (spec, sig, k), got in zip(plan, answers, strict=True):
+        ok = bool(got.ok and got.data and len(got.data) >= 32)
+        seen.setdefault(spec.address.lower(), {}).setdefault(sig, {})[k] = (
+            ("0x" + got.data[-20:].hex()).lower() if ok else "")
+
+    notes: list[str] = []
+    for spec in wanted:
+        by_sig = seen.get(spec.address.lower(), {})
+        best = 0
+        for answered in by_sig.values():
+            n = 0
+            while answered.get(n):
+                n += 1
+            best = max(best, n)
+        if best == 0 or best == len(spec.coins):
+            # No answer at all leaves the listing alone: a pool that will not
+            # say is not evidence that the listing is wrong, and shrinking on
+            # silence would delete real coins.
+            continue
+        if best > len(spec.coins):
+            notes.append(f"{spec.name or spec.address}: pool reports {best} coins, "
+                         f"the listing had {len(spec.coins)} -- kept the listing")
+            continue
+        notes.append(f"{spec.name or spec.address}: {len(spec.coins)} coins in the "
+                     f"listing, {best} on the pool -- dropped the underlying view")
+        spec.coins = spec.coins[:best]
+        if spec.balances:
+            spec.balances = spec.balances[:best]
+        if getattr(spec, "held", None):
+            spec.held = spec.held[:best]
+    return notes
 
 
 def count_swap_arcs(pools: list[PoolSpec]) -> int:
