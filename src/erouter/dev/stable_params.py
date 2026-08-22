@@ -279,13 +279,16 @@ def build_exact_pools(pools, client, *, quiet: bool = True,
         # dropping the pool.
         for label, rates in candidates:
             for on_xp in (fee_on_xp, not fee_on_xp):
-                built.append((pool, StableSwap(
-                    balances=tuple(int(b) for b in pool.balances),
-                    rates=rates, amp=amp, fee=fee.uint(),
-                    offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
-                    a_precision=a_precision, fee_on_xp=on_xp,
-                    admin_fee=admin.uint_or(-1) if admin.ok else -1,
-                ), {"family": "stable", "rates": label, "fee_on_xp": on_xp}))
+                for minus_one in (True, False):
+                    built.append((pool, StableSwap(
+                        balances=tuple(int(b) for b in pool.balances),
+                        rates=rates, amp=amp, fee=fee.uint(),
+                        offpeg_fee_multiplier=offpeg.uint_or(0) or 0,
+                        a_precision=a_precision, fee_on_xp=on_xp,
+                        subtract_one=minus_one,
+                        admin_fee=admin.uint_or(-1) if admin.ok else -1,
+                    ), {"family": "stable", "rates": label, "fee_on_xp": on_xp,
+                        "subtract_one": minus_one}))
 
     if not built:
         return out

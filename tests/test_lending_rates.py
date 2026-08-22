@@ -118,3 +118,28 @@ def test_a_pool_whose_coins_do_not_lend_is_left_out():
     to answer Compound's getters, or the rate is `LENDING_PRECISION` and the
     plain candidate already covers it."""
     assert _lending_rates([_pool()], Chain(lending=False), BLOCK) == {}
+
+
+# ------------------------------------------------------ the rounding variant
+
+
+def test_subtract_one_is_asked_rather_than_assumed():
+    """Not every stableswap drops the wei.
+
+    The Aave pools compute `dy = xp[j] - y` where most compute
+    `xp[j] - y - 1`.  On the two-coin one both coins are 18 decimals, so `xp`
+    is the balance and the missing subtraction is exactly one wei; on the
+    three-coin one the 1e12 precision divide rounds it away.  That is why one
+    read as a rounding error and the other read as exact.
+
+    `StableSwap` has carried the flag since it was written; nothing varied it,
+    so every pool was modelled as though it subtracted.
+    """
+    from erouter.core.stableswap import StableSwap
+
+    common = {"balances": (10**24, 10**24), "rates": (10**18, 10**18),
+              "amp": 10_000, "fee": 4_000_000, "a_precision": 100,
+              "fee_on_xp": True}
+    drops = StableSwap(**common, subtract_one=True).get_dy(0, 1, 10**21)
+    keeps = StableSwap(**common, subtract_one=False).get_dy(0, 1, 10**21)
+    assert keeps - drops == 1, "the flag has to be worth exactly the wei"
