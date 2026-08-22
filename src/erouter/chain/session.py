@@ -29,12 +29,14 @@ import copy
 import time
 from dataclasses import dataclass, field
 
+from ..core import accel as _accel
 from ..core import pipeline
 from ..core.pools import PoolSpec, parse_universe, volatile_pools
 from ..core.probe import COARSE_GRID, plan_grid
 from ..core.quoter import QuoterClient
 from ..core.rendermodel import build_diagram
 from ..core.routecall import NEEDED, encode_route
+from ..core.schema import ROUTER_ADDRESS
 from .exact_cache import ExactCache
 from .facts import FactsCache, apply_broken_facts
 from .localevm import LocalEvm
@@ -53,6 +55,15 @@ STATE_FILE = "evm-state/{name}.json.gz"
 EXACT_FILE = "exact/{name}.json"
 FACTS_FILE = "facts/{name}.json"
 QUOTER_FILE = "quoter/RouteQuoter.runtime.hex"
+
+#: What the pre-submit simulation is allowed to spend.  Generous: a thirteen-leg
+#: mainnet route measured 2.47M, and this is a local execution where the only
+#: cost of a high ceiling is that a runaway loop takes longer to stop.
+DRY_RUN_GAS = 3_000_000_000
+
+#: Curve's sentinel for native ETH, which a route spends through `msg.value`
+#: rather than through an allowance.
+NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
 #: Where the quoter is injected when a chain has none deployed.  Any address
 #: with no code of its own; the same one `dev/boa_host.py` uses.
@@ -151,6 +162,10 @@ class RouterSession:
         self.pair: tuple[str, str] | None = None
         self.report = WarmReport()
         self.notes: list[str] = []
+        #: Which solver will answer.  A property of the build rather than of
+        #: this session -- `core.accel` decided it at import time -- but the
+        #: frontend asks the session, because the session is what it holds.
+        self.solver = "rust" if _accel.available() else "python"
         self._models = None
         self._quoter = ""
         self._overrides: dict | None = None
@@ -346,11 +361,15 @@ class RouterSession:
             min_out=min_out,
         )
         data = call.calldata(sender=sender or receiver)
-        gas, reverted = self._dry_run(call, data, sender or receiver)
+        # Native ETH is Curve's `0xEeee…` sentinel rather than a token, so a
+        # route that spends it needs `msg.value` to match -- and one that does
+        # not refuses a non-zero value rather than keeping it.
+        value = result.amount_in if call.token_in.lower() == NATIVE else 0
+        gas, reverted = await self._dry_run(data, sender or receiver, value, block)
         return ExecutionPlan(
-            to=call.to,
+            to=ROUTER_ADDRESS,
             data=data,
-            value=call.value if hasattr(call, "value") else 0,
+            value=value,
             token_in=call.token_in,
             amount_in=result.amount_in,
             quoted_out=result.verified_out or 0,
@@ -362,18 +381,38 @@ class RouterSession:
             reverted=reverted,
         )
 
-    def _dry_run(self, call, data: bytes, sender: str) -> tuple[int, str]:
-        """Execute the encoded call locally, for gas and for a reason.
+    async def _dry_run(self, data: bytes, sender: str, value: int,
+                       block: int) -> tuple[int, str]:
+        """Execute the encoded call locally, for the gas and for a reason.
 
-        It will usually revert: the router moves the caller's tokens, and the
-        caller's balance and allowance are not in the prefetched state.  That
-        is worth knowing but is not a failure, so the reason is returned rather
-        than raised and the caller decides.
+        Through the miss loop, and that is the whole point of doing it here at
+        all.  Nothing in a quote ever calls the router, so its code is not in
+        the swept state, and a call into an account with no code *succeeds* --
+        it is an EOA as far as the EVM is concerned.  That reported a 6-leg
+        route as costing 34,090 gas and reverting nowhere, which is 21,000 for
+        the transaction plus the calldata and not one opcode of routing.
+
+        Fetching what the call reads gets the router's code, and then the
+        caller's own balance and allowance for the input token, which nothing
+        else has ever needed.  So this is also the honest answer to "will this
+        go through": a revert naming the token is an approval that is not
+        there, and one naming a leg's minimum rate is a route that has moved.
         """
-        got = self.backend.call(sender, call.to, bytes(data), "0x0", 3_000_000_000)
-        if got["success"]:
+        held: dict = {}
+
+        def run():
+            held["got"] = self.backend.call(
+                sender, ROUTER_ADDRESS, bytes(data), hex(int(value)), DRY_RUN_GAS)
+            return held["got"]
+
+        await self.evm.fill(self.rpc, run, block=hex(block),
+                            code_for=self._code_for)
+        if not self.backend.has_account(ROUTER_ADDRESS):
+            return 0, f"no router deployed at {ROUTER_ADDRESS} on this chain"
+        got = held.get("got") or {}
+        if got.get("success"):
             return int(got["gas_used"]), ""
-        return 0, str(got["revert_reason"] or got["halt_reason"] or "reverted")
+        return 0, str(got.get("revert_reason") or got.get("halt_reason") or "reverted")
 
     # ------------------------------------------------------------- internals
 
