@@ -69,6 +69,17 @@ class StateCache:
     #: What those stages produced when they last ran against the chain.  The
     #: local run is checked against it -- see `cli._wrapper_signature`.
     wrapper_sig: str = ""
+    #: What an *arc* reads outside its own pool, at slot granularity.
+    #:
+    #: A lending pool scales by the cToken's exchange rate and a vault pool by
+    #: the vault's; neither slot belongs to the pool, and `prime` refreshes only
+    #: what it knows to ask for.  An unread slot is zero, and zero on an
+    #: exchange rate is not a revert -- it is a wrong quote that looks like a
+    #: right one.  `refresh_arcs` repairs that every warm; this is what lets it
+    #: be *checked*, which is the difference between working and happening to
+    #: work.  Same shape as `wrapper_needs` and for the same reason: account
+    #: presence is not the test, because these accounts are cached anyway.
+    arc_needs: dict[str, set[int]] = field(default_factory=dict)
     dirty: bool = False
 
     # ------------------------------------------------------------- load/save
@@ -91,6 +102,7 @@ class StateCache:
         cache.volatile = set(raw.get("volatile", []))
         cache.wrapper_needs = {a: set(v) for a, v in raw.get("wrapper_needs", {}).items()}
         cache.wrapper_sig = str(raw.get("wrapper_sig", "") or "")
+        cache.arc_needs = {a: set(v) for a, v in raw.get("arc_needs", {}).items()}
         return cache
 
     def learn_wrapper_needs(self, needs: dict, signature: str) -> None:
@@ -106,6 +118,32 @@ class StateCache:
             self.wrapper_sig = signature
             changed = True
         self.dirty = self.dirty or changed
+
+    def learn_arc_needs(self, needs: dict) -> None:
+        """Record the slots arc probes read, keeping what was already known."""
+        for address, slots in needs.items():
+            key = address.lower()
+            have = self.arc_needs.setdefault(key, set())
+            if not set(slots) <= have:
+                have |= set(slots)
+                self.dirty = True
+
+    def missing_arc_slots(self) -> dict[str, set[int]]:
+        """`account -> slots` an arc needs and the cache does not hold.
+
+        Returned rather than reduced to a bool: which account is short says
+        whether a quote is merely slower or quietly wrong.
+        """
+        short: dict[str, set[int]] = {}
+        for address, slots in self.arc_needs.items():
+            have = self.accounts.get(address) or set()
+            gap = set(slots) - have
+            if gap:
+                short[address] = gap
+        return short
+
+    def covers_arcs(self) -> bool:
+        return not self.missing_arc_slots()
 
     def covers_wrappers(self) -> bool:
         """Whether every slot those stages read is loaded, not merely present.
@@ -138,6 +176,8 @@ class StateCache:
             "wrapper_needs": {a: sorted(v)
                               for a, v in sorted(self.wrapper_needs.items())},
             "wrapper_sig": self.wrapper_sig,
+            "arc_needs": {a: sorted(v)
+                          for a, v in sorted(self.arc_needs.items())},
         }
         tmp = self.path.with_suffix(".tmp")
         # `mtime=0` so an unchanged cache produces a byte-identical file: this

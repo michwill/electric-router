@@ -66,9 +66,11 @@ def test_no_slot_values_are_ever_written(tmp_path):
     cache.save()
     with gzip.open(cache.path, "rt", encoding="utf-8") as handle:
         raw = json.load(handle)
+    # `arc_needs` is slot *addresses* an arc reads outside its own pool -- the
+    # same kind of thing as `wrapper_needs`, and equally not a value.
     assert set(raw) == {"version", "chain_id", "accounts", "code_of", "code",
                         "funded", "pools", "volatile", "wrapper_needs",
-                        "wrapper_sig"}
+                        "wrapper_sig", "arc_needs"}
     assert raw["version"] == VERSION
     # `accounts` maps to slot *keys* only.
     assert all(isinstance(k, int) for keys in raw["accounts"].values() for k in keys)
@@ -144,3 +146,57 @@ def test_coverage_needs_a_signature_to_check_against(tmp_path):
     cache.learn_wrapper_needs({"0xVault": {1}}, "")
     cache.accounts["0xvault"] = {1}
     assert not cache.covers_wrappers()
+
+
+# ------------------------------------------------- what an arc reads through
+
+
+def test_arc_needs_are_recorded_and_checkable(tmp_path):
+    """A lending pool scales by its cToken's rate and a vault pool by its
+    vault's.  Neither slot belongs to the pool, so `prime` cannot know to ask
+    for it -- and an unread slot is zero, which on an exchange rate is a wrong
+    quote rather than a missing one.  Recording them is what lets that be
+    checked instead of assumed."""
+    cache = build(tmp_path)
+    token = "0x" + "cd" * 20
+    cache.learn_arc_needs({token: {1, 2, 3}})
+
+    assert cache.missing_arc_slots() == {token: {1, 2, 3}}, (
+        "nothing holds those slots yet, so they are missing")
+    assert not cache.covers_arcs()
+
+    cache.learn_slots({token: {1, 2, 3}})
+    assert cache.missing_arc_slots() == {}
+    assert cache.covers_arcs()
+
+
+def test_a_partially_held_account_is_still_short(tmp_path):
+    """Account presence is not the test -- these accounts are cached anyway,
+    and the slots are what differ."""
+    cache = build(tmp_path)
+    token = "0x" + "cd" * 20
+    cache.learn_slots({token: {1}})
+    cache.learn_arc_needs({token: {1, 7}})
+    assert cache.missing_arc_slots() == {token: {7}}
+    assert not cache.covers_arcs()
+
+
+def test_arc_needs_survive_a_round_trip(tmp_path):
+    cache = build(tmp_path)
+    cache.learn_arc_needs({"0x" + "cd" * 20: {4, 5}})
+    cache.save()
+
+    from erouter.dev.state_cache import StateCache
+    again = StateCache.load(cache.chain_id, "test", directory=tmp_path)
+    assert again.arc_needs == {"0x" + "cd" * 20: {4, 5}}
+
+
+def test_learning_the_same_needs_twice_does_not_dirty_the_cache(tmp_path):
+    """The file is committed, so a save that changes nothing is a diff for
+    nobody."""
+    cache = build(tmp_path)
+    cache.learn_arc_needs({"0x" + "cd" * 20: {4, 5}})
+    cache.save()
+    assert not cache.dirty
+    cache.learn_arc_needs({"0x" + "cd" * 20: {4}})
+    assert not cache.dirty, "a subset is already covered"

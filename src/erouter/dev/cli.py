@@ -579,10 +579,27 @@ def _learn_arcs(evm, rpc, chain, load, nodes, *, quiet: bool = False) -> int:
     if not refs:
         return 0
     learned = evm.refresh_arcs(refs, quoter_client(rpc, chain).address)
+    cache = getattr(evm, "cache", None)
+    if cache is not None:
+        # What the arcs read *through* -- a lending pool's cToken, a vault
+        # pool's vault -- recorded so the next run can check it holds them
+        # rather than discover a zero where an exchange rate should be.
+        # `refresh_arcs` has just listed exactly these calls, so this is the
+        # same access lists kept rather than consumed.
+        cache.learn_arc_needs(evm.last_arc_needs())
+        short = cache.missing_arc_slots()
+        if short and not quiet:
+            print(f"  ! local EVM: {sum(len(v) for v in short.values())} slot(s) "
+                  f"missing across {len(short)} account(s) an arc reads through; "
+                  f"quotes touching them would read zero")
+            for address in sorted(short)[:3]:
+                print(f"      {address}  {len(short[address])} slot(s)")
     if learned:
-        getattr(evm, 'cache', None) and evm.cache.save()
+        cache is not None and cache.save()
         if not quiet:
             print(f"  local EVM: {learned} stale slot(s) recovered")
+    elif cache is not None and cache.dirty:
+        cache.save()
     return learned
 
 

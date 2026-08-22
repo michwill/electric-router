@@ -165,6 +165,11 @@ class LocalEvm:
     _injected: set[str] = field(default_factory=set)
     _tracing: bool | None = None
     _al_shape: dict | None = None
+    #: What the last warm's access lists named, and which of those accounts were
+    #: the pools themselves.  Kept so `last_arc_needs` can report what an arc
+    #: reads *through* without asking the node for the same lists twice.
+    _last_listed: dict[str, set[int]] = field(default_factory=dict)
+    _arc_targets: set[str] = field(default_factory=set)
     stats: WarmStats = field(default_factory=WarmStats)
 
     def __post_init__(self) -> None:
@@ -534,6 +539,7 @@ class LocalEvm:
                 self._slots.setdefault(address, set()).add(int(key, 16))
                 touched.setdefault(address, set()).add(int(key, 16))
                 self.stats.slots += 1
+        self._last_listed = {a: set(v) for a, v in touched.items()}
         if self.cache is not None and touched:
             self.cache.learn_slots(touched)
 
@@ -626,6 +632,7 @@ class LocalEvm:
                 touched.setdefault(entry["address"].lower(), set()).update(
                     int(k, 16) for k in entry.get("storageKeys") or ())
         self.stats.list_calls += len(payloads)
+        self._last_listed = {a: set(v) for a, v in touched.items()}
         if not served:
             return False
 
@@ -677,6 +684,17 @@ class LocalEvm:
 
 
 
+    def last_arc_needs(self) -> dict[str, set[int]]:
+        """What the last arc warm read, excluding the pools' own storage.
+
+        The pools are covered by `prime`, which refreshes every slot it knows.
+        What it cannot know to ask for is what an arc reaches *through* -- a
+        lending pool's cToken, a vault pool's vault, an oracle a pool consults
+        -- and those are the accounts worth being able to check.
+        """
+        return {a: set(v) for a, v in (self._last_listed or {}).items()
+                if a not in self._arc_targets and v}
+
     def warm_arcs(self, refs, quoter: str, grid=None, per_call: int = 200) -> WarmStats:
         """Discover state for specific arcs -- the ones the cache has not seen.
 
@@ -700,6 +718,7 @@ class LocalEvm:
         from ..core.quoter import SIG_PROBE_BATCH
 
         plan = plan_grid(list(refs), grid or COARSE_GRID)
+        self._arc_targets = {p.pool.lower() for p in plan.probes}
         if quoter:
             calls = [
                 Call(quoter, encode_call(
