@@ -1060,9 +1060,15 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} no route: {exc}")
         return 2
 
-    if _confirm_against_chain(result, rpc, chain, evm, nodes, load.pools,
-                              used_chain=_chain_was_used(client, sent_before)
-                              or args.confirm) is None:
+    # Timed like a stage, for the same reason the interactive path times it:
+    # one `eth_call` over the wire, after the quote is already computed, and
+    # untimed it lands in `rest` and reads as the router being slow.
+    _confirm_started = time.monotonic()
+    _confirmed = _confirm_against_chain(
+        result, rpc, chain, evm, nodes, load.pools,
+        used_chain=_chain_was_used(client, sent_before) or args.confirm)
+    result.timings["confirm"] = (time.monotonic() - _confirm_started) * 1000
+    if _confirmed is None:
         try:
             result = route(
                 load.pools, nodes, client,

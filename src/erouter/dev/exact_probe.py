@@ -118,6 +118,19 @@ class ExactStats:
         return self.computed + self.delegated + self.failed
 
 
+class _OneToOne:
+    """1:1. `RouteQuoter.vy` returns `dx` for these three, with no call."""
+
+    __slots__ = ()
+
+    def get_dy(self, i: int, j: int, dx: int) -> int:
+        return dx
+
+
+#: Shared: it holds nothing, and one route can carry several wraps.
+ONE_TO_ONE = _OneToOne()
+
+
 def _price(model, i: int, j: int, dx: int) -> int:
     """`get_dy`, through the model's float path when it has one.
 
@@ -291,6 +304,13 @@ class ExactQuoterClient:
 
     def _resolve_model(self, pool: str, kind, i: int, j: int):
         """Which model serves this pool and direction, worked out from scratch."""
+        if kind in (ArcKind.WRAP_NATIVE, ArcKind.UNWRAP_NATIVE,
+                    ArcKind.STAKE_NATIVE):
+            # Without this the leg is a hole, and one hole sends the whole
+            # route to the chain: measured on gnosis, where WXDAI is the
+            # wrapped native, that was 2 of 14 candidates and a 172 ms
+            # confirmation on every quote.
+            return ONE_TO_ONE
         if kind in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM):
             return self.vaults.get(pool, kind) if self.vaults is not None else None
         if self.lp is not None and kind is ArcKind.WITHDRAW_STABLE:
