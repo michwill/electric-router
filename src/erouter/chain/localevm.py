@@ -45,7 +45,12 @@ CALL_GAS = 1_000_000_000
 #: contract discovered in an earlier round, which nests as deep as the calls
 #: do.  It rarely runs out -- the loop normally stops because a round asked for
 #: nothing new -- and this is the backstop, not the mechanism.
-FILL_ROUNDS = 12
+#:
+#: Twelve was not a backstop, though: executing a sixteen-leg route locally
+#: needs twenty-four, because a reverting call reports only the layer it got
+#: to and each round buys exactly one more.  At twelve it gave up mid-route
+#: and reported a Maker slot as unreadable that the endpoint answers happily.
+FILL_ROUNDS = 64
 
 
 @dataclass(slots=True)

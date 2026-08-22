@@ -37,6 +37,7 @@ from ..core.quoter import QuoterClient
 from ..core.rendermodel import build_diagram
 from ..core.routecall import NEEDED, encode_route
 from ..core.schema import ROUTER_ADDRESS
+from . import gas_probe
 from .exact_cache import ExactCache
 from .facts import FactsCache, apply_broken_facts
 from .localevm import LocalEvm
@@ -126,6 +127,32 @@ class ExecutionPlan:
     block: int
     unbounded: tuple = ()
     reverted: str = ""
+    #: True when `gas` was measured with the approval granted locally rather
+    #: than by the call that would actually be sent -- which is the only way
+    #: to have a figure at all before the token is approved.  See
+    #: `_estimate_gas`.
+    gas_estimated: bool = False
+
+
+class _Prank:
+    """`gas_probe.Funder`'s idea of an EVM, over an `EvmBackend`.
+
+    Two methods and a spelling difference: the prober was written against the
+    CLI's pyrevm wrapper, and the portable backend names the same two things
+    `call` and `insert_storage`.
+    """
+
+    def __init__(self, backend) -> None:
+        self.backend = backend
+
+    def message_call(self, *, caller: str, to: str, calldata: bytes) -> bytes:
+        got = self.backend.call(caller, to, bytes(calldata))
+        if not got.get("success"):
+            raise SessionError(str(got.get("revert_reason") or "call reverted"))
+        return bytes(got.get("output") or b"")
+
+    def insert_account_storage(self, address: str, slot: int, value: int) -> None:
+        self.backend.insert_storage(address, hex(int(slot)), hex(int(value)))
 
 
 class SessionError(RuntimeError):
@@ -343,7 +370,8 @@ class RouterSession:
         block = int(header["number"], 16)
         self._set_block_env(header)
         touched = self._route_accounts(result.route)
-        await self._read_slots([s for s in self.backend.known_slots() if s[0] in touched])
+        await self._read_slots(
+            [s for s in self.backend.known_slots() if s[0] in touched], at=block)
 
         def price():
             return pipeline.price_legs(result.route, self.client)
@@ -369,6 +397,16 @@ class RouterSession:
         # not refuses a non-zero value rather than keeping it.
         value = result.amount_in if call.token_in.lower() == NATIVE else 0
         gas, reverted = await self._dry_run(data, sender or receiver, value, block)
+        estimated = False
+        if not gas and reverted:
+            # The usual reason is an approval that is not there yet, and
+            # "we cannot say what it costs until you approve it" is a poor
+            # answer to "what does it cost".  Measured on a stand-in account,
+            # so nothing about the real sender is touched and the refusal
+            # above stays the honest one.
+            gas = await self._estimate_gas(
+                call, result, value, block, sender or receiver)
+            estimated = bool(gas)
         return ExecutionPlan(
             to=ROUTER_ADDRESS,
             data=data,
@@ -382,10 +420,126 @@ class RouterSession:
             block=block,
             unbounded=tuple(call.unbounded),
             reverted=reverted,
+            gas_estimated=estimated,
         )
 
+    async def _seed_from_access_list(self, data: bytes, sender: str,
+                                     value: int, block: int) -> int:
+        """Ask the node what this call touches, and fetch all of it at once.
+
+        The miss loop can only discover state one layer of calls at a time,
+        because that is all a local EVM can report: it stops at the first
+        thing it does not have, and each round buys exactly one more layer.  A
+        sixteen-leg route is twenty-four layers deep, which is twenty-four
+        sequential round trips before a gas figure appears.
+        `eth_createAccessList` answers the same question in one.
+
+        Partial by nature: the call it is asked about reverts for want of an
+        allowance, so the list stops where the execution did.  The miss loop
+        still runs afterwards -- this only means it has much less to find.
+
+        Best-effort throughout.  A node that will not answer, a key not
+        scoped for the router, an answer in an unexpected shape: all of them
+        just leave the loop to do the work it did before.
+
+        It writes the *chain's* values, so anything that has been overridden
+        locally has to be overridden again afterwards -- see `_estimate_gas`,
+        which grants an allowance this would otherwise fetch back to zero.
+        """
+        transaction = {
+            "from": sender,
+            "to": ROUTER_ADDRESS,
+            "data": "0x" + bytes(data).hex(),
+            "gas": hex(DRY_RUN_GAS),
+            "value": hex(int(value)),
+        }
+        try:
+            answer = (await self.rpc.batch(
+                [("eth_createAccessList", [transaction, hex(block)])]))[0]
+        except Exception:
+            return 0
+        if not isinstance(answer, dict):
+            return 0
+        wanted: list[tuple[str, str]] = []
+        unknown: list[str] = []
+        for entry in answer.get("accessList") or ():
+            address = str((entry or {}).get("address") or "")
+            if not address:
+                continue
+            if not self.backend.has_account(address):
+                unknown.append(address)
+            wanted += [(address, str(key)) for key in entry.get("storageKeys") or ()]
+        if unknown:
+            await self._read_code(unknown, block)
+        if wanted:
+            await self._read_slots(wanted, at=block)
+        return len(wanted)
+
+    async def _read_code(self, accounts: list[str], block: int) -> None:
+        """Code and balance for accounts the sweep never had a reason to hold."""
+        payloads = [("eth_getCode", [a, hex(block)]) for a in accounts]
+        payloads += [("eth_getBalance", [a, hex(block)]) for a in accounts]
+        got = await self._batched(payloads)
+        codes, balances = got[:len(accounts)], got[len(accounts):]
+        for address, code, balance in zip(accounts, codes, balances, strict=True):
+            blob = self._code_for(address)
+            if blob is None and isinstance(code, str):
+                blob = bytes.fromhex(code[2:])
+            self.backend.insert_account(
+                address, nonce=1,
+                balance=balance if isinstance(balance, str) else "0x0",
+                code=blob or None,
+            )
+
+    async def _estimate_gas(self, call, result, value: int, block: int,
+                            sender: str) -> int:
+        """What this route would cost, for a sender who already holds the coin.
+
+        Everything the estimate needs is already here -- the swept state, the
+        router's code, and an EVM to run it in -- so the only thing missing is
+        the approval, and that is one storage slot.  `gas_probe.Funder` finds
+        it by writing a marker and asking the token's own `allowance` whether
+        it landed, which works without knowing any token's layout in advance.
+
+        Only the approval is granted.  A wallet that does not hold the coin
+        gets no figure rather than a figure for a trade it cannot make: giving
+        it a balance would be quoting the cost of somebody else's swap, and
+        finding a real holder to impersonate is a fork trick with a great deal
+        behind it that this does not need.
+
+        Both slots the search touches are re-read from the chain afterwards.
+        The search writes markers into the balance slot to identify it, and
+        the approval it grants is not real -- left behind, either would make
+        the *next* honest dry run agree to a transaction that cannot go
+        through, which is worse than having no estimate at all.
+        """
+        token = call.token_in
+        if token.lower() == NATIVE or not sender:
+            return 0
+        funder = gas_probe.Funder(_Prank(self.backend), owner=sender)
+        held = funder.balance_of(token, sender)
+        if held < result.amount_in:
+            return 0
+        try:
+            if not funder.fund(token, ROUTER_ADDRESS, result.amount_in):
+                return 0
+            # The receiver is named rather than defaulted: defaulting it pays
+            # whoever sent the call, and that is the same sender here, so the
+            # shape stays the one that will really be sent.
+            data = call.calldata(sender=sender)
+            gas, _reason = await self._dry_run(
+                data, sender, value, block, seed=False)
+        except Exception:
+            gas = 0
+        finally:
+            slots = funder.slots_for(token, ROUTER_ADDRESS)
+            if slots:
+                await self._read_slots(
+                    [(token, hex(slot)) for slot in slots], at=block)
+        return gas
+
     async def _dry_run(self, data: bytes, sender: str, value: int,
-                       block: int) -> tuple[int, str]:
+                       block: int, *, seed: bool = True) -> tuple[int, str]:
         """Execute the encoded call locally, for the gas and for a reason.
 
         Through the miss loop, and that is the whole point of doing it here at
@@ -408,6 +562,8 @@ class RouterSession:
                 sender, ROUTER_ADDRESS, bytes(data), hex(int(value)), DRY_RUN_GAS)
             return held["got"]
 
+        if seed:
+            await self._seed_from_access_list(data, sender, value, block)
         await self.evm.fill(self.rpc, run, block=hex(block),
                             code_for=self._code_for)
         if not self.backend.has_account(ROUTER_ADDRESS):
@@ -486,8 +642,14 @@ class RouterSession:
         say("storage", 1.0)
         return loaded
 
-    async def _read_slots(self, wanted, *, say=None) -> int:
-        """Read these slots at the pinned block and insert them.
+    async def _read_slots(self, wanted, *, say=None, at: int | None = None) -> int:
+        """Read these slots at `at`, or at the pinned block, and insert them.
+
+        `at` is for the pre-submit re-read, which is the one place that wants
+        a *different* block from the one the session is pinned to: it re-reads
+        the route's own accounts at the newest block without moving the pin,
+        because the pin is what the next `refresh` compares against and moving
+        it would make that refresh decide it had nothing to do.
 
         A slot that will not come back is retried once -- a dropped batch is
         usually transient -- and then counted, because a slot the EVM does not
@@ -496,7 +658,7 @@ class RouterSession:
         wanted = list(wanted)
         if not wanted:
             return 0
-        block = hex(self.block)
+        block = hex(at if at is not None else self.block)
         values = await self._batched(
             [("eth_getStorageAt", [a, _word(s), block]) for a, s in wanted], say=say)
         rows, missing = [], []

@@ -61,13 +61,19 @@ def _mapping_slot(layout: str, key, index: int | bytes) -> int:
 
 @dataclass(slots=True)
 class Funder:
-    """Gives `CALLER` a balance and an allowance in any token it can decode.
+    """Gives an account a balance and an allowance in any token it can decode.
+
+    `CALLER` by default, which is who the gas measurements trade as.  Another
+    `owner` is for measuring what a route would cost *someone else* without
+    touching their real state -- the layout is a property of the contract, so
+    the cache is shared whoever is being funded.
 
     The layout it finds is cached per token, because the search costs a handful
     of calls and the answer is a property of the deployed contract.
     """
 
     evm: object
+    owner: str = CALLER
     layout: dict[str, tuple[str, int, int]] = field(default_factory=dict)
     unreadable: set[str] = field(default_factory=set)
 
@@ -86,7 +92,7 @@ class Funder:
         for layout in (SOLIDITY, VYPER):
             balance_at = None
             for index in range(SLOTS_SEARCHED):
-                slot = _mapping_slot(layout, CALLER, index)
+                slot = _mapping_slot(layout, self.owner, index)
                 self.evm.insert_account_storage(token, slot, probe)
                 # stETH and friends report `shares * pooled / total`, so the
                 # write comes back rescaled rather than verbatim.  Requiring
@@ -94,7 +100,7 @@ class Funder:
                 # that the slot *moved the balance materially* finds them and
                 # still cannot be fooled by an unrelated slot, which moves it
                 # not at all.
-                if self._read(token, _BALANCE_OF, [CALLER]) >= probe // 2:
+                if self._read(token, _BALANCE_OF, [self.owner]) >= probe // 2:
                     balance_at = index
                     break
                 self.evm.insert_account_storage(token, slot, 0)
@@ -102,12 +108,13 @@ class Funder:
                 continue
             for index in range(SLOTS_SEARCHED):
                 inner = keccak256(
-                    _pad(CALLER) + _pad(index) if layout == SOLIDITY
-                    else _pad(index) + _pad(CALLER)
+                    _pad(self.owner) + _pad(index) if layout == SOLIDITY
+                    else _pad(index) + _pad(self.owner)
                 )
                 slot = _mapping_slot(layout, spender, inner)
                 self.evm.insert_account_storage(token, slot, probe)
-                if self._read(token, _ALLOWANCE, [CALLER, spender]) >= probe // 2:
+                if self._read(token, _ALLOWANCE,
+                              [self.owner, spender]) >= probe // 2:
                     return (layout, balance_at, index)
                 self.evm.insert_account_storage(token, slot, 0)
         return None
@@ -154,8 +161,26 @@ class Funder:
         """
         return self._read(token, _BALANCE_OF, [owner])
 
+    def slots_for(self, token: str, spender: str) -> tuple[int, int] | None:
+        """Where `owner`'s balance and `spender`'s allowance live in `token`.
+
+        Only once the layout is known -- `fund` is what finds it.  For a
+        caller that has to put a real holder's slots back afterwards, since
+        the search writes markers into both while it looks for them.
+        """
+        known = self.layout.get(token.lower())
+        if known is None:
+            return None
+        layout, balance_at, allowance_at = known
+        inner = keccak256(
+            _pad(self.owner) + _pad(allowance_at) if layout == SOLIDITY
+            else _pad(allowance_at) + _pad(self.owner)
+        )
+        return (_mapping_slot(layout, self.owner, balance_at),
+                _mapping_slot(layout, spender, inner))
+
     def fund(self, token: str, spender: str, amount: int) -> bool:
-        """Leave `CALLER` holding `amount` and `spender` approved for it."""
+        """Leave `owner` holding `amount` and `spender` approved for it."""
         token, spender = token.lower(), spender.lower()
         if token in self.unreadable:
             return False
@@ -169,14 +194,14 @@ class Funder:
         layout, balance_at, allowance_at = known
         # Twice the trade, so a rescaling token still ends up with enough.
         self.evm.insert_account_storage(
-            token, _mapping_slot(layout, CALLER, balance_at), amount * 2)
+            token, _mapping_slot(layout, self.owner, balance_at), amount * 2)
         inner = keccak256(
-            _pad(CALLER) + _pad(allowance_at) if layout == SOLIDITY
-            else _pad(allowance_at) + _pad(CALLER)
+            _pad(self.owner) + _pad(allowance_at) if layout == SOLIDITY
+            else _pad(allowance_at) + _pad(self.owner)
         )
         self.evm.insert_account_storage(
             token, _mapping_slot(layout, spender, inner), amount * 2)
-        return self._read(token, _BALANCE_OF, [CALLER]) >= amount
+        return self._read(token, _BALANCE_OF, [self.owner]) >= amount
 
 
 # --------------------------------------------------------------- calldata
