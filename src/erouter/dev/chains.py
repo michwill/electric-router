@@ -470,6 +470,14 @@ CHAINS: dict[str, Chain] = {
         wrapped="0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38",  # wS
         quoter=QUOTER,
         public_rpc=scoped_rpc("sonic"),
+        blacklist=(
+            # CrossCurve CRV: eight per-chain CRV wrappers that trade only with
+            # each other -- no other sonic pool holds any of them, and its 56
+            # arcs are all internal.  The bridge behind them was drained, so
+            # the wrappers are claims on nothing; the invariant does not know
+            # that and quotes happily.  Michael read the supplies as a mint.
+            "0x38DD6B3C096c8CBe649fA0039CC144f333be8E61",
+        ),
     ),
 }
 

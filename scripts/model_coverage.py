@@ -33,13 +33,12 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 from erouter.core.pipeline import RoutingError, build_arcs, route  # noqa: E402
-from erouter.core.pools import parse_universe  # noqa: E402
 from erouter.core.types import ArcKind  # noqa: E402
 from erouter.dev import chains as chain_table  # noqa: E402
 from erouter.dev import config  # noqa: E402
 from erouter.dev.boa_host import override_client  # noqa: E402
 from erouter.dev.crypto_lp_params import build_exact_crypto_lp  # noqa: E402
-from erouter.dev.curve_api import CurveApi, CurveApiError  # noqa: E402
+from erouter.dev.curve_api import CurveApiError  # noqa: E402
 from erouter.dev.exact_probe import ExactQuoterClient  # noqa: E402
 from erouter.dev.facts import FactsCache, apply_broken_facts  # noqa: E402
 from erouter.dev.lp_params import build_exact_lp  # noqa: E402
@@ -50,6 +49,7 @@ from erouter.dev.tricrypto_params import build_exact_tricrypto  # noqa: E402
 from erouter.dev.twocrypto_params import build_exact_twocrypto  # noqa: E402
 from erouter.dev.universe import (  # noqa: E402
     check_reserves_are_real,
+    load_pools,
     read_balances,
     resolve_coin_counts,
     resolve_dialects,
@@ -94,7 +94,7 @@ def audit(name: str, limit: int) -> dict:
     rpc = JsonRpcTransport(config.rpc_url(chain.rpc_attr), block="latest",
                            chain_id=chain.chain_id)
     base = CachedQuoterClient(override_client(rpc), chain.chain_id, rpc.block)
-    specs = parse_universe(CurveApi().list_pools(chain.chain_id, min_tvl=10_000.0))
+    specs = load_pools(chain, min_tvl=10_000.0, pool_filters=True).pools
     if not specs:
         print(f"  {name}: no pools above the floor\n")
         return {}

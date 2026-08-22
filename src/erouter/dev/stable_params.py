@@ -57,10 +57,17 @@ class ExactPools:
         return self.by_pool.get(pool.lower())
 
 
+#: What the contracts allow: `MAX_COINS` is 8 in RouteQuoter, RouteExecutor and
+#: ElectricRouter alike.  Capped at 4 here, sonic's 8-coin CrossCurve CRV never
+#: reached the gate -- and it reproduces on the first convention tried.
+MAX_COINS = 8
+
+
 def _stable(pool) -> bool:
     """Whether this pool is worth asking about at all."""
     kind = getattr(pool, "swap_kind", None)
-    return kind in (ArcKind.SWAP_STABLE, None) and len(pool.coins) in (2, 3, 4)
+    return (kind in (ArcKind.SWAP_STABLE, None)
+            and 2 <= len(pool.coins) <= MAX_COINS)
 
 
 def _decode_rates(blob: bytes | None, n_coins: int) -> tuple[int, ...]:

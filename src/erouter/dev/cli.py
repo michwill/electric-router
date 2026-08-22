@@ -2053,9 +2053,14 @@ def cmd_gascal(args: argparse.Namespace) -> int:
             # again below.  Shadowing it crashed the command after the cache
             # had already been written, so the failure looked like the probe
             # never running.
+            # A share balance is not a slot to write, so redemption is tested
+            # by becoming a holder -- which this call never gave it.  cDAI
+            # happens to deal and cUSDC does not, so cUSDC read as `untested`
+            # and built no cUSDC->USDC arc at all.
             able = try_wrapper(executing._evm, Funder(executing._evm), token=token,
                                underlying=underlying, family=family,
-                               amount=10_000 * 10 ** 8)
+                               amount=10_000 * 10 ** 8,
+                               holders={t: r[0][0] for t, r in holders.items() if r})
             note = able.notes.get("mint") or able.notes.get("redeem") or ""
             if cache.learn_wrapper(able.address, mint=able.mint, redeem=able.redeem,
                                    note=note):
