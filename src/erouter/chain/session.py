@@ -532,10 +532,23 @@ class RouterSession:
             (a, v) for a, v in zip(holders, got, strict=True) if isinstance(v, str))
 
     async def _batched(self, payloads, *, say=None) -> list:
+        """Hand the transport enough at a time to keep its streams busy.
+
+        A transport chunks and streams internally; handing it one chunk and
+        awaiting that before building the next made the whole sweep as serial
+        as a transport with one stream.  Measured against the same endpoint,
+        6,174 slots took 16.9 s that way and 1.3 s from the CLI, which does
+        not.
+
+        Still in groups rather than all at once, because whoever asked is
+        drawing a loading bar and one await reports nothing until it is over.
+        """
         out: list = []
         size = getattr(self.rpc, "batch_size", 0) or 100
-        for start in range(0, len(payloads), size):
-            out.extend(await self.rpc.batch(payloads[start:start + size]))
+        streams = getattr(self.rpc, "max_streams", 0) or 1
+        step = size * streams
+        for start in range(0, len(payloads), step):
+            out.extend(await self.rpc.batch(payloads[start:start + step]))
             if say is not None and payloads:
                 say("storage", min(1.0, len(out) / len(payloads)))
         return out
