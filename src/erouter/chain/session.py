@@ -25,6 +25,7 @@ tracer: what neither can do is let a missing slot read as a plausible zero.
 
 from __future__ import annotations
 
+import copy
 import time
 from dataclasses import dataclass, field
 
@@ -37,7 +38,6 @@ from ..core.routecall import NEEDED, encode_route
 from .exact_cache import ExactCache
 from .facts import FactsCache, apply_broken_facts
 from .localevm import LocalEvm
-from .probe_cache import CachedQuoterClient
 from .statecache import StateCache
 from .universe import (
     check_reserves_are_real,
@@ -150,20 +150,28 @@ class RouterSession:
         self.prepared = None
         self.pair: tuple[str, str] | None = None
         self.report = WarmReport()
+        self.notes: list[str] = []
         self._models = None
         self._quoter = ""
         self._overrides: dict | None = None
 
     # ------------------------------------------------------------------ warm
 
-    async def warm(self, progress=None) -> WarmReport:
-        """Everything that does not depend on the pair or the amount."""
+    async def warm(self, progress=None, *, block: int | str = "latest") -> WarmReport:
+        """Everything that does not depend on the pair or the amount.
+
+        `block` resolves once and pins everything after it.  A quote is only
+        comparable to another if both read the same state, so nothing
+        downstream ever sees `"latest"` -- and passing a number here is what
+        makes a run reproducible against the CLI.
+        """
         started = time.monotonic()
         report = WarmReport()
         say = _reporter(progress)
 
         say("block", 0.0)
-        header = await self._header("latest")
+        header = await self._header(
+            block if isinstance(block, str) else hex(int(block)))
         self.block = int(header["number"], 16)
         report.block = self.block
         say("block", 1.0)
@@ -500,24 +508,60 @@ class RouterSession:
         apply_broken_facts(pools, self.facts)
         return pools
 
+    async def _settle(self, touch) -> None:
+        """Fetch everything `touch` reads, discarding what it produced.
+
+        The miss loop runs its stage several times, and several of these
+        stages **mutate**: `check_reserves_are_real` drops a pool that looks
+        insolvent, `resolve_deposit_gates` marks one gated, the exact gate
+        records a refusal.  Run against incomplete state, each of those makes
+        a decision it will not revisit -- a token whose account is not loaded
+        answers `balanceOf` with zero, so 35 solvent pools read as holding
+        nothing and lost their arcs, measured against the CLI at one block.
+
+        So the loop runs on throwaway copies until it stops asking for
+        anything, and the real stage then runs exactly once, against state
+        that is complete.
+        """
+        await self.evm.fill(self.rpc, touch, block=hex(self.block),
+                            code_for=self._code_for)
+
     async def _resolve_pools(self, say) -> None:
         """Dialects, balances, LP tokens and deposit gates, off the local EVM."""
         say("pools", 0.0)
         client = self.client
         chain_id = self.chain.chain_id
-        notes: list[str] = []
 
-        def run():
-            resolve_dialects(self.pools, client, self.chain, use_cache=False)
-            read_balances(self.pools, client, notes, chain_id)
-            resolve_lp_tokens(self.pools, client, chain_id)
-            resolve_deposit_gates(self.pools, client)
-            list(check_reserves_are_real(self.pools, client, None))
+        # What each pool holds in *native* ETH, before the stages run.  A pool
+        # listing WETH may legitimately hold ether instead -- 29 of the 31
+        # apparent shortfalls on mainnet -- and `check_reserves_are_real`
+        # expresses a drop by zeroing balances, so without these thirty solvent
+        # crypto pools lose every arc they have.  It cannot fetch them itself
+        # here: it is synchronous, and this is the only side that can await.
+        native = await self._native_balances()
+
+        def stages(pools, notes):
+            resolve_dialects(pools, client, self.chain, use_cache=False)
+            read_balances(pools, client, notes, chain_id)
+            resolve_lp_tokens(pools, client, chain_id)
+            resolve_deposit_gates(pools, client)
+            list(check_reserves_are_real(pools, client, None, native=native))
             return notes
 
-        await self.evm.fill(self.rpc, run, block=hex(self.block),
-                            code_for=self._code_for)
+        await self._settle(lambda: stages(copy.deepcopy(self.pools), []))
+        self.notes = stages(self.pools, [])
         say("pools", 1.0)
+
+    async def _native_balances(self) -> dict[str, int]:
+        """`pool -> wei` for every pool that lists WETH or ETH among its coins."""
+        wanted = [p.address for p in self.pools
+                  if any(c.symbol.upper() in ("WETH", "ETH") for c in p.coins)]
+        if not wanted:
+            return {}
+        block = hex(self.block)
+        got = await self._batched([("eth_getBalance", [a, block]) for a in wanted])
+        return {a: int(v, 16) for a, v in zip(wanted, got, strict=True)
+                if isinstance(v, str)}
 
     async def _build_wrappers(self, say) -> None:
         """The node map, and the arcs no pool list mentions.
@@ -536,22 +580,22 @@ class RouterSession:
         )
 
         client = self.client
-        held: dict = {}
 
-        def run():
+        def stages():
             nodes, wrappers = build_node_map(
                 self.pools, self.chain, client, facts=self.facts, token_client=client)
             stake = build_stake_arcs(nodes, self.chain, client)
             stake = stake + build_transmuter_arcs(nodes, self.chain, client)
             stake = stake + build_lending_arcs(nodes, self.chain, client, self.facts)
-            held["nodes"], held["wrappers"], held["stake"] = nodes, wrappers, stake
-            return held
+            return nodes, wrappers, stake
 
-        await self.evm.fill(self.rpc, run, block=hex(self.block),
-                            code_for=self._code_for)
-        self.nodes = held["nodes"]
-        self.wrappers = held["wrappers"]
-        self.stake_arcs = held["stake"]
+        # These build fresh objects rather than mutating, but a round run
+        # against incomplete state still *decides* -- a vault whose
+        # `convertToAssets` reads zero is rejected as non-linear and its arc
+        # never appears.  So the answer is taken from a run after the state
+        # has settled, not from the last round of the loop.
+        await self._settle(stages)
+        self.nodes, self.wrappers, self.stake_arcs = stages()
         say("wrappers", 1.0)
 
     async def _preflight_arcs(self, say) -> int:
@@ -603,7 +647,8 @@ class RouterSession:
         measured = self.client
         held: dict = {}
 
-        def build(block: int = 0):
+        def build(block: int = 0, cache=None):
+            cache = self.verdicts if cache is None else cache
             if block:
                 # Balances are frozen into each model, so a rebuild that kept
                 # the old ones would be self-consistent and wrong.
@@ -614,36 +659,46 @@ class RouterSession:
             vault_arcs = {a.pool for a in self.stake_arcs
                           if a.kind in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM)}
             vault_arcs |= {v.token for v in self.wrappers.merged_vaults}
-            stable = build_exact_pools(self.pools, measured, cache=self.verdicts)
-            crypto = build_exact_tricrypto(self.pools, measured, cache=self.verdicts)
+            stable = build_exact_pools(self.pools, measured, cache=cache)
+            crypto = build_exact_tricrypto(self.pools, measured, cache=cache)
             carrying = [p for p in self.pools if p.address.lower() in lp_pools]
             return (
                 stable,
-                build_exact_twocrypto(self.pools, measured, cache=self.verdicts),
+                build_exact_twocrypto(self.pools, measured, cache=cache),
                 crypto,
                 build_exact_vaults(vault_arcs, measured),
                 build_exact_lp(carrying, stable, measured),
                 build_exact_crypto_lp(carrying, crypto, measured),
             )
 
-        def run():
-            held["models"] = build()
-            return held["models"]
-
-        await self.evm.fill(self.rpc, run, block=hex(self.block),
-                            code_for=self._code_for)
+        # The gate refuses a pool that will not reproduce its own quote, and
+        # records the refusal.  A round against incomplete state would refuse
+        # pools for reading zeros -- `ExactCache.mass_refusal` exists because
+        # that has happened over the wire -- so the loop runs against a
+        # throwaway cache and the verdicts are earned once, afterwards.
+        await self._settle(lambda: build(cache=ExactCache.from_bytes(self.chain.chain_id, None)))
+        held["models"] = build()
         exact, two, tri, vaults, lp, crypto_lp = held["models"]
         self._models = held["models"]
-        client = CachedQuoterClient(self.client, self.chain.chain_id, self.block)
+        # No probe memoisation under this.  `probe_cache` exists to avoid round
+        # trips and there are none here -- and it also memoises *route*
+        # verifications, which is wrong for a route that uses one pool twice:
+        # the second leg meets a pool the first leg moved, and a cached answer
+        # would price it as though it had not.  The CLI drops it for the same
+        # reason once its local EVM is warm.
         if exact or two or tri:
-            client = ExactQuoterClient(
-                client, exact, two, tri, vaults, lp,
+            self.client = ExactQuoterClient(
+                self.client, exact, two, tri, vaults, lp,
                 models_block=self.block, rebuild=build, crypto_lp=crypto_lp)
-        self.client = client
         say("models", 1.0)
         return len(exact) + len(two) + len(tri)
 
     async def _gas_price(self) -> int:
+        """What a leg costs to execute, priced.
+
+        Left at zero every route looks free to branch, which is backwards for
+        the small trades where an extra leg costs more than it saves.
+        """
         got = await self.rpc.call("eth_gasPrice", [])
         return int(got, 16) if isinstance(got, str) else 0
 

@@ -110,6 +110,18 @@ impl PyEvm {
         Ok(self.inner.has_account(&address(address_)?))
     }
 
+    /// What this holds for a slot, as hex, without counting it as a miss.
+    fn storage_at(&self, address_: &str, slot: &str) -> PyResult<Option<String>> {
+        Ok(self
+            .inner
+            .storage_at(&address(address_)?, word(slot)?)
+            .map(|v| format!("{v:#x}")))
+    }
+
+    fn code_size(&self, address_: &str) -> PyResult<Option<usize>> {
+        Ok(self.inner.code_size(&address(address_)?))
+    }
+
     fn known_slots(&self) -> Vec<(String, String)> {
         self.inner
             .known_slots()

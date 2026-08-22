@@ -459,7 +459,7 @@ def _pool(pools: list[PoolSpec], address: str) -> PoolSpec:
 
 
 def check_reserves_are_real(
-    pools: list[PoolSpec], client: QuoterClient, transport=None
+    pools: list[PoolSpec], client: QuoterClient, transport=None, *, native=None
 ) -> list[str]:
     """Drop pools that report more than they hold.
 
@@ -473,6 +473,12 @@ def check_reserves_are_real(
 
     Pools listing WETH may legitimately hold *native* ETH instead (E11), which is
     29 of the 31 apparent shortfalls on mainnet, so that is checked first.
+
+    `native` is `{pool: wei}` for a caller that has already read those balances
+    -- an async one cannot be handed a `transport` to fetch them from inside a
+    synchronous function, and without them thirty healthy crypto pools are
+    dropped as insolvent and lose every arc.  `transport` stays for the CLI,
+    which does have one.
     """
     from ..core.codec import encode_call
     from ..core.transport import Call
@@ -539,8 +545,8 @@ def check_reserves_are_real(
         if any(_pool(pools, address).coins[k].symbol.upper() in ("WETH", "ETH")
                for k, _, _ in rows)
     ]
-    native: dict[str, int] = {}
-    if wants_native and transport is not None:
+    native = dict(native or {})
+    if wants_native and not native and transport is not None:
         block = transport.pin.hex_block
         try:
             answers = transport.fetch_multi(

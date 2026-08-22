@@ -5,8 +5,11 @@ answered from disk.  Everything the grid measures is a pure function of
 (pool state at that block, size), so caching it is exact rather than an
 approximation -- which is why the block must be pinned for this to be sound.
 
-Sits in `dev` and implements the same surface as `QuoterClient`, so `core`
-neither knows nor cares: the browser build simply does not wrap it.
+Implements the same surface as `QuoterClient`, so `core` neither knows nor
+cares -- and the browser build simply does not wrap it.  There are no round
+trips to save once a local EVM is warm, and this also memoises *route*
+verifications, which is wrong for a route that uses one pool twice: the second
+leg meets a pool the first leg moved.
 """
 
 from __future__ import annotations

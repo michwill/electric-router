@@ -76,6 +76,19 @@ impl MemDb {
         self.accounts.contains_key(address)
     }
 
+    /// What this holds for a slot, without counting the read as a miss.
+    /// For tests and for saying why a quote came out wrong.
+    pub fn storage_at(&self, address: &Address, slot: U256) -> Option<U256> {
+        self.storage.get(address).and_then(|s| s.get(&slot)).copied()
+    }
+
+    /// How much code an account has, or `None` if there is no account.
+    pub fn code_size(&self, address: &Address) -> Option<usize> {
+        self.accounts.get(address).map(|info| {
+            info.code.as_ref().map(|c| c.original_bytes().len()).unwrap_or(0)
+        })
+    }
+
     pub fn slot_count(&self) -> usize {
         self.storage.values().map(|s| s.len()).sum()
     }

@@ -41,9 +41,11 @@ BATCH_LIMIT = 100
 CALL_GAS = 1_000_000_000
 
 #: How many times `fill` will fetch-and-retry before giving up.  Two rounds are
-#: structural (account, then its slots); a third covers a slot read through a
-#: contract discovered in the second.  Past that it is a loop, not a warm.
-FILL_ROUNDS = 6
+#: structural (account, then its slots); more cover a slot read *through* a
+#: contract discovered in an earlier round, which nests as deep as the calls
+#: do.  It rarely runs out -- the loop normally stops because a round asked for
+#: nothing new -- and this is the backstop, not the mechanism.
+FILL_ROUNDS = 12
 
 
 @dataclass(slots=True)
@@ -199,17 +201,26 @@ class LocalEvm:
         code cannot change is a round trip for a constant.
         """
         result = None
+        missed: dict = {}
+        asked_before: frozenset | None = None
         self.forget_misses()
         for _ in range(rounds):
             self.stats.rounds += 1
             result = run()
             missed = self.misses()
-            if not (missed["accounts"] or missed["slots"] or missed["blocks"]):
+            asking = _asked(missed)
+            if not asking:
                 return result
+            # Only a miss that survives having been fetched is unreadable.  A
+            # slot touched for the first time in the last round has simply not
+            # been asked for yet, and counting it would call a good warm
+            # incomplete -- which is the difference between quoting and
+            # refusing to.  So the loop stops on *no progress*, not on a
+            # round count.
+            if asking == asked_before:
+                break
+            asked_before = asking
             await self._fetch(rpc, missed, block=block, code_for=code_for)
-        # One last run, so what was fetched in the final round is used.
-        result = run()
-        missed = self.misses()
         short = len(missed["accounts"]) + len(missed["slots"])
         if short:
             self.stats.unreadable += short
@@ -265,6 +276,15 @@ class LocalEvm:
         for start in range(0, len(payloads), BATCH_LIMIT):
             out.extend(await rpc.batch(payloads[start:start + BATCH_LIMIT]))
         return out
+
+
+def _asked(missed: dict) -> frozenset:
+    """What a round wants, as something two rounds can be compared by."""
+    return frozenset(
+        [("a", a) for a in missed["accounts"]]
+        + [("s", a, s) for a, s in missed["slots"]]
+        + [("b", n) for n in missed["blocks"]]
+    )
 
 
 class LocalEvmError(RuntimeError):

@@ -120,6 +120,14 @@ impl Evm {
         self.db.has_account(address)
     }
 
+    pub fn storage_at(&self, address: &Address, slot: U256) -> Option<U256> {
+        self.db.storage_at(address, slot)
+    }
+
+    pub fn code_size(&self, address: &Address) -> Option<usize> {
+        self.db.code_size(address)
+    }
+
     pub fn known_slots(&self) -> Vec<(Address, U256)> {
         self.db.known_slots()
     }
