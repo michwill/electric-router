@@ -22,9 +22,10 @@ import pathlib
 import random
 import time
 
-from erouter.core.pipeline import RoutingError, route
+from erouter.core.pipeline import RoutingError, build_arcs, route
 from erouter.core.pools import parse_universe, volatile_pools
 from erouter.core.routecall import EncodingError, encode_route
+from erouter.core.types import ArcKind
 from erouter.dev import chains as chain_table
 from erouter.dev import config
 from erouter.dev.boa_host import override_client
@@ -42,6 +43,7 @@ from erouter.dev.stable_params import build_exact_pools
 from erouter.dev.tricrypto_params import build_exact_tricrypto
 from erouter.dev.twocrypto_params import build_exact_twocrypto
 from erouter.dev.universe import read_balances, resolve_dialects, resolve_lp_tokens
+from erouter.dev.vault_params import build_exact_vaults
 from erouter.dev.wrappers import build_node_map
 
 #: `(from symbol, to symbol, human amount)`, chosen to reach different leg
@@ -174,15 +176,24 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
     # withheld arc is how a fact stops being visible.
     facts = FactsCache.load(chain.chain_id, chain.name.lower())
     withheld = apply_broken_facts(specs, facts)
-    nodes, _ = build_node_map(specs, chain, base, facts=facts)
+    nodes, wrappers = build_node_map(specs, chain, base, facts=facts)
     # The LP models matter here.  A legacy pool's own `calc_token_amount` omits
     # the fee `add_liquidity` charges, so a deposit quoted from the chain is
     # quoted too high and trips its own bound on the way out.
     stable = build_exact_pools(specs, base)
     crypto = build_exact_tricrypto(specs, base)
     with_lp = [p for p in specs if p.lp_token]
+    # A vault has no curve, so one ratio per direction prices every size --
+    # and without these an ERC4626 leg costs a request and is priced by the
+    # chain rather than by the model production uses.  Collected the way
+    # `cli.py` collects them: the arcs, plus the vaults merged into nodes,
+    # because arcs alone miss the merged ones.
+    vault_arcs = {a.pool for a in build_arcs(specs, nodes)[0]
+                  if a.kind in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM)}
+    vault_arcs |= {v.token for v in wrappers.merged_vaults}
     client = ExactQuoterClient(
         base, stable, build_exact_twocrypto(specs, base), crypto,
+        build_exact_vaults(vault_arcs, base),
         lp=build_exact_lp(with_lp, stable, base),
         crypto_lp=build_exact_crypto_lp(with_lp, crypto, base))
     loose = volatile_pools(specs, chain.stables + chain.forex)
