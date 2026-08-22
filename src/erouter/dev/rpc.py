@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import http.client
 import json
 import re
 import time
@@ -53,6 +54,10 @@ _BATCH_LIMIT = re.compile(r"batch limit (\d+) exceeded")
 # tiny reads, but that is a burst against a node someone chose; this default is
 # what every endpoint sees.
 DEFAULT_STREAMS = 8
+# Between attempts at an unanswered request.  Zero on the first retry: a stalled
+# socket is already gone and the next one is fresh, so there is nothing to wait
+# for.  It grows only for the 429/5xx case, where there is.
+STALL_BACKOFF = 0.5
 MAX_BATCH_BYTES = 16 << 20
 
 
@@ -62,6 +67,15 @@ class RpcError(RuntimeError):
         self.message = message
         self.code = code
         self.data = data
+
+
+class RpcStalled(RpcError):
+    """Accepted and never answered, after every attempt.
+
+    Its own type because the two failures want opposite treatment: an
+    oversized batch is halved, and halving a stall just spreads it over twice
+    as many requests that can each stall again.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +127,7 @@ class RpcStats:
     round_trips: int = 0
     seconds: float = 0.0
     bytes_sent: int = 0
+    stalls: int = 0
 
     @property
     def mean_ms(self) -> float:
@@ -122,6 +137,7 @@ class RpcStats:
         self.round_trips = 0
         self.seconds = 0.0
         self.bytes_sent = 0
+        self.stalls = 0
 
 
 #: Endpoint capabilities, between runs.  Gitignored: this is a property of
@@ -177,13 +193,15 @@ class JsonRpcTransport:
         url: str,
         block: int | str = "latest",
         *,
-        timeout: float = 300.0,
+        timeout: float = 45.0,
+        attempts: int = 4,
         batch_size: int = DEFAULT_BATCH,
         max_streams: int = DEFAULT_STREAMS,
         chain_id: int | None = None,
     ) -> None:
         self.url = url
         self.timeout = timeout
+        self.attempts = attempts
         self.batch_size = batch_size
         self._batch_ceiling: int | None = None
         self.max_streams = max_streams
@@ -299,16 +317,39 @@ class JsonRpcTransport:
             self.stats.seconds += time.perf_counter() - started
 
     def _post_inner(self, payload: bytes) -> Any:
-        request = urllib.request.Request(
-            self.url,
-            data=payload,
-            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read())
-        except urllib.error.URLError as exc:
-            raise RpcError(f"transport failure: {exc}") from exc
+        """Ask, and ask again if the answer never comes.
+
+        An endpoint that accepts a request and goes quiet is the common remote
+        failure, not a rare one: measured on base, one read in twenty stalled
+        for the whole timeout while its neighbours came back in 50 ms.  A new
+        request gets a new connection, so a retry is all the recovery needed.
+
+        A status code is an answer and is not retried, except the two that say
+        "later": 429 and 5xx.
+        """
+        last = ""
+        for attempt in range(self.attempts):
+            request = urllib.request.Request(
+                self.url,
+                data=payload,
+                headers={"Content-Type": "application/json",
+                         "User-Agent": USER_AGENT},
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    return json.loads(response.read())
+            except urllib.error.HTTPError as exc:
+                if exc.code < 500 and exc.code != 429:
+                    raise RpcError(f"transport failure: {exc}") from exc
+                last = f"{exc.code} {exc.reason}"
+            except (urllib.error.URLError, TimeoutError, OSError,
+                    http.client.HTTPException) as exc:
+                last = str(getattr(exc, "reason", exc)) or type(exc).__name__
+            self.stats.stalls += 1
+            if attempt + 1 < self.attempts:
+                time.sleep(STALL_BACKOFF * attempt)
+        raise RpcStalled(
+            f"no answer in {self.attempts} attempts of {self.timeout:g}s: {last}")
 
     def fetch(self, method: str, params: list[Any]) -> Any:
         self._id += 1
@@ -372,6 +413,11 @@ class JsonRpcTransport:
                     )
                 else:
                     out[i] = entry.get("result")
+        except RpcStalled as exc:
+            # Halving would turn one unanswered request into two that can each
+            # go unanswered; the retries above have already had their turn.
+            for i in range(lo, hi):
+                out[i] = exc
         except RpcError as exc:
             if hi - lo == 1:
                 out[lo] = exc
@@ -413,6 +459,7 @@ class JsonRpcTransport:
             self._batch_ceiling = remembered
             return remembered
         probe = sample or ("eth_blockNumber", [])
+        stalled = False
         for size in self.BATCH_LADDER:
             if size > self.batch_size and self._batch_ceiling is None:
                 pass  # still worth asking: batch_size is a default, not a limit
@@ -420,12 +467,19 @@ class JsonRpcTransport:
                 got = self._post([{"jsonrpc": "2.0", "id": i + 1,
                                    "method": probe[0], "params": probe[1]}
                                   for i in range(size)])
+            except RpcStalled:
+                # Silence is not a refusal.  Step down so the run proceeds, but
+                # do not write it down: a ceiling cached from one bad minute
+                # would halve every later run against a healthy endpoint.
+                stalled = True
+                continue
             except Exception:
                 continue
             if isinstance(got, list) and len(got) == size and not any(
                     isinstance(r, dict) and r.get("error") for r in got):
                 self._batch_ceiling = size
-                _remember_ceiling(self.url, size)
+                if not stalled:
+                    _remember_ceiling(self.url, size)
                 return size
         self._batch_ceiling = self.BATCH_LADDER[-1]
         return self._batch_ceiling

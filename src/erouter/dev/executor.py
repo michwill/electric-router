@@ -134,9 +134,15 @@ def slot_tokens(route: RealizedRoute) -> list[str]:
 _RETRIES_INSTALLED = False
 
 
-def serves_prestate(url: str, timeout: float = 10.0) -> bool:
-    """Does this node answer `debug_traceCall` with the prestate tracer?"""
+def serves_prestate(url: str, timeout: float = 10.0, attempts: int = 3) -> bool:
+    """Does this node answer `debug_traceCall` with the prestate tracer?
+
+    Asked more than once because a no here is expensive and irreversible: it
+    puts the whole run on one `eth_getStorageAt` per slot, and a stalled socket
+    would be indistinguishable from a node that does not serve `debug_*`.
+    """
     import json
+    import urllib.error
     import urllib.request
 
     body = json.dumps({
@@ -144,13 +150,19 @@ def serves_prestate(url: str, timeout: float = 10.0) -> bool:
         "params": [{"to": "0x" + "00" * 19 + "01", "data": "0x"},
                    "latest", {"tracer": "prestateTracer"}],
     }).encode()
-    request = urllib.request.Request(
-        url, data=body, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as reply:
-            return "result" in json.loads(reply.read())
-    except Exception:
-        return False
+    for _ in range(attempts):
+        request = urllib.request.Request(
+            url, data=body, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as reply:
+                return "result" in json.loads(reply.read())
+        except urllib.error.HTTPError:
+            return False      # a status is an answer, and it was no
+        except (TimeoutError, OSError):
+            continue          # no answer yet; a fresh connection may get one
+        except Exception:
+            return False
+    return False
 
 
 #: Retrying one of these would broadcast twice, so a stall on one is final.
