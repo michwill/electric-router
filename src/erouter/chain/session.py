@@ -25,6 +25,7 @@ tracer: what neither can do is let a missing slot read as a plausible zero.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import time
 from dataclasses import dataclass, field
@@ -56,6 +57,12 @@ STATE_FILE = "evm-state/{name}.json.gz"
 EXACT_FILE = "exact/{name}.json"
 FACTS_FILE = "facts/{name}.json"
 QUOTER_FILE = "quoter/RouteQuoter.runtime.hex"
+
+#: How many times to ask again for the newest block while waiting for an
+#: endpoint to catch up to one already seen, and how long to wait between.
+#: Twelve seconds of patience, against a lag that is normally under one.
+CATCH_UP_TRIES = 8
+CATCH_UP_PAUSE = 1.5
 
 #: What the pre-submit simulation is allowed to spend.  Generous: a thirteen-leg
 #: mainnet route measured 2.47M, and this is a local execution where the only
@@ -350,7 +357,8 @@ class RouterSession:
     # ----------------------------------------------------------- the sending
 
     async def plan_call(self, result, *, receiver: str, sender: str = "",
-                        min_out_bp: float = 0.0) -> ExecutionPlan:
+                        min_out_bp: float = 0.0,
+                        not_before: int = 0) -> ExecutionPlan:
         """Re-read the route's state, re-price its legs, and encode the call.
 
         A quote is priced at the block the slots were swept at.  Between that
@@ -366,7 +374,9 @@ class RouterSession:
         """
         if result.route is None:
             raise SessionError("no route to send")
-        header = await self._header("latest")
+        # `not_before` is a block the caller has seen a transaction confirmed
+        # in -- an approval, usually.  See `_header_at_least`.
+        header = await self._header_at_least(not_before)
         block = int(header["number"], 16)
         self._set_block_env(header)
         touched = self._route_accounts(result.route)
@@ -579,6 +589,34 @@ class RouterSession:
         header = await self.rpc.call("eth_getBlockByNumber", [block, False])
         if not isinstance(header, dict) or "number" not in header:
             raise SessionError(f"could not read the {block} block header")
+        return header
+
+    async def _header_at_least(self, floor: int) -> dict:
+        """The newest block, once the endpoint has caught up to `floor`.
+
+        An endpoint behind a load balancer is many nodes, and they are not at
+        the same height.  A transaction the caller has *seen confirmed* in
+        block N is not visible to a node still at N-1, so a plan pinned there
+        prices the route against a chain where the approval has not happened
+        -- and the dry run reverts on an allowance that does exist, which
+        reads as "this route would not go through" and is simply wrong.
+
+        So a caller that knows a block waits for it.  Briefly: this is a
+        second or two of lag, not a reorg, and pinning a stale block is worse
+        than pinning a slightly later one.
+        """
+        header = await self._header("latest")
+        if not floor:
+            return header
+        for _ in range(CATCH_UP_TRIES):
+            if int(header["number"], 16) >= floor:
+                return header
+            await asyncio.sleep(CATCH_UP_PAUSE)
+            header = await self._header("latest")
+        # Still behind: answer with what there is rather than refuse.  A plan
+        # against a stale block is a plan the dry run will speak up about,
+        # and refusing outright would be this deciding on the caller's behalf
+        # that a slow endpoint is a broken one.
         return header
 
     def _set_block_env(self, header: dict) -> None:
