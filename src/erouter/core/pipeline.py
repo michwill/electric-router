@@ -1159,6 +1159,14 @@ def price_legs(route, client) -> int:
 #: How many times to re-walk before accepting the sizes.  Two is enough on
 #: every route measured; a third is cheap insurance and the cap stops a route
 #: whose fractions oscillate from spinning.
+#:
+#: A second walk costs nothing on most routes because most never ask for one.
+#: Only a split at an *intermediate* node moves the fractions: the source slot
+#: holds `route.amount_in`, which pricing cannot change, so a route fanning out
+#: of its input settles in one pass however many legs it has.  Measured on the
+#: ethereum Router pairs, one of six walks twice -- a 14-leg CVX->WETH that
+#: branches again after its first hop -- while an 8-leg USDT->USDC splitting
+#: five ways off the input does not.
 PRICING_ROUNDS = 3
 
 

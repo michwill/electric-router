@@ -5,11 +5,9 @@
   "0x06a2e1521afde7f7dc30d351dcf04408042f536e": "f347f1e25fb5",
   "0x1631d0e588d475cee4be0f51b7410daaaabd7034": "da6fd928fbd0",
   "0x2c7827010121aae14200e839f6c89913457ed34c": "5212f86ed939",
-  "0x618788357d0ebd8a37e763adab3bc575d54c2c7d": "e45163b4e337",
   "0x6bd88c57523bf138a19b263e8ebc8661c836b171": "f1fecbd1749e",
   "0x71db3764d6841d8b01dc27c0fd4a66a8a34b2be0": "0419c71224d1",
   "0xb79bbc5c96ba248e10c1bdac1a2b83790ff22b7f": "0b14fb24060c",
-  "0xbf5047039f2980c21eb5692c790bad8a9533b900": "1961feb428f2",
   "0xd0a1d2a9350824516ae8729b8311557ba7e55bff": "b7171a650905",
   "0xddbdcebb989b1ef804338d6c9a902f91c2738936": "8498986ca674"
  },
@@ -1078,6 +1076,14 @@
   "0x8a4f252812dff2a8636e4f7eb249d8fc2e3bd77f": {
    "family": "tricrypto"
   },
+  "0x8ac64ba8e440ce5c2d08688f4020698b1826152e": {
+   "family": "twocrypto",
+   "legacy_fee": true,
+   "legacy_mul2": false,
+   "legacy_pool": true,
+   "stable": false,
+   "v21": true
+  },
   "0x8b83c4aa949254895507d09365229bc3a8c7f710": {
    "family": "stable",
    "fee_on_xp": true,
@@ -1461,6 +1467,11 @@
    "legacy_pool": true,
    "stable": false,
    "v21": true
+  },
+  "0xbf5047039f2980c21eb5692c790bad8a9533b900": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported"
   },
   "0xc03fef1c425956a3cd5762022e511e0d4148b3d6": {
    "family": "stable",
