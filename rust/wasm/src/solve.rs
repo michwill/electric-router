@@ -429,6 +429,7 @@ pub fn split_ascend(
     curve_u: &[f64],
     curve_slope: &[f64],
     curve_off: &[u32],
+    slope_off: &[u32],
     curve_rate0: &[f64],
     curve_tail: &[f64],
     src_of: &[u32],
@@ -454,16 +455,26 @@ pub fn split_ascend(
     if curve_rate0.len() != n_curves || curve_tail.len() != n_curves {
         return Err(JsError::new("curve_rate0/curve_tail must have one entry per curve"));
     }
+    if slope_off.len() != curve_off.len() {
+        return Err(JsError::new("slope_off must have one entry per curve boundary"));
+    }
     let mut curves = Vec::with_capacity(n_curves);
     for k in 0..n_curves {
+        // `slope` has its own offsets rather than sharing `x`'s: it is
+        // `diff(u) / diff(x)` and so is one shorter than both, which a single
+        // offsets array silently overruns on the last curve.
         let (lo, hi) = (curve_off[k] as usize, curve_off[k + 1] as usize);
-        if hi > curve_x.len() || hi > curve_u.len() || hi > curve_slope.len() || lo > hi {
+        let (slo, shi) = (slope_off[k] as usize, slope_off[k + 1] as usize);
+        if hi > curve_x.len() || hi > curve_u.len() || lo > hi {
             return Err(JsError::new("curve offsets run past the flattened arrays"));
+        }
+        if shi > curve_slope.len() || slo > shi {
+            return Err(JsError::new("slope offsets run past the flattened array"));
         }
         curves.push(Curve {
             x: curve_x[lo..hi].to_vec(),
             u: curve_u[lo..hi].to_vec(),
-            slope: curve_slope[lo..hi].to_vec(),
+            slope: curve_slope[slo..shi].to_vec(),
             rate0: curve_rate0[k],
             tail: curve_tail[k],
         });

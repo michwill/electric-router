@@ -85,8 +85,15 @@ def evm_batch():
 step("Evm.call_many + misses", evm_batch)
 
 def split():
+    # `slope` is one shorter than `x` and `u` -- it is `diff(u) / diff(x)`.
+    # Equal-length arrays here passed while the real thing overran its own
+    # flattened array on every quote, which is the whole reason this probe
+    # uses a shape the router actually produces.
+    x = [0.0, 0.5, 1.0]
+    u = [0.0, 0.5, 0.99]
+    slope = [1.0, 0.98]
     return _solve.split_ascend(
-        [([0.0, 1.0], [0.0, 0.99], [0.99, 0.99], 1.0, 0.0)],
+        [(x, u, slope, 1.0, 0.0)],
         [0], [1], [None], [[0]], [0], 2, 1, 1.0, [[1.0]], [(0, 0)],
         1e-6, 10, 2, 0.3, 1e-9)
 step("split_ascend", split)

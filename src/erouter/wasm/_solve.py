@@ -238,13 +238,17 @@ def split_ascend(curves, src_of, dst_of, static_share, heads, tails, slots,
     per-keystroke path: the curves alone are ~10,000 floats, which is a
     200 kB parse per quote for data that a typed array carries as bytes.
     """
-    curve_x, curve_u, curve_slope, curve_off = [], [], [], [0]
+    curve_x, curve_u, curve_slope = [], [], []
+    curve_off, slope_off = [0], [0]
     rate0, tail_values = [], []
     for x, u, slope, r0, tail in curves:
         curve_x.extend(x)
         curve_u.extend(u)
         curve_slope.extend(slope)
         curve_off.append(len(curve_x))
+        # Its own offsets: `slope` is `diff(u) / diff(x)`, so it is one shorter
+        # than the points it was fitted between.
+        slope_off.append(len(curve_slope))
         rate0.append(r0)
         tail_values.append(tail)
 
@@ -259,8 +263,8 @@ def split_ascend(curves, src_of, dst_of, static_share, heads, tails, slots,
         start_off.append(len(start_flat))
 
     got = _mod.splitAscend(
-        _f64(curve_x), _f64(curve_u), _f64(curve_slope), _u32(curve_off),
-        _f64(rate0), _f64(tail_values),
+        _f64(curve_x), _f64(curve_u), _f64(curve_slope),
+        _u32(curve_off), _u32(slope_off), _f64(rate0), _f64(tail_values),
         _u32(src_of), _u32(dst_of),
         # NaN is "not fixed", the same spelling `calibrate` uses for absent.
         _f64([_nan(v) for v in static_share]),
