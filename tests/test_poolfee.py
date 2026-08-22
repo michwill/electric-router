@@ -286,3 +286,72 @@ def test_a_pool_a_route_touches_twice_is_priced_after_its_own_first_leg():
     assert second.verified_out == 250, (
         f"the second leg was priced at {second.verified_out}; it must meet the "
         f"pool its own first leg left, not the pool as it started")
+
+
+def test_a_deposit_after_a_swap_on_one_pool_sees_the_swap():
+    """The other half of an element: swap out of a coin, deposit the rest.
+
+    The gnosis 3pool split is exactly this, and `candidates.py` names it
+    as the legal shape.  Pricing the deposit against the pool as it stood before the
+    swap put it 115 bp high at 30,000 USDC -- against a 0.1 bp bound -- so the
+    route reverted after quoting.  A swap advances balances and a deposit
+    advances balances and supply, so one state has to pass between them.
+    """
+    from dataclasses import dataclass, replace
+
+    from erouter.core.pipeline import price_legs
+    from erouter.core.realize import RealizedLeg, RealizedRoute
+    from erouter.core.types import ArcKind, Leg
+
+    @dataclass(frozen=True)
+    class Swap:
+        reserve: int = 1_000
+
+        def exchange(self, i, j, dx):
+            return self.reserve // 2, replace(self, reserve=self.reserve // 2)
+
+    @dataclass(frozen=True)
+    class LP:
+        pool: Swap
+        total_supply: int = 1_000
+        n: int = 2
+
+        def add_liquidity(self, amounts):
+            minted = self.pool.reserve // 4
+            return minted, replace(self, total_supply=self.total_supply + minted)
+
+    class Deposit:
+        def __init__(self, lp):
+            self.lp = lp
+
+        def get_dy(self, i, j, dx):
+            return self.lp.pool.reserve // 4
+
+    same = "0x" + "cc" * 20
+
+    class Client:
+        def probe(self, probes):
+            from erouter.core.quoter import Quote
+            from erouter.core.transport import Status
+
+            return [Quote(Status.VALUE, 9_999) for _ in probes]
+
+        def model_for(self, pool, kind, i, j):
+            return Deposit(LP(Swap())) if kind.is_deposit else Swap()
+
+    def leg(kind, slot):
+        return RealizedLeg(
+            leg=Leg(target=same, kind=kind, src_slot=slot, dst_slot=slot + 1),
+            kind=kind, target=same, token_in="0x" + "01" * 20,
+            token_out="0x" + "02" * 20, amount_in=10**18, amount_out=10**18)
+
+    route = RealizedRoute(amount_in=10**18,
+                          legs=[leg(ArcKind.SWAP_STABLE, 0),
+                                leg(ArcKind.DEPOSIT_FIXED, 1)])
+    price_legs(route, Client())
+
+    swap_leg, deposit_leg = route.legs
+    assert swap_leg.verified_out == 500, "the swap meets the pool untouched"
+    assert deposit_leg.verified_out == 125, (
+        f"the deposit was priced at {deposit_leg.verified_out}; it must mint "
+        f"against the 500 the swap left, not the 1,000 it started with")

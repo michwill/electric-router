@@ -1170,6 +1170,36 @@ def price_legs(route, client) -> int:
 PRICING_ROUNDS = 3
 
 
+def _advance(state, model, kind, i: int, j: int, dx: int):
+    """`(dy, the pool this leg leaves)`, or None if it cannot be advanced.
+
+    One state per pool, whichever kind of leg touches it: a swap advances the
+    balances and a deposit advances the balances *and* the supply, so an
+    element made of one of each has to hand the same pool between them.  The LP
+    model carries both, so it is the state whenever the pool has one.
+    """
+    from dataclasses import replace as _replace
+
+    lp = getattr(model, "lp", None)
+    holds_supply = hasattr(state, "add_liquidity")
+    if lp is not None and getattr(kind, "is_deposit", False):
+        current = state if holds_supply else (
+            _replace(lp, pool=state) if state is not None else lp)
+        amounts = [0] * current.n
+        if not 0 <= i < len(amounts):
+            return None
+        amounts[i] = dx
+        return current.add_liquidity(amounts)
+
+    swap = state.pool if holds_supply else state
+    if swap is None:
+        swap = lp.pool if lp is not None else model
+    if not hasattr(swap, "exchange"):
+        return None
+    dy, after = swap.exchange(i, j, dx)
+    return dy, (_replace(state, pool=after) if holds_supply else after)
+
+
 def _merge_carried(wanted, ask, quotes, carried):
     """Put the carried answers back in leg order beside the probed ones."""
     from .quoter import Quote
@@ -1193,9 +1223,10 @@ def _price_once(route, client, fracs) -> int:
     fee_floor = getattr(client, "fee_floor", None)
     model_for = getattr(client, "model_for", None)
     # A pool a route touches twice -- an element fanning out of one coin -- is
-    # moved by its own earlier leg, and a probe cannot see that.  Where the
-    # model can trade, carry it forward; measured on ethereum CRV->USDC, the
-    # second leg came up 0.236 bp short against a 0.194 bp bound.
+    # moved by its own earlier leg, and a probe cannot see that.  Measured:
+    # 0.236 bp on ethereum CRV->USDC, where both legs swap, and 115 bp on
+    # gnosis USDC->EURe, where the second leg deposits into the pool the first
+    # one just swapped through.
     repeated = {leg.target.lower() for leg in route.legs}
     repeated = {a for a in repeated
                 if sum(1 for leg in route.legs if leg.target.lower() == a) > 1}
@@ -1226,17 +1257,17 @@ def _price_once(route, client, fracs) -> int:
                 key = rl.target.lower()
                 if key not in repeated:
                     continue
-                model = evolved.get(key) or model_for(
-                    rl.target, rl.kind, rl.leg.i, rl.leg.j)
-                if model is None or not hasattr(model, "exchange"):
+                model = model_for(rl.target, rl.kind, rl.leg.i, rl.leg.j)
+                if model is None:
                     continue
                 try:
-                    dy, after = model.exchange(rl.leg.i, rl.leg.j, dx)
+                    got = _advance(evolved.get(key), model, rl.kind,
+                                   rl.leg.i, rl.leg.j, dx)
                 except Exception:
                     continue
-                if dy > 0:
-                    carried[k] = dy
-                    evolved[key] = after
+                if got is None or got[0] <= 0:
+                    continue
+                carried[k], evolved[key] = got
         ask = [(k, rl, dx) for k, rl, dx in wanted if k not in carried]
         quotes = client.probe([
             Probe(rl.target, rl.kind, rl.leg.i, rl.leg.j, rl.leg.n, dx)
