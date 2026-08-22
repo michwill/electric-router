@@ -227,3 +227,62 @@ def test_a_later_leg_is_priced_at_what_the_earlier_one_really_paid():
         f"modelled {route.legs[1].amount_in} bounds it at a size it never trades"
     )
     assert route.legs[1].verified_out == 4 * 10**18
+
+
+def test_a_pool_a_route_touches_twice_is_priced_after_its_own_first_leg():
+    """An element fanning out of one coin trades the same pool twice.
+
+    The second leg meets a pool the first one moved, and a probe cannot see
+    that -- so its rate is a fraction of a rate that was never achievable.
+    Measured on ethereum CRV->USDC at block 25,809,526: legs 5 and 6 were both
+    0x8B878AFE, the second came up 0.236 bp short against a 0.194 bp bound, and
+    the route reverted after quoting.
+    """
+    from erouter.core.pipeline import price_legs
+
+    class Pool:
+        """Pays half of what it holds, and holds less after each trade."""
+
+        def __init__(self, reserve=1_000):
+            self.reserve = reserve
+
+        def get_dy(self, i, j, dx):
+            return self.reserve // 2
+
+        def exchange(self, i, j, dx):
+            return self.reserve // 2, Pool(self.reserve // 2)
+
+    class Client:
+        def __init__(self):
+            self.probed = []
+
+        def probe(self, probes):
+            from erouter.core.quoter import Quote
+            from erouter.core.transport import Status
+
+            self.probed.extend(probes)
+            return [Quote(Status.VALUE, 1_000) for _ in probes]
+
+        def model_for(self, pool, kind, i, j):
+            return Pool()
+
+    from erouter.core.realize import RealizedLeg, RealizedRoute
+    from erouter.core.types import ArcKind, Leg
+
+    same = "0x" + "bb" * 20
+
+    def leg(slot):
+        return RealizedLeg(
+            leg=Leg(target=same, kind=ArcKind.SWAP_STABLE, src_slot=slot,
+                    dst_slot=slot + 1),
+            kind=ArcKind.SWAP_STABLE, target=same, token_in="0x" + "01" * 20,
+            token_out="0x" + "02" * 20, amount_in=10**18, amount_out=10**18)
+
+    route = RealizedRoute(amount_in=10**18, legs=[leg(0), leg(1)])
+    price_legs(route, Client())
+
+    first, second = route.legs
+    assert first.verified_out == 500, "the first leg meets the pool untouched"
+    assert second.verified_out == 250, (
+        f"the second leg was priced at {second.verified_out}; it must meet the "
+        f"pool its own first leg left, not the pool as it started")

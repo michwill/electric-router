@@ -1170,6 +1170,17 @@ def price_legs(route, client) -> int:
 PRICING_ROUNDS = 3
 
 
+def _merge_carried(wanted, ask, quotes, carried):
+    """Put the carried answers back in leg order beside the probed ones."""
+    from .quoter import Quote
+    from .transport import Status
+
+    answers = dict(zip((k for k, _, _ in ask), quotes, strict=True))
+    for k, dy in carried.items():
+        answers[k] = Quote(Status.VALUE, dy)
+    return wanted, [answers[k] for k, _, _ in wanted]
+
+
 def _price_once(route, client, fracs) -> int:
     """One walk at these fractions.  Returns how many legs the pools priced."""
     from .routecall import ONE
@@ -1180,6 +1191,15 @@ def _price_once(route, client, fracs) -> int:
 
     fee_at = getattr(client, "fee_at", None)
     fee_floor = getattr(client, "fee_floor", None)
+    model_for = getattr(client, "model_for", None)
+    # A pool a route touches twice -- an element fanning out of one coin -- is
+    # moved by its own earlier leg, and a probe cannot see that.  Where the
+    # model can trade, carry it forward; measured on ethereum CRV->USDC, the
+    # second leg came up 0.236 bp short against a 0.194 bp bound.
+    repeated = {leg.target.lower() for leg in route.legs}
+    repeated = {a for a in repeated
+                if sum(1 for leg in route.legs if leg.target.lower() == a) > 1}
+    evolved: dict[str, object] = {}
     balances: dict[int, int] = {route.legs[0].leg.src_slot: route.amount_in}
     priced = 0
 
@@ -1198,10 +1218,31 @@ def _price_once(route, client, fracs) -> int:
             sized.append((k, realized, dx))
 
         wanted = [(k, rl, dx) for k, rl, dx in sized if dx > 0]
+        # Legs on a pool this route reuses are priced from the carried model;
+        # the rest go to the client as before.
+        carried: dict[int, int] = {}
+        if model_for is not None and repeated:
+            for k, rl, dx in wanted:
+                key = rl.target.lower()
+                if key not in repeated:
+                    continue
+                model = evolved.get(key) or model_for(
+                    rl.target, rl.kind, rl.leg.i, rl.leg.j)
+                if model is None or not hasattr(model, "exchange"):
+                    continue
+                try:
+                    dy, after = model.exchange(rl.leg.i, rl.leg.j, dx)
+                except Exception:
+                    continue
+                if dy > 0:
+                    carried[k] = dy
+                    evolved[key] = after
+        ask = [(k, rl, dx) for k, rl, dx in wanted if k not in carried]
         quotes = client.probe([
             Probe(rl.target, rl.kind, rl.leg.i, rl.leg.j, rl.leg.n, dx)
-            for _, rl, dx in wanted
-        ]) if wanted else []
+            for _, rl, dx in ask
+        ]) if ask else []
+        wanted, quotes = _merge_carried(wanted, ask, quotes, carried)
 
         for (_k, realized, dx), quote in zip(wanted, quotes, strict=True):
             if quote.ok and quote.value > 0:

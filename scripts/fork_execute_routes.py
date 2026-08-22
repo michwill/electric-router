@@ -22,6 +22,7 @@ import pathlib
 import random
 import time
 
+from erouter.core.keccak import keccak256
 from erouter.core.pipeline import RoutingError, build_arcs, route
 from erouter.core.pools import parse_universe, volatile_pools
 from erouter.core.routecall import EncodingError, encode_route
@@ -269,6 +270,10 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
             print(f"{label:<24}{len(result.route.legs):>5}  {short:<30}"
                   f"{'':>10}{'':>11}  FAILED: {report.error[:46]}")
             problems.append(f"{chain.name} {label}: {report.error[:90]}")
+            if "minimum rate" in report.error:
+                for line in why_the_bound_tripped(result, call, router, chain,
+                                                  specs, by_address):
+                    print(f"      {line}")
             failed += 1
             continue
         ok += 1
@@ -279,6 +284,60 @@ def sweep(chain, args) -> tuple[int, int, int, set[str], list[str]]:
     print(f"  {ok} executed, {failed} failed, {skipped} not routed")
     print(f"  pool types: {', '.join(sorted(types_seen)) or 'none'}\n")
     return ok, failed, skipped, kinds_seen, types_seen, problems
+
+
+TRANSFER_TOPIC = int.from_bytes(
+    keccak256(b"Transfer(address,address,uint256)"), "big")
+
+
+def why_the_bound_tripped(result, call, router, chain, specs, by_address):
+    """Per leg: the size its rate was measured at, against the size it got.
+
+    Taken now rather than later, because the route is not reproducible: the
+    shape follows the block, and the next run picks a different one.
+    """
+    from dataclasses import replace as _replace
+
+    from erouter.core.routecall import leg_in
+
+    loose = _replace(call, params=tuple(_replace(s, min_rate=0).pack()
+                                        for s in call.steps()))
+    got = send(loose, router=router, quoted_out=result.verified_out,
+               wrapped=chain.wrapped,
+               holders=_token_holders(specs, call.token_in,
+                                      avoid=result.route.pools_used))
+    if not got.ok:
+        return [f"with the bounds off it still fails: {got.error[:60]}"]
+
+    me = str(router.address).lower()
+    moved: dict[str, list[int]] = {}
+    for entry in router._computation.get_raw_log_entries():
+        address, topics, data = entry[1], entry[2], entry[3]
+        if not topics or topics[0] != TRANSFER_TOPIC:
+            continue
+        token = address.hex() if isinstance(address, bytes) else str(address)
+        token = ("0x" + token).lower() if not token.startswith("0x") else token.lower()
+        if ("0x" + f"{topics[1]:064x}"[24:]).lower() != me:
+            continue
+        value = int.from_bytes(data, "big") if isinstance(data, bytes) else int(data)
+        moved.setdefault(token, []).append(value)
+
+    out = [f"bounds off: {got.amount_out:,} out ({got.drift_bp:+.4f} bp) -- "
+           f"the route is fine, a bound is not"]
+    for k, leg in enumerate(result.route.legs):
+        queue = moved.get(leg.token_in.lower(), [])
+        real = queue.pop(0) if queue else 0
+        priced = leg_in(leg)
+        if not priced or not real:
+            continue
+        off = (real / priced - 1) * 1e4
+        if abs(off) > 1.0:
+            spec = by_address.get(leg.target.lower())
+            out.append(f"leg {k} {(spec.name[:24] if spec else leg.target[:24]):<26}"
+                       f"priced at {priced:,} handed {real:,} ({off:+.2f} bp)")
+    if len(out) == 1:
+        out.append("every leg was handed the size it was priced at")
+    return out
 
 
 def main() -> int:

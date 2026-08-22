@@ -264,6 +264,10 @@ class ExactQuoterClient:
                 out[k] = quote
         return [q for q in out if q is not None]
 
+    def model_for(self, pool: str, kind, i: int, j: int):
+        """The model that prices this arc, or None."""
+        return self._model(pool, kind, i, j)
+
     def computes(self, pool: str) -> bool:
         """Whether a probe on this pool costs arithmetic rather than a request.
 
