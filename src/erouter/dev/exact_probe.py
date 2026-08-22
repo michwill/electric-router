@@ -25,7 +25,7 @@ downstream could tell which half it was reading.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from ..core.quoter import Quote
 from ..core.stableswap import StableSwapError, StableSwapLP
@@ -112,6 +112,9 @@ class ExactStats:
     #: Candidate routes verified by walking the models rather than the chain.
     walked: int = 0
     sent_routes: int = 0
+    #: `(kind, pool) -> legs`, for legs no model could price.  One of these
+    #: sends a whole route to the chain, so this is what to audit a chain for.
+    holes: dict = field(default_factory=dict)
 
     @property
     def total(self) -> int:
@@ -418,6 +421,11 @@ class ExactQuoterClient:
 
         if holes:
             self.stats.sent_routes += len(holes)
+            for k in holes:
+                for leg in routes[k]:
+                    if self._model(leg.target, leg.kind, leg.i, leg.j) is None:
+                        key = (leg.kind.name, leg.target.lower())
+                        self.stats.holes[key] = self.stats.holes.get(key, 0) + 1
             served = self.client.quote_routes(
                 [routes[k] for k in holes], [amounts_in[k] for k in holes],
                 [dst_slots[k] for k in holes])
