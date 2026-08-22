@@ -71,8 +71,38 @@ n = 49 median, and the crossing happens 45 times a quote.
 
 ### Browser build
 
-Not attempted yet.  The wheel here is `abi3` for CPython; Pyodide needs the
-same crate built for `wasm32-unknown-emscripten` against Pyodide's own ABI,
-which needs `rustup` (absent on this machine) to add the target.  The crate is
-written for it -- no I/O, no threads, no clock, no BLAS -- and the `rlib` also
-allows a `wasm-bindgen` wrapper for a Worker that skips Python entirely.
+Built, and it is the `wasm-bindgen` route rather than the Pyodide wheel.
+
+A `wasm32-unknown-emscripten` extension would have to match the Emscripten
+version Pyodide was built with *and* be built with a pyo3 that supports its
+CPython -- Pyodide 314.0.3 is CPython 3.14, which pyo3 0.23 does not target.
+A `wasm-bindgen` module has neither constraint: it is the same Rust for the
+browser's own target, and `src/erouter/wasm/` presents the PyO3 spelling to
+Python, so `core/accel.py` never learns which one answered.
+
+    ./scripts/build_wasm.sh          # -> rust/wasm/pkg/
+
+1.43 MB, 467 kB gzipped, carrying the solver *and* the EVM (see `evm/`).
+`tests/test_wasm_differential.py` differs it against the native extension and
+requires **byte equality** -- same crate, same compiler (`rust-toolchain.toml`
+pins 1.96.1), and `sqrt` is the only non-trivially-rounded operation in the
+solver, which IEEE-754 requires be correctly rounded on both targets.  The
+hard paths are in there too: `maxit` exhaustion, cycling under Bland's rule,
+`partial_ok`.  Those are what the earlier port got wrong while passing every
+clean problem.
+
+### Toolchain
+
+The system `rust-bin` has x86_64 std only, so this needs rustup, and a
+`wasm-bindgen` CLI whose version *equals* the crate's -- it refuses a mismatch,
+which is why `wasm/Cargo.toml` pins it with `=`.
+
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.96.1
+    ~/.cargo/bin/rustup target add wasm32-unknown-unknown
+    curl -L https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.127/\
+    wasm-bindgen-0.2.127-x86_64-unknown-linux-musl.tar.gz \
+        | tar xz -C ~/.local/bin --strip-components=1 --wildcards '*/wasm-bindgen'
+    uv tool install maturin==1.14.1
+
+Nothing needs root and nothing replaces `/usr/bin/cargo`.

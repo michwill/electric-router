@@ -1,3 +1,11 @@
+# One workspace, three crates: the solver (this package), the EVM wrapper, and
+# the wasm-bindgen module that carries both into a browser.  `resolver = "2"`
+# so `default-features = false` on a path dependency really excludes pyo3 when
+# the wasm crate is the one being built.
+[workspace]
+members = ["evm", "wasm"]
+resolver = "2"
+
 [package]
 name = "erouter-solve"
 version = "0.1.0"

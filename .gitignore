@@ -17,3 +17,9 @@ out/*.json
 snapshot_cache/
 rust/target/
 dist/
+
+# Built by scripts/build_wasm.sh, 1.4 MB of it, and rebuilt whenever the
+# crate changes -- so it is a build product like any other, not a source file.
+# `flet-curve-demo/tools/build_router.py` runs that script rather than
+# expecting a checkout to carry the binary.
+rust/wasm/pkg/
