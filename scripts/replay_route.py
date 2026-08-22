@@ -117,8 +117,8 @@ def main() -> int:
         print(f"\n  the target block {target:,} did not route; nothing to compare")
         return 2
 
+    from erouter.chain import chains as chain_table
     from erouter.core.quoter import QuoterClient
-    from erouter.dev import chains as chain_table
     from erouter.dev.cli import _rpc_url
     from erouter.dev.rpc import JsonRpcTransport
 

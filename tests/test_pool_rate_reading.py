@@ -15,12 +15,12 @@ is exactly the error that flatters one leg and penalises the other.
 
 from __future__ import annotations
 
+from erouter.chain import lending_params
+from erouter.chain.stable_params import _decode_rates
 from erouter.core.codec import decode
 from erouter.core.quoter import Quote
 from erouter.core.stableswap import StableSwap
 from erouter.core.transport import Status
-from erouter.dev import lending_params
-from erouter.dev.stable_params import _decode_rates
 
 RATES = (10**18, 1095507299727383149)          # ETH/ETHx, as the pool reports it
 

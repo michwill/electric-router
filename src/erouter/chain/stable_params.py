@@ -22,12 +22,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .codec import encode_call
+from ..core.codec import encode_call
+from ..core.stableswap import StableSwap, StableSwapError
+from ..core.transport import Call
+from ..core.types import ArcKind, Probe
 from .exact_cache import trust as _trust_verdict
 from .lending_params import build_exact_lending, build_exact_rate_pools
-from .stableswap import StableSwap, StableSwapError
-from .transport import Call
-from .types import ArcKind, Probe
 
 #: Sizes to check at, as fractions of the input balance, in both directions.
 #

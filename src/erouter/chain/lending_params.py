@@ -25,11 +25,11 @@ Two things kept these out of `build_exact_pools`, and neither was the maths:
 
 from __future__ import annotations
 
-from .codec import encode_call
-from .probe import Probe
-from .quoter import Call
-from .stableswap import StableSwap, StableSwapError
-from .types import ArcKind
+from ..core.codec import encode_call
+from ..core.probe import Probe
+from ..core.quoter import Call
+from ..core.stableswap import StableSwap, StableSwapError
+from ..core.types import ArcKind
 
 #: `LENDING_PRECISION` in the pools' own words: the rate of a coin that is not
 #: lent out at all.

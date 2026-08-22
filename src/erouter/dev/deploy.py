@@ -184,8 +184,8 @@ def funding_report(target: Target, names: list[str], deployer: str, salt_phrase:
     discovered to be short *during* it is the expensive way to find out -- the
     passphrase is typed and half the chains are done.
     """
+    from erouter.chain import chains as chain_table
     from erouter.core.keccak import keccak256
-    from erouter.dev import chains as chain_table
     from erouter.dev import config
     from erouter.dev.rpc import JsonRpcTransport
 
@@ -319,7 +319,7 @@ def fork_at_head(url: str, chain_id: int, holding: str = "") -> int:
 def deploy_one(target: Target, name: str, args, account=None) -> int:
     import boa
 
-    from erouter.dev import chains as chain_table
+    from erouter.chain import chains as chain_table
     from erouter.dev import config
 
     chain = chain_table.get(name)
@@ -468,7 +468,7 @@ def run(target: Target, description: str) -> int:
     )
     args = parser.parse_args()
 
-    from erouter.dev import chains as chain_table
+    from erouter.chain import chains as chain_table
 
     skipped = UNSUPPORTED | target.skip
     if args.chain == "all":

@@ -27,8 +27,8 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass, field
 
-from .keccak import keccak256
-from .types import ArcKind
+from ..core.keccak import keccak256
+from ..core.types import ArcKind
 
 #: Funded fresh for every measurement; never an address that holds anything.
 CALLER = "0x1234567890AbcdEF1234567890aBcdef12345678"

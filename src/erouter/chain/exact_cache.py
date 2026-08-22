@@ -61,12 +61,12 @@ MATH_SOURCES = (
     ("core", "twocrypto.py"),
     ("core", "tricrypto.py"),
     ("core", "cryptoswap.py"),
-    ("core", "stable_params.py"),
-    ("core", "twocrypto_params.py"),
-    ("core", "tricrypto_params.py"),
+    ("chain", "stable_params.py"),
+    ("chain", "twocrypto_params.py"),
+    ("chain", "tricrypto_params.py"),
     # Decides which variant a wrapped-token or oracle-priced pool is built
     # from, so it decides verdicts as much as the invariants do.
-    ("core", "lending_params.py"),
+    ("chain", "lending_params.py"),
 )
 
 

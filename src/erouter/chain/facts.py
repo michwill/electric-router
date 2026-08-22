@@ -31,10 +31,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
 
-from .gas import GasTable
-from .pools import registry_key
-from .risk import DEFAULT_RISK, RiskTable
-from .types import ArcKind
+from ..core.gas import GasTable
+from ..core.pools import registry_key
+from ..core.risk import DEFAULT_RISK, RiskTable
+from ..core.types import ArcKind
 
 VERSION = 1
 DEFAULT_DIR = Path(__file__).resolve().parents[3] / "data" / "facts"

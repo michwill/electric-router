@@ -27,13 +27,13 @@ from __future__ import annotations
 import contextlib
 from dataclasses import dataclass, field
 
-from ..core.keccak import keccak256
-from .gas_probe import (
+from ..chain.gas_probe import (
     CALLER,
     Funder,
     _pad,
     revert_reason,  # re-exported: callers read it from here
 )
+from ..core.keccak import keccak256
 
 __all__ = ["WRAPPER_CALLS", "Capability", "discover_wrappers",
            "refused_by_protocol", "revert_reason", "try_wrapper"]

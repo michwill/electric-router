@@ -47,7 +47,7 @@ def measure(chain_name: str, size: float, only: set[str] | None, quiet: bool):
     """Every (pool, kind) on one chain: what the view says, what execution pays."""
     import boa
 
-    from erouter.dev import chains as chain_table
+    from erouter.chain import chains as chain_table
     from erouter.dev import config
     from erouter.dev import executor as ex
     from erouter.dev.boa_host import CONTRACT as QUOTER_SRC
@@ -182,7 +182,7 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
-    from erouter.dev import chains as chain_table
+    from erouter.chain import chains as chain_table
 
     # Etherlink rejects state overrides and access lists, so it has no quoter
     # and nothing here can run against it.

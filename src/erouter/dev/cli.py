@@ -16,10 +16,10 @@ import re
 import sys
 import time
 
-from . import chains as chain_table
+from ..chain import chains as chain_table
+from ..chain.facts import FactsCache, apply_broken_facts
 from . import config
 from .curve_api import CurveApi, CurveApiError
-from .facts import FactsCache, apply_broken_facts
 from .rpc import JsonRpcTransport, RpcError
 
 # BLAS threads are pinned by `erouter/__init__.py`, which runs before this
@@ -427,7 +427,7 @@ def _local_quoter(rpc, chain, load, nodes, *, quiet: bool = False,
         # Imported to be *tried*: a local EVM that will not import is the
         # thing this branch is deciding, and pyrevm is an optional wheel.
         importlib.import_module(".local_evm", __package__)
-        from .state_cache import StateCache
+        from ..chain.statecache import StateCache
     except ImportError as exc:
         if not quiet:
             print(f"  {WARN} local EVM unavailable ({exc}); quoting over the wire")
@@ -478,7 +478,7 @@ _TRACEBACK = os.environ.get("EROUTER_TRACEBACK", "") == "1"
 def _state_cache_for(chain):
     """The committed slot cache, or `None` if there is not one to use."""
     try:
-        from .state_cache import StateCache
+        from ..chain.statecache import StateCache
     except ImportError:
         return None
     cache = StateCache.load(chain.chain_id, chain.name.lower())
@@ -525,7 +525,7 @@ def _wrapper_signature(nodes, wrappers, stake_arcs) -> str:
 
 def _build_wrappers(load, chain, reader, facts, token_client=None):
     """The node map and the stake/transmuter/lending arcs, off one client."""
-    from .wrappers import (
+    from ..chain.wrappers import (
         build_lending_arcs,
         build_node_map,
         build_stake_arcs,
@@ -761,9 +761,9 @@ def _boot_line(started: float) -> str:
 def cmd_route(args: argparse.Namespace) -> int:
     from decimal import Decimal
 
+    from ..chain.probe_cache import CachedQuoterClient
     from ..core.pipeline import RoutingError, route
     from .boa_host import quoter_client
-    from .probe_cache import CachedQuoterClient
     from .rpc import JsonRpcTransport
     from .universe import (
         check_reserves_are_real,
@@ -923,15 +923,15 @@ def cmd_route(args: argparse.Namespace) -> int:
     exact = two = tri = None
     verdicts = None
     if getattr(args, "exact", True):
+        from ..chain.crypto_lp_params import build_exact_crypto_lp
+        from ..chain.exact_cache import ExactCache
+        from ..chain.exact_probe import ExactQuoterClient
+        from ..chain.lp_params import build_exact_lp
+        from ..chain.stable_params import build_exact_pools
+        from ..chain.tricrypto_params import build_exact_tricrypto
+        from ..chain.twocrypto_params import build_exact_twocrypto
+        from ..chain.vault_params import build_exact_vaults
         from ..core.types import ArcKind as _ArcKind
-        from .crypto_lp_params import build_exact_crypto_lp
-        from .exact_cache import ExactCache
-        from .exact_probe import ExactQuoterClient
-        from .lp_params import build_exact_lp
-        from .stable_params import build_exact_pools
-        from .tricrypto_params import build_exact_tricrypto
-        from .twocrypto_params import build_exact_twocrypto
-        from .vault_params import build_exact_vaults
 
         # Read through the *unwrapped* quoter, and keep it for rebuilds.  The
         # gate that admits a pool works by disagreeing with it, so running it
@@ -1552,16 +1552,16 @@ def cmd_bench(args: argparse.Namespace) -> int:
     import time as _time
     from decimal import Decimal
 
-    from ..core.pipeline import RoutingError, prepare, route
-    from .boa_host import quoter_client
-    from .probe_cache import CachedQuoterClient
-    from .rpc import JsonRpcTransport
-    from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import (
+    from ..chain.probe_cache import CachedQuoterClient
+    from ..chain.wrappers import (
         build_lending_arcs,
         build_node_map,
         build_stake_arcs,
     )
+    from ..core.pipeline import RoutingError, prepare, route
+    from .boa_host import quoter_client
+    from .rpc import JsonRpcTransport
+    from .universe import load_pools, read_balances, resolve_dialects
 
     chain = chain_table.get(args.chain)
     try:
@@ -1732,8 +1732,8 @@ UNDERLYING_KIND = 14
 
 def _underlying_swap(i: int, j: int, dx: int) -> bytes:
     """`exchange_underlying` -- the call a lending pool cannot always honour."""
+    from ..chain.gas_probe import _pad
     from ..core.keccak import keccak256
-    from .gas_probe import _pad
 
     return (keccak256(b"exchange_underlying(int128,int128,uint256,uint256)")[:4]
             + _pad(i) + _pad(j) + _pad(dx) + _pad(0))
@@ -1741,8 +1741,8 @@ def _underlying_swap(i: int, j: int, dx: int) -> bytes:
 
 def _underlying_of(evm, pool: str, index: int) -> str:
     """The underlying token a lending pool's coin `index` wraps, or ""."""
+    from ..chain.gas_probe import CALLER, _pad
     from ..core.keccak import keccak256
-    from .gas_probe import CALLER, _pad
 
     for signature in (b"underlying_coins(int128)", b"underlying_coins(uint256)"):
         try:
@@ -1768,21 +1768,21 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     """
     import time as _time
 
-    from ..core.pipeline import RoutingError, prepare, route
-    from .boa_host import quoter_client
-    from .facts import FactsCache
-    from .gas_probe import CALLER as GASCAL_CALLER
-    from .gas_probe import Funder, measure_legs
-    from .local_evm import LocalEvm
-    from .probe_cache import CachedQuoterClient
-    from .rpc import JsonRpcTransport
-    from .state_cache import StateCache
-    from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import (
+    from ..chain.facts import FactsCache
+    from ..chain.gas_probe import CALLER as GASCAL_CALLER
+    from ..chain.gas_probe import Funder, measure_legs
+    from ..chain.probe_cache import CachedQuoterClient
+    from ..chain.statecache import StateCache
+    from ..chain.wrappers import (
         build_lending_arcs,
         build_node_map,
         build_stake_arcs,
     )
+    from ..core.pipeline import RoutingError, prepare, route
+    from .boa_host import quoter_client
+    from .local_evm import LocalEvm
+    from .rpc import JsonRpcTransport
+    from .universe import load_pools, read_balances, resolve_dialects
 
     chain = chain_table.get(args.chain)
     try:
@@ -2077,7 +2077,7 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     # not `--skip-executability`: execution cost holds for months, rate
     # movement is this week's market.
     if not args.skip_drift:
-        from .drift import SAMPLE_BLOCKS, SAMPLE_FRACTION, sample_rates
+        from ..chain.drift import SAMPLE_BLOCKS, SAMPLE_FRACTION, sample_rates
 
         deepest: dict[str, tuple] = {}
         for pool in load.pools:
@@ -2111,7 +2111,7 @@ def cmd_gascal(args: argparse.Namespace) -> int:
         # bound the executor really sets.  The exception list comes from the
         # *four-hour* series above: it asks what the pair does, and half an
         # hour of a quiet pool cannot answer that.
-        from .revert_risk import (
+        from ..chain.revert_risk import (
             FINE_BLOCKS,
             breach_risk,
             read_fees,
@@ -2205,7 +2205,7 @@ def _risk_table(chain, args=None):
     strength of no evidence.  A *partial* table is different -- there the default
     fills a gap in a real measurement.
     """
-    from .facts import FactsCache
+    from ..chain.facts import FactsCache
 
     if getattr(args, "no_risk", False):
         return None, 0
@@ -2223,8 +2223,8 @@ def _gas_table(chain, args, pools=None):
     sitting in the repo would be strictly worse.  `--static-gas` opts out, for
     comparing against the old behaviour.
     """
+    from ..chain.facts import FactsCache
     from ..core.gas import STATIC
-    from .facts import FactsCache
 
     if getattr(args, "static_gas", False):
         return STATIC, 0
@@ -2243,17 +2243,17 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     """
     import time as _time
 
-    from ..core.pipeline import prepare
-    from .boa_host import quoter_client
-    from .local_evm import LocalEvm, Recorder
-    from .rpc import JsonRpcTransport
-    from .state_cache import StateCache
-    from .universe import load_pools, read_balances, resolve_dialects
-    from .wrappers import (
+    from ..chain.statecache import StateCache
+    from ..chain.wrappers import (
         build_lending_arcs,
         build_node_map,
         build_stake_arcs,
     )
+    from ..core.pipeline import prepare
+    from .boa_host import quoter_client
+    from .local_evm import LocalEvm, Recorder
+    from .rpc import JsonRpcTransport
+    from .universe import load_pools, read_balances, resolve_dialects
 
     chain = chain_table.get(args.chain)
     try:

@@ -24,6 +24,7 @@ from __future__ import annotations
 import boa
 import pytest
 
+from erouter.chain.tricrypto_params import build_exact_tricrypto
 from erouter.core.poolfee import floor_fee
 from erouter.core.pools import parse_universe
 from erouter.core.realize import RealizedLeg, RealizedRoute
@@ -31,7 +32,6 @@ from erouter.core.routecall import FEE_SHARE, ONE, min_rates
 from erouter.core.types import ArcKind, Leg
 from erouter.dev import config
 from erouter.dev.executor import fork
-from erouter.dev.tricrypto_params import build_exact_tricrypto
 from erouter.dev.universe import read_balances, resolve_dialects
 
 pytestmark = pytest.mark.forked

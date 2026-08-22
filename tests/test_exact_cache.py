@@ -27,7 +27,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from erouter.dev.exact_cache import ExactCache, math_fingerprint, trust
+from erouter.chain.exact_cache import ExactCache, math_fingerprint, trust
 
 STABLE = {"family": "stable", "rates": "reported", "fee_on_xp": True}
 PLAIN = {"family": "stable", "rates": "plain", "fee_on_xp": True}
@@ -129,7 +129,7 @@ def test_editing_the_maths_discards_every_verdict(tmp_path: Path, monkeypatch):
     cache.save()
     assert len(ExactCache.load(1, "ethereum", tmp_path)) == 1
 
-    monkeypatch.setattr("erouter.dev.exact_cache.math_fingerprint",
+    monkeypatch.setattr("erouter.chain.exact_cache.math_fingerprint",
                         lambda: "0000000000000000")
     assert len(ExactCache.load(1, "ethereum", tmp_path)) == 0
 
@@ -217,7 +217,7 @@ def test_changing_the_maths_forgets_every_failure(tmp_path):
 # arithmetic and blind to what is written about it.
 
 def test_the_fingerprint_ignores_comments_and_docstrings():
-    from erouter.dev.exact_cache import _code_only
+    from erouter.chain.exact_cache import _code_only
 
     documented = (
         'def get_y(a, b):\n'
@@ -233,7 +233,7 @@ def test_the_fingerprint_ignores_comments_and_docstrings():
 
 
 def test_the_fingerprint_still_catches_every_real_edit():
-    from erouter.dev.exact_cache import _code_only
+    from erouter.chain.exact_cache import _code_only
 
     base = 'def get_y(a, b):\n    return a * 3 + b\n'
     for label, edited in [
@@ -251,7 +251,7 @@ def test_the_fingerprint_still_catches_every_real_edit():
 
 
 def test_a_line_moved_between_branches_moves_the_fingerprint():
-    from erouter.dev.exact_cache import _code_only
+    from erouter.chain.exact_cache import _code_only
 
     # Indentation is structure, so it is hashed as depth rather than dropped
     # with the other whitespace.

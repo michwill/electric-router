@@ -116,7 +116,7 @@ def test_a_stableswap_was_never_volatile_to_begin_with():
 
 def test_the_declared_currencies_are_real_addresses():
     """A typo here silently loosens a bound rather than failing."""
-    from erouter.dev.chains import CHAINS
+    from erouter.chain.chains import CHAINS
 
     seen = 0
     for name, chain in CHAINS.items():

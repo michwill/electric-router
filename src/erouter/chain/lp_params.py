@@ -17,10 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .codec import encode_call
-from .stableswap import StableSwapError, StableSwapLP
-from .transport import Call
-from .types import ArcKind, Probe
+from ..core.codec import encode_call
+from ..core.stableswap import StableSwapError, StableSwapLP
+from ..core.transport import Call
+from ..core.types import ArcKind, Probe
 
 #: Fractions of total supply to check a withdrawal at, and of each balance for
 #: a deposit.  Three decades, because a fee charged on an imbalance is exactly

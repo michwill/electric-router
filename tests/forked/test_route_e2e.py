@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 
+from erouter.chain.wrappers import build_node_map
 from erouter.core.pipeline import RoutingError, route
 from erouter.core.pools import parse_universe
 from erouter.core.realize import check_one_arc_per_pool
@@ -18,7 +19,6 @@ from erouter.core.rendermodel import build_diagram
 from erouter.core.schema import to_json
 from erouter.core.types import ArcKind, Probe
 from erouter.dev.universe import read_balances, resolve_dialects
-from erouter.dev.wrappers import build_node_map
 
 pytestmark = pytest.mark.forked
 

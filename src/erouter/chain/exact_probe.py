@@ -27,14 +27,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from .quoter import Quote
-from .stableswap import StableSwapError, StableSwapLP
-from .transport import Status
-from .tricrypto import TricryptoError
-from .twocrypto import TwocryptoError
-from .types import ArcKind
-from .vault import VaultError
-from .walk import LegUnquotable, walk_route
+from ..core.quoter import Quote
+from ..core.stableswap import StableSwapError, StableSwapLP
+from ..core.transport import Status
+from ..core.tricrypto import TricryptoError
+from ..core.twocrypto import TwocryptoError
+from ..core.types import ArcKind
+from ..core.vault import VaultError
+from ..core.walk import LegUnquotable, walk_route
 
 #: Kinds priced by a rate rather than by pool state, so a route may cross one
 #: twice without the second reading anything the first moved.  See `_reused`.
@@ -368,14 +368,14 @@ class ExactQuoterClient:
         Only a modelled pool can answer; the rest fall back to the marginal fee
         two probes measure.  See `core.poolfee`.
         """
-        from .poolfee import charged_fee
+        from ..core.poolfee import charged_fee
 
         model = self._model(pool, kind, i, j)
         return None if model is None else charged_fee(model, i, j, dx)
 
     def fee_floor(self, pool: str, kind, i: int, j: int) -> float | None:
         """The least this pool can charge -- what a minimum rate is set from."""
-        from .poolfee import floor_fee
+        from ..core.poolfee import floor_fee
 
         model = self._model(pool, kind, i, j)
         return None if model is None else floor_fee(model)
@@ -474,7 +474,7 @@ class ExactQuoterClient:
         this pool is not one the models can advance, so the caller falls back
         to the sweep it would have done anyway.
         """
-        from .multiport import MultiPort, MultiPortError, Port, best_split
+        from ..core.multiport import MultiPort, MultiPortError, Port, best_split
 
         model = self.exact.get(pool) if self.exact else None
         if model is None or pool.lower() not in self.reentrant_pools:

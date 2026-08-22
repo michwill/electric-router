@@ -23,12 +23,12 @@ import ast
 import inspect
 from pathlib import Path
 
+from erouter.chain.exact_cache import ExactCache
+from erouter.chain.stable_params import build_exact_pools
 from erouter.core.quoter import Quote
 from erouter.core.stableswap import StableSwap
 from erouter.core.transport import Answer, Status
 from erouter.dev import cli as cli_module
-from erouter.dev.exact_cache import ExactCache
-from erouter.dev.stable_params import build_exact_pools
 
 
 def _cmd_route_calls() -> list[str]:

@@ -103,8 +103,8 @@ def _from_chain(name: str, router: str, span: int):
     then read for the route.  Slower and shallower than the explorer, and the
     only way to see optimism and base at all.
     """
+    from erouter.chain import chains as chain_table
     from erouter.core.keccak import keccak256
-    from erouter.dev import chains as chain_table
     from erouter.dev import config
     from erouter.dev.rpc import JsonRpcTransport
 
@@ -135,7 +135,7 @@ def _from_chain(name: str, router: str, span: int):
 
 
 def survey(name: str, key: str, pages: int, top: int, span: int) -> list[dict]:
-    from erouter.dev import chains as chain_table
+    from erouter.chain import chains as chain_table
     from erouter.dev.universe import load_pools
 
     chain_id, router = ROUTERS[name]

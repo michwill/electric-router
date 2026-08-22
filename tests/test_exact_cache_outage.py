@@ -16,7 +16,7 @@ signal.
 
 from __future__ import annotations
 
-from erouter.dev.exact_cache import MASS_REFUSAL_SHARE, ExactCache
+from erouter.chain.exact_cache import MASS_REFUSAL_SHARE, ExactCache
 
 
 def cache(tmp_path, chain_id: int = 1) -> ExactCache:

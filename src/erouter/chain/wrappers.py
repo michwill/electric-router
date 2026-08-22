@@ -10,13 +10,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..core.codec import encode_call
+from ..core.nodes import Conversion, ConversionKind, NodeMap
+from ..core.pools import PoolSpec
+from ..core.quoter import QuoterClient
+from ..core.transport import Call, Status
+from ..core.types import ArcKind, PoolArc
 from .chains import NATIVE_SENTINEL, Chain
-from .codec import encode_call
-from .nodes import Conversion, ConversionKind, NodeMap
-from .pools import PoolSpec
-from .quoter import QuoterClient
-from .transport import Call, Status
-from .types import ArcKind, PoolArc
 
 # A vault must accept at least this multiple of the trade before it can be
 # treated as a zero-resistance short circuit rather than a capped arc.
@@ -378,8 +378,8 @@ def discover_aliases(pools: list[PoolSpec], nodes: NodeMap,
     supply of nothing agrees with everything" guard below correctly refuses to
     merge on that, and the alias is silently not found.
     """
-    from .codec import encode_call
-    from .transport import Call
+    from ..core.codec import encode_call
+    from ..core.transport import Call
 
     by_symbol: dict[str, list[tuple[str, int]]] = {}
     holders: list[str] = []
@@ -495,8 +495,8 @@ def build_transmuter_arcs(
     `deposit(uint256)`, not WETH's payable `deposit()` -- so the adapter address
     rides on the leg's target and note until there is one.
     """
-    from .codec import encode_call
-    from .transport import Call
+    from ..core.codec import encode_call
+    from ..core.transport import Call
 
     entries = [
         (a.lower(), b.lower(), adapter.lower())

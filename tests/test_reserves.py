@@ -151,7 +151,7 @@ def test_a_blacklisted_pool_never_reaches_the_universe():
     deposit -- so nothing about their balances gives them away and only
     executing finds them.
     """
-    from erouter.dev import chains
+    from erouter.chain import chains
     from erouter.dev.universe import _apply_filters
 
     chain = chains.get("ethereum")
@@ -172,7 +172,7 @@ def test_a_blacklisted_pool_never_reaches_the_universe():
 
 
 def test_the_blacklist_is_case_insensitive():
-    from erouter.dev import chains
+    from erouter.chain import chains
     from erouter.dev.universe import _apply_filters
 
     chain = chains.get("ethereum")

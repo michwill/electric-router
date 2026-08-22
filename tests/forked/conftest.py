@@ -13,7 +13,7 @@ import os
 
 import pytest
 
-from erouter.dev import chains as chain_table
+from erouter.chain import chains as chain_table
 from erouter.dev import config
 
 pytestmark = pytest.mark.forked
@@ -53,8 +53,8 @@ def quoter_client(rpc):
     """
     if not rpc.supports_state_override():
         pytest.skip("node does not support eth_call state overrides")
+    from erouter.chain.probe_cache import CachedQuoterClient
     from erouter.dev.boa_host import override_client
-    from erouter.dev.probe_cache import CachedQuoterClient
 
     return CachedQuoterClient(override_client(rpc), rpc.chain_id, rpc.block)
 

@@ -25,11 +25,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from itertools import product
 
-from .codec import decode, encode_call
+from ..core.codec import decode, encode_call
+from ..core.transport import Call
+from ..core.twocrypto import Twocrypto, TwocryptoError
+from ..core.types import ArcKind, Probe
 from .exact_cache import trust as _trust_verdict
-from .transport import Call
-from .twocrypto import Twocrypto, TwocryptoError
-from .types import ArcKind, Probe
 
 #: Sizes to check at, in both directions -- see `stable_params` for why one
 #: point is not enough.  Here it is load-bearing rather than prudent: telling an

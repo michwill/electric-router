@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from erouter.dev.state_cache import VERSION, StateCache
+from erouter.chain.statecache import VERSION, StateCache
 
 POOL = "0x" + "a1" * 20
 OTHER = "0x" + "b2" * 20
@@ -186,7 +186,7 @@ def test_arc_needs_survive_a_round_trip(tmp_path):
     cache.learn_arc_needs({"0x" + "cd" * 20: {4, 5}})
     cache.save()
 
-    from erouter.dev.state_cache import StateCache
+    from erouter.chain.statecache import StateCache
     again = StateCache.load(cache.chain_id, "test", directory=tmp_path)
     assert again.arc_needs == {"0x" + "cd" * 20: {4, 5}}
 

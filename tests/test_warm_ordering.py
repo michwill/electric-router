@@ -55,7 +55,7 @@ def test_no_state_cache_means_no_early_warm(monkeypatch):
         def load(cls, *a, **k):
             return cls()
 
-    import erouter.dev.state_cache as sc
+    import erouter.chain.statecache as sc
     monkeypatch.setattr(sc, "StateCache", Empty)
 
     class Chain:

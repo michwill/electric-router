@@ -7,8 +7,8 @@ and that its coin list runs past its balances.
 
 from __future__ import annotations
 
+from erouter.chain.lending_params import LENDING_PRECISION, VARIANTS, candidates
 from erouter.core.stableswap import PRECISION, StableSwap
-from erouter.dev.lending_params import LENDING_PRECISION, VARIANTS, candidates
 
 
 class Coin:
@@ -87,7 +87,7 @@ def test_the_wrapper_rate_sources_cover_the_deployed_shapes():
     buys -- and reading it as a rate directly would value the pool upside
     down rather than merely wrongly.
     """
-    from erouter.dev.lending_params import RATE_SOURCES
+    from erouter.chain.lending_params import RATE_SOURCES
 
     sources = dict(RATE_SOURCES)
     assert "getExchangeRate()" in sources
@@ -100,7 +100,7 @@ def test_the_wrapper_rate_sources_cover_the_deployed_shapes():
 
 def test_the_redemption_price_is_scaled_from_27_decimals():
     """RAI's snapshot carries 27 decimals; `xp` wants 18."""
-    from erouter.dev.lending_params import REDEMPTION_PRICE_SCALE
+    from erouter.chain.lending_params import REDEMPTION_PRICE_SCALE
 
     snapped = 3_059_000_000_000_000_000_000_000_000        # ~3.059, 27 dp
     assert snapped // REDEMPTION_PRICE_SCALE == 3_059_000_000_000_000_000
@@ -108,7 +108,7 @@ def test_the_redemption_price_is_scaled_from_27_decimals():
 
 def test_a_zero_ratio_does_not_divide_by_zero():
     """A wrapper answering zero is not a rate of infinity."""
-    from erouter.dev.lending_params import RATE_SOURCES
+    from erouter.chain.lending_params import RATE_SOURCES
 
     sources = dict(RATE_SOURCES)
     assert sources["ratio()"](0) == 0

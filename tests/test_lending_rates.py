@@ -17,10 +17,10 @@ With both, the model reproduces cDAI/cUSDC and cDAI/cUSDC/USDT to the wei.
 
 from __future__ import annotations
 
+from erouter.chain.stable_params import LENDING_PRECISION, _lending_rates
 from erouter.core.codec import encode_call
 from erouter.core.pools import PoolSpec
 from erouter.core.transport import Answer, Status
-from erouter.dev.stable_params import LENDING_PRECISION, _lending_rates
 
 CDAI = "0x" + "c1" * 20
 CUSDC = "0x" + "c2" * 20

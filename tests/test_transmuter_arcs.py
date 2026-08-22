@@ -9,8 +9,8 @@ side as "no capacity" understated the mint direction sevenfold.
 
 from __future__ import annotations
 
+from erouter.chain.wrappers import build_transmuter_arcs
 from erouter.core.transport import Answer, Status
-from erouter.dev.wrappers import build_transmuter_arcs
 
 USDC = "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83"    # omnibridge
 USDCE = "0x2a22f9c3b484c3629090feed35f17ff8f88f76f0"   # Circle standard

@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import pytest
 
+from erouter.chain.exact_probe import ExactQuoterClient
 from erouter.core.pipeline import route
 from erouter.core.types import ArcKind
-from erouter.dev.exact_probe import ExactQuoterClient
 from test_session_invariance import (
     CURVES_,
     DST,

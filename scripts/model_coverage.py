@@ -32,21 +32,23 @@ from itertools import pairwise
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
+from erouter.chain import chains as chain_table  # noqa: E402
+from erouter.chain.crypto_lp_params import build_exact_crypto_lp  # noqa: E402
+from erouter.chain.exact_probe import ExactQuoterClient  # noqa: E402
+from erouter.chain.facts import FactsCache, apply_broken_facts  # noqa: E402
+from erouter.chain.lp_params import build_exact_lp  # noqa: E402
+from erouter.chain.probe_cache import CachedQuoterClient  # noqa: E402
+from erouter.chain.stable_params import build_exact_pools  # noqa: E402
+from erouter.chain.tricrypto_params import build_exact_tricrypto  # noqa: E402
+from erouter.chain.twocrypto_params import build_exact_twocrypto  # noqa: E402
+from erouter.chain.vault_params import build_exact_vaults  # noqa: E402
+from erouter.chain.wrappers import build_node_map, build_stake_arcs  # noqa: E402
 from erouter.core.pipeline import RoutingError, build_arcs, route  # noqa: E402
 from erouter.core.types import ArcKind  # noqa: E402
-from erouter.dev import chains as chain_table  # noqa: E402
 from erouter.dev import config  # noqa: E402
 from erouter.dev.boa_host import override_client  # noqa: E402
-from erouter.dev.crypto_lp_params import build_exact_crypto_lp  # noqa: E402
 from erouter.dev.curve_api import CurveApiError  # noqa: E402
-from erouter.dev.exact_probe import ExactQuoterClient  # noqa: E402
-from erouter.dev.facts import FactsCache, apply_broken_facts  # noqa: E402
-from erouter.dev.lp_params import build_exact_lp  # noqa: E402
-from erouter.dev.probe_cache import CachedQuoterClient  # noqa: E402
 from erouter.dev.rpc import JsonRpcTransport, RpcError  # noqa: E402
-from erouter.dev.stable_params import build_exact_pools  # noqa: E402
-from erouter.dev.tricrypto_params import build_exact_tricrypto  # noqa: E402
-from erouter.dev.twocrypto_params import build_exact_twocrypto  # noqa: E402
 from erouter.dev.universe import (  # noqa: E402
     check_reserves_are_real,
     load_pools,
@@ -55,8 +57,6 @@ from erouter.dev.universe import (  # noqa: E402
     resolve_dialects,
     resolve_lp_tokens,
 )
-from erouter.dev.vault_params import build_exact_vaults  # noqa: E402
-from erouter.dev.wrappers import build_node_map, build_stake_arcs  # noqa: E402
 
 VAULTY = (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM)
 

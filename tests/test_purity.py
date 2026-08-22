@@ -17,7 +17,15 @@ import pathlib
 
 import pytest
 
-CORE = pathlib.Path(__file__).resolve().parents[1] / "src" / "erouter" / "core"
+ROOT = pathlib.Path(__file__).resolve().parents[1] / "src" / "erouter"
+CORE = ROOT / "core"
+#: Everything that reads a chain through a `Transport` and opens no socket:
+#: the dialects and balances, the wrapper stages, the exact-model readers, the
+#: slot cache and the local EVM.  Held to the same rule as `core`, because the
+#: frontend runs the wei-exact gate itself rather than trusting verdicts it did
+#: not check (`docs/browser-port.md` section 4) -- so this is the other half of
+#: what has to survive under Pyodide.
+CHAIN = ROOT / "chain"
 
 # Anything that is not stdlib or numpy.  scipy is allowed *inside functions*
 # (an optional fast path) but never at module scope, so it can never be a hard
@@ -37,10 +45,16 @@ FORBIDDEN = {
 FORBIDDEN_AT_MODULE_SCOPE_ONLY = {"scipy"}
 
 CORE_FILES = sorted(CORE.rglob("*.py"))
+CHAIN_FILES = sorted(CHAIN.rglob("*.py"))
+PORTABLE = CORE_FILES + CHAIN_FILES
 
 
 def test_core_package_is_populated():
     assert CORE_FILES, f"no modules found under {CORE}"
+
+
+def test_chain_package_is_populated():
+    assert CHAIN_FILES, f"no modules found under {CHAIN}"
 
 
 def _module_scope_imports(tree: ast.Module):
@@ -53,44 +67,61 @@ def _module_scope_imports(tree: ast.Module):
             yield node.module, node.lineno
 
 
-@pytest.mark.parametrize("path", CORE_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", PORTABLE, ids=lambda p: p.name)
 def test_no_forbidden_module_scope_imports(path):
     tree = ast.parse(path.read_text(), filename=str(path))
+    package = path.parent.name
     for name, lineno in _module_scope_imports(tree):
         root = name.split(".")[0]
         assert root not in FORBIDDEN, (
             f"{path.name}:{lineno} imports {name!r} at module scope. "
-            f"erouter.core must stay stdlib + numpy so it can run under Pyodide."
+            f"erouter.{package} must stay stdlib + numpy so it can run "
+            f"under Pyodide."
         )
 
 
-@pytest.mark.parametrize("path", CORE_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", PORTABLE, ids=lambda p: p.name)
 def test_no_imports_from_dev(path):
-    """core must never reach into dev; the dependency arrow points one way."""
+    """Neither may reach into dev; the dependency arrow points one way.
+
+    `chain` may import `core` and does, so it is allowed one level of escape
+    -- what it must not do is reach sideways into `dev`, which owns the socket
+    and the CLI.  `core` may not escape at all.
+    """
     tree = ast.parse(path.read_text(), filename=str(path))
+    in_core = path.parent.name == "core"
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
         if node.module and "dev" in node.module.split("."):
             pytest.fail(f"{path.name}:{node.lineno} imports from erouter.dev")
-        if node.level >= 2:
+        if node.level >= 2 and in_core:
             pytest.fail(
                 f"{path.name}:{node.lineno} uses a relative import that escapes erouter.core"
             )
+        if node.level >= 3:
+            pytest.fail(
+                f"{path.name}:{node.lineno} uses a relative import that escapes erouter"
+            )
 
 
-def test_core_imports_with_forbidden_packages_blocked():
-    """Import every core module in a process where the banned packages cannot load.
+def test_the_portable_half_imports_with_forbidden_packages_blocked():
+    """Import every portable module where the banned packages cannot load.
 
     Stronger than the AST check: it catches a transitive dependency that only
-    shows up at import time, which is exactly how a port breaks.
+    shows up at import time, which is exactly how a port breaks.  Covers
+    `chain` as well as `core`, since the frontend imports both.
     """
     import subprocess
     import sys
     import textwrap
 
     blocked = sorted(FORBIDDEN - {"urllib"})
-    modules = [f"erouter.core.{p.stem}" for p in CORE_FILES if p.name != "__init__.py"]
+    modules = [
+        f"erouter.{path.parent.name}.{path.stem}"
+        for path in PORTABLE
+        if path.name != "__init__.py"
+    ]
     script = textwrap.dedent(f"""
         import importlib, sys
         BLOCKED = {blocked!r}
@@ -101,7 +132,7 @@ def test_core_imports_with_forbidden_packages_blocked():
             def find_spec(self, name, path=None, target=None):
                 if name.split(".")[0] in BLOCKED:
                     raise ImportError(
-                        f"{{name}} is banned in erouter.core (Pyodide portability)"
+                        f"{{name}} is banned in the portable half (Pyodide portability)"
                     )
                 return None
 

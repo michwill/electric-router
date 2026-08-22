@@ -21,9 +21,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from .codec import encode_call
-from .transport import Call
-from .tricrypto import TricryptoError, TricryptoLP
+from ..core.codec import encode_call
+from ..core.transport import Call
+from ..core.tricrypto import TricryptoError, TricryptoLP
 
 #: Fractions of total supply to burn in the check.  Three decades, because a
 #: fee charged on an imprecise post-withdrawal balance agrees at one size and

@@ -21,9 +21,9 @@ held $173k and the solver could not see it at all.
 
 from __future__ import annotations
 
+from erouter.chain.cache import Cache, TokenFactsCache
 from erouter.core.pools import Coin, PoolSpec
 from erouter.core.transport import Answer, Status
-from erouter.dev.cache import Cache, TokenFactsCache
 from erouter.dev.universe import read_balances
 
 DECIMALS = bytes.fromhex("313ce567")   # decimals()
@@ -93,7 +93,7 @@ def test_a_later_writer_still_wins_on_its_own_key(tmp_path):
 def test_decimals_are_read_when_the_cache_knows_the_address_for_something_else(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr("erouter.dev.cache.DEFAULT_ROOT", tmp_path)
+    monkeypatch.setattr("erouter.chain.cache.DEFAULT_ROOT", tmp_path)
     # Exactly the poisoned shape: present, but holding the wrapper pass's fact.
     facts_at(tmp_path).save(100, {USDCE.lower(): {"asset": ""},
                                   EURE.lower(): {"asset": ""}})
@@ -108,7 +108,7 @@ def test_decimals_are_read_when_the_cache_knows_the_address_for_something_else(
 
 
 def test_a_cached_decimals_is_believed_without_a_call(tmp_path, monkeypatch):
-    monkeypatch.setattr("erouter.dev.cache.DEFAULT_ROOT", tmp_path)
+    monkeypatch.setattr("erouter.chain.cache.DEFAULT_ROOT", tmp_path)
     facts_at(tmp_path).save(100, {USDCE.lower(): {"decimals": 6},
                                   EURE.lower(): {"decimals": 18}})
 
@@ -120,7 +120,7 @@ def test_a_cached_decimals_is_believed_without_a_call(tmp_path, monkeypatch):
 
 
 def test_the_correction_is_reported_and_cached(tmp_path, monkeypatch):
-    monkeypatch.setattr("erouter.dev.cache.DEFAULT_ROOT", tmp_path)
+    monkeypatch.setattr("erouter.chain.cache.DEFAULT_ROOT", tmp_path)
     spec, report = pool(), []
     read_balances([spec], Pools(), report, 100, token_client=Tokens(says=6))
 
@@ -134,7 +134,7 @@ def test_a_zero_decimals_read_is_neither_applied_nor_cached(tmp_path, monkeypatc
     Believed here it would be indistinguishable from a real fact and would
     stick for good, so the API's guess -- which gets re-checked -- is better.
     """
-    monkeypatch.setattr("erouter.dev.cache.DEFAULT_ROOT", tmp_path)
+    monkeypatch.setattr("erouter.chain.cache.DEFAULT_ROOT", tmp_path)
     spec = pool()
     read_balances([spec], Pools(), None, 100, token_client=Tokens(says=0))
 

@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import pytest
 
+from erouter.chain.exact_probe import RATE_KINDS, ExactQuoterClient
 from erouter.core.types import ArcKind, Leg
-from erouter.dev.exact_probe import RATE_KINDS, ExactQuoterClient
 
 VAULT = "0x" + "77" * 20
 POOL = "0x" + "a1" * 20

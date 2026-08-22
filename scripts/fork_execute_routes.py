@@ -22,30 +22,30 @@ import pathlib
 import random
 import time
 
+from erouter.chain import chains as chain_table
+from erouter.chain.crypto_lp_params import build_exact_crypto_lp
+from erouter.chain.exact_probe import ExactQuoterClient
+from erouter.chain.facts import FactsCache, apply_broken_facts
+from erouter.chain.lp_params import build_exact_lp
+from erouter.chain.probe_cache import CachedQuoterClient
+from erouter.chain.stable_params import build_exact_pools
+from erouter.chain.tricrypto_params import build_exact_tricrypto
+from erouter.chain.twocrypto_params import build_exact_twocrypto
+from erouter.chain.vault_params import build_exact_vaults
+from erouter.chain.wrappers import build_node_map
 from erouter.core.keccak import keccak256
 from erouter.core.pipeline import RoutingError, build_arcs, route
 from erouter.core.pools import parse_universe, volatile_pools
 from erouter.core.routecall import EncodingError, encode_route
 from erouter.core.types import ArcKind
-from erouter.dev import chains as chain_table
 from erouter.dev import config
 from erouter.dev.boa_host import override_client
 from erouter.dev.cli import _token_holders
-from erouter.dev.crypto_lp_params import build_exact_crypto_lp
 from erouter.dev.curve_api import CurveApi, CurveApiError
-from erouter.dev.exact_probe import ExactQuoterClient
 from erouter.dev.executor import fork
-from erouter.dev.facts import FactsCache, apply_broken_facts
-from erouter.dev.lp_params import build_exact_lp
-from erouter.dev.probe_cache import CachedQuoterClient
 from erouter.dev.router import deploy, send
 from erouter.dev.rpc import JsonRpcTransport, RpcError
-from erouter.dev.stable_params import build_exact_pools
-from erouter.dev.tricrypto_params import build_exact_tricrypto
-from erouter.dev.twocrypto_params import build_exact_twocrypto
 from erouter.dev.universe import read_balances, resolve_dialects, resolve_lp_tokens
-from erouter.dev.vault_params import build_exact_vaults
-from erouter.dev.wrappers import build_node_map
 
 #: `(from symbol, to symbol, human amount)`, chosen to reach different leg
 #: kinds rather than to flatter the router: native both ways, a wrapper, a

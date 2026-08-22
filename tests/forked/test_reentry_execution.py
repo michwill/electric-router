@@ -22,10 +22,10 @@ from __future__ import annotations
 import boa
 import pytest
 
+from erouter.chain.exact_probe import ExactQuoterClient
+from erouter.chain.lp_params import build_exact_lp
+from erouter.chain.stable_params import build_exact_pools
 from erouter.core.types import ArcKind, Leg
-from erouter.dev.exact_probe import ExactQuoterClient
-from erouter.dev.lp_params import build_exact_lp
-from erouter.dev.stable_params import build_exact_pools
 from erouter.dev.universe import parse_universe, read_balances, resolve_dialects, resolve_lp_tokens
 
 pytestmark = pytest.mark.forked

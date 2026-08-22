@@ -15,9 +15,9 @@ from pathlib import Path
 
 import pytest
 
+from erouter.chain.facts import FactsCache
 from erouter.core.types import ArcKind
 from erouter.dev.executability import revert_reason
-from erouter.dev.facts import FactsCache
 
 
 @pytest.fixture
@@ -100,7 +100,7 @@ def test_a_recorded_revert_never_drops_a_pool(tmp_path, monkeypatch):
     Pool-level removal belongs to the hand-written blacklist, where a human
     decided it.  Nothing probed removes a pool on its own.
     """
-    from erouter.dev import facts as facts_mod
+    from erouter.chain import facts as facts_mod
     from erouter.dev.universe import _probed_dead_pools
 
     cache = FactsCache(chain_id=1, path=tmp_path / "ethereum.json")
@@ -127,7 +127,7 @@ def test_the_underlying_kind_does_not_collide_with_the_pools_own_arcs(tmp_path):
 
 
 def test_no_facts_at_all_bans_nothing(tmp_path, monkeypatch):
-    from erouter.dev import facts as facts_mod
+    from erouter.chain import facts as facts_mod
     from erouter.dev.universe import _probed_dead_pools
 
     monkeypatch.setattr(facts_mod, "DEFAULT_DIR", tmp_path)
@@ -185,7 +185,7 @@ class FakeChain:
 def test_measurement_widens_the_merge_list():
     """A vault that mints and redeems earns its way on without anyone adding
     it, which is the point: the list stops being maintained by hand."""
-    from erouter.dev.wrappers import merge_candidates
+    from erouter.chain.wrappers import merge_candidates
 
     facts = FactsCache(chain_id=1, path=Path("/nowhere"))
     facts.wrappers = {"0xbbb": {"mint": True, "redeem": True}}
@@ -199,7 +199,7 @@ def test_a_one_way_vault_is_never_merged_however_it_measures():
     every size.  Measurement may say "this looks fine"; only a human may say
     "and I know why".
     """
-    from erouter.dev.wrappers import merge_candidates
+    from erouter.chain.wrappers import merge_candidates
 
     facts = FactsCache(chain_id=1, path=Path("/nowhere"))
     facts.wrappers = {"0xpuf": {"mint": True, "redeem": True}}
@@ -207,7 +207,7 @@ def test_a_one_way_vault_is_never_merged_however_it_measures():
 
 
 def test_without_facts_the_hand_written_list_still_stands():
-    from erouter.dev.wrappers import merge_candidates
+    from erouter.chain.wrappers import merge_candidates
 
     assert merge_candidates(FakeChain(), None) == ["0xaaa"]
 
@@ -242,11 +242,11 @@ def test_blocked_arcs_are_keyed_by_direction_and_kind():
 
 
 def test_apply_broken_facts_withholds_only_the_recorded_direction():
+    from erouter.chain.facts import apply_broken_facts
     from erouter.core.nodes import NodeMap
     from erouter.core.pipeline import build_arcs
     from erouter.core.pools import Coin, PoolSpec
     from erouter.core.types import Dialect
-    from erouter.dev.facts import apply_broken_facts
 
     a, b = "0x" + "b1" * 20, "0x" + "b2" * 20
     pool = PoolSpec(address="0x" + "aa" * 20, name="p", pool_type="factory",

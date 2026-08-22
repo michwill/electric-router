@@ -22,12 +22,12 @@ from __future__ import annotations
 
 import pytest
 
+from erouter.chain.wrappers import build_node_map
 from erouter.core.pipeline import RoutingError, route
 from erouter.core.pools import parse_universe
 from erouter.dev import config
 from erouter.dev.executor import Execution, deploy, execute, fork, slot_tokens
 from erouter.dev.universe import read_balances, resolve_dialects, resolve_lp_tokens
-from erouter.dev.wrappers import build_node_map
 
 pytestmark = pytest.mark.forked
 

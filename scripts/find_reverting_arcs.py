@@ -111,12 +111,12 @@ def sweep(chain_name: str, size: float, quiet: bool,
           only: set[str] | None = None) -> list[dict]:
     import boa
 
-    from erouter.dev import chains as chain_table
+    from erouter.chain import chains as chain_table
+    from erouter.chain.facts import FactsCache
     from erouter.dev import config
     from erouter.dev import executor as ex
     from erouter.dev.boa_host import CONTRACT as QUOTER_SRC
     from erouter.dev.boa_host import quoter_client
-    from erouter.dev.facts import FactsCache
     from erouter.dev.rpc import JsonRpcTransport
     from erouter.dev.universe import (
         check_reserves_are_real,
@@ -229,8 +229,8 @@ def sweep(chain_name: str, size: float, quiet: bool,
 
 def record(rows: list[dict], apply: bool) -> int:
     """Write what reverted into `data/facts`, and clear what recovered."""
-    from erouter.dev import chains as chain_table
-    from erouter.dev.facts import FactsCache
+    from erouter.chain import chains as chain_table
+    from erouter.chain.facts import FactsCache
 
     by_chain: dict[str, list[dict]] = {}
     for row in rows:
@@ -269,7 +269,7 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
-    from erouter.dev import chains as chain_table
+    from erouter.chain import chains as chain_table
 
     # Etherlink serves no state overrides and no access lists, so it has no
     # quoter and nothing here can run against it.

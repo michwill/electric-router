@@ -16,10 +16,10 @@ from __future__ import annotations
 import pytest
 from naive import naive_direct, naive_two_step
 
+from erouter.chain.wrappers import build_node_map
 from erouter.core.pipeline import RoutingError, route
 from erouter.core.pools import parse_universe
 from erouter.dev.universe import read_balances, resolve_dialects
-from erouter.dev.wrappers import build_node_map
 
 pytestmark = pytest.mark.forked
 

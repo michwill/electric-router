@@ -16,12 +16,12 @@ from pathlib import Path
 
 import pytest
 
+from erouter.chain import stable_params
+from erouter.chain.exact_cache import MATH_SOURCES, ExactCache
+from erouter.chain.stable_params import build_exact_pools
 from erouter.core.quoter import Quote
 from erouter.core.stableswap import StableSwap
 from erouter.core.transport import Answer, Status
-from erouter.dev import stable_params
-from erouter.dev.exact_cache import MATH_SOURCES, ExactCache
-from erouter.dev.stable_params import build_exact_pools
 
 
 def _shaped() -> dict:

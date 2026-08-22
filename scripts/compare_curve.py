@@ -168,12 +168,17 @@ def pairs_for(chain, pools, sizes: tuple[float, ...], pair: str = ""):
 
 def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
                   pair: str = "", from_router: bool = False) -> None:
+    from erouter.chain import chains as chain_table
+    from erouter.chain.facts import FactsCache, apply_broken_facts
+    from erouter.chain.probe_cache import CachedQuoterClient
+    from erouter.chain.wrappers import (
+        build_node_map,
+        build_stake_arcs,
+        build_transmuter_arcs,
+    )
     from erouter.core.pipeline import RoutingError, prepare, route
     from erouter.core.quoter import QuoterClient
-    from erouter.dev import chains as chain_table
     from erouter.dev.cli import _local_quoter, _rpc_url
-    from erouter.dev.facts import FactsCache, apply_broken_facts
-    from erouter.dev.probe_cache import CachedQuoterClient
     from erouter.dev.rpc import JsonRpcTransport
     from erouter.dev.universe import (
         check_reserves_are_real,
@@ -182,11 +187,6 @@ def compare_chain(name: str, sizes: tuple[float, ...], rows: list[dict],
         resolve_deposit_gates,
         resolve_dialects,
         resolve_lp_tokens,
-    )
-    from erouter.dev.wrappers import (
-        build_node_map,
-        build_stake_arcs,
-        build_transmuter_arcs,
     )
 
     api = HOSTED.format(chain=name)

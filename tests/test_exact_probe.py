@@ -6,8 +6,8 @@ def test_a_one_to_one_leg_is_walked_rather_than_sent():
     with no call.  Without a model each was a hole, and one hole sends the whole
     route to the chain -- on gnosis, where WXDAI is the wrapped native, that was
     2 of 14 candidates and a 172 ms confirmation on every quote."""
+    from erouter.chain.exact_probe import ExactQuoterClient
     from erouter.core.types import ArcKind
-    from erouter.dev.exact_probe import ExactQuoterClient
 
     client = ExactQuoterClient.__new__(ExactQuoterClient)
     for kind in (ArcKind.WRAP_NATIVE, ArcKind.UNWRAP_NATIVE, ArcKind.STAKE_NATIVE):

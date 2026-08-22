@@ -32,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from erouter.dev import chains as chain_table
+from erouter.chain import chains as chain_table
 from erouter.dev.boa_host import quoter_client
 from erouter.dev.cli import _rpc_url
 from erouter.dev.rpc import JsonRpcTransport

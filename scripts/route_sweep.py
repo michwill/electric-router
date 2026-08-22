@@ -34,10 +34,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from erouter.chain import chains as chain_table
 from erouter.core.codec import encode_call
 from erouter.core.quoter import QuoterClient
 from erouter.core.transport import Call
-from erouter.dev import chains as chain_table
 from erouter.dev.cli import _rpc_url
 from erouter.dev.lite import LITE_MIN_TVL
 from erouter.dev.rpc import JsonRpcTransport

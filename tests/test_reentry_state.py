@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import pytest
 
+from erouter.chain.exact_probe import ExactQuoterClient
 from erouter.core.stableswap import StableSwap, StableSwapLP
 from erouter.core.types import ArcKind, Leg
-from erouter.dev.exact_probe import ExactQuoterClient
 
 UNIT = 10**18
 POOL = StableSwap(

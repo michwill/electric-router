@@ -67,8 +67,8 @@ def test_the_source_still_deploys_to_the_live_quoter():
     failed with a mismatch that reads like "regenerate the hex file" -- which
     would have moved the quoter and passed.
     """
+    from erouter.chain.chains import QUOTER
     from erouter.core.keccak import keccak256
-    from erouter.dev.chains import QUOTER
     from erouter.dev.deploy import create2_address
 
     salt = keccak256(b"erouter.RouteQuoter.v2")

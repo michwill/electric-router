@@ -20,10 +20,10 @@ from __future__ import annotations
 
 import pytest
 
+from erouter.chain.vault_params import CHECK_SIZES, build_exact_vaults
 from erouter.core.transport import Answer, Status
 from erouter.core.types import ArcKind
 from erouter.core.vault import Vault, VaultError
-from erouter.dev.vault_params import CHECK_SIZES, build_exact_vaults
 
 DEPOSIT, REDEEM = ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM
 VAULT = "0x" + "5a" * 20

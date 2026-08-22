@@ -36,15 +36,15 @@ FRACTIONS = (0.01, 0.05, 0.20, 0.50, 1.00)
 
 
 def study(name: str, rows: list[dict]) -> None:
+    from erouter.chain import chains as chain_table
+    from erouter.chain.facts import FactsCache
+    from erouter.chain.wrappers import build_node_map, build_stake_arcs, build_transmuter_arcs
     from erouter.core.pipeline import prepare
     from erouter.core.quoter import QuoterClient
-    from erouter.dev import chains as chain_table
     from erouter.dev.cli import _local_quoter, _rpc_url
-    from erouter.dev.facts import FactsCache
     from erouter.dev.lite import LITE_MIN_TVL
     from erouter.dev.rpc import JsonRpcTransport
     from erouter.dev.universe import load_pools, read_balances, resolve_dialects, resolve_lp_tokens
-    from erouter.dev.wrappers import build_node_map, build_stake_arcs, build_transmuter_arcs
 
     chain = chain_table.CHAINS[name]
     args = argparse.Namespace(rpc=None, block=None, private=False)
@@ -131,7 +131,7 @@ def sweep(name, load, nodes, client, stake, src, dst, reserve, rows) -> None:
 
 
 def main(argv: list[str]) -> int:
-    from erouter.dev import chains as chain_table
+    from erouter.chain import chains as chain_table
     names = argv or list(chain_table.CHAINS)
     rows: list[dict] = []
     for name in names:

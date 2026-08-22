@@ -15,13 +15,13 @@ import random
 
 import numpy as np
 
+from erouter.chain.drift import PriceSeries
+from erouter.chain.revert_risk import breach_risk, jump_scale_bp, tail_model
 from erouter.core.candidates import Candidate, CandidateSet
 from erouter.core.realize import RealizedLeg, RealizedRoute
 from erouter.core.risk import DEFAULT_RISK, RiskTable
 from erouter.core.types import ArcKind, Leg
 from erouter.core.verify import verify
-from erouter.dev.drift import PriceSeries
-from erouter.dev.revert_risk import breach_risk, jump_scale_bp, tail_model
 
 POOL = ["0x" + f"{k:02x}" * 20 for k in range(1, 9)]
 
@@ -295,7 +295,7 @@ def test_the_tail_is_empirical_inside_the_data():
 def test_the_worst_arc_is_what_an_unsampled_direction_inherits(tmp_path):
     """`FactsCache.risk_table` fills the `(-1, -1)` tier, so a pair the sweep
     missed is priced from its own pool rather than from the global default."""
-    from erouter.dev.facts import FactsCache
+    from erouter.chain.facts import FactsCache
 
     cache = FactsCache(chain_id=1, path=tmp_path / "x.json")
     cache.learn_breach({f"{POOL[0].lower()}:0>1": {"p": 0.02},
@@ -320,7 +320,7 @@ def test_a_deposit_leg_takes_the_pool_figure_not_a_swap_pair():
 def test_a_listed_pool_gets_the_absolute_floor_under_its_bound():
     """Twenty percent of a 3.3 bp fee is 0.65 bp, against a rate that jumps
     ~0.9 bp per trade: TricryptoUSDC failed more often than it landed."""
-    from erouter.dev.revert_risk import BOUND_FLOOR_BP, bound_bp
+    from erouter.chain.revert_risk import BOUND_FLOOR_BP, bound_bp
 
     assert bound_bp(0.00033, wide=True) == BOUND_FLOOR_BP
     # 146 bp fee, as Yield Basis charges: nowhere near the floor, listed or not.
@@ -330,7 +330,7 @@ def test_a_listed_pool_gets_the_absolute_floor_under_its_bound():
 def test_a_pool_off_the_list_keeps_the_fee_fraction():
     """5 bp is a large allowance against a spread of one or two, and a pool on
     a pegged pair does not need it."""
-    from erouter.dev.revert_risk import bound_bp
+    from erouter.chain.revert_risk import bound_bp
 
     assert bound_bp(0.0001) == 0.2                         # 1 bp fee, unlisted
 
@@ -339,7 +339,7 @@ def test_the_list_names_low_fee_pools_on_moving_pairs():
     """Both conditions, because either alone is the wrong answer: a volatile
     pool that charges for it needs nothing, and a pegged pair would only be
     handed an allowance many times its own spread."""
-    from erouter.dev.revert_risk import wide_bound_pools
+    from erouter.chain.revert_risk import wide_bound_pools
 
     def series(pair, pool, prices):
         return {f"{pair}@{pool}": PriceSeries(token=pair, pool=pool, prices=prices)}
@@ -362,7 +362,7 @@ def test_the_list_is_keyed_on_the_pair_not_on_one_pool_trading():
     """The defect this replaces: a pool that saw no trade in the sample looked
     pegged whatever it trades.  TricryptoINV's USDC/INV rate moves 1,178 bp in
     four hours, and a per-arc test left it on a 0.75 bp bound."""
-    from erouter.dev.revert_risk import wide_bound_pools
+    from erouter.chain.revert_risk import wide_bound_pools
 
     busy, quiet = POOL[3].lower(), POOL[4].lower()
     series = {
@@ -380,7 +380,7 @@ def test_the_list_also_names_a_pool_whose_own_rate_wobbles():
     charges 0.1 bp, putting its bound at 0.02, and trips a fifth of the time
     while trading USDC against USDT -- a pair nobody would call volatile.  Left
     off the list it binds every route it appears in."""
-    from erouter.dev.revert_risk import wide_bound_pools
+    from erouter.chain.revert_risk import wide_bound_pools
 
     pool = POOL[5].lower()
     pegged = {f"a|b@{pool}": PriceSeries(token="a|b", pool=pool,

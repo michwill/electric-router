@@ -24,10 +24,10 @@ from hypothesis import strategies as st
 from naive import naive_direct, naive_two_step
 from test_no_worse_than_naive import TIE_SLACK, T
 
+from erouter.chain.wrappers import build_node_map
 from erouter.core.pipeline import RoutingError, route
 from erouter.core.pools import parse_universe
 from erouter.dev.universe import read_balances, resolve_dialects
-from erouter.dev.wrappers import build_node_map
 
 pytestmark = pytest.mark.forked
 

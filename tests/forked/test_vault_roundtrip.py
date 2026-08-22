@@ -16,7 +16,7 @@ from __future__ import annotations
 import boa
 import pytest
 
-from erouter.dev import chains as chain_table
+from erouter.chain import chains as chain_table
 
 pytestmark = pytest.mark.forked
 
@@ -49,9 +49,9 @@ TOLERANCE_WEI = 4
 
 @pytest.fixture(scope="module")
 def node_map(pools, quoter_client, chain):
+    from erouter.chain.wrappers import build_node_map
     from erouter.core.pools import parse_universe
     from erouter.dev.universe import read_balances, resolve_dialects
-    from erouter.dev.wrappers import build_node_map
 
     specs = parse_universe(pools)
     resolve_dialects(specs, quoter_client, chain)

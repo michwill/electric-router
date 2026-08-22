@@ -111,10 +111,10 @@ def test_a_pool_with_the_pair_in_both_directions_yields_one_arc_each_way():
 
 
 def test_probe_cache_round_trips(tmp_path):
+    from erouter.chain.cache import Cache
+    from erouter.chain.probe_cache import CachedQuoterClient
     from erouter.core.transport import Status
     from erouter.core.types import Probe
-    from erouter.dev.cache import Cache
-    from erouter.dev.probe_cache import CachedQuoterClient
 
     class Counter:
         def __init__(self):
@@ -139,11 +139,11 @@ def test_probe_cache_round_trips(tmp_path):
 
 
 def test_probe_cache_is_keyed_by_block_and_by_batch(tmp_path):
+    from erouter.chain.cache import Cache
+    from erouter.chain.probe_cache import CachedQuoterClient, digest
     from erouter.core.quoter import Quote
     from erouter.core.transport import Status
     from erouter.core.types import Probe
-    from erouter.dev.cache import Cache
-    from erouter.dev.probe_cache import CachedQuoterClient, digest
 
     class Counter:
         def __init__(self):
