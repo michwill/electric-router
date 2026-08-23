@@ -24,6 +24,17 @@ class Chain:
     rpc_attr: str  # attribute name in networks.py
     native_symbol: str
     wrapped: str  # wrapped-native ERC20
+    #: Whether `wrapped` is a WETH-style 1:1 wrapper the router can call --
+    #: `deposit()` in, `withdraw()` out, holding one native unit per unit of
+    #: supply.  Only then are the native token and `wrapped` one node.
+    #:
+    #: Declared rather than probed, because no cheap read decides it: Arbitrum's
+    #: WETH reverts on a zero-value `deposit()` and is a real wrapper, while
+    #: Fraxtal's `0xFC00..06` answers the whole ERC20 surface and is not one --
+    #: it is an `OptimismMintableERC20` for L1 frxETH, holds no native at all,
+    #: and has no `deposit` to call.  `test_native_wrappers.py` checks every
+    #: entry against the chain.
+    wraps_native: bool = True
     # Served by `api2.curve.finance` rather than the Prices API -- a factory
     # deployment with no trade indexing.  See `dev/lite.py`; the only chain in
     # both lists is sonic, where Prices wins because it has the whole deployment
@@ -328,7 +339,13 @@ CHAINS: dict[str, Chain] = {
         api_name="fraxtal",
         rpc_attr="FRAXTAL",
         native_symbol="frxETH",
-        wrapped="0xFC00000000000000000000000000000000000006",  # wfrxETH
+        # Not a wrapper: an OptimismMintableERC20 for L1 frxETH, minted by the
+        # standard bridge at 0x4200..0010.  It holds zero native against a
+        # 3,223 frxETH supply and has no `deposit`/`withdraw` at all.  Kept
+        # here because funding and payout detection need the chain's ERC20;
+        # `wraps_native` is what stops it being merged with the gas token.
+        wrapped="0xFC00000000000000000000000000000000000006",  # bridged frxETH
+        wraps_native=False,
         quoter=QUOTER,
         public_rpc=scoped_rpc("fraxtal"),
     ),
@@ -423,9 +440,13 @@ CHAINS: dict[str, Chain] = {
         api_name="celo",
         rpc_attr="CELO",
         native_symbol="CELO",
-        # CELO is natively an ERC20 at this address -- there is no
-        # separate wrapped token, so the merge is the identity.
+        # CELO is natively an ERC20 at this address, so there is no separate
+        # wrapped token and the relation is the identity rather than a wrap.
+        # Which is why it is not merged: the merge emits a `WRAP_NATIVE` leg,
+        # and this 1e27-supply token custodies no native and has no `deposit`
+        # to call.  Nothing is lost today -- no pool holds it.
         wrapped="0x471EcE3750Da237f93B8E339c536989b8978a438",
+        wraps_native=False,
         lite=True,   # ~$259k
         quoter=QUOTER,
         public_rpc=scoped_rpc("celo"),

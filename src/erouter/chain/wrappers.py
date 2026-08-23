@@ -118,14 +118,25 @@ def build_node_map(
             pair for pair in discover_aliases(pools, nodes, token_client or client)
             if (pair[0].lower(), pair[1].lower()) not in known
             and (pair[1].lower(), pair[0].lower()) not in known]:
+        # A declared pair names tokens that may not be here at all: the TVL
+        # floor cuts pools, not the table.  With neither side in the graph
+        # there is nothing to alias onto, and merging anyway raised a KeyError
+        # out of `build_node_map` -- `--min-tvl 1000000` on gnosis took every
+        # EURe pool with it and the chain failed to load rather than reporting
+        # no pools.  Discovered pairs cannot hit this: they come from the coins.
+        here = [t for t in (left, right) if nodes.has(t)]
+        if not here:
+            continue
         # The deeper side is canonical, so the token most pools already hold
-        # stays the one legs are denominated in.
+        # stays the one legs are denominated in -- but only a side that is
+        # here can be, because the alias has to land on a node.
         weight = {left: 0.0, right: 0.0}
         for pool in pools:
             for coin in pool.coins:
                 if coin.address.lower() in weight:
                     weight[coin.address.lower()] += pool.tvl_usd
-        canonical, other = (left, right) if weight[left] >= weight[right] else (right, left)
+        canonical = max(here, key=lambda t: weight[t])
+        other = right if canonical == left else left
         nodes.merge(Conversion(kind=ConversionKind.ALIAS, token=other,
                                canonical=canonical, target=""))
         report.aliases.append((other, canonical))
@@ -139,9 +150,17 @@ def build_node_map(
     # improve a route, but it can and did drag the price fit and the solver.
 
     # --- native wrapper: 1:1, no probing needed --------------------------
+    #
+    # Either side being in the graph is enough.  Gating on the sentinel alone
+    # meant the native token existed only where some pool happened to hold it:
+    # true on ethereum, arbitrum and optimism, and false on base, gnosis,
+    # polygon, monad and etherlink, where the wrapper is traded and the gas
+    # token was simply not a node -- `XDAI -> USDC.e` answered "not routable"
+    # for a pair whose second leg was already there.  Merging costs no node and
+    # no arc; it adds an alias onto the wrapper's own node.
     wrapped = chain.wrapped.lower()
     sentinel = NATIVE_SENTINEL.lower()
-    if nodes.has(sentinel):
+    if chain.wraps_native and (nodes.has(sentinel) or nodes.has(wrapped)):
         if not nodes.has(wrapped):
             nodes.add_token(wrapped, f"W{chain.native_symbol}", 18)
         # The wrapped ERC20 is canonical because most pools hold it; only the
