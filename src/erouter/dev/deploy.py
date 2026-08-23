@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from getpass import getpass
@@ -35,6 +36,11 @@ REPO = Path(__file__).resolve().parent.parent.parent.parent
 # initcode) alone, so one recipe puts the contract at the *same* address
 # everywhere and one whitelist entry covers the lot.
 CREATE2_PROXY = "0x4e59b44847b379578588920cA78FbF26c0B4956C"
+
+#: Etherscan's v2 endpoint: one host, one key, `chainid` selecting the explorer.
+#: Not every chain in the table is served by it -- xlayer, tac and etherlink
+#: answer "unsupported chainid" -- and that is not the same as unverified.
+ETHERSCAN_API = "https://api.etherscan.io/v2/api"
 
 #: How far over the chain's own estimate the gas limit is set.  Enough for a
 #: pool that shifts between estimating and mining, far below any block limit.
@@ -118,29 +124,270 @@ def account_load(name: str):
 #: *success* was retried six times and then reported as a failure.
 ALREADY_VERIFIED = ("already verified", "already been verified")
 
+#: Chains whose explorer is a Blockscout, and where it lives.
+#:
+#: Verifying on Etherscan is not the same as being verified where anyone
+#: looks.  Etherscan retired gnosisscan.io and the domain now serves
+#: Blockscout, so a chain-100 submission to the v2 API succeeds, reads back as
+#: verified, and the address still shows "Verify & publish" to every visitor.
+#: tac is the other way round: v2 does not serve chain 239 at all, and its
+#: Blockscout does.
+#:
+#: Both explorers are submitted to where both exist -- a chain is verified when
+#: the place people open it is, not when one API says so.
+BLOCKSCOUT = {
+    "ethereum": "https://eth.blockscout.com",
+    "gnosis": "https://gnosisscan.io",
+    "optimism": "https://explorer.optimism.io",
+    "polygon": "https://polygon.blockscout.com",
+    "tac": "https://explorer.tac.build",
+}
 
-def verify_with_retries(contract, etherscan, attempts: int = 6, pause: int = 10) -> None:
+
+def explorer_ask(chain_id: int, key: str, form: dict | None = None, **params) -> dict:
+    """One call to the v2 API, with `chainid` in the query string either way.
+
+    That last part is the whole reason this is hand-rolled rather than boa's
+    verifier: v2 reads `chainid` from the query for a POST as well as a GET,
+    and boa sends it in the form body.  So every submission that was not to
+    mainnet came back "Missing or unsupported chainid parameter", six times,
+    and a good deployment was reported as one that could not be verified.
+    """
+    import urllib.parse
+    import urllib.request
+
+    query = urllib.parse.urlencode({"chainid": chain_id, "apikey": key, **params})
+    body = urllib.parse.urlencode({**form, "apikey": key}).encode() if form else None
+    request = urllib.request.Request(f"{ETHERSCAN_API}?{query}", data=body,
+                                     headers={"User-Agent": "erouter"})
+    with urllib.request.urlopen(request, timeout=60) as handle:
+        return json.load(handle)
+
+
+def explorer_source(chain_id: int, address: str, key: str) -> str | None:
+    """The source the explorer holds for `address`, or None if it holds none.
+
+    Three answers, and the third is why this exists: a chain the v2 API does
+    not serve raises, rather than reporting an address as unverified that it
+    was never asked about.
+    """
+    answer = explorer_ask(chain_id, key, module="contract",
+                          action="getsourcecode", address=address)
+    result = answer.get("result")
+    if isinstance(result, str):             # NOTOK, and the string is the why
+        raise RuntimeError(result)
+    return result[0].get("SourceCode") or None
+
+
+def submit_source(chain_id: int, address: str, contract: Path, key: str) -> str:
+    """Post the standard-json bundle; returns the guid to poll."""
+    import boa
+
+    solc = boa.load_partial(str(contract)).solc_json
+    entry = next(k for k, v in solc["settings"]["outputSelection"].items() if "*" in v)
+    version = re.match(r"v?(\d+\.\d+\.\d+)", solc["compiler_version"])
+    if version is None:
+        raise RuntimeError(f"no vyper version in {solc['compiler_version']}")
+    answer = explorer_ask(chain_id, key, form={
+        "module": "contract", "action": "verifysourcecode",
+        "codeformat": "vyper-json", "sourceCode": json.dumps(solc),
+        # Both contracts are constructor-free, which is also what makes the
+        # CREATE2 address the initcode's alone.
+        "constructorArguments": "", "contractaddress": address,
+        "contractname": f"{entry}:{contract.stem}",
+        "compilerversion": f"vyper:{version.group(1)}",
+        "optimizationUsed": "1", "licenseType": "1",
+    })
+    if answer.get("status") != "1":
+        raise RuntimeError(str(answer.get("result") or answer))
+    return answer["result"]
+
+
+def await_verification(chain_id: int, guid: str, key: str,
+                       attempts: int = 40, pause: int = 5) -> str:
+    """Poll until the queue says something other than "pending"."""
+    for _ in range(attempts):
+        sleep(pause)
+        answer = explorer_ask(chain_id, key, module="contract",
+                              action="checkverifystatus", guid=guid)
+        result = str(answer.get("result"))
+        if "pending" not in result.lower():
+            return result
+    return "still pending in the queue"
+
+
+def standard_json(contract: Path) -> tuple[dict, str]:
+    """The vyper standard-input bundle, and the compiler that made it.
+
+    boa hangs `compiler_version` and `integrity` off the same dict.  Etherscan
+    ignores the extras; Blockscout hands the bundle to vyper, which does not.
+    """
+    import boa
+
+    solc = boa.load_partial(str(contract)).solc_json
+    keep = ("language", "sources", "settings")
+    return {k: v for k, v in solc.items() if k in keep}, solc["compiler_version"]
+
+
+def blockscout_source(host: str, address: str) -> str | None:
+    """The source this Blockscout holds, or None.  404 means it has never
+    seen the address, which is not the same as holding no source for it."""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(f"{host}/api/v2/smart-contracts/{address}",
+                                     headers={"User-Agent": "erouter"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as handle:
+            answer = json.load(handle)
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"HTTP {exc.code} -- is the address indexed here?") from exc
+    return answer.get("source_code") if answer.get("is_verified") else None
+
+
+def blockscout_submit(host: str, address: str, contract: Path) -> None:
+    """Post the bundle as multipart, which is the only shape it accepts."""
+    import urllib.request
+    import uuid
+
+    bundle, version = standard_json(contract)
+    boundary = uuid.uuid4().hex
+    parts = [
+        f"--{boundary}\r\nContent-Disposition: form-data; "
+        f"name=\"{name}\"\r\n\r\n{value}\r\n".encode()
+        for name, value in (("compiler_version", version), ("license_type", "none"))
+    ]
+    parts.append(
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; "
+        f"filename=\"standard.json\"\r\nContent-Type: application/json\r\n\r\n".encode()
+        + json.dumps(bundle).encode() + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode())
+
+    request = urllib.request.Request(
+        f"{host}/api/v2/smart-contracts/{address}/verification/via/"
+        f"vyper-standard-input", data=b"".join(parts),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 "User-Agent": "erouter"})
+    with urllib.request.urlopen(request, timeout=60) as handle:
+        answer = json.load(handle)
+    # It answers with the job it started.  Anything else means it started none,
+    # and the poll that follows would spend a minute discovering that.
+    if "started" not in str(answer.get("message", "")).lower():
+        raise RuntimeError(str(answer)[:200])
+
+
+def blockscout_verify(host: str, address: str, contract: Path,
+                      attempts: int = 20, pause: int = 5) -> bool:
+    """Submit, then poll the contract itself -- there is no job to ask about."""
+    import urllib.error
+
+    try:
+        if blockscout_source(host, address):
+            print(f"  already verified on {host}")
+            return True
+        blockscout_submit(host, address, contract)
+    except (RuntimeError, OSError, urllib.error.HTTPError) as exc:
+        print(f"  ! {host}: {str(exc)[:80]}")
+        return False
+    for _ in range(attempts):
+        sleep(pause)
+        if blockscout_source(host, address):
+            print(f"  verified on {host}")
+            return True
+    print(f"  ! {host}: submitted, still not showing as verified")
+    return False
+
+
+def verify_with_retries(chain_id: int, address: str, contract: Path, key: str,
+                        attempts: int = 6, pause: int = 10,
+                        settle: int = 10) -> bool:
     """Etherscan needs the code indexed before it will look at it.
 
-    Retries exist for that indexing delay and nothing else.  "Already verified"
-    is the desired end state -- CREATE2 puts identical bytecode on every chain,
-    so the second chain onward is often verified on submission.
+    Retries exist for that indexing delay and nothing else.  `settle` is the
+    wait before the *first* attempt, which a deployment mined seconds ago needs
+    and an address that has been on chain for a week does not.  "Already
+    verified" is the desired end state -- CREATE2 puts identical bytecode on
+    every chain, so the second chain onward is often verified on submission.
     """
-    from boa.verifiers import verify as boa_verify
-
+    sleep(settle)
     for attempt in range(attempts):
         try:
+            result = await_verification(
+                chain_id, submit_source(chain_id, address, contract, key), key)
+        except (RuntimeError, OSError) as exc:
+            result = str(exc)
+        if result.lower().startswith("pass") or any(
+                phrase in result.lower() for phrase in ALREADY_VERIFIED):
+            print(f"  verified -- {result}")
+            return True
+        print(f"  verify attempt {attempt + 1}/{attempts}: {result}")
+        if attempt + 1 < attempts:
             sleep(pause)
-            boa_verify(contract, etherscan, wait=True)
-            print("  verified")
-            return
-        except Exception as exc:            # classified below
-            text = str(exc).lower()
-            if any(phrase in text for phrase in ALREADY_VERIFIED):
-                print("  already verified")
-                return
-            print(f"  verify attempt {attempt + 1}/{attempts}: {exc}")
     print("  ! not verified -- the deployment is still good, verify by hand")
+    return False
+
+
+def verify_one(target: Target, name: str, args) -> int:
+    """Publish the source for a contract already on chain.
+
+    Verification is not part of a deployment, however much the `--verify` flag
+    makes it look like one.  A deployment happens once; a chain whose explorer
+    was down that afternoon, or one the sweep submitted to the wrong `chainid`,
+    still has unverified bytecode weeks later and no reason to be redeployed.
+    So it is its own pass, over the address CREATE2 already fixed.
+
+    Every explorer the chain has, not the first that answers: gnosis is served
+    by Etherscan's API and shown to people by Blockscout, and satisfying one
+    left the other displaying "Verify & publish".
+
+    It refuses on a runtime mismatch rather than submitting: an explorer
+    showing source that is not the code there is worse than one showing none.
+    """
+    from erouter.chain import chains as chain_table
+    from erouter.core.keccak import keccak256
+    from erouter.dev import config
+    from erouter.dev.rpc import JsonRpcTransport
+
+    chain = chain_table.get(name)
+    address = args.address or create2_address(
+        keccak256(args.salt.encode()), target.initcode())
+    print(f"{chain.name} (chain {chain.chain_id})  {address}")
+
+    answer = JsonRpcTransport(
+        config.rpc_url(chain.rpc_attr), chain_id=chain.chain_id).fetch(
+        "eth_getCode", [address, "latest"]) or "0x"
+    on_chain = bytes.fromhex(answer[2:])
+    expected = bytes(target.expected_runtime())
+    if not on_chain:
+        print(f"  ! no {target.label} deployed here -- nothing to verify")
+        return 1
+    if on_chain != expected:
+        print(f"  ! runtime differs: {len(on_chain):,} on chain vs "
+              f"{len(expected):,} compiled -- refusing to publish a source "
+              f"that is not the code")
+        return 1
+
+    done = []
+    key = getattr(config.networks(), "ETHERSCAN_API_KEY", None)
+    if not key:
+        print("  ! no ETHERSCAN_API_KEY in networks.py")
+        done.append(False)
+    else:
+        try:
+            if explorer_source(chain.chain_id, address, key):
+                print("  already verified on etherscan")
+                done.append(True)
+            else:
+                done.append(verify_with_retries(
+                    chain.chain_id, address, target.contract, key, settle=0))
+        except (RuntimeError, OSError) as exc:
+            # Not a failure where Blockscout is the chain's explorer anyway.
+            print(f"  - etherscan does not serve this chain: {str(exc)[:60]}")
+            done.append(name in BLOCKSCOUT)
+
+    if name in BLOCKSCOUT:
+        done.append(blockscout_verify(BLOCKSCOUT[name], address, target.contract))
+    return 0 if all(done) else 1
 
 
 def create2_address(salt: bytes, initcode: bytes, proxy: str = CREATE2_PROXY) -> str:
@@ -416,15 +663,9 @@ def deploy_one(target: Target, name: str, args, account=None) -> int:
             unproven = True
 
     if args.broadcast and args.verify:
-        from boa.explorer import Etherscan
-
         key = getattr(config.networks(), "ETHERSCAN_API_KEY", None)
         if key:
-            # CREATE2 leaves no deployer object to verify, so bind one to the
-            # address the proxy put the code at.
-            deployed_at = (boa.load_partial(str(target.contract)).at(address)
-                           if args.create2 else plain)
-            verify_with_retries(deployed_at, Etherscan(api_key=key))
+            verify_with_retries(chain.chain_id, address, target.contract, key)
         else:
             print("  ! no ETHERSCAN_API_KEY in networks.py; skipping verification")
 
@@ -451,6 +692,15 @@ def run(target: Target, description: str) -> int:
              "throws the result away, which is the safe way to rehearse",
     )
     parser.add_argument("--verify", action="store_true", help="submit to Etherscan")
+    parser.add_argument(
+        "--verify-only", action="store_true",
+        help="publish the source for what is already deployed and do nothing "
+             "else -- no fork, no passphrase, no transaction",
+    )
+    parser.add_argument(
+        "--address",
+        help="what to verify, if not the --create2 address for this salt",
+    )
     parser.add_argument(
         "--create2", action="store_true",
         help="deploy through the deterministic proxy, so it lands on the same "
@@ -488,7 +738,8 @@ def run(target: Target, description: str) -> int:
     results: dict[str, int] = {}
     for name in wanted:
         try:
-            results[name] = deploy_one(target, name, args, account)
+            results[name] = (verify_one(target, name, args) if args.verify_only
+                             else deploy_one(target, name, args, account))
         except Exception as exc:
             # In full, with the traceback.  This was truncated to 100
             # characters, which is how monad failed the sweep without leaving
@@ -501,7 +752,13 @@ def run(target: Target, description: str) -> int:
             results[name] = 1
         print()
 
-    if len(wanted) > 1:
+    if len(wanted) > 1 and args.verify_only:
+        done = [n for n, code in results.items() if code == 0]
+        print(f"  {len(done)}/{len(wanted)} explorers hold the {target.label} source")
+        for name, code in results.items():
+            if code:
+                print(f"    ! {name} -- not verified")
+    elif len(wanted) > 1:
         # Two different failures, and conflating them once reported fifteen
         # landed deployments as three.  Code 2 means the contract is on chain
         # with a matching runtime and only the trade could not be made.

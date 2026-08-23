@@ -17,6 +17,7 @@ Dry-runs on a fork by default; `--broadcast` sends it for real.
     python scripts/deploy_router.py --chain ethereum --create2
     python scripts/deploy_router.py --chain all --create2 --funding
     python scripts/deploy_router.py --chain all --create2 --broadcast --verify
+    python scripts/deploy_router.py --chain all --verify-only
 
 The deployer key is a brownie keystore under `~/.brownie/accounts/`, decoded
 with a passphrase at the prompt.  Everything not specific to the router lives

@@ -16,6 +16,7 @@ Dry-runs on a fork by default; `--broadcast` sends it for real.
 
     python scripts/deploy_quoter.py --chain ethereum
     python scripts/deploy_quoter.py --chain ethereum --broadcast --verify
+    python scripts/deploy_quoter.py --chain all --verify-only
 
 The deployer key is a brownie keystore under `~/.brownie/accounts/`, decoded
 with a passphrase at the prompt -- the same arrangement yb-core's scripts use.
