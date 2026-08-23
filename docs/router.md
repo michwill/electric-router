@@ -138,19 +138,19 @@ high-decimal-value intermediate cannot express the fee fraction at all.  A
 $1.45 tBTC -> WBTC -> USDT route makes **1,881 raw WBTC**; 20% of that pool's
 4 bp fee is 0.15 of one unit, and a rate has no way to say it.
 
-The bound then becomes the **tightest rate that still admits the quote**: the
-largest `min_rate` for which `dx * min_rate / 1e18` is still no more than the
-quoted output.  The leg has to pay what it was quoted at, to the unit, and a
-sandwich gets nothing at all.  (It lands *on* the quote about nine times in ten;
-where one step of the rate is worth several units of output there is no rate in
-between, and the largest admissible one is all there is to ask for.)
+The bound then becomes the **tightest rate that still leaves a whole unit**:
+the largest `min_rate` for which `dx * min_rate / 1e18` is at most `out - 1`.
+One unit is 5.3 bp here, and that is what `tolerance_bp` reports -- not the
+0.8 bp the fee rule asked for.
 
-The cost is on the other side, and it is real: the leg reverts on one unit of
-adverse movement -- 5.3 bp here -- including movement it causes itself, when an
-upstream leg overperforms and this one pays a worse marginal rate on the larger
-input.  That is the trade taken deliberately.  Granting the unit instead would
-hand 5.3 bp to a bound whose whole purpose is to be a fraction of a fee, and a
-trade this size is one the user can simply resubmit.
+Binding at the quote itself is what that replaced, and it does not survive
+contact with the route's own arithmetic.  A downstream leg's `dx` is a 60-bit
+fraction of a balance standing at that moment, and the leg that sweeps takes
+whatever wei earlier divisions stranded in the slot, so a leg with no room at
+all reverts on rounding with nothing having moved.  Measured: the tBTC -> USDT
+dust route tripped its own bound at some blocks and not others **on a fork**,
+where there is no market to move.  The unit is the price of routing a trade
+that size through an 8-decimal intermediate.
 
 The same thing happens from the other side, and there it is worse.  `min_rate`
 is `out * 1e18 // in`, so when `in` dwarfs `out` -- a cheap 18-decimal token

@@ -15,8 +15,8 @@ sandwich.  The bound is a fraction of the fee that pool is measured to be
 charging *on this trade*, and what it buys is a ceiling on how much a sandwich
 can take: the front-run can only be as large as the bound will still settle.
 Where the output token is too coarse to express that fraction -- a trade small
-enough that its intermediate is a few thousand raw units -- the leg is bounded
-at the quote itself, which is the tightest rate that still admits it.
+enough that its intermediate is a few thousand raw units -- the ceiling becomes
+one unit of that token, which is the finest one it can express.
 
 Whether there is an attack to cap is decided elsewhere.  A leg whose own price
 impact is under twice its pool's fee cannot be sandwiched profitably at all --
@@ -322,14 +322,17 @@ def min_rates(
     A tolerance finer than one unit of the output token cannot be expressed as
     a rate -- `min_rate` is `out * 1e18 // in`, so one unit is `1/out` of it,
     and a leg making a few thousand units quantises harder than the room the
-    fee rule asks for.  What ships then is the tightest rate that still admits
-    the quote, so the leg has to pay what it was quoted at to the unit.  That
-    is a real cost on the other side: the leg reverts on a unit of adverse
-    movement, including movement it causes itself when an upstream leg
-    overperforms and this one pays a worse marginal rate on the larger input.
-    It is the trade taken deliberately, because the alternative is granting a
-    whole unit -- 5.3 bp on a 1,881-unit leg -- to a bound whose entire purpose
-    is to be small.
+    fee rule asks for.  What ships then is the tightest rate that still leaves
+    a whole unit: the finest tolerance the token has, and never less than one.
+
+    Binding at the quote itself is what that replaced, and it does not survive
+    contact.  The route's own arithmetic moves a leg by a wei with no market
+    behind it -- a downstream `dx` is a 60-bit fraction of a standing balance,
+    and the sweeper takes whatever earlier divisions stranded in the slot -- so
+    a leg with no room reverts on rounding.  Measured: the tBTC -> USDT dust
+    route tripped its own bound at some blocks and not others, on a fork, where
+    nothing moved at all.  One unit is 5.3 bp on a 1,881-unit leg, which is the
+    price of the coarsest intermediate a trade that size can go through.
 
     A leg lands in `unbounded` only when the floor its bound really imposes
     rounds to nothing, which is a bound guarding nothing.  Everything short of
@@ -353,11 +356,16 @@ def min_rates(
         rate = want * ONE // have
         bound = rate - rate * share // 10**9
         # A tolerance worth less than one unit of the output token has no rate
-        # to be written as.  Take the tightest one that still admits the quote:
-        # the largest `bound` whose floor is `want` where the rate can land
-        # there, and the largest whose floor is under it where it cannot.
+        # to be written as, so grant the unit: the tightest rate whose floor is
+        # a whole unit under the quote.  Binding at the quote itself leaves no
+        # room for the route's own arithmetic -- a downstream leg's `dx` is a
+        # 60-bit fraction of a standing balance and the sweeper takes whatever
+        # wei were stranded by earlier divisions, so a wei in the wrong
+        # direction reverts.  Measured: the tBTC -> USDT dust route trips its
+        # own bound at some blocks and not others, on a fork with no market
+        # movement at all.
         if want * share < 10**9:
-            bound = ((want + 1) * ONE - 1) // have
+            bound = (want * ONE - 1) // have
         if bound > MAX_RATE:
             raise EncodingError(
                 f"leg {k} on {realized.target} has a raw-unit rate of {rate}, "

@@ -363,13 +363,13 @@ def _floor(legs, **kw):
     return rc.leg_in(legs[0]) * rates[0] // ONE, unbounded
 
 
-def test_a_tolerance_finer_than_one_unit_binds_at_the_quote():
+def test_a_tolerance_finer_than_one_unit_becomes_one_unit():
     """0.8 bp of 1,881 raw units is 0.15 of one, and a rate cannot say that.
-    What ships is the tightest rate that still admits the quote, so the leg
-    pays what it was quoted at to the unit and a sandwich gets nothing."""
+    What ships is the tightest rate that still leaves a whole unit -- the
+    finest the token has, and enough for the route's own rounding."""
     legs = [leg(0, 1, 18813936625701, 1881, gamma=1 - 4e-4)]
     floor, unbounded = _floor(legs)
-    assert floor == 1881, "the quote itself, not a unit under it"
+    assert floor == 1880, "one unit under the quote, not at it"
     assert unbounded == []
 
 
@@ -386,15 +386,24 @@ def test_the_bound_is_the_largest_rate_that_still_admits_the_quote(have, want):
     """
     rate = rc.min_rates(route([leg(0, 1, have, want, gamma=1 - 4e-4)],
                               amount_in=have, dst_slot=1))[0][0]
-    assert have * rate // ONE <= want
-    assert have * (rate + 1) // ONE > want
+    assert have * rate // ONE <= want - 1
+    assert have * (rate + 1) // ONE > want - 1
 
 
-def test_a_five_unit_leg_binds_at_five():
+def test_a_five_unit_leg_keeps_a_unit_back():
     """A five-unit leg quantises so hard that 0.2 bp rounds clean away."""
     legs = [leg(0, 1, 10**18, 5, gamma=1 - 1e-4)]
     floor, unbounded = _floor(legs)
-    assert floor == 5 and unbounded == []
+    assert floor == 4 and unbounded == []
+
+
+def test_no_leg_is_ever_bound_at_its_own_quote():
+    """The property the dust route reverted for: a leg with no room at all
+    trips on the route's own rounding, with nothing having moved."""
+    for have, want in ((18813936625701, 1881), (10**18, 5), (10**18, 3),
+                       (10**21, 10**21), (5055147152544766989, 61)):
+        floor, _ = _floor([leg(0, 1, have, want, gamma=1 - 4e-4)])
+        assert floor < want, f"{have} -> {want} bound at the quote"
 
 
 def test_a_rate_that_underflows_to_zero_is_still_unbounded():
@@ -474,12 +483,13 @@ def test_a_small_trade_through_a_coarse_intermediate_encodes():
     """The tBTC -> WBTC -> USDT shape at $1.45: the intermediate is 1,881 raw
     units, which no fee-fraction can express and which used to be refused.
 
-    The coarse leg costs nothing now that it binds at its own quote, so what
-    is left in the tolerance is the second leg's own fee rule.
+    One unit of 1,881 is 5.3 bp, and that is what the caller is told: the
+    reported tolerance is the coarse leg's unit compounded with the second
+    leg's own fee rule, not the 0.8 bp the fee rule asked for.
     """
     legs = [leg(0, 1, 18813936625701, 1881, gamma=1 - 4e-4),
             leg(1, 2, 1881, 1449003, target=POOL_B, gamma=1 - 4e-4)]
     r = route(legs, amount_in=18813936625701, dst_slot=2)
     call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=1449003)
     assert call.unbounded == ()
-    assert 0.7 < call.tolerance_bp < 0.9
+    assert 5.9 < call.tolerance_bp < 6.3
