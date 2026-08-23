@@ -30,7 +30,6 @@ import copy
 import time
 from dataclasses import dataclass, field
 
-from ..core import accel as _accel
 from ..core import pipeline
 from ..core.pools import PoolSpec, parse_universe, volatile_pools
 from ..core.probe import COARSE_GRID, plan_grid
@@ -38,6 +37,7 @@ from ..core.quoter import QuoterClient
 from ..core.rendermodel import build_diagram
 from ..core.routecall import NEEDED, encode_route
 from ..core.schema import ROUTER_ADDRESS
+from ..core.solve import accel_in_use
 from . import gas_probe
 from .exact_cache import ExactCache
 from .facts import FactsCache, apply_broken_facts
@@ -199,7 +199,13 @@ class RouterSession:
         #: Which solver will answer.  A property of the build rather than of
         #: this session -- `core.accel` decided it at import time -- but the
         #: frontend asks the session, because the session is what it holds.
-        self.solver = "rust" if _accel.available() else "python"
+        #:
+        #: `available()` alone is not the answer: the compiled solver is opt-in
+        #: behind `EROUTER_ACCEL=1`, so reporting "rust" merely because the
+        #: module imports told a caller trying to bisect a bug onto the other
+        #: solver that they had failed to, when in fact they were already on
+        #: the one they wanted.
+        self.solver = "rust" if accel_in_use() else "python"
         self._models = None
         self._quoter = ""
         self._overrides: dict | None = None

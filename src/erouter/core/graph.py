@@ -287,17 +287,42 @@ def build(
     return arrays
 
 
+#: The smallest the scaled demand may become.  `solve` snaps any `|psi|` under
+#: its `TOL` of 1e-9 to zero, and it does that in **scaled** units -- so a
+#: normalisation that divides the demand below that annihilates the whole flow
+#: and returns a "feasible" solution carrying nothing.  Measured on gnosis at
+#: block 47,871,103: a $0.008 XDAI -> EURe quote against a median `G` of 7.6e7
+#: scaled to 9.0e-11, and nineteen sizes between 0.0080 and 0.0120 failed with
+#: "the optimal flow is empty" while their neighbours quoted normally.
+#:
+#: 1e-6 is a thousand times `TOL`, and the smallest scaled demand measured to
+#: solve correctly on that pair -- so the floor binds only where the median
+#: would otherwise have gone too far, and leaves every quote that works today
+#: on exactly the scale it has now.
+MIN_SCALED_PSI = 1e-6
+
+
 def scale(arrays: ArcArrays, Psi: float) -> tuple[ArcArrays, float]:
     """§9.1 -- (P) is homogeneous in (G, Psi), so normalise G by its median.
 
     `u`, `eps` and `rho` are dimensionless and unchanged; only psi rescales.
-    Without this, G spans 10+ orders (dust pool vs 100M pool) and the Laplacian
-    conditions badly.
+    Without this, G spans 10+ orders (dust pool vs 100M pool) and the numbers
+    the solver compares against its fixed tolerances sit nowhere near 1.
+
+    Which is the whole point, and the reason the demand gets a say: uniform
+    scaling cannot change the Laplacian's condition number -- dividing every
+    `G` by one number divides every eigenvalue by it -- so what this buys is
+    magnitude, not conditioning, and a normalisation that puts `G` near 1 by
+    putting `Psi` under `TOL` has bought nothing and lost the route.  Any
+    positive `s` leaves the problem the same problem, so where the two pull
+    apart the demand wins.
     """
     positive = arrays.G[arrays.G > 0]
     s = float(np.median(positive)) if positive.size else 1.0
     if not np.isfinite(s) or s <= 0:
         s = 1.0
+    if Psi > 0.0 and np.isfinite(Psi):
+        s = min(s, Psi / MIN_SCALED_PSI)
     arrays.G = arrays.G / s
     arrays.cap = arrays.cap / s
     arrays.g_scale = s

@@ -79,6 +79,15 @@ PERTURB_SCALE = 1e-11
 _ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 
 
+def accel_in_use() -> bool:
+    """Whether `solve` will really take the compiled path.
+
+    Both halves, because a caller asking which solver answered gets the wrong
+    answer from either alone: the module can import while the opt-in is off.
+    """
+    return _ACCEL_ON and _accel.available()
+
+
 def _steepest_pick(mask: np.ndarray, score: np.ndarray) -> int:
     """Most-violating candidate; ties go to the lowest index."""
     where = np.flatnonzero(mask)
