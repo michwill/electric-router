@@ -800,7 +800,14 @@ class RouterSession:
             read_balances(pools, client, notes, chain_id)
             resolve_lp_tokens(pools, client, chain_id)
             resolve_deposit_gates(pools, client)
-            list(check_reserves_are_real(pools, client, None, native=native))
+            # Kept, not discarded.  Zeroing a pool's balances is how a drop is
+            # expressed, and with the reason thrown away a frontend has a pool
+            # that was there a moment ago and nothing to say about it: polygon
+            # drops five this way -- four on retired am3CRV and one reporting
+            # 139,834 WPOL against a wei it actually holds -- and the CLI names
+            # all five while the session named none.
+            notes.extend(check_reserves_are_real(pools, client, None,
+                                                 native=native))
             return notes
 
         await self._settle(lambda: stages(copy.deepcopy(self.pools), []))
