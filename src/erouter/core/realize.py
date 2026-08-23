@@ -486,7 +486,8 @@ def realize(
         if total <= 0:
             continue
         spokes: list[tuple[int, int]] = []  # (arc index, spoke slot)
-        group: list[tuple[int, int]] = []  # (arc index, destination slot)
+        hub_arcs: list[int] = []
+        by_token: dict[str, list[int]] = {}  # spoke token -> arcs drawing it
         for k in outgoing:
             token_in = arcs[k].token_in.lower()
             # Compare *slots*, not addresses.  An alias is a second address over
@@ -497,11 +498,32 @@ def realize(
             # `Leg` refused it outright.  The fold above skips aliases for the
             # same reason.
             if slot(token_in) == slot(hub):
-                group.append((k, -1))
+                hub_arcs.append(k)
             else:
-                spoke = slot(token_in)
-                group.append((k, spoke))
-                spokes.append((k, spoke))
+                spokes.append((k, slot(token_in)))
+                by_token.setdefault(token_in, []).append(k)
+
+        # One fill per spoke, not one per arc drawing on it.  Every arc wanting
+        # scrvUSD used to get its own crvUSD -> scrvUSD wrap: measured on
+        # crvUSD -> sDOLA at $100,000, four deposits at one ratio into one slot
+        # where a single deposit of the total pays the same 80,140.808884 --
+        # three redundant vault calls, and three of the caller's 32 legs, for
+        # nothing.  The draw side has always grouped this way; see (3).
+        #
+        # Keyed on the *token* rather than the slot it lands in, because the
+        # conversion is a property of the token: two of them sharing a slot are
+        # two different calls and still need a leg each.
+        group: list[tuple[str, object]] = (
+            [("arc", k) for k in hub_arcs] + [("spoke", t) for t in by_token]
+        )
+
+        def behind(item, by_token=by_token) -> list[int]:
+            """The arcs an item carries -- one for an arc, all of them for a fill.
+
+            `by_token` is bound rather than closed over: this runs once per
+            node and the dict is rebuilt each time round.
+            """
+            return [item[1]] if item[0] == "arc" else by_token[item[1]]
 
         # The last leg of a group sweeps -- `bps == 0` takes whatever is left, so
         # no dust strands in the slot -- and that makes the order load-bearing
@@ -525,30 +547,35 @@ def realize(
         reused = _reused_pools(arcs)
 
         def absorbs_remainder(item) -> bool:
-            return not math.isfinite(arcs[item[0]].cap)
+            # A fill hands its remainder on to whatever draws on it, so it may
+            # sweep only when every one of those can take it.
+            return all(not math.isfinite(arcs[k].cap) for k in behind(item))
 
         group.sort(key=lambda item: (
             absorbs_remainder(item),
-            bool(reused) and arcs[item[0]].pool.lower() in reused
-            and arcs[item[0]].kind not in ADVANCEABLE,
+            bool(reused) and any(arcs[k].pool.lower() in reused
+                                 and arcs[k].kind not in ADVANCEABLE
+                                 for k in behind(item)),
         ))
         # Nothing here can take the remainder, so nobody sweeps and the rounding
         # dust stays in the slot.  A few wei stranded is a cost; a leg that
         # sweeps past its cap is a route that does not run.
         sweeper = len(group) - 1 if any(map(absorbs_remainder, group)) else -1
 
-        for position, (k, spoke) in enumerate(group):
+        for position, item in enumerate(group):
+            share = sum(deltas[k] for k in behind(item))
             bps = (0 if position == sweeper
-                   else max(1, min(BPS - 1, round(BPS * deltas[k] / total))))
-            if spoke >= 0:
-                conversion = nodes.conversion[arcs[k].token_in.lower()]
+                   else max(1, min(BPS - 1, round(BPS * share / total))))
+            if item[0] == "spoke":
+                token_in = item[1]
                 route.legs.append(
                     _conversion_leg(
-                        nodes, conversion, forward=False,
-                        src=slot(hub), dst=spoke, bps=bps,
+                        nodes, nodes.conversion[token_in], forward=False,
+                        src=slot(hub), dst=slot(token_in), bps=bps,
                     )
                 )
             else:
+                k = item[1]
                 route.legs.append(
                     _arc_leg(arcs[k], nodes, slot(hub), slot(arcs[k].token_out),
                              bps, deltas[k], outs[k], float(psi[k]), deltas[k] / total)
@@ -568,8 +595,12 @@ def realize(
             by_spoke.setdefault(spoke, []).append(k)
         for spoke, ks in by_spoke.items():
             # The sweeper goes last and must be able to absorb the remainder,
-            # the same rule the hub group above follows and for the same reason.
-            ks.sort(key=lambda k: math.isfinite(arcs[k].cap))
+            # the same rule the hub group above follows and for the same reason
+            # -- which is `not isfinite`, the uncapped arc, and this sorted the
+            # other way round: `isfinite` ascending puts the *capped* one last
+            # and hands it the whole slot, the very thing the USD3 measurement
+            # above is about.
+            ks.sort(key=lambda k: not math.isfinite(arcs[k].cap))
             drawn = sum(deltas[k] for k in ks)
             for position, k in enumerate(ks):
                 bps = (0 if position == len(ks) - 1 or drawn <= 0
