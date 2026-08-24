@@ -212,7 +212,6 @@ class RouterSession:
         #: costs -- a browser tab would rather re-warm in the background than
         #: fail a quote on a dropped batch.
         self.unreadable = 0
-        self._models = None
         #: The gate's own closure, kept so `refresh` can re-run it under the
         #: miss loop rather than bare.
         self._rebuild_models = None
@@ -931,7 +930,6 @@ class RouterSession:
         from .vault_params import build_exact_vaults
 
         measured = self.client
-        held: dict = {}
 
         def build(block: int = 0, cache=None):
             cache = self.verdicts if cache is None else cache
@@ -967,10 +965,9 @@ class RouterSession:
         # that has happened over the wire -- so the loop runs against a
         # throwaway cache and the verdicts are earned once, afterwards.
         await self._settle(lambda: build(cache=ExactCache.from_bytes(self.chain.chain_id, None)))
-        held["models"] = build()
+        models = build()
         self._rebuild_models = build
-        exact, two, tri, vaults, lp, crypto_lp = held["models"]
-        self._models = held["models"]
+        exact, two, tri, vaults, lp, crypto_lp = models
         # No probe memoisation under this.  `probe_cache` exists to avoid round
         # trips and there are none here -- and it also memoises *route*
         # verifications, which is wrong for a route that uses one pool twice:
