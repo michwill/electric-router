@@ -28,11 +28,19 @@ class Rpc:
         return {"number": hex(101), "timestamp": "0x1", "gasLimit": "0x1"}
 
 
+class Stats:
+    def __init__(self) -> None:
+        self.unreadable = 0
+        self.errors: list = []
+
+
 class Evm:
     """Records what ran under the miss loop, and what ran outside it."""
 
-    def __init__(self, log: list) -> None:
+    def __init__(self, log: list, short: int = 0) -> None:
         self.log = log
+        self.stats = Stats()
+        self.short = short
 
     def repin(self, block: int) -> None:
         self.log.append(("repin", block))
@@ -42,7 +50,9 @@ class Evm:
         # something: the rebuild must tolerate being run more than once.
         self.log.append(("fill", block))
         run_it()
-        return run_it()
+        result = run_it()
+        self.stats.unreadable += self.short
+        return result
 
 
 class Client:
@@ -54,10 +64,11 @@ class Client:
         return 1
 
 
-def session_at_block(log: list) -> sess.RouterSession:
+def session_at_block(log: list, short: int = 0) -> sess.RouterSession:
     made = sess.RouterSession.__new__(sess.RouterSession)
     made.rpc = Rpc()
-    made.evm = Evm(log)
+    made.evm = Evm(log, short)
+    made.unreadable = 0
     made.client = Client(log)
     made.block = 100
     made.chain = type("Chain", (), {"chain_id": 1})()
@@ -95,6 +106,23 @@ def test_the_rebuild_runs_under_the_miss_loop():
     for _, at, throwaway in rebuilds:
         assert at == 101, "the rebuild reads the new block, not the old one"
         assert throwaway, "verdicts earned against incomplete state stick"
+
+
+def test_what_a_refresh_could_not_read_is_counted_not_refused():
+    """A dropped batch is common in a browser tab, and the caller decides.
+
+    Failing the quote would be worse than the drift, so the count is offered
+    and nothing is refused: the frontend re-warms in the background after a run
+    of them.
+    """
+    log: list = []
+    clean = session_at_block(log)
+    run(clean.refresh())
+    assert clean.unreadable == 0
+
+    short = session_at_block(log, short=3)
+    run(short.refresh())
+    assert short.unreadable == 3, "a slot still on the old block's value is news"
 
 
 def test_a_session_that_never_built_models_still_refreshes():

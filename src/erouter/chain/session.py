@@ -206,6 +206,12 @@ class RouterSession:
         #: solver that they had failed to, when in fact they were already on
         #: the one they wanted.
         self.solver = "rust" if accel_in_use() else "python"
+        #: What the last `refresh` could not read: those slots still hold the
+        #: previous block's value, or none at all.  Counted rather than
+        #: refused, because the caller is the one that knows what a stale word
+        #: costs -- a browser tab would rather re-warm in the background than
+        #: fail a quote on a dropped batch.
+        self.unreadable = 0
         self._models = None
         #: The gate's own closure, kept so `refresh` can re-run it under the
         #: miss loop rather than bare.
@@ -290,6 +296,7 @@ class RouterSession:
         block = int(header["number"], 16)
         if block == self.block:
             return block
+        short = self.evm.stats.unreadable
         self.block = block
         self.evm.repin(block)
         self._set_block_env(header)
@@ -312,6 +319,7 @@ class RouterSession:
         # A preparation is a function of (universe, block); the pair has to be
         # re-prepared before the next quote is comparable to the last.
         self.prepared = None
+        self.unreadable = self.evm.stats.unreadable - short
         return block
 
     # -------------------------------------------------------------- the pair
