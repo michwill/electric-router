@@ -32,6 +32,7 @@ import numpy as np
 from . import accel as _accel
 from .graph import ArcArrays, component_of, laplacian
 from .linalg import DEFAULT_SOLVER, SingularSystem
+from .seed import build_adjacency, spfa
 
 # §9.2 absolute, never relative: rho legitimately passes through zero, and this
 # is far below any real fee (1e-9 is 1e-5 bp).
@@ -138,6 +139,25 @@ class Solution:
         with np.errstate(divide="ignore", invalid="ignore"):
             impact = np.where(g.G > 0, self.psi**2 / (2 * g.G), 0.0)
         return float(np.sum(g.eps * self.psi)), float(np.sum(impact))
+
+
+def _reconnect(g, src: int, dst: int, allowed: np.ndarray, adj) -> np.ndarray | None:
+    """Arc indices of a directed `src -> dst` path over `allowed`, or None.
+
+    Directed, because that is what the demand needs.  `component_of` reads the
+    active set undirectedly -- correct for grounding the Laplacian, which has no
+    orientation -- but a flow is `psi >= 0` along `tau -> sig`, so carrying `Psi`
+    takes a path that runs the right way.
+
+    Cheapest by `eps` for the same reason §5.3 uses it: any connecting path
+    restores feasibility, and a cheap one costs fewer pivots to correct.
+    """
+    banned = set(np.flatnonzero(~allowed).tolist())
+    found = spfa(g, src, dst, adj, banned_arcs=banned)
+    if found.negative_cycle:
+        shifted = g.eps - min(0.0, float(g.eps.min()))
+        found = spfa(g, src, dst, adj, banned_arcs=banned, weights=shifted)
+    return np.asarray(found.arcs, dtype=np.int64) if found.found else None
 
 
 def _why_unreachable(g, src: int, dst: int, Psi: float) -> str:
@@ -259,6 +279,12 @@ def active_set_solve(
     cycles = 0
 
     reseeded = False
+    adjacency = None
+    # Arcs this solve has sent back to zero, and the ones a repair has since put
+    # back.  Each arc is worth one turn back at most: that bounds the repairs at
+    # `2m` and is what makes the loop below terminate.
+    sent_to_zero = np.zeros(m, bool)
+    readmitted = np.zeros(m, bool)
     # `eps` the pivot rule actually sees.  Identical to the graph's until a cycle
     # forces a perturbation, and rebound to a shifted copy after.
     eps = g.eps
@@ -274,9 +300,32 @@ def active_set_solve(
             # which is a starting point, not a verdict.  §5.4 admits every arc at
             # initialisation for exactly this reason; doing it again here is the
             # same step, taken when a pivot rather than the caller emptied the
-            # set.  Two ways in: a stale warm start whose single arc caps out at
-            # a larger size, and a cheap capped arc in parallel with a dearer
-            # open one, which strands itself the moment the cheap one fills.
+            # set.  Three ways in: a stale warm start whose single arc caps out
+            # at a larger size, a cheap capped arc in parallel with a dearer open
+            # one which strands itself the moment the cheap one fills, and the
+            # drop rule walking off the end of the graph.
+            #
+            # The last is why the repair admits a *path* rather than restarting,
+            # which only rebuilds what a deterministic descent began from.  Below
+            # a certain size `psi` is circulation around negative-`eps` loops --
+            # `G |eps|`, which knows nothing of `Psi` -- so hundreds of arcs read
+            # negative, leave one per pivot, and the last one across the src/dst
+            # cut points the wrong way and carries exactly `-Psi`.  Measured on
+            # mainnet wstETH -> trUSD at 25,825,568: 0.1 failed, 0.2 and 1 routed.
+            # Arcs the descent has not dropped yet first; a dropped one gets a
+            # single turn back, so the repair cannot trade places with the pivot
+            # before it, and the token's only way out is still reachable.
+            if adjacency is None:
+                adjacency = build_adjacency(g.tau, g.sig, n)
+            open_arcs = ~forbidden & ~U & ~readmitted
+            path = _reconnect(g, src, dst, open_arcs & ~sent_to_zero, adjacency)
+            if path is None:
+                path = _reconnect(g, src, dst, open_arcs, adjacency)
+            if path is not None and not A[path].all():
+                A[path] = True
+                readmitted[path[sent_to_zero[path]]] = True
+                pivots += 1
+                continue
             candidates = ~forbidden & ~U
             if not reseeded and candidates.any() and not np.array_equal(candidates, A):
                 A, reseeded = candidates.copy(), True
@@ -394,7 +443,9 @@ def active_set_solve(
 
         negative = A & (psi < -tol)
         if negative.any():
-            A[pick(negative, -psi)] = False
+            leaving = pick(negative, -psi)
+            A[leaving] = False
+            sent_to_zero[leaving] = True
             pivots += 1
             continue
 

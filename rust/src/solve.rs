@@ -23,6 +23,9 @@ use std::collections::HashSet;
 
 pub const TOL: f64 = 1e-9;
 pub const CYCLE_PATIENCE: u32 = 3;
+/// Depth of the path that repairs a cut active set -- `seed.py`'s `MAX_HOPS`,
+/// since it is that search this borrows.
+pub const RECONNECT_HOPS: usize = 8;
 
 /// Why a solve stopped, in the same words the Python uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,6 +311,13 @@ pub fn active_set_solve(
     let mut use_bland = false;
     let mut cycles = 0u32;
     let mut reseeded = false;
+    // Built on the first cut and kept; most solves never take one.
+    let mut adjacency: Option<crate::seed::Adjacency> = None;
+    // Arcs this solve has sent back to zero, and the ones a repair has since
+    // put back.  Each arc is worth one turn back at most, which bounds the
+    // repairs and is what makes the loop terminate.
+    let mut sent_to_zero = vec![false; m];
+    let mut readmitted = vec![false; m];
     let mut chol_failures = 0u32;
     let mut keep_changes = 0u32;
     let mut refits = 0u32;
@@ -328,7 +338,55 @@ pub fn active_set_solve(
         component_of(dst, arcs, &active, &mut comp);
         if !comp[src] && psi_total != 0.0 {
             // A disconnected active set is a starting point, not a verdict:
-            // the arc joining src to dst may simply have saturated into `U`.
+            // the arc joining src to dst may simply have saturated into `U` --
+            // or the drop rule walked off the end of the graph.  Below a certain
+            // size `psi` is circulation around negative-`eps` loops, which knows
+            // nothing of `Psi`, so hundreds of arcs read negative and leave one
+            // per pivot until the last one across the src/dst cut points the
+            // wrong way and carries exactly `-Psi`.  Admit what the demand needs
+            // -- one directed path.  See `core/solve.py`, which this mirrors
+            // pivot for pivot.
+            if adjacency.is_none() {
+                adjacency = Some(crate::seed::build_adjacency(arcs.tau, n));
+            }
+            let adj = adjacency.as_ref().unwrap();
+            let free_nodes = vec![false; n];
+            // Arcs the descent has not dropped yet first; one it has gets a
+            // single turn back, which is still enough when the arc it dropped
+            // was the token's only way out.
+            let mut found = None;
+            for recycle in [false, true] {
+                let banned: Vec<bool> = (0..m)
+                    .map(|p| forbid[p] || upper[p] || readmitted[p]
+                             || (!recycle && sent_to_zero[p]))
+                    .collect();
+                let mut path = crate::seed::spfa(
+                    arcs.tau, arcs.sig, arcs.eps, n, adj, src, dst,
+                    &banned, &free_nodes, RECONNECT_HOPS);
+                if !path.negative_cycle.is_empty() {
+                    let shift = arcs.eps.iter().copied()
+                        .fold(f64::INFINITY, f64::min).min(0.0);
+                    let shifted: Vec<f64> = arcs.eps.iter().map(|e| e - shift).collect();
+                    path = crate::seed::spfa(
+                        arcs.tau, arcs.sig, &shifted, n, adj, src, dst,
+                        &banned, &free_nodes, RECONNECT_HOPS);
+                }
+                if path.found {
+                    found = Some(path.arcs);
+                    break;
+                }
+            }
+            if let Some(path) = found.filter(|p| p.iter().any(|&a| !active[a])) {
+                for &p in &path {
+                    active[p] = true;
+                    if sent_to_zero[p] {
+                        readmitted[p] = true;
+                    }
+                }
+                pending = None;
+                pivots += 1;
+                continue;
+            }
             let mut candidates = vec![false; m];
             let mut any = false;
             for i in 0..m {
@@ -580,6 +638,7 @@ pub fn active_set_solve(
         if any {
             let j = if use_bland { bland(&mask) } else { steepest(&mask, &score) };
             active[j] = false;
+            sent_to_zero[j] = true;
             pending = Some((j, false));
             pivots += 1;
             continue;
