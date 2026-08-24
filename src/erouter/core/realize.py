@@ -59,6 +59,10 @@ class RealizedLeg:
     #: `theta` after it rescales the amounts.  Without it `theta` describes the
     #: flow the arc was realised at rather than the one being quoted.
     reserve_in: int = 0
+    #: The most this leg's arc will take, in `token_in` wei.  The solve honours
+    #: it; everything that re-weights legs afterwards works from quotes, and a
+    #: view does not have to refuse what the pool will.
+    cap_in: float = math.inf
     #: The pool's TVL, for `route_conductance`.  Deliberately the pool's own
     #: size rather than anything fitted: it is what lets a topology be weighed
     #: without going through the split the model happened to give it.
@@ -138,6 +142,18 @@ class RealizedRoute:
     @property
     def pools_used(self) -> list[str]:
         return sorted({rl.target.lower() for rl in self.legs if not rl.is_conversion})
+
+    @property
+    def over_capacity(self) -> RealizedLeg | None:
+        """The first leg carrying more than its arc will take, if any.
+
+        Read rather than stored, so it describes the amounts as they stand
+        after whatever last re-weighted them.
+        """
+        for realized in self.legs:
+            if realized.amount_in > realized.cap_in:
+                return realized
+        return None
 
 
 def topological_nodes(tau: np.ndarray, sig: np.ndarray, n_nodes: int) -> list[int]:
@@ -676,6 +692,8 @@ def _arc_leg(
         amount_in=amount_in,
         amount_out=amount_out,
         share_of_node=share,
+        cap_in=(arc.cap * 10 ** arc.decimals_in
+                if math.isfinite(arc.cap) else math.inf),
         arc_id=arc.id,
         pool_name=arc.note,
         eps=arc.eps,

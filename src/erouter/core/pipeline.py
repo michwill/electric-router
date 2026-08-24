@@ -1443,9 +1443,17 @@ def _scout_wider(
 
     candidate = entrants[best_found.index]
     best_value = best_gross
+    held = [rl.leg for rl in candidate.route.legs]
     for realized, leg in zip(candidate.route.legs, best_found.legs, strict=True):
         realized.leg = leg
     candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)
+    # The re-split works from quotes, which do not refuse what the pool will.
+    if candidate.route.over_capacity is not None:
+        for realized, leg in zip(candidate.route.legs, held, strict=True):
+            realized.leg = leg
+        candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)
+        result.counters["scout_over_capacity"] = 1
+        return
     candidate.verified_out = int(best_value)
     # The split pass runs on this route next and would sample the very arcs
     # the scout just sampled.  Hand them over: same block, same ladders, and
@@ -1497,11 +1505,18 @@ def _optimise_split(
         result.counters["split_curve_error_bp"] = round(report.curve_error_bp, 3)
     if not report.improved:
         return
+    held = [rl.leg for rl in route.legs]
     for realized, leg in zip(route.legs, tuned, strict=True):
         realized.leg = leg
     # The modelled per-leg amounts described the old split; re-walk so the
     # diagram and the JSON report the flow that is actually being quoted.
     route.modelled_out = _forward_simulate(route, nodes)
+    if route.over_capacity is not None:
+        for realized, leg in zip(route.legs, held, strict=True):
+            realized.leg = leg
+        route.modelled_out = _forward_simulate(route, nodes)
+        result.counters["split_over_capacity"] = 1
+        return
     result.verified_out = report.after
     if result.winner is not None:
         result.winner.route = route

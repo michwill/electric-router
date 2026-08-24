@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -50,8 +51,10 @@ def merged_nodes() -> NodeMap:
     return nodes
 
 
-def arc(pool, token_in, token_out, nodes, *, a=1.0, B=1e-9, i=0, j=1, reserve=10**24):
+def arc(pool, token_in, token_out, nodes, *, a=1.0, B=1e-9, i=0, j=1,
+        reserve=10**24, cap=math.inf):
     return PoolArc(
+        cap=cap,
         id=f"{pool}:{i}>{j}",
         pool=pool,
         kind=ArcKind.SWAP_STABLE,
@@ -193,6 +196,39 @@ def test_parallel_split_shares_sum_and_the_last_leg_sweeps():
     assert route.legs[0].leg.bps == 7000
     assert route.legs[1].leg.bps == 0  # remainder, so no dust is stranded
     assert route.legs[0].amount_in + route.legs[1].amount_in == 1000 * 10**6
+
+
+def test_a_leg_past_its_arc_cap_is_visible_on_the_route():
+    """The solve honours a cap; everything that re-weights afterwards does not.
+
+    Reported from the frontend: 4,888 USDC to sDOLA minted USD3, a vault whose
+    issuance throttle had 39.50 USDC left, and the scout put 4,887 through it
+    because `previewDeposit` quotes any size.  The arc knew all along -- so the
+    leg carries the arc's cap and the route can say when a re-split has
+    overrun it.
+    """
+    nodes = base_nodes()
+    capped = arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, cap=40.0)
+    open_arc = arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1)
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        [capped, open_arc], np.array([30.0, 970.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert route.legs[0].cap_in == 40.0 * 10**6, "the cap rides on the leg, in wei"
+    assert route.over_capacity is None, "30 of a 40 cap is fine"
+
+    # Re-weight it the way the scout does, and the route says so.
+    route.legs[0].leg = replace(route.legs[0].leg, bps=9000)
+    _forward_simulate(route, nodes)
+
+    over = route.over_capacity
+    assert over is not None, "900 through an arc capped at 40 has to be visible"
+    assert over.target == POOL_A
+    assert over.amount_in == 900 * 10**6
 
 
 def test_the_share_shown_follows_a_retuned_split():

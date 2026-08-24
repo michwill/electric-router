@@ -177,6 +177,15 @@ def verify(
                 candidate.status = "reverted"
                 candidate.note = candidate.note or "quoter returned 0"
                 continue
+            # A view does not have to refuse what the pool will: a vault past
+            # its deposit room quotes the ratio quite happily and then reverts.
+            over = candidate.route.over_capacity
+            if over is not None:
+                candidate.status = "reverted"
+                candidate.note = (f"{over.pool_name or over.target[:10]} takes at "
+                                  f"most {over.cap_in:.0f} and is handed "
+                                  f"{over.amount_in}")
+                continue
             candidate.verified_out = int(value)
             candidate.status = "ok"
 
