@@ -207,6 +207,9 @@ class RouterSession:
         #: the one they wanted.
         self.solver = "rust" if accel_in_use() else "python"
         self._models = None
+        #: The gate's own closure, kept so `refresh` can re-run it under the
+        #: miss loop rather than bare.
+        self._rebuild_models = None
         self._quoter = ""
         self._overrides: dict | None = None
 
@@ -298,6 +301,13 @@ class RouterSession:
         client = self.client
         refresh_at = getattr(client, "refresh_at", None)
         if refresh_at is not None:
+            # Under the miss loop, for the reason the warm gate runs under it:
+            # this reads storage, and a slot the EVM does not hold reads zero,
+            # which the rebuilt model then freezes.  A refreshed session drifted
+            # from a cold one by up to 0.83% that way, and never came back.
+            if self._rebuild_models is not None:
+                await self._settle(lambda: self._rebuild_models(
+                    block, cache=ExactCache.from_bytes(self.chain.chain_id, None)))
             refresh_at(block)
         # A preparation is a function of (universe, block); the pair has to be
         # re-prepared before the next quote is comparable to the last.
@@ -946,6 +956,7 @@ class RouterSession:
         # throwaway cache and the verdicts are earned once, afterwards.
         await self._settle(lambda: build(cache=ExactCache.from_bytes(self.chain.chain_id, None)))
         held["models"] = build()
+        self._rebuild_models = build
         exact, two, tri, vaults, lp, crypto_lp = held["models"]
         self._models = held["models"]
         # No probe memoisation under this.  `probe_cache` exists to avoid round
