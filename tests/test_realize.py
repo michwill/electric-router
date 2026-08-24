@@ -10,6 +10,7 @@ import pytest
 from erouter.core.nodes import Conversion, ConversionKind, NodeMap, rescale
 from erouter.core.realize import (
     RealizationError,
+    _forward_simulate,
     check_one_arc_per_pool,
     realize,
     topological_nodes,
@@ -192,6 +193,39 @@ def test_parallel_split_shares_sum_and_the_last_leg_sweeps():
     assert route.legs[0].leg.bps == 7000
     assert route.legs[1].leg.bps == 0  # remainder, so no dust is stranded
     assert route.legs[0].amount_in + route.legs[1].amount_in == 1000 * 10**6
+
+
+def test_the_share_shown_follows_a_retuned_split():
+    """The diagram's percentage has to describe the amounts beside it.
+
+    `_optimise_split` retunes `bps` and re-walks the legs, so a share left at
+    the solve's `psi` names the split before tuning.  Seen on mainnet crvUSD ->
+    sDOLA at $2M: a leg drawing 54.7% of its node printed 98.5%.
+    """
+    nodes = base_nodes()
+    arcs = [
+        arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0),
+        arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1),
+    ]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+
+    route = realize(
+        arcs, np.array([700.0, 300.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert route.legs[0].share_of_node == pytest.approx(0.7)
+
+    # Retune, as the split optimiser does, and re-walk.
+    route.legs[0].leg = replace(route.legs[0].leg, bps=2500)
+    _forward_simulate(route, nodes)
+
+    assert route.legs[0].share_of_node == pytest.approx(0.25)
+    assert route.legs[1].share_of_node == pytest.approx(0.75)
+    for realized in route.legs:
+        assert realized.share_of_node == pytest.approx(
+            realized.amount_in / (1000 * 10**6))
 
 
 def test_mid_path_branch_produces_two_groups():

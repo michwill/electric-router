@@ -795,6 +795,10 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
         take = available if realized.leg.bps == 0 else min(base * realized.leg.bps // BPS, available)
         if take <= 0:
             continue
+        # Same reason `theta` is refreshed below: the split optimiser retunes
+        # `bps` and re-walks, and a share left at the solve's `psi` then names
+        # the split before tuning.
+        realized.share_of_node = take / base if base > 0 else 1.0
         if realized.is_conversion:
             conversion = nodes.conversion.get(realized.token_in.lower()) or nodes.conversion.get(
                 realized.token_out.lower()
