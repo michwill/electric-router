@@ -34,18 +34,26 @@ def word(v: int) -> Answer:
     return Answer(Status.VALUE, int(v).to_bytes(32, "big"))
 
 
-class FakeVaultChain:
-    """Answers totalAssets/totalSupply and the two preview calls."""
+#: What an unthrottled vault answers `maxDeposit` with, and most of them do.
+UNLIMITED = 2**256 - 1
 
-    def __init__(self, deposit, redeem):
+
+class FakeVaultChain:
+    """Answers totalAssets/totalSupply, maxDeposit, and the two previews."""
+
+    def __init__(self, deposit, redeem, room: int = UNLIMITED):
         self.deposit, self.redeem = deposit, redeem
+        self.room = room
 
     def raw(self, calls):
         out = []
         for call in calls:
             sig = bytes(call.data[:4])
             if len(call.data) == 4:                      # a no-argument getter
-                out.append(word(A if not out or len(out) % 2 == 0 else S))
+                out.append(word(A if len(out) % 3 == 0 else S))
+                continue
+            if sig == _selector("maxDeposit(address)"):
+                out.append(word(self.room))
                 continue
             x = int.from_bytes(call.data[4:36], "big")
             # `previewDeposit` and `previewRedeem` differ in their selector; the
@@ -54,15 +62,19 @@ class FakeVaultChain:
         return out
 
 
-_DEPOSIT_SEL = None
+_SELECTORS: dict[str, bytes] = {}
+
+
+def _selector(signature: str) -> bytes:
+    from erouter.core.codec import encode_call
+    if signature not in _SELECTORS:
+        args = (0,) if "uint256" in signature else ("0x" + "00" * 20,)
+        _SELECTORS[signature] = bytes(encode_call(signature, *args)[:4])
+    return _SELECTORS[signature]
 
 
 def _is_deposit(sig: bytes) -> bool:
-    from erouter.core.codec import encode_call
-    global _DEPOSIT_SEL
-    if _DEPOSIT_SEL is None:
-        _DEPOSIT_SEL = bytes(encode_call("previewDeposit(uint256)", 0)[:4])
-    return sig == _DEPOSIT_SEL
+    return sig == _selector("previewDeposit(uint256)")
 
 
 def test_the_ratio_is_exact_at_every_size():
@@ -109,3 +121,35 @@ def test_a_vault_that_reproduces_neither_is_left_to_the_probes():
     chain = FakeVaultChain(lambda x: x * S // A + 7, lambda x: x * A // S + 7)
     out = build_exact_vaults([VAULT], chain)
     assert len(out) == 0 and out.checked == 2
+
+
+def test_a_throttle_the_preview_ignores_is_carried_anyway():
+    """`previewDeposit` answers any size; the vault will not take any size.
+
+    Reported from the frontend: 4,888 USDC to sDOLA quoted through USD3, a $75M
+    vault whose issuance throttle had 39.50 USDC of room left.  The arc was
+    capped correctly and the solver honoured it, but every stage that re-weights
+    legs afterwards reads the quote, and the quote said the deposit was fine.
+    The route was offered and reverted with "ERC4626: deposit more than max".
+    """
+    room = 39 * 10**18
+    chain = FakeVaultChain(lambda x: x * S // A, lambda x: x * A // S, room=room)
+    out = build_exact_vaults([VAULT], chain)
+
+    deposit = out.get(VAULT, DEPOSIT)
+    assert deposit.cap == room
+    assert deposit.convert(room) == room * S // A, "under the throttle it is exact"
+    assert deposit.convert(room + 1) == 0, "over it, there is no quote to give"
+
+    # `maxRedeem` is per-owner and answers zero for an address holding no
+    # shares, so the exit side is never capped from a probe address.
+    assert out.get(VAULT, REDEEM).cap == 0
+
+
+def test_an_unthrottled_vault_carries_no_cap():
+    """Most answer `2**256-1`, which is a sentinel and not a limit."""
+    chain = FakeVaultChain(lambda x: x * S // A, lambda x: x * A // S)
+    out = build_exact_vaults([VAULT], chain)
+
+    assert out.get(VAULT, DEPOSIT).cap == 0
+    assert out.get(VAULT, DEPOSIT).convert(10**30) == 10**30 * S // A

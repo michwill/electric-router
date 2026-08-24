@@ -30,16 +30,24 @@ class VaultError(ArithmeticError):
 
 @dataclass(frozen=True, slots=True)
 class Vault:
-    """One direction of one vault: `out = dx * num // den`."""
+    """One direction of one vault: `out = dx * num // den`.
+
+    `cap` is what the vault will actually take, and 0 means no limit.  The
+    preview call does not apply it -- it answers the ratio for any size, which
+    is why a route can be quoted through a throttle it cannot pass.
+    """
 
     num: int
     den: int
+    cap: int = 0
 
     def convert(self, dx: int) -> int:
         if dx <= 0:
             return 0
         if self.den <= 0 or self.num <= 0:
             raise VaultError("empty vault")
+        if self.cap and dx > self.cap:
+            return 0
         return dx * self.num // self.den
 
     # The router calls every model the same way, so a vault answers `get_dy`

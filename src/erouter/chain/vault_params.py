@@ -12,7 +12,7 @@ coincidence with no room left to hide.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from ..core.codec import encode_call
 from ..core.transport import Call
@@ -26,6 +26,14 @@ CHECK_SIZES = (10**15, 10**18, 5 * 10**20, 10**23)
 
 DEPOSIT = ArcKind.ERC4626_DEPOSIT
 REDEEM = ArcKind.ERC4626_REDEEM
+
+#: Whose deposit room to ask about, matching `wrappers.build_stake_arcs`.
+DEPOSITOR = "0x" + "11" * 20
+
+#: Above this a `maxDeposit` is a sentinel rather than a limit -- most vaults
+#: answer 2**256-1 -- and carrying it as a cap would only cost an integer
+#: comparison per quote.
+UNCAPPED = 2**255
 
 
 @dataclass(slots=True)
@@ -52,7 +60,8 @@ def build_exact_vaults(addresses, client, *, quiet: bool = True) -> ExactVaults:
 
     meta = client.raw([c for a in wanted for c in (
         Call(a, encode_call("totalAssets()")),
-        Call(a, encode_call("totalSupply()")))])
+        Call(a, encode_call("totalSupply()")),
+        Call(a, encode_call("maxDeposit(address)", DEPOSITOR)))])
 
     probes: list[Call] = []
     for a in wanted:
@@ -62,7 +71,7 @@ def build_exact_vaults(addresses, client, *, quiet: bool = True) -> ExactVaults:
     per = 2 * len(CHECK_SIZES)
 
     for k, address in enumerate(wanted):
-        assets, supply = meta[2 * k: 2 * k + 2]
+        assets, supply, room = meta[3 * k: 3 * k + 3]
         if not (assets.ok and supply.ok):
             out.rejected.append((address, "totalAssets/totalSupply unreadable"))
             continue
@@ -89,6 +98,13 @@ def build_exact_vaults(addresses, client, *, quiet: bool = True) -> ExactVaults:
                 continue
             for model in variants[kind]:
                 if all(model.convert(x) == q.uint() for x, q in points):
+                    # After the check, never during it: the ratio has to
+                    # reproduce `previewDeposit`, which answers any size, and a
+                    # capped model would fail its own check at the top rungs.
+                    # Deposits only -- `maxRedeem` is per-owner and answers zero
+                    # for an address holding no shares.
+                    if kind is DEPOSIT and room.ok and room.uint() < UNCAPPED:
+                        model = replace(model, cap=room.uint())
                     out.by_key[(address, kind)] = model
                     break
             else:
