@@ -18,6 +18,7 @@ import time
 
 from ..chain import chains as chain_table
 from ..chain.facts import FactsCache, apply_broken_facts
+from ..core.codec import selector
 from . import config
 from .curve_api import CurveApi, CurveApiError
 from .rpc import JsonRpcTransport, RpcError
@@ -507,6 +508,64 @@ def _recording(client):
     return [Recorder(client), calls]
 
 
+#: The ERC4626 getters the wrapper stages ask a vault, which are answered over
+#: the wire rather than out of the local EVM.
+#:
+#: A vault's share price is a number and not a curve -- `convertToAssets` is
+#: linear, which is the whole reason a vault can be a node merge -- so one read
+#: covers every size and there is nothing to gain by holding its storage.  There
+#: is something to lose: a vault priced off an oracle reads
+#: `s_transmissions[roundId]`, a slot that moves every time the feed posts, and
+#: a slot the cache does not hold sends the *whole* stage back to the wire for a
+#: minute.  Measured on ethereum: of the fourteen accounts whose access lists
+#: move between blocks, thirteen are reached only through these calls, and the
+#: two that are not (Compound's cUSDC and cDAI) move over days rather than
+#: hours.
+VAULT_GETTERS = frozenset(
+    selector(signature) for signature in (
+        "asset()",
+        "totalAssets()",
+        "convertToAssets(uint256)",
+        "convertToShares(uint256)",
+        "previewDeposit(uint256)",
+        "previewRedeem(uint256)",
+        "maxDeposit(address)",
+        "maxRedeem(address)",
+    )
+)
+
+
+class _VaultsOverWire:
+    """Vault getters over the wire, everything else through `inner`.
+
+    Order is preserved, and each side is asked once, so the split costs a round
+    trip rather than a call.
+    """
+
+    def __init__(self, inner, wire):
+        self._inner, self._wire = inner, wire
+
+    def raw(self, batch):
+        batch = list(batch)
+        wire = [k for k, call in enumerate(batch)
+                if bytes(call.data)[:4] in VAULT_GETTERS]
+        if not wire:
+            return self._inner.raw(batch)
+        rest = [k for k in range(len(batch)) if k not in set(wire)]
+        out: list = [None] * len(batch)
+        for k, answer in zip(wire, self._wire.raw([batch[k] for k in wire]),
+                             strict=True):
+            out[k] = answer
+        if rest:
+            for k, answer in zip(rest, self._inner.raw([batch[k] for k in rest]),
+                                 strict=True):
+                out[k] = answer
+        return out
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def _wrapper_signature(nodes, wrappers, stake_arcs) -> str:
     """What the wrapper stages produced, in one comparable string.
 
@@ -875,20 +934,26 @@ def cmd_route(args: argparse.Namespace) -> int:
     live_cache = getattr(evm, "cache", None) or warm_cache
     if evm is not None and live_cache is not None and live_cache.covers_wrappers():
         with _boot("wrappers"):
-            nodes, wrappers, stake_arcs = _build_wrappers(load, chain, reader, facts, client)
+            nodes, wrappers, stake_arcs = _build_wrappers(
+                load, chain, _VaultsOverWire(reader, client), facts, client)
         if _wrapper_signature(nodes, wrappers, stake_arcs) != live_cache.wrapper_sig:
             nodes = None      # the state moved; ask the chain and re-record
     if nodes is None:
         source = client
         if evm is not None:
             recorded = _recording(client)
-            source = recorded[0]
+            # The recorder sits *under* the split, so the vault getters are not
+            # in what gets warmed: they are answered on the wire either way, and
+            # recording them is what put a drifting slot in the coverage check.
+            source = _VaultsOverWire(recorded[0], client)
         # The one startup stage that can take a minute, and the only one that
         # took it in silence -- which reads as a hang, and was reported as one.
         # Said before the wait rather than after it, so it is an explanation
-        # rather than an epitaph.
-        print("  wrappers: the cache does not cover this state; reading vaults "
-              "and tokens over the wire (one-off, up to a minute)", flush=True)
+        # rather than an epitaph.  Coverage is not what failed when it does:
+        # the cache held every slot it had been told to, and the *signature*
+        # said what it built out of them was not this block's wrappers.
+        print("  wrappers: what the cache holds does not rebuild this block; "
+              "reading them over the wire", flush=True)
         started_wrappers = time.monotonic()
         with _boot("wrappers"):
             nodes, wrappers, stake_arcs = _build_wrappers(load, chain, source, facts, client)
