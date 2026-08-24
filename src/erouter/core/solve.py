@@ -142,15 +142,9 @@ class Solution:
 
 
 def _reconnect(g, src: int, dst: int, allowed: np.ndarray, adj) -> np.ndarray | None:
-    """Arc indices of a directed `src -> dst` path over `allowed`, or None.
+    """Cheapest directed `src -> dst` path over `allowed`, or None.
 
-    Directed, because that is what the demand needs.  `component_of` reads the
-    active set undirectedly -- correct for grounding the Laplacian, which has no
-    orientation -- but a flow is `psi >= 0` along `tau -> sig`, so carrying `Psi`
-    takes a path that runs the right way.
-
-    Cheapest by `eps` for the same reason §5.3 uses it: any connecting path
-    restores feasibility, and a cheap one costs fewer pivots to correct.
+    Directed where `component_of` is not: `psi >= 0` runs `tau -> sig`.
     """
     banned = set(np.flatnonzero(~allowed).tolist())
     found = spfa(g, src, dst, adj, banned_arcs=banned)
@@ -280,9 +274,7 @@ def active_set_solve(
 
     reseeded = False
     adjacency = None
-    # Arcs this solve has sent back to zero, and the ones a repair has since put
-    # back.  Each arc is worth one turn back at most: that bounds the repairs at
-    # `2m` and is what makes the loop below terminate.
+    # One turn back per arc, which is what bounds the repair below.
     sent_to_zero = np.zeros(m, bool)
     readmitted = np.zeros(m, bool)
     # `eps` the pivot rule actually sees.  Identical to the graph's until a cycle
@@ -302,19 +294,10 @@ def active_set_solve(
             # same step, taken when a pivot rather than the caller emptied the
             # set.  Three ways in: a stale warm start whose single arc caps out
             # at a larger size, a cheap capped arc in parallel with a dearer open
-            # one which strands itself the moment the cheap one fills, and the
-            # drop rule walking off the end of the graph.
-            #
-            # The last is why the repair admits a *path* rather than restarting,
-            # which only rebuilds what a deterministic descent began from.  Below
-            # a certain size `psi` is circulation around negative-`eps` loops --
-            # `G |eps|`, which knows nothing of `Psi` -- so hundreds of arcs read
-            # negative, leave one per pivot, and the last one across the src/dst
-            # cut points the wrong way and carries exactly `-Psi`.  Measured on
-            # mainnet wstETH -> trUSD at 25,825,568: 0.1 failed, 0.2 and 1 routed.
-            # Arcs the descent has not dropped yet first; a dropped one gets a
-            # single turn back, so the repair cannot trade places with the pivot
-            # before it, and the token's only way out is still reachable.
+            # one, and the drop rule stripping negative arcs until the last one
+            # across the cut points backwards.  Restarting replays a
+            # deterministic descent, so admit a path instead; a dropped arc gets
+            # one turn back, which terminates.
             if adjacency is None:
                 adjacency = build_adjacency(g.tau, g.sig, n)
             open_arcs = ~forbidden & ~U & ~readmitted

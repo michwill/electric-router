@@ -381,20 +381,15 @@ def test_the_drop_rule_cannot_strand_the_source():
 
     Reproduced on mainnet wstETH -> trUSD at block 25,825,568: 0.1 wstETH came
     back "src not connected to dst through the active set" while 0.2 and 1
-    routed through the same pools at the same block.  Below a certain size the
-    flow stops being made of the demand -- circulation around negative-`eps`
-    loops is `G |eps|`, which knows nothing of `Psi` -- so hundreds of arcs read
-    negative, leave one per pivot, and the last arc across the src/dst cut is
-    eventually one pointing the wrong way, carrying exactly `-Psi`.  Dropping it
-    is right.  Giving up afterwards is not: the arcs it needs are sitting at
-    zero waiting to be admitted.
+    routed through the same pools.  At small sizes the flow is circulation, not
+    demand, so arcs read negative and leave one per pivot until the last across
+    the cut points backwards carrying `-Psi`.  Dropping it is right; stopping
+    there is not.
 
-    Five nodes here.  One arc leaves the source and two shut ones come back into
-    it, and conservation (`psi_out = Psi + psi_in`) makes the way out the most
-    negative of the three -- so it leaves first, and the two shut arcs then
-    strand the source behind them.  The answer is the same at every size, since
-    there is only one directed path; the size is what used to decide whether it
-    was found.
+    One arc out of the source and two shut ones back in: conservation makes the
+    way out the most negative of the three, so it leaves first and the shut pair
+    strands the source.  One directed path, so the answer is size-independent --
+    and the size decided whether it was found.
     """
     # 0 -> 2 -> 1 is the route.  3 -> 0 and 4 -> 0 are shut, at eps = 0.2.
     g = make([0, 2, 3, 4, 2, 2], [2, 1, 0, 0, 3, 4],
@@ -404,9 +399,7 @@ def test_the_drop_rule_cannot_strand_the_source():
         report = solve(g, 0, 1, X)
         assert report.solution.feasible, f"X={X}: {report.reason}"
         assert report.solution.psi == pytest.approx([X, X, 0, 0, 0, 0], abs=1e-12)
-        # Relative to `X`, so the smallest size carries the loosest bound; the
-        # absolute residual is 8.7e-15 there.
+        # Relative to `X`: the absolute residual is 8.7e-15 at the smallest.
         assert kcl_residual(g, report.solution, 0, 1, X) < 1e-9
-        # The shut arcs are shut because they cost 20%, not because the solve
-        # ran out of graph -- so the loss is impact alone.
+        # Shut on their 20% fee, not for want of graph, so the loss is impact.
         assert report.solution.objective(g) == pytest.approx(X**2 / 1000.0)

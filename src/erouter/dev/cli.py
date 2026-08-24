@@ -508,19 +508,9 @@ def _recording(client):
     return [Recorder(client), calls]
 
 
-#: The ERC4626 getters the wrapper stages ask a vault, which are answered over
-#: the wire rather than out of the local EVM.
-#:
-#: A vault's share price is a number and not a curve -- `convertToAssets` is
-#: linear, which is the whole reason a vault can be a node merge -- so one read
-#: covers every size and there is nothing to gain by holding its storage.  There
-#: is something to lose: a vault priced off an oracle reads
-#: `s_transmissions[roundId]`, a slot that moves every time the feed posts, and
-#: a slot the cache does not hold sends the *whole* stage back to the wire for a
-#: minute.  Measured on ethereum: of the fourteen accounts whose access lists
-#: move between blocks, thirteen are reached only through these calls, and the
-#: two that are not (Compound's cUSDC and cDAI) move over days rather than
-#: hours.
+#: Answered on the wire, never from the local EVM: a vault's rate is linear, so
+#: one read covers every size, and holding its storage means holding whatever
+#: oracle slot it prices off -- which moves with every round the feed posts.
 VAULT_GETTERS = frozenset(
     selector(signature) for signature in (
         "asset()",
@@ -536,10 +526,9 @@ VAULT_GETTERS = frozenset(
 
 
 class _VaultsOverWire:
-    """Vault getters over the wire, everything else through `inner`.
+    """Vault getters over the wire, the rest through `inner`.
 
-    Order is preserved, and each side is asked once, so the split costs a round
-    trip rather than a call.
+    One batch per side, so the split costs a round trip rather than a call.
     """
 
     def __init__(self, inner, wire):
@@ -942,16 +931,9 @@ def cmd_route(args: argparse.Namespace) -> int:
         source = client
         if evm is not None:
             recorded = _recording(client)
-            # The recorder sits *under* the split, so the vault getters are not
-            # in what gets warmed: they are answered on the wire either way, and
-            # recording them is what put a drifting slot in the coverage check.
+            # Under the split, so the vault getters stay out of what gets warmed.
             source = _VaultsOverWire(recorded[0], client)
-        # The one startup stage that can take a minute, and the only one that
-        # took it in silence -- which reads as a hang, and was reported as one.
-        # Said before the wait rather than after it, so it is an explanation
-        # rather than an epitaph.  Coverage is not what failed when it does:
-        # the cache held every slot it had been told to, and the *signature*
-        # said what it built out of them was not this block's wrappers.
+        # This can take a minute, and took it in silence, which reads as a hang.
         print("  wrappers: what the cache holds does not rebuild this block; "
               "reading them over the wire", flush=True)
         started_wrappers = time.monotonic()

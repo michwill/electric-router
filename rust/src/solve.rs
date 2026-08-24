@@ -23,8 +23,7 @@ use std::collections::HashSet;
 
 pub const TOL: f64 = 1e-9;
 pub const CYCLE_PATIENCE: u32 = 3;
-/// Depth of the path that repairs a cut active set -- `seed.py`'s `MAX_HOPS`,
-/// since it is that search this borrows.
+/// `seed.py`'s `MAX_HOPS`, since the repair borrows that search.
 pub const RECONNECT_HOPS: usize = 8;
 
 /// Why a solve stopped, in the same words the Python uses.
@@ -313,9 +312,7 @@ pub fn active_set_solve(
     let mut reseeded = false;
     // Built on the first cut and kept; most solves never take one.
     let mut adjacency: Option<crate::seed::Adjacency> = None;
-    // Arcs this solve has sent back to zero, and the ones a repair has since
-    // put back.  Each arc is worth one turn back at most, which bounds the
-    // repairs and is what makes the loop terminate.
+    // One turn back per arc, which is what bounds the repair below.
     let mut sent_to_zero = vec![false; m];
     let mut readmitted = vec![false; m];
     let mut chol_failures = 0u32;
@@ -337,23 +334,16 @@ pub fn active_set_solve(
         mark.lap(&mut timings[6]);
         component_of(dst, arcs, &active, &mut comp);
         if !comp[src] && psi_total != 0.0 {
-            // A disconnected active set is a starting point, not a verdict:
-            // the arc joining src to dst may simply have saturated into `U` --
-            // or the drop rule walked off the end of the graph.  Below a certain
-            // size `psi` is circulation around negative-`eps` loops, which knows
-            // nothing of `Psi`, so hundreds of arcs read negative and leave one
-            // per pivot until the last one across the src/dst cut points the
-            // wrong way and carries exactly `-Psi`.  Admit what the demand needs
-            // -- one directed path.  See `core/solve.py`, which this mirrors
-            // pivot for pivot.
+            // A starting point, not a verdict: an arc saturated into `U`,
+            // or the drop rule stripped negatives until the last one across
+            // the cut pointed backwards.  Admit a directed path instead.
+            // Mirrors `core/solve.py` pivot for pivot.
             if adjacency.is_none() {
                 adjacency = Some(crate::seed::build_adjacency(arcs.tau, n));
             }
             let adj = adjacency.as_ref().unwrap();
             let free_nodes = vec![false; n];
-            // Arcs the descent has not dropped yet first; one it has gets a
-            // single turn back, which is still enough when the arc it dropped
-            // was the token's only way out.
+            // Undropped arcs first; a dropped one gets a single turn back.
             let mut found = None;
             for recycle in [false, true] {
                 let banned: Vec<bool> = (0..m)
