@@ -937,8 +937,12 @@ class RouterSession:
             cache = self.verdicts if cache is None else cache
             if block:
                 # Balances are frozen into each model, so a rebuild that kept
-                # the old ones would be self-consistent and wrong.
-                read_balances(self.pools, measured, None, self.chain.chain_id)
+                # the old ones would be self-consistent and wrong.  A pool the
+                # reserve check zeroed at the warm stays out: the check is not
+                # re-run here, and re-reading its balances would put an
+                # insolvent pool back in the universe.
+                read_balances([p for p in self.pools if any(p.balances)],
+                              measured, None, self.chain.chain_id, refresh=True)
             refs, _ = pipeline.build_arcs(self.pools, self.nodes)
             lp_pools = {r.pool.lower() for r in refs
                         if r.kind.is_deposit or r.kind.is_withdraw}

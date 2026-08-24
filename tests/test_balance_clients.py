@@ -36,6 +36,7 @@ class Pool:
     balances: tuple = ()
     held: tuple = ()
     name: str = "pool"
+    pool_type: str = "stableswap"
 
 
 class Client:
@@ -78,3 +79,33 @@ def test_the_pool_still_gets_its_balances():
     read_balances([pool], Client(7), None, None, token_client=Client(9))
     assert [int(b) for b in pool.balances] == [7, 7]
     assert [int(h) for h in pool.held] == [9, 9], "held comes from the coin"
+
+
+def test_a_refresh_reads_balances_a_fill_would_leave_alone():
+    """A rebuild at a new block has to actually re-read them.
+
+    Filling only empty balances is right at the warm and a no-op afterwards, so
+    `refresh_at`'s rebuild froze the warm block's numbers into every model it
+    built.  Measured on mainnet: a session warmed 25 blocks back and refreshed
+    quoted up to 0.71% away from one warmed cold at the same block, always
+    worse, and the EVM under it was provably correct the whole time.
+    """
+    pool = Pool(balances=(1, 1), held=(1, 1))
+
+    read_balances([pool], Client(7), None, None)
+    assert [int(b) for b in pool.balances] == [1, 1], "a fill leaves them alone"
+
+    read_balances([pool], Client(7), None, None, refresh=True)
+    assert [int(b) for b in pool.balances] == [7, 7], "a refresh reads them again"
+
+
+def test_a_llamma_is_left_alone_either_way():
+    """It has no `balances()`; its reserves come from the market feed, and a
+    refresh that probed for them would replace good numbers with none."""
+    pool = Pool(balances=(5, 5), held=(5, 5), pool_type="llamma")
+    asked = Client(7)
+
+    read_balances([pool], asked, None, None, refresh=True)
+
+    assert [int(b) for b in pool.balances] == [5, 5]
+    assert asked.targets == [], "nothing should have been asked at all"

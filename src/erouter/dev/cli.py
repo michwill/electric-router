@@ -1001,8 +1001,11 @@ def cmd_route(args: argparse.Namespace) -> int:
             if block:
                 # Balances are frozen into each model, so a rebuild that kept
                 # the old ones would produce something self-consistent and
-                # wrong -- the failure this whole hook exists to prevent.
-                read_balances(load.pools, measured, None, chain.chain_id)
+                # wrong -- the failure this whole hook exists to prevent.  A
+                # pool the reserve check zeroed stays out; re-reading it would
+                # put an insolvent pool back in the universe.
+                read_balances([p for p in load.pools if any(p.balances)],
+                              measured, None, chain.chain_id, refresh=True)
             # A vault has no curve, so one ratio per direction covers every
             # size; the directions are decided separately, since a vault can
             # quote a deposit exactly and charge on the way out.  Both places a

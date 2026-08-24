@@ -324,7 +324,8 @@ def count_swap_arcs(pools: list[PoolSpec]) -> int:
 def read_balances(pools: list[PoolSpec], client: QuoterClient,
                   report: list[str] | None = None,
                   chain_id: int | None = None,
-                  token_client: QuoterClient | None = None) -> int:
+                  token_client: QuoterClient | None = None,
+                  refresh: bool = False) -> int:
     """Fill in each pool's reserves, in one batched call.
 
     Curve has two spellings of the same getter and the registry does not say
@@ -343,7 +344,10 @@ def read_balances(pools: list[PoolSpec], client: QuoterClient,
 
     # LLAMMA has no `balances()` getter; its reserves come from the market
     # feed, and probing for them would only overwrite good numbers with none.
-    pools = [p for p in pools if not p.balances]
+    # Everything else is filled once -- or read again, when `refresh` says the
+    # block has moved and the numbers on hand are the previous one's.
+    pools = [p for p in pools
+             if p.pool_type != "llamma" and (refresh or not p.balances)]
 
     # Three calls per coin, not two: what the pool says it has, in both spellings,
     # and what the coin says it holds.  The third rides the same batch, so knowing
