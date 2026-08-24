@@ -883,12 +883,21 @@ def cmd_route(args: argparse.Namespace) -> int:
         if evm is not None:
             recorded = _recording(client)
             source = recorded[0]
+        # The one startup stage that can take a minute, and the only one that
+        # took it in silence -- which reads as a hang, and was reported as one.
+        # Said before the wait rather than after it, so it is an explanation
+        # rather than an epitaph.
+        print("  wrappers: the cache does not cover this state; reading vaults "
+              "and tokens over the wire (one-off, up to a minute)", flush=True)
+        started_wrappers = time.monotonic()
         with _boot("wrappers"):
             nodes, wrappers, stake_arcs = _build_wrappers(load, chain, source, facts, client)
         if recorded:
             with _boot("wrappers"):
                 _learn_wrappers(evm, warm_cache, rpc, recorded[1],
                                 _wrapper_signature(nodes, wrappers, stake_arcs))
+        print(f"  wrappers: {len(stake_arcs):,} wrapper arc(s) in "
+              f"{(time.monotonic() - started_wrappers) * 1000:,.0f} ms")
     if evm is not None:
         # The half that needed arcs.  Everything above was answered from the
         # values loaded before it.
