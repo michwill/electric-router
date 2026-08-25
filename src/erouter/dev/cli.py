@@ -404,6 +404,11 @@ def _resolve_token(nodes, symbol_or_address: str, pools, chain=None) -> str:
     native = (_fold(chain.native_symbol), _fold("W" + chain.native_symbol)) if chain else ()
     if not tvl and chain and chain.wrapped and wanted in native:
         return chain.wrapped.lower()
+    # A vault no pool holds has no TVL to rank and no coin to match, so the
+    # universe cannot name it.  The table can.
+    for vault, symbol in (getattr(chain, "unlisted_vaults", ()) if chain else ()):
+        if _fold(symbol) == wanted:
+            return vault.lower()
     if not tvl:
         raise KeyError(f"no token with symbol {symbol_or_address!r} in the universe")
     ranked = sorted(tvl.items(), key=lambda kv: -kv[1])
@@ -531,8 +536,10 @@ class _VaultsOverWire:
     One batch per side, so the split costs a round trip rather than a call.
     """
 
-    def __init__(self, inner, wire):
+    def __init__(self, inner, wire, sent=None):
         self._inner, self._wire = inner, wire
+        #: What went to the wire, for a caller that wants it warmed anyway.
+        self.sent = [] if sent is None else sent
 
     def raw(self, batch):
         batch = list(batch)
@@ -540,6 +547,7 @@ class _VaultsOverWire:
                 if bytes(call.data)[:4] in VAULT_GETTERS]
         if not wire:
             return self._inner.raw(batch)
+        self.sent.extend(batch[k] for k in wire)
         rest = [k for k in range(len(batch)) if k not in set(wire)]
         out: list = [None] * len(batch)
         for k, answer in zip(wire, self._wire.raw([batch[k] for k in wire]),
@@ -588,7 +596,7 @@ def _build_wrappers(load, chain, reader, facts, token_client=None):
     return nodes, wrappers, stake
 
 
-def _learn_wrappers(evm, cache, rpc, calls, signature) -> None:
+def _learn_wrappers(evm, cache, rpc, calls, signature, warm_only=()) -> None:
     """Warm what the wrapper stages read, at slot granularity.
 
     Their access lists are taken over the calls they actually made, because
@@ -605,7 +613,12 @@ def _learn_wrappers(evm, cache, rpc, calls, signature) -> None:
         return
     try:
         needs = evm.list_state(list(calls))
-        evm.warm(list(calls))
+        # Warmed wider than it is recorded.  The vault getters are answered on
+        # the wire, so nothing *needs* their slots -- but the exact models are
+        # built off the local EVM, and a vault it has never loaded reads as
+        # empty and gets no model at all.  Recording them is what put a
+        # drifting oracle round in the coverage check; loading them is not.
+        evm.warm(list(calls) + list(warm_only))
     except Exception:  # a warm that fails is not a failed quote
         return
     cache.learn_wrapper_needs(needs, signature)
@@ -929,10 +942,12 @@ def cmd_route(args: argparse.Namespace) -> int:
             nodes = None      # the state moved; ask the chain and re-record
     if nodes is None:
         source = client
+        vault_calls: list = []
         if evm is not None:
             recorded = _recording(client)
-            # Under the split, so the vault getters stay out of what gets warmed.
-            source = _VaultsOverWire(recorded[0], client)
+            # Under the split, so the vault getters stay out of the *recording*.
+            # They are still warmed; see `_learn_wrappers`.
+            source = _VaultsOverWire(recorded[0], client, sent=vault_calls)
         # This can take a minute, and took it in silence, which reads as a hang.
         print("  wrappers: what the cache holds does not rebuild this block; "
               "reading them over the wire", flush=True)
@@ -942,7 +957,8 @@ def cmd_route(args: argparse.Namespace) -> int:
         if recorded:
             with _boot("wrappers"):
                 _learn_wrappers(evm, warm_cache, rpc, recorded[1],
-                                _wrapper_signature(nodes, wrappers, stake_arcs))
+                                _wrapper_signature(nodes, wrappers, stake_arcs),
+                                warm_only=vault_calls)
         print(f"  wrappers: {len(stake_arcs):,} wrapper arc(s) in "
               f"{(time.monotonic() - started_wrappers) * 1000:,.0f} ms")
     if evm is not None:

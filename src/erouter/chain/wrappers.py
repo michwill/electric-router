@@ -110,6 +110,22 @@ def build_node_map(
         for coin in pool.coins:
             nodes.add_token(coin.address, coin.symbol, coin.decimals)
 
+    # A vault nothing trades, named in the table.  `decimals` is read rather
+    # than declared: it decides every amount through the arc, and a wrong 18
+    # would be off by a factor of a million and still look plausible.
+    unlisted = [(v.lower(), s) for v, s in getattr(chain, "unlisted_vaults", ())
+                if not nodes.has(v.lower())]
+    if unlisted:
+        asked = (token_client or client).raw(
+            [Call(v, encode_call("decimals()")) for v, _ in unlisted])
+        for (vault, symbol), answer in zip(unlisted, asked, strict=True):
+            if answer.status is Status.VALUE and 0 < answer.uint() <= 36:
+                nodes.add_token(vault, symbol, int(answer.uint()))
+            else:
+                report.vaults.append(VaultReport(
+                    token=vault, symbol=symbol,
+                    reason="listed as an unlisted vault and has no decimals()"))
+
     # Aliases first: two addresses over one balance are one node, and merging
     # them before anything else means every later step -- wrappers, vaults,
     # arcs -- sees the consolidated market rather than two halves of it.

@@ -122,6 +122,12 @@ class Chain:
     # a one-way ERC4626_DEPOSIT arc rather than dropped: sUSDe's 7-day cooldown
     # and pufETH's withdrawal queue make them unmergeable, not unroutable.
     oneway_vaults: tuple[str, ...] = ()
+    # `(vault, symbol)` for vaults no pool holds.  Every other vault reaches the
+    # graph as a pool coin, and `mintable_vaults` then finds it by asking each
+    # coin what it mints from; a vault nothing trades is invisible to both, so
+    # its share token is named here and added as a node.  The symbol comes with
+    # it because the quoter caps returndata at 32 bytes and cannot read one.
+    unlisted_vaults: tuple[tuple[str, str], ...] = ()
     extra: dict[str, str] = field(default_factory=dict)
 
 
@@ -143,6 +149,19 @@ STUSDS = "0x99cD4EC3F88a45940936f469E4Bb72a2a701EeB9"
 # cvcrvUSD = 0xcea18a8752bb7e7817f9ae7565328fe415c0f2ca
 # sUSG     = 0xf17d6f98a5c6eaa99d149079984119e0a4ef6900
 PUFETH = "0xD9A442856C234a39a81a089C06451EBAa4306a72"
+# Resupply's savings vault, from their own registry: `getAddress("SREUSD")` on
+# 0x10101010E0C3171D894B71B3400668aF311e7D94.  No pool holds it, so nothing else
+# would put it in the graph.
+#
+# Read the leading digits twice.  The vault and the asset it wraps are both
+# vanity addresses and differ from the second character:
+#
+#     sreUSD  0x557AB1e003951A73c12D16F0fEA8490E39C33C35
+#     reUSD   0x57aB1E0003F623289CD798B1824Be09a793e4Bec
+#
+# `asset()` on the first returns the second, which is the check that tells them
+# apart without counting characters.
+SREUSD = "0x557AB1e003951A73c12D16F0fEA8490E39C33C35"
 CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 
 #: RouteQuoter, at the same address on every chain.
@@ -236,6 +255,7 @@ CHAINS: dict[str, Chain] = {
             (NATIVE_SENTINEL, STETH, "STAKE_NATIVE", STETH, "getCurrentStakeLimit()"),
         ),
         oneway_vaults=(SUSDE, PUFETH),
+        unlisted_vaults=((SREUSD, "sreUSD"),),
     ),
     "arbitrum": Chain(
         name="arbitrum",
