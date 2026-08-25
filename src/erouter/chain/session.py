@@ -31,6 +31,7 @@ import time
 from dataclasses import dataclass, field
 
 from ..core import pipeline
+from ..core.codec import encode_call
 from ..core.pools import PoolSpec, parse_universe, volatile_pools
 from ..core.probe import COARSE_GRID, plan_grid
 from ..core.quoter import QuoterClient
@@ -72,6 +73,11 @@ DRY_RUN_GAS = 3_000_000_000
 #: Curve's sentinel for native ETH, which a route spends through `msg.value`
 #: rather than through an allowance.
 NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
+#: What `_allow` reads before it decides to write, and the value that makes it
+#: return without writing.
+ALLOWANCE = "allowance(address,address)"
+MAX_UINT = (1 << 256) - 1
 
 #: Where the quoter is injected when a chain has none deployed.  Any address
 #: with no code of its own; the same one `dev/boa_host.py` uses.
@@ -139,6 +145,10 @@ class ExecutionPlan:
     #: to have a figure at all before the token is approved.  See
     #: `_estimate_gas`.
     gas_estimated: bool = False
+    #: Whether the call tells the router to top up its own allowances.  Off
+    #: when every pool on the route was already approved, which is the usual
+    #: case and saves a staticcall a leg.  See `_needs_approvals`.
+    set_approvals: bool = True
 
 
 class _Prank:
@@ -416,9 +426,11 @@ class RouterSession:
         # deriving it from that would compound the two.
         min_out = (int(result.route.modelled_out * (1 - min_out_bp / 1e4))
                    if min_out_bp else 0)
+        approvals = await self._needs_approvals(result.route, block)
         call = encode_route(
             result.route,
             receiver=receiver,
+            set_approvals=approvals,
             volatile=volatile_pools(self.pools, self.chain.stables + self.chain.forex),
             quoted_out=result.verified_out,
             naming=NEEDED,
@@ -454,7 +466,61 @@ class RouterSession:
             unbounded=tuple(call.unbounded),
             reverted=reverted,
             gas_estimated=estimated,
+            set_approvals=approvals,
         )
+
+    async def _needs_approvals(self, route, block: int) -> bool:
+        """Whether any leg's pool still lacks the router's allowance.
+
+        `set_approvals` makes the router read an allowance before every leg so
+        that it can grant the ones that are missing.  They are hardly ever
+        missing: the approval is the router's own rather than the caller's, it
+        is infinite, and it is permanent, so the first person through a
+        (token, pool) pair pays for it and everyone after finds it there.
+        What the flag costs the rest of the time is one staticcall per leg --
+        measured at 936 gas each, 1,872 on a two-leg mainnet route whose
+        allowances were both already in place.
+
+        Free to answer here, because the slots are in the local EVM already:
+        this is the same read the router would do, done where it costs nothing.
+
+        True on any doubt -- a call failed, a short answer, anything under the
+        maximum -- because a route sent without an approval it turns out to
+        need reverts, and a thousand gas a leg is not worth that.
+
+        No second opinion from the dry run, though it was tempting: the dry run
+        executes against this same EVM at this same block, so it reads the very
+        slot read here and cannot disagree about it.  Falling back on a revert
+        would only ever fire on an unrelated one -- a caller who does not hold
+        the coin -- and would then price a call that is not the one to send.
+        """
+        pairs = sorted({(realized.token_in.lower(), realized.target.lower())
+                        for realized in route.legs
+                        if realized.token_in.lower() != NATIVE})
+        if not pairs:
+            return False
+        held: dict = {}
+
+        def run():
+            held["got"] = [
+                self.backend.call(ROUTER_ADDRESS, token,
+                                  encode_call(ALLOWANCE, ROUTER_ADDRESS, pool))
+                for token, pool in pairs
+            ]
+            return held["got"]
+
+        await self.evm.fill(self.rpc, run, block=hex(block),
+                            code_for=self._code_for)
+        answers = held.get("got") or []
+        if len(answers) != len(pairs):
+            return True
+        for answer in answers:
+            out = bytes(answer.get("output") or b"")
+            if not answer.get("success") or len(out) < 32:
+                return True
+            if int.from_bytes(out[-32:], "big") != MAX_UINT:
+                return True
+        return False
 
     async def _seed_from_access_list(self, data: bytes, sender: str,
                                      value: int, block: int) -> int:
