@@ -613,12 +613,18 @@ def _learn_wrappers(evm, cache, rpc, calls, signature, warm_only=()) -> None:
         return
     try:
         needs = evm.list_state(list(calls))
-        # Warmed wider than it is recorded.  The vault getters are answered on
-        # the wire, so nothing *needs* their slots -- but the exact models are
-        # built off the local EVM, and a vault it has never loaded reads as
-        # empty and gets no model at all.  Recording them is what put a
-        # drifting oracle round in the coverage check; loading them is not.
-        evm.warm(list(calls) + list(warm_only))
+        # Warmed wider than it is recorded, and only where it has to be.  The
+        # vault getters are answered on the wire, so nothing *needs* their
+        # slots -- but the exact models are built off the local EVM, and a vault
+        # it has never loaded reads as empty and gets no model at all.
+        # Recording them is what put a drifting oracle round in the coverage
+        # check; loading them is not.
+        #
+        # Only the accounts the cache has never seen: warming all of them again
+        # costs an access list apiece and put 48 s back on a cold start that
+        # `4a69cd9` had brought down to six.
+        fresh = [c for c in warm_only if c.to.lower() not in cache.accounts]
+        evm.warm(list(calls) + fresh)
     except Exception:  # a warm that fails is not a failed quote
         return
     cache.learn_wrapper_needs(needs, signature)

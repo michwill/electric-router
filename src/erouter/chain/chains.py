@@ -162,6 +162,11 @@ PUFETH = "0xD9A442856C234a39a81a089C06451EBAa4306a72"
 # `asset()` on the first returns the second, which is the check that tells them
 # apart without counting characters.
 SREUSD = "0x557AB1e003951A73c12D16F0fEA8490E39C33C35"
+# K3's auto-compounding Stability Pool vault over Liquity's BOLD, named in
+# Liquity's own docs.  Its `previewDeposit` is a hair under `1/convertToAssets`,
+# so the exact gate refuses both directions and the arc is probed instead --
+# which is the gate working, not a reason to leave the vault out.
+SBOLD = "0x50Bd66D59911F5e086Ec87aE43C811e0D059DD11"
 CRVUSD = "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E"
 
 #: RouteQuoter, at the same address on every chain.
@@ -255,7 +260,7 @@ CHAINS: dict[str, Chain] = {
             (NATIVE_SENTINEL, STETH, "STAKE_NATIVE", STETH, "getCurrentStakeLimit()"),
         ),
         oneway_vaults=(SUSDE, PUFETH),
-        unlisted_vaults=((SREUSD, "sreUSD"),),
+        unlisted_vaults=((SREUSD, "sreUSD"), (SBOLD, "sBOLD")),
     ),
     "arbitrum": Chain(
         name="arbitrum",
