@@ -242,10 +242,11 @@ fn call_out<H: std::fmt::Debug>(result: ExecutionResult<H>) -> CallOut {
 
 /// A revert's data as something a person can read.
 fn revert_reason(data: &[u8]) -> String {
-    if data.len() >= 4 && data[..4] == ERROR_SELECTOR {
-        if let Some(text) = decode_string(&data[4..]) {
-            return text;
-        }
+    if data.len() >= 4
+        && data[..4] == ERROR_SELECTOR
+        && let Some(text) = decode_string(&data[4..])
+    {
+        return text;
     }
     if data.len() == 36 && data[..4] == PANIC_SELECTOR {
         let code = U256::from_be_slice(&data[4..36]);

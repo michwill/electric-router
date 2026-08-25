@@ -178,23 +178,23 @@ pub fn calibrate(
             break;
         }
     }
-    if let Some(wall) = saturated_at {
-        if x.len() == 1 {
-            return Ok(Calibration {
-                a,
-                b: 0.0,
-                cap: wall,
-                clamped: true,
-                convex_flag: true,
-                flag: Flag::Clamped,
-                drift: 0.0,
-                eta: f64::NAN,
-                split_hint: false,
-                calib_delta: wall,
-                tangent_delta,
-                note: "SATURATED",
-            });
-        }
+    if let Some(wall) = saturated_at
+        && x.len() == 1
+    {
+        return Ok(Calibration {
+            a,
+            b: 0.0,
+            cap: wall,
+            clamped: true,
+            convex_flag: true,
+            flag: Flag::Clamped,
+            drift: 0.0,
+            eta: f64::NAN,
+            split_hint: false,
+            calib_delta: wall,
+            tangent_delta,
+            note: "SATURATED",
+        });
     }
 
     let mut cap = match (saturated_at, cap_in) {
@@ -265,7 +265,7 @@ pub fn calibrate(
     let mut f_at_cap = f_at_cap_in;
     if clamped {
         // §2.3 zero-curvature clamp: the chord, not the tangent.
-        if cap.map_or(true, |c| !c.is_finite()) {
+        if cap.is_none_or(|c| !c.is_finite()) {
             cap = Some(x[x.len() - 1]);
             f_at_cap = Some(y[y.len() - 1]);
             note = "CAP_FROM_LADDER";

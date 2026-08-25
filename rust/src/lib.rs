@@ -9,6 +9,12 @@
 //! is why there is no I/O, no threading, no clock and no BLAS anywhere in it.
 //! See `README.md` for what each of those would break.
 
+// `!(x > 0.0)` rather than `x <= 0.0`, seven times over: the negation rejects
+// NaN and the comparison admits it, and every one of those sites is a guard
+// whose whole job is to refuse one.  Clippy reads it as a style slip; it is the
+// difference between a `Singular` error and a factorisation full of NaN.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 pub mod chol;
 pub mod lu;
 pub mod solve;

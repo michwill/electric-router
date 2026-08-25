@@ -1,15 +1,16 @@
 # One workspace, three crates: the solver (this package), the EVM wrapper, and
-# the wasm-bindgen module that carries both into a browser.  `resolver = "2"`
-# so `default-features = false` on a path dependency really excludes pyo3 when
-# the wasm crate is the one being built.
+# the wasm-bindgen module that carries both into a browser.  The resolver keeps
+# `default-features = false` on a path dependency honest, so pyo3 really is
+# excluded when the wasm crate is the one being built; `3` adds MSRV-aware
+# version picking, which matters because the toolchain here is pinned.
 [workspace]
 members = ["evm", "wasm"]
-resolver = "2"
+resolver = "3"
 
 [package]
 name = "erouter-solve"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "The quadratic-flow router's hot path: active-set QP over a graph Laplacian."
 license = "MIT"
 

@@ -111,6 +111,7 @@ impl Problem {
     /// saves.  The adjacency is built once, on first use.
     #[pyo3(signature = (src, dst, banned_arcs=None, banned_nodes=None,
                         weights=None, max_hops=8))]
+    #[allow(clippy::too_many_arguments)]
     fn shortest_path<'py>(
         &mut self,
         py: Python<'py>,
@@ -297,6 +298,9 @@ fn flags<'py>(py: Python<'py>, v: &[bool]) -> Bound<'py, PyBytes> {
 /// Everything crosses once: the sampled curves, the leg wiring and the
 /// starting weights go in, the optimised weights come back.  The search runs
 /// ~100,000 evaluations inside, none of which touch Python.
+/// One leg's sampled curve as it crosses: `(x, y, slopes, top, rate)`.
+type Curve = (Vec<f64>, Vec<f64>, Vec<f64>, f64, f64);
+
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (curves, src_of, dst_of, static_share, heads, tails, slots,
@@ -304,7 +308,7 @@ fn flags<'py>(py: Python<'py>, v: &[bool]) -> Bound<'py, PyBytes> {
                     sweeps, window, sweep_tol))]
 fn split_ascend<'py>(
     py: Python<'py>,
-    curves: Vec<(Vec<f64>, Vec<f64>, Vec<f64>, f64, f64)>,
+    curves: Vec<Curve>,
     src_of: Vec<usize>,
     dst_of: Vec<usize>,
     static_share: Vec<Option<f64>>,

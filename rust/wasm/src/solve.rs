@@ -51,19 +51,19 @@ impl SolveResult {
     }
     #[wasm_bindgen(getter)]
     pub fn pivots(&self) -> u32 {
-        self.inner.pivots as u32
+        self.inner.pivots
     }
     #[wasm_bindgen(getter, js_name = cholFailures)]
     pub fn chol_failures(&self) -> u32 {
-        self.inner.chol_failures as u32
+        self.inner.chol_failures
     }
     #[wasm_bindgen(getter, js_name = keepChanges)]
     pub fn keep_changes(&self) -> u32 {
-        self.inner.keep_changes as u32
+        self.inner.keep_changes
     }
     #[wasm_bindgen(getter)]
     pub fn refits(&self) -> u32 {
-        self.inner.refits as u32
+        self.inner.refits
     }
     /// Nanoseconds per section of the pivot loop, and all zero unless the
     /// crate was built with `--features bench` -- which the browser build

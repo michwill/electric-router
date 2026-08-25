@@ -213,6 +213,8 @@ fn component_of(root: usize, arcs: &Arcs, active: &[bool], out: &mut [bool]) {
     // branch-free; a queue would be asymptotically better and slower here.
     loop {
         let mut grew = false;
+        // Three parallel arrays indexed together, in the hottest loop there is.
+        #[allow(clippy::needless_range_loop)]
         for p in 0..arcs.m() {
             if !active[p] {
                 continue;
@@ -248,6 +250,7 @@ fn bland(mask: &[bool]) -> usize {
     mask.iter().position(|&on| on).unwrap_or(usize::MAX)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn active_set_solve(
     arcs: &Arcs,
     src: usize,
@@ -527,6 +530,9 @@ pub fn active_set_solve(
                     }
                 }
             }
+            // A let-chain would collapse these, at the cost of putting a
+            // forty-line block expression in the condition.
+            #[allow(clippy::collapsible_if)]
             if factor_l.is_empty() {
                 if let Err(e) = {
                 chol_failures += 1;

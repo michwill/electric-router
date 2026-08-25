@@ -45,9 +45,7 @@ pub struct MemDb {
 
 impl MemDb {
     pub fn insert_account(&mut self, address: Address, nonce: u64, balance: U256, code: Option<Bytecode>) {
-        let mut info = AccountInfo::default();
-        info.nonce = nonce;
-        info.balance = balance;
+        let mut info = AccountInfo { nonce, balance, ..Default::default() };
         if let Some(code) = code {
             info.code_hash = code.hash_slow();
             self.codes.insert(info.code_hash, code.clone());
