@@ -71,6 +71,8 @@ class ElementView:
     conductance_usd: float = 0.0
     flags: list[str] = field(default_factory=list)
     detail: str = ""
+    #: A merge, which is free.  A mint arc shares the kind and is not.
+    is_merge: bool = False
 
     @property
     def is_conversion(self) -> bool:
@@ -167,7 +169,7 @@ def build_diagram(
 
     for k, realized in enumerate(route.legs, start=1):
         flags: list[str] = []
-        if realized.is_conversion:
+        if realized.is_merge:
             flags.append("MERGE")
         if realized.eps < 0:
             flags.append("BATTERY")
@@ -194,6 +196,7 @@ def build_diagram(
                 theta_pct=realized.theta * 100.0,
                 modelled=realized.modelled,
                 flags=flags,
+                is_merge=realized.is_merge,
                 detail=realized.target,
             )
         )

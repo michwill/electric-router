@@ -167,8 +167,8 @@ def _element_block(
     cont = " " if last else glyph["pipe"]
     number = _index(element.index, unicode)
 
-    symbol = glyph["diode"] if not element.is_conversion else "=="
-    resistor = glyph["resistor"] if not element.is_conversion else glyph["dash"] * 6
+    symbol = glyph["diode"] if not element.is_merge else "=="
+    resistor = glyph["resistor"] if not element.is_merge else glyph["dash"] * 6
     if element.is_battery:
         symbol = paint("↯|" if unicode else "!|", GREEN)
 
@@ -190,7 +190,7 @@ def _element_block(
         indent + f"{element.amount_in} {src.symbol} {glyph['arrow']} "
         f"{element.amount_out} {dest.symbol}"
     )
-    if element.is_conversion:
+    if element.is_merge:
         lines.append(indent + paint("zero-resistance node merge, 0 bp", DIM))
     else:
         stats = (

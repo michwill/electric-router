@@ -103,6 +103,16 @@ class RealizedLeg:
     modelled: bool = True
 
     @property
+    def is_merge(self) -> bool:
+        """A leg the *merge* emitted, which is the one that is free.
+
+        `is_conversion` is a kind, and a mint arc into an unmerged vault shares
+        it: same `ERC4626_DEPOSIT`, but a rate, a cap and a gas cost.  Only a
+        merge comes from a `Conversion`, and only those legs have no arc.
+        """
+        return self.is_conversion and not self.arc_id
+
+    @property
     def is_conversion(self) -> bool:
         """A leg the node merge emitted, not a pool the solver chose.
 
@@ -817,15 +827,19 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
         # `bps` and re-walks, and a share left at the solve's `psi` then names
         # the split before tuning.
         realized.share_of_node = take / base if base > 0 else 1.0
+        conversion = None
         if realized.is_conversion:
             conversion = nodes.conversion.get(realized.token_in.lower()) or nodes.conversion.get(
                 realized.token_out.lower()
             )
+        # A merge is a kind *and* a `Conversion`.  A mint arc into a vault
+        # nothing merged shares the kind and has no conversion, and passing its
+        # amount through 1:1 priced a 1.0334 vault at par -- 3.3% out, in the
+        # diagram and in `modelled_out`, while the quote itself was right.
+        if conversion is not None:
             # Direction from the conversion, not from a list of kinds: it names
             # the two itself, so a kind added later cannot be missed.
-            if conversion is None:
-                produced = take
-            elif realized.kind is conversion.forward_kind:
+            if realized.kind is conversion.forward_kind:
                 produced = conversion.to_canonical(take)
             else:
                 produced = conversion.from_canonical(take)
