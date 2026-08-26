@@ -12,6 +12,7 @@ publish = false
 [dependencies]
 erouter-solve = { path = ".." }
 serde_json = "1"
+ruint = "1"
 
 [[bin]]
 name = "proto"

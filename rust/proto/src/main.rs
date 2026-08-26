@@ -12,6 +12,8 @@
 //! Python. Anything this prints that is close to 18 ms means the solve count is
 //! the problem and porting buys nothing.
 
+mod stableswap;
+
 use erouter_solve::cycles::cancel_cycles;
 use erouter_solve::solve::{active_set_solve, Arcs, Options};
 use std::time::Instant;
@@ -104,8 +106,78 @@ fn realize(tau: &[i64], sig: &[i64], psi: &[f64], n_nodes: usize, amount_in: f64
     legs
 }
 
+/// Replay real pools and their Python answers: exactness first, then speed.
+fn pools_bench(path: &str, reps: usize) {
+    use ruint::aliases::U256;
+    let raw = std::fs::read_to_string(path).expect("read pools");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("parse pools");
+    let specs = v.as_array().unwrap();
+
+    let big = |x: &serde_json::Value| -> U256 {
+        x.as_str().unwrap().parse::<U256>().unwrap()
+    };
+    let mut pools = Vec::new();
+    for spec in specs {
+        let pool = stableswap::Pool {
+            balances: spec["balances"].as_array().unwrap().iter().map(big).collect(),
+            rates: spec["rates"].as_array().unwrap().iter().map(big).collect(),
+            amp: big(&spec["amp"]),
+            fee: big(&spec["fee"]),
+            offpeg_fee_multiplier: big(&spec["offpeg_fee_multiplier"]),
+            a_precision: big(&spec["a_precision"]),
+            fee_on_xp: spec["fee_on_xp"].as_bool().unwrap(),
+            subtract_one: spec["subtract_one"].as_bool().unwrap(),
+        };
+        let vectors: Vec<(usize, usize, U256, U256)> = spec["vectors"].as_array()
+            .unwrap().iter().map(|t| (
+                t[0].as_u64().unwrap() as usize,
+                t[1].as_u64().unwrap() as usize,
+                big(&t[2]), big(&t[3]))).collect();
+        pools.push((pool, vectors));
+    }
+
+    let mut n = 0usize;
+    let mut wrong = 0usize;
+    let mut none = 0usize;
+    for (pool, vectors) in &pools {
+        for (i, j, dx, want) in vectors {
+            n += 1;
+            match pool.get_dy(*i, *j, *dx) {
+                Some(got) if got == *want => {}
+                Some(_) => wrong += 1,
+                None => none += 1,
+            }
+        }
+    }
+    println!("{} pools · {} vectors · {} wrong · {} would not converge",
+             pools.len(), n, wrong, none);
+
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let start = Instant::now();
+        let mut sink = U256::ZERO;
+        for (pool, vectors) in &pools {
+            for (i, j, dx, _) in vectors {
+                if let Some(got) = pool.get_dy(*i, *j, *dx) {
+                    sink += got;
+                }
+            }
+        }
+        std::hint::black_box(sink);
+        best = best.min(start.elapsed().as_secs_f64() * 1e6);
+    }
+    println!("rust get_dy: {best:.0} us for {n} calls = {:.2} us each", best / n as f64);
+    println!("python was 9.30 us each");
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("usage: proto <quote.json>");
+    if path.ends_with("pools.json") {
+        let reps: usize = std::env::args().nth(2)
+            .and_then(|s| s.parse().ok()).unwrap_or(20);
+        pools_bench(&path, reps);
+        return;
+    }
     let reps: usize = std::env::args().nth(2)
         .and_then(|s| s.parse().ok()).unwrap_or(20);
     let raw = std::fs::read_to_string(&path).expect("read dump");

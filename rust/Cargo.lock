@@ -1161,6 +1161,7 @@ name = "erouter-proto"
 version = "0.1.0"
 dependencies = [
  "erouter-solve",
+ "ruint",
  "serde_json",
 ]
 
