@@ -172,6 +172,40 @@ class _Prank:
         self.backend.insert_storage(address, hex(int(slot)), hex(int(value)))
 
 
+class _LiveQuotes:
+    """The exact client, with its quotes read from storage rather than models.
+
+    `plan_call` re-reads the accounts its route touches and then dry-runs
+    against them, so a bound priced off models frozen at the warm block is
+    measured on one state and enforced on another.  Every leg whose rate has
+    fallen further than its tolerance since the warm then refuses a route the
+    chain would have settled -- and a leg on the volatile floor is granted
+    5 bp, against a pool that moves a median 3.9 bp in two minutes.
+
+    Only the quote has to move.  A fee is a fraction the models compute better
+    than a probe can and it drifts far more slowly than a rate, so `fee_at` and
+    `fee_floor` stay where they are; `model_for` stays because a pool the route
+    touches twice needs a model that can be carried through its own earlier
+    leg, which no probe can see.
+
+    Delegating is what `ExactQuoterClient.probe` already does for a pool it has
+    no model for, so this asks nothing new of the client underneath.
+    """
+
+    def __init__(self, client) -> None:
+        self._exact = client
+        #: The `QuoterClient` beneath, which runs the quoter inside the local
+        #: EVM -- the storage `_dry_run` is about to execute against.  A
+        #: session with no exact models is already live, and is then itself.
+        self._live = getattr(client, "client", client)
+
+    def probe(self, probes):
+        return self._live.probe(probes)
+
+    def __getattr__(self, name):
+        return getattr(self._exact, name)
+
+
 class SessionError(RuntimeError):
     """A stage that could not be completed, with what stopped it."""
 
@@ -402,8 +436,11 @@ class RouterSession:
         own figures, against a tolerance of 13.9.
 
         So this re-reads exactly the accounts the chosen route touches at the
-        newest block, re-quotes the legs at their final sizes, and encodes
-        against that.
+        newest block, re-quotes the legs at their final sizes *off that same
+        storage*, and encodes against that.  Pricing them from the exact models
+        instead would set the bound on the block the models were built at and
+        enforce it on this one, which refuses executable routes; `_LiveQuotes`
+        is what keeps the two the same state.
 
         `slippage_bp` names the whole route's tolerance instead of letting each
         pool set its own; `core.slippage` divides it between the legs.  The
@@ -422,7 +459,10 @@ class RouterSession:
             [s for s in self.backend.known_slots() if s[0] in touched], at=block)
 
         def price():
-            return pipeline.price_legs(result.route, self.client)
+            # Quotes off the storage just re-read, not off models frozen at the
+            # warm: the bound is enforced by the dry run below, against exactly
+            # this state.  See `_LiveQuotes`.
+            return pipeline.price_legs(result.route, _LiveQuotes(self.client))
 
         await self.evm.fill(self.rpc, price, block=hex(block), code_for=self._code_for)
         # An end-to-end bound *as well as* the per-leg ones, when the caller
