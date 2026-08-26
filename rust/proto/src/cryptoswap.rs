@@ -176,3 +176,94 @@ pub fn get_y(ann: U256, gamma: U256, x: &[U256], d: U256, i: usize, v21: bool)
     }
     Some((y, root))
 }
+
+const A_MULTIPLIER: u64 = 10_000;
+const MAX_ITER: usize = 255;
+
+/// The Newton fallback, and the *whole* of `get_y` for the pools that predate
+/// the optimized math and iterate in the pool itself.
+///
+/// All unsigned, unlike the cubic. Two flags carry the differences between
+/// deployed generations rather than a version number, because that is what
+/// they are: `inline` bounds `K0_i` instead of `frac` and re-checks its own
+/// answer before returning it, and `mul2_over_sum` is the one line Vyper
+/// 0.3.1 and 0.3.3 disagree on -- `1e18 + 2e18 * K0 / g1k0` against
+/// `(1e18 + 2e18 * K0) / g1k0`, the `1e18` having moved inside the division.
+/// Both are live on mainnet.
+pub fn newton_y(ann: U256, gamma: U256, x: &[U256], d: U256, i: usize,
+                lim_mul: U256, inline: bool, mul2_over_sum: bool) -> Option<U256> {
+    let p = precision();
+    let n = U256::from(N_COINS);
+    let one = U256::from(1u64);
+    let x_j = x[1 - i];
+    if x_j.is_zero() || d.is_zero() {
+        return None;
+    }
+
+    let mut y = d * d / (x_j * n * n);
+    let k0_i = p * n * x_j / d;
+    if inline {
+        let lo = e(16) * n;
+        let hi = e(20) * n;
+        if !(k0_i > lo - one && k0_i < hi + one) {
+            return None;
+        }
+    } else if !(k0_i >= e(36) / lim_mul && k0_i <= lim_mul) {
+        return None;
+    }
+
+    let e14 = e(14);
+    let convergence_limit = (x_j / e14).max(d / e14).max(U256::from(100u64));
+    let two = U256::from(2u64);
+
+    for _ in 0..MAX_ITER {
+        let y_prev = y;
+        if y.is_zero() {
+            return None;
+        }
+        let k0 = k0_i * y * n / d;
+        let s = x_j + y;
+        if k0.is_zero() {
+            return None;
+        }
+
+        let g = gamma + p;
+        let g1k0 = if g > k0 { g - k0 + one } else { k0 - g + one };
+
+        let mul1 = p * d / gamma * g1k0 / gamma * g1k0 * U256::from(A_MULTIPLIER) / ann;
+        let mul2 = if mul2_over_sum {
+            (p + two * p * k0) / g1k0
+        } else {
+            p + two * p * k0 / g1k0
+        };
+
+        let mut yfprime = p * y + s * mul2 + mul1;
+        let dyfprime = d * mul2;
+        if yfprime < dyfprime {
+            y = y_prev / two;
+            continue;
+        }
+        yfprime -= dyfprime;
+        let fprime = yfprime / y;
+        if fprime.is_zero() {
+            return None;
+        }
+
+        let mut y_minus = mul1 / fprime;
+        let y_plus = (yfprime + p * d) / fprime + y_minus * p / k0;
+        y_minus += p * s / fprime;
+        y = if y_plus < y_minus { y_prev / two } else { y_plus - y_minus };
+
+        let diff = if y > y_prev { y - y_prev } else { y_prev - y };
+        if diff < convergence_limit.max(y / e14) {
+            if inline {
+                let frac = y * p / d;
+                if !(frac > e(16) - one && frac < e(20) + one) {
+                    return None;
+                }
+            }
+            return Some(y);
+        }
+    }
+    None
+}

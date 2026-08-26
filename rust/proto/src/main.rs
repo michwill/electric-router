@@ -297,8 +297,28 @@ fn gety_bench(path: &str) {
             None => refused += 1,
         }
     }
-    println!("cubic: {} vectors · {wrong} wrong · {refused} refused",
+    println!("cubic : {} vectors · {wrong} wrong · {refused} refused",
              rows.len());
+
+    let rows = v["newton"].as_array().unwrap();
+    let (mut wrong, mut refused, mut shown) = (0usize, 0usize, 0usize);
+    for r in rows {
+        let xp: Vec<U256> = r["xp"].as_array().unwrap().iter().map(big).collect();
+        let want = big(&r["y"]);
+        let lim = U256::from(100u64) * U256::from(10u64).pow(U256::from(18u64));
+        match cryptoswap::newton_y(big(&r["amp"]), big(&r["gamma"]), &xp,
+                                   big(&r["d"]), r["j"].as_u64().unwrap() as usize,
+                                   lim, true,
+                                   r["mul2_over_sum"].as_bool().unwrap()) {
+            Some(got) if got == want => {}
+            Some(got) => {
+                wrong += 1;
+                if shown < 3 { shown += 1; println!("  want {want}\n  got  {got}"); }
+            }
+            None => refused += 1,
+        }
+    }
+    println!("newton: {} vectors · {wrong} wrong · {refused} refused", rows.len());
 }
 
 fn main() {

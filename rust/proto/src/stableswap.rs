@@ -172,7 +172,6 @@ pub mod fast {
         pub subtract_one: bool,
     }
 
-    const MAX_ITER: usize = 255;
     const PRECISION: f64 = 1e18;
     const FEE_DENOMINATOR: f64 = 1e10;
     /// Relative, not absolute. The integer form stops at `|y - prev| <= 1`
