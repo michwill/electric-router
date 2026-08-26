@@ -1477,6 +1477,7 @@ def _report_calldata(result, args, chain, nodes, dst, pools):
             result.route, receiver=args.receiver,
             volatile=volatile_pools(pools, chain.stables + chain.forex),
             naming=args.calldata, min_out=min_out,
+            slippage_bp=args.slippage_bp,
             quoted_out=result.verified_out)
     except EncodingError as exc:
         print(f"  {BAD} calldata: {exc}")
@@ -1489,6 +1490,9 @@ def _report_calldata(result, args, chain, nodes, dst, pools):
           f"the rest read on chain")
     print(f"    guaranteed  {call.guaranteed_out / 10**decimals:>22,.6f} {symbol}"
           f"   {call.tolerance_bp:.2f} bp under the quote")
+    if args.slippage_bp is not None:
+        print(f"    slippage    {args.slippage_bp:>22,.2f} bp asked for, divided "
+              f"between the legs in proportion to their fees")
     if min_out:
         print(f"    min_out     {min_out / 10**decimals:>22,.6f} {symbol}")
     print(f"\n  {'pool':<42}{'i>j':>6}{'frac':>9}{'fee':>10}{'granted':>10}"
@@ -2682,6 +2686,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--receiver", default="",
         help="who the router pays (default: whoever sends the transaction, "
              "which also shortens the calldata)")
+    route_cmd.add_argument(
+        "--slippage-bp", type=float, default=None,
+        help="the whole route's tolerance, in basis points, instead of letting "
+             "each pool set its own from its fee. It is divided between the "
+             "legs the way voltage divides between resistors: in proportion to "
+             "the fees along a series route, and once rather than once per "
+             "branch on one that splits")
     route_cmd.add_argument(
         "--min-out-bp", type=float, default=None,
         help="an end-to-end bound as well, this far below the modelled output. "

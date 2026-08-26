@@ -390,7 +390,7 @@ class RouterSession:
     # ----------------------------------------------------------- the sending
 
     async def plan_call(self, result, *, receiver: str, sender: str = "",
-                        min_out_bp: float = 0.0,
+                        min_out_bp: float = 0.0, slippage_bp: float | None = None,
                         not_before: int = 0) -> ExecutionPlan:
         """Re-read the route's state, re-price its legs, and encode the call.
 
@@ -404,6 +404,11 @@ class RouterSession:
         So this re-reads exactly the accounts the chosen route touches at the
         newest block, re-quotes the legs at their final sizes, and encodes
         against that.
+
+        `slippage_bp` names the whole route's tolerance instead of letting each
+        pool set its own; `core.slippage` divides it between the legs.  The
+        result is on `ExecutionPlan.tolerance_bp`, which is what a caller who
+        named a number should be shown it bought.
         """
         if result.route is None:
             raise SessionError("no route to send")
@@ -435,6 +440,7 @@ class RouterSession:
             quoted_out=result.verified_out,
             naming=NEEDED,
             min_out=min_out,
+            slippage_bp=slippage_bp,
         )
         data = call.calldata(sender=sender or receiver)
         # Native ETH is Curve's `0xEeee…` sentinel rather than a token, so a

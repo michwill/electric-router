@@ -32,6 +32,7 @@ from dataclasses import dataclass
 
 from .codec import encode_call
 from .realize import RealizedRoute
+from .slippage import divide
 from .types import ArcKind
 
 ONE = 10**18
@@ -300,6 +301,47 @@ def leg_in(realized) -> int:
     return realized.verified_in or realized.amount_in
 
 
+def movement_floors(
+    route: RealizedRoute,
+    *,
+    volatile: Collection[str] = (),
+    floor_bp: float = FLOOR_BP,
+    volatile_floor_bp: float = VOLATILE_FLOOR_BP,
+) -> list[float]:
+    """The room each leg needs for what moves under it, whatever it charges.
+
+    `volatile_floor_bp` where the pair genuinely moves between the quote and
+    the block it lands in, and the wei a wrap or a rebasing token rounds away
+    everywhere else.  Distinct from the fee rule above it, which is a ceiling
+    on what a sandwich can take rather than an allowance for movement -- so
+    this is the part no caller-named budget gets to take back.
+    """
+    loose = {address.lower() for address in volatile}
+    return [(volatile_floor_bp if realized.target.lower() in loose else floor_bp) / 1e4
+            for realized in route.legs]
+
+
+def tolerances(
+    route: RealizedRoute,
+    *,
+    volatile: Collection[str] = (),
+    fee_share: float = FEE_SHARE,
+    floor_bp: float = FLOOR_BP,
+    volatile_floor_bp: float = VOLATILE_FLOOR_BP,
+) -> list[float]:
+    """How far below its quote the automatic rule lets each leg land.
+
+    A fifth of the least that pool can charge, over `movement_floors`.  These
+    are also the weights a caller-named budget is divided by, which is what
+    keeps the two rules the same shape: both are proportional to the pool's fee
+    wherever the fee rule binds.
+    """
+    floors = movement_floors(route, volatile=volatile, floor_bp=floor_bp,
+                             volatile_floor_bp=volatile_floor_bp)
+    return [min(1.0, max(fee_share * bounding_fee(realized), floor))
+            for realized, floor in zip(route.legs, floors, strict=True)]
+
+
 def min_rates(
     route: RealizedRoute,
     *,
@@ -307,17 +349,22 @@ def min_rates(
     fee_share: float = FEE_SHARE,
     floor_bp: float = FLOOR_BP,
     volatile_floor_bp: float = VOLATILE_FLOOR_BP,
+    slippage_bp: float | None = None,
 ) -> tuple[list[int], list[int]]:
     """`(min_rate per leg, indices the bound does not really cover)`.
 
-    A fifth of the least that pool can charge, floored at `volatile_floor_bp`
-    for a pair whose price moves on its own and at the wei of rounding for
-    everything else.
-
-    `volatile` names those pools by address.  It is data rather than something
+    `tolerances` says how much room each leg gets, and `volatile` names the
+    pools whose pair moves on its own.  That is data rather than something
     inferred here: an oraclised stableswap holding a volatile pair looks
     exactly like a pegged one from the arc alone, and that shape is the one
     that rugs on broadcast.
+
+    `slippage_bp` replaces the whole rule with a total the caller names,
+    divided between the legs as voltage divides between resistors: in
+    proportion to the fees along a series route, and once rather than once per
+    branch on one that splits.  A caller who names less than the automatic rule
+    would have granted gets less, which is theirs to name; `movement_floors` is
+    the one thing the budget cannot take back.  See `core.slippage`.
 
     A tolerance finer than one unit of the output token cannot be expressed as
     a rate -- `min_rate` is `out * 1e18 // in`, so one unit is `1/out` of it,
@@ -341,12 +388,22 @@ def min_rates(
     step of it can be percent-sized whatever `tol` asked for.  `tolerance_bp`
     is read off `walk_bounds` for that reason.
     """
-    loose = {address.lower() for address in volatile}
+    grant = tolerances(route, volatile=volatile, fee_share=fee_share,
+                       floor_bp=floor_bp, volatile_floor_bp=volatile_floor_bp)
+    if slippage_bp is not None:
+        # Movement is not slippage, so it is not the budget's to spend: a leg
+        # keeps its floor however little the caller granted.  The automatic
+        # tolerances go in twice -- as the weights, and as the backstop under a
+        # leg the network runs backwards, which divides to nothing.
+        floors = movement_floors(route, volatile=volatile, floor_bp=floor_bp,
+                                 volatile_floor_bp=volatile_floor_bp)
+        share = divide(route, grant, slippage_bp / 1e4, backstop=grant)
+        grant = [min(1.0, max(value, floor))
+                 for value, floor in zip(share, floors, strict=True)]
     rates: list[int] = []
     unbounded: list[int] = []
     for k, realized in enumerate(route.legs):
-        floor = volatile_floor_bp if realized.target.lower() in loose else floor_bp
-        tol = min(1.0, max(fee_share * bounding_fee(realized), floor / 1e4))
+        tol = grant[k]
         if leg_in(realized) <= 0 or leg_out(realized) <= 0:
             rates.append(0)
             unbounded.append(k)
@@ -480,6 +537,9 @@ def encode_route(
     A leg whose token cannot be derived *at all* -- a 1:1 adapter that is
     neither a native wrapper nor a pool -- is named whatever `naming` says,
     because the alternative is a call that quietly means something else.
+
+    `policy` reaches `min_rates`, which is where `slippage_bp` goes to replace
+    the per-pool rule with a total the caller has named.
     """
     if naming not in (NEEDED, NONE, ALL):
         raise EncodingError(f"naming must be one of {NEEDED}/{NONE}/{ALL}, got {naming!r}")

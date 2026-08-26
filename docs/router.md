@@ -215,6 +215,114 @@ Everything here is computed off chain and arrives as `min_rate` in the packed
 word.  The router reads no oracle and re-derives no price: the solver's own
 spot quote for that leg, minus this discount, is the bound.
 
+### A total the caller names
+
+`--slippage-bp` -- `slippage_bp` on `min_rates`, `encode_route` and
+`RouterSession.plan_call` -- replaces that rule with one number for the whole
+route.  Splitting it is not a division by the leg count: a route that branches
+and merges has to spend the budget **once per path**, not once per leg, and the
+legs two branches share cannot carry two different bounds.
+
+So it is divided the way voltage divides between resistors.  Each leg gets a
+resistance equal to the tolerance the automatic rule would have granted it --
+which is proportional to the pool's fee wherever the fee rule binds -- the
+whole budget is put across the route's source and destination, and
+`core.slippage` solves the same Laplacian the router itself is built on, over a
+graph of three or four nodes.  Series shares in proportion; parallel branches
+each drop the whole budget, because either one alone is the trade.
+
+    USDT -> crvUSD -> YB, fees 1 bp and 20 bp, 50 bp asked for
+    2.38 bp on the first leg, 47.62 on the second
+
+    the same with the first hop split two ways, 1 bp and 30 bp
+    2.31 and 2.31 on the branches, 47.69 on the leg below the merge
+    -- 50.00 down either path
+
+    USDC -> USDT over 3pool and over USDC/USDT at once
+    50 bp on each, whatever either one charges
+
+The budget belongs to the branch rather than to the leg, so branches of
+different length still net to the same tolerance: a direct pool and a two-hop
+beside it are each granted the whole 50 bp, and only the two-hop divides its
+50 between two legs.  Two parallel single-hop branches are granted the same
+number however far apart their fees are -- there is nothing in series for the
+fees to divide against.
+
+The drops are then scaled so the longest path spends exactly the budget, which
+is what makes the promise structural rather than a property of the solve: no
+path can spend more, whatever came back.  And `1 - sum` under-states
+`prod(1 - t)`, so what ships is fractionally tighter than what was asked for --
+50 bp of budget reads as 49.99 bp on `tolerance_bp`, never 50.01.
+
+Two things the budget does not get to do.  It cannot take back a leg's
+`movement_floors` -- 5 bp on a pair that genuinely moves, the wei of rounding
+everywhere else -- because movement is not slippage; and it does not stop a leg
+quantising up to a whole unit of a coarse output token.  Both raise the total
+above the number asked for, and `tolerance_bp` is where that shows: read it,
+not the argument.
+
+What the budget *does* take back is the fee share, and that is the right half
+to give up.  `0.2 * fee` is a ceiling on what a sandwich can take rather than
+an allowance for movement, so a leg granted less than the automatic rule would
+have given it is harder to sandwich, not more fragile.  Which is also why a
+budget under what the automatic rule would have granted is allowed: it is the
+caller's to name, and the floors are what stand under it.
+
+### The leg that runs backwards
+
+A resistor network has no idea the route is a DAG.  On a shape that is not
+series-parallel the solve can put a leg's head above its tail -- a Wheatstone
+bridge, with current in the middle leg running against the way the route sends
+value through it -- and the drop comes back negative, which is not a bound
+anything can express.
+
+Clamping it to zero is the obvious fix and it silently breaks the telescoping:
+paths through that leg then sum to *more* than the budget, and the caller ships
+more slippage than they asked for without being told.  So the drops are clamped
+and then scaled so the longest path spends exactly the budget.  Where nothing
+came back negative the longest path is already the budget and the factor is 1.
+
+Not a corner.  Over 56 mainnet routes at block 25,838,323, one size each:
+
+| | routes |
+|---|---|
+| series-parallel, so structurally impossible | 31 |
+| not series-parallel | 25 |
+| carrying a leg the fee network runs backwards | 18 |
+
+Always exactly one such leg, and always the same shape: the BTC-to-BTC pool --
+`cbBTC/wBTC`, `tBTC/cbBTC` -- bridging two branches of a twelve-leg route.  It
+comes back at −0.15 to −2.70 bp against a 50 bp budget, and clamped without the
+rescale the worst path would have shipped **52.70 bp for a 50 bp ask**.
+
+Clamping it to zero is not enough either, because that leg is not incidental:
+it carries **13 to 28%** of the route's value flow on the BTC pairs, and
+shipping a leg that size at the 0.1 bp of rounding room reverts on any movement
+at all.  So it is held at the magnitude it came back by -- what the network says
+the imbalance across it is -- and never under the automatic rule's own answer
+for it.  The rest of the route is then scaled around that floor by bisection,
+because the longest path is a maximum over paths rather than a sum.
+
+    USDT -> tBTC   cbBTC/wBTC   14% of the flow   auto 0.40 bp   ships 1.84 bp
+    tBTC -> FRAX   cbBTC/wBTC   28% of the flow   auto 0.40 bp   ships 1.52 bp
+    WBTC -> USDC   tBTC/cbBTC    5% of the flow   auto 0.20 bp   ships 0.20 bp
+
+The last of those is the backstop rather than the drop: the network bent that
+leg by only 0.15 bp, so the automatic rule's 0.20 stands and the fattest leg on
+the route gives way from 49.71 to 49.65 to make the room.
+
+Granting the bridge the largest tolerance any element of its own kind got is
+the other way to answer this, and the flow measurement is what rules it out:
+that would be 30 to 50 bp, and a leg carrying a quarter of the trade at 44 bp
+is sandwich exposure rather than rounding room.
+
+All ten bridge routes divide to exactly 50.00 bp, and their movement floors
+never bind.  What does move the shipped figure is the rate granularity above --
+`min_rate` is `out * 1e18 // in`, and a WBTC leg has eight decimals to say it
+in -- which runs both ways: 47.04 bp on one of them and 52.51 on another,
+against the same 50 bp ask.  That is the automatic rule's granularity too, and
+`tolerance_bp` is where it shows.
+
 ### What it was measured to buy
 
 Sandwiching the deployed TricryptoUSDC on a fork -- real contract, real dynamic
