@@ -155,3 +155,93 @@ impl Pool {
         Some(out - out * self.fee / fd)
     }
 }
+
+/// The same algebra in `f64`, for the places that only need to choose.
+///
+/// A quote uses the exact form for the *bound* -- a minimum rate is a promise
+/// about a number nothing on chain will re-check -- and could use this one for
+/// the search, which only has to rank. Whether that trade is worth making is a
+/// question about how much of a quote is spent here at all.
+pub mod fast {
+    pub struct Pool {
+        pub xp: Vec<f64>,
+        pub rates: Vec<f64>,
+        pub amp: f64,
+        pub fee: f64,
+        pub a_precision: f64,
+        pub subtract_one: bool,
+    }
+
+    const MAX_ITER: usize = 255;
+    const PRECISION: f64 = 1e18;
+    const FEE_DENOMINATOR: f64 = 1e10;
+    /// Relative, not absolute. The integer form stops at `|y - prev| <= 1`
+    /// because a wei is a wei; in `f64` at 1e30 an ULP is about 1e14, so the
+    /// same test is either never true or trivially true and the iteration runs
+    /// its full 255 and returns nonsense. Matches Python's `_FAST_TOL`.
+    const FAST_TOL: f64 = 1e-14;
+
+    impl Pool {
+        pub fn d(&self) -> Option<f64> {
+            let n = self.xp.len() as f64;
+            let s: f64 = self.xp.iter().sum();
+            if s == 0.0 {
+                return Some(0.0);
+            }
+            let ann = self.amp * n;
+            let mut d = s;
+            for _ in 0..MAX_ITER {
+                let mut d_p = d;
+                for x in &self.xp {
+                    d_p = d_p * d / (*x * n);
+                }
+                let prev = d;
+                d = (ann * s / self.a_precision + d_p * n) * d
+                    / ((ann - self.a_precision) * d / self.a_precision + (n + 1.0) * d_p);
+                if (d - prev).abs() <= FAST_TOL * d {
+                    return Some(d);
+                }
+            }
+            None
+        }
+
+        pub fn solve_y(&self, d: f64, i: usize, j: usize, x: f64) -> Option<f64> {
+            let len = self.xp.len();
+            let n = len as f64;
+            let ann = self.amp * n;
+            let mut c = d;
+            let mut s = 0.0;
+            for (k, item) in self.xp.iter().enumerate().take(len) {
+                let below = if k == i { x } else if k != j { *item } else { continue };
+                s += below;
+                c = c * d / (below * n);
+            }
+            c = c * d * self.a_precision / (ann * n);
+            let b = s + d * self.a_precision / ann;
+            let mut y = d;
+            for _ in 0..MAX_ITER {
+                let prev = y;
+                y = (y * y + c) / (2.0 * y + b - d);
+                if (y - prev).abs() <= FAST_TOL * y {
+                    return Some(y);
+                }
+            }
+            None
+        }
+
+        pub fn get_dy(&self, i: usize, j: usize, dx: f64) -> Option<f64> {
+            if dx <= 0.0 {
+                return Some(0.0);
+            }
+            let d = self.d()?;
+            let x = self.xp[i] + dx * self.rates[i] / PRECISION;
+            let y = self.solve_y(d, i, j, x)?;
+            let raw = self.xp[j] - y - if self.subtract_one { 1.0 } else { 0.0 };
+            if raw <= 0.0 {
+                return Some(0.0);
+            }
+            let out = raw * PRECISION / self.rates[j];
+            Some(out - out * self.fee / FEE_DENOMINATOR)
+        }
+    }
+}

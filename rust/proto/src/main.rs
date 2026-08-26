@@ -166,8 +166,56 @@ fn pools_bench(path: &str, reps: usize) {
         std::hint::black_box(sink);
         best = best.min(start.elapsed().as_secs_f64() * 1e6);
     }
-    println!("rust get_dy: {best:.0} us for {n} calls = {:.2} us each", best / n as f64);
-    println!("python was 9.30 us each");
+    println!("rust U256 : {best:.0} us for {n} calls = {:.2} us each", best / n as f64);
+
+    // The same vectors in f64, to price what the exact width costs.
+    let fast: Vec<(stableswap::fast::Pool, Vec<(usize, usize, f64)>)> = pools.iter()
+        .map(|(pool, vectors)| {
+            let xp: Vec<f64> = pool.xp().iter().map(|v| f64::from(*v)).collect();
+            (stableswap::fast::Pool {
+                xp,
+                rates: pool.rates.iter().map(|r| f64::from(*r)).collect(),
+                amp: f64::from(pool.amp),
+                fee: f64::from(pool.fee),
+                a_precision: f64::from(pool.a_precision),
+                subtract_one: pool.subtract_one,
+            },
+             vectors.iter().map(|(i, j, dx, _)| (*i, *j, f64::from(*dx))).collect())
+        }).collect();
+    let mut bailed = 0usize;
+    let mut drift = 0.0f64;
+    for ((pool, vectors), (fp, fv)) in pools.iter().zip(fast.iter()) {
+        for ((_, _, _, want), (i, j, dx)) in vectors.iter().zip(fv.iter()) {
+            let _ = pool;
+            match fp.get_dy(*i, *j, *dx) {
+                None => bailed += 1,
+                Some(got) => {
+                    let exact = f64::from(*want);
+                    if exact > 0.0 {
+                        drift = drift.max(((got - exact) / exact).abs() * 1e4);
+                    }
+                }
+            }
+        }
+    }
+    println!("  f64: {bailed} of {n} did not converge · worst drift {drift:.4} bp");
+    let mut best_f = f64::INFINITY;
+    for _ in 0..reps {
+        let start = Instant::now();
+        let mut sink = 0.0f64;
+        for (pool, vectors) in &fast {
+            for (i, j, dx) in vectors {
+                if let Some(got) = pool.get_dy(*i, *j, *dx) {
+                    sink += got;
+                }
+            }
+        }
+        std::hint::black_box(sink);
+        best_f = best_f.min(start.elapsed().as_secs_f64() * 1e6);
+    }
+    println!("rust f64  : {best_f:.0} us for {n} calls = {:.2} us each",
+             best_f / n as f64);
+    println!("python exact was 9.30 us each");
 }
 
 fn main() {
