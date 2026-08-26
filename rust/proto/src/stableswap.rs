@@ -180,9 +180,23 @@ pub mod fast {
     /// same test is either never true or trivially true and the iteration runs
     /// its full 255 and returns nonsense. Matches Python's `_FAST_TOL`.
     const FAST_TOL: f64 = 1e-14;
+    /// Newton doubles its digits a step, so a solve that has not converged in
+    /// this many is not going to: measured over 2,240 solves on 268 mainnet
+    /// pools, the worst took 12 and none reached 255. Running the rest of the
+    /// cap buys nothing and hides the failure inside a plausible number.
+    const GIVE_UP: usize = 40;
+    /// What to fall back to when it does not. A tolerance that cannot be met
+    /// is a statement about the pool's conditioning, not a reason to return
+    /// the last iterate as though it had converged -- so loosen once, and say
+    /// so, rather than failing a quote that only needed less precision.
+    const LOOSE_TOL: f64 = 1e-9;
 
     impl Pool {
         pub fn d(&self) -> Option<f64> {
+            self.d_within(FAST_TOL).or_else(|| self.d_within(LOOSE_TOL))
+        }
+
+        fn d_within(&self, tol: f64) -> Option<f64> {
             let n = self.xp.len() as f64;
             let s: f64 = self.xp.iter().sum();
             if s == 0.0 {
@@ -190,7 +204,7 @@ pub mod fast {
             }
             let ann = self.amp * n;
             let mut d = s;
-            for _ in 0..MAX_ITER {
+            for _ in 0..GIVE_UP {
                 let mut d_p = d;
                 for x in &self.xp {
                     d_p = d_p * d / (*x * n);
@@ -198,7 +212,7 @@ pub mod fast {
                 let prev = d;
                 d = (ann * s / self.a_precision + d_p * n) * d
                     / ((ann - self.a_precision) * d / self.a_precision + (n + 1.0) * d_p);
-                if (d - prev).abs() <= FAST_TOL * d {
+                if (d - prev).abs() <= tol * d {
                     return Some(d);
                 }
             }
@@ -206,6 +220,12 @@ pub mod fast {
         }
 
         pub fn solve_y(&self, d: f64, i: usize, j: usize, x: f64) -> Option<f64> {
+            self.y_within(d, i, j, x, FAST_TOL)
+                .or_else(|| self.y_within(d, i, j, x, LOOSE_TOL))
+        }
+
+        fn y_within(&self, d: f64, i: usize, j: usize, x: f64, tol: f64)
+            -> Option<f64> {
             let len = self.xp.len();
             let n = len as f64;
             let ann = self.amp * n;
@@ -219,10 +239,10 @@ pub mod fast {
             c = c * d * self.a_precision / (ann * n);
             let b = s + d * self.a_precision / ann;
             let mut y = d;
-            for _ in 0..MAX_ITER {
+            for _ in 0..GIVE_UP {
                 let prev = y;
                 y = (y * y + c) / (2.0 * y + b - d);
-                if (y - prev).abs() <= FAST_TOL * y {
+                if (y - prev).abs() <= tol * y {
                     return Some(y);
                 }
             }
