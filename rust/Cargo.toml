@@ -4,7 +4,7 @@
 # excluded when the wasm crate is the one being built; `3` adds MSRV-aware
 # version picking, which matters because the toolchain here is pinned.
 [workspace]
-members = ["evm", "wasm"]
+members = ["evm", "wasm", "proto"]
 resolver = "3"
 
 [package]

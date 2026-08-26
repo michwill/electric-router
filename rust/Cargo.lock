@@ -1157,6 +1157,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "erouter-proto"
+version = "0.1.0"
+dependencies = [
+ "erouter-solve",
+ "serde_json",
+]
+
+[[package]]
 name = "erouter-solve"
 version = "0.1.0"
 dependencies = [

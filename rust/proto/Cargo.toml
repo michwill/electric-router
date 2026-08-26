@@ -1,0 +1,19 @@
+# The candidate stage, on the other side of the boundary.
+#
+# A separate crate rather than a bin in the solver, so `serde_json` and the
+# clock stay out of the library that has to compile to wasm32 with no I/O.
+# Nothing here ships; it exists to answer one question with a number.
+[package]
+name = "erouter-proto"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+erouter-solve = { path = ".." }
+serde_json = "1"
+
+[[bin]]
+name = "proto"
+path = "src/main.rs"
+
