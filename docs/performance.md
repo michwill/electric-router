@@ -116,6 +116,29 @@ not because a crossing is dear (1 to 2 us) but because of what sits between
 them: 452 argument lists built and 452 dataclasses constructed, to wrap
 arithmetic that is already native.
 
+## Where the models are actually called
+
+Counting `probe` alone said the models were ~15 ms of a quote. That was wrong,
+and wrong in the direction that matters: two other paths evaluate them and
+neither goes through `probe`.
+
+| call | calls | items | ms | share |
+|---|---|---|---|---|
+| `element_split` | 22 | 924 | 17.89 | 16.8% |
+| `quote_routes` | 4 | 39 | 15.21 | 14.3% |
+| `probe` | 14 | 1,641 | 13.09 | 12.3% |
+| | | | **46.19** | **43.4%** |
+
+**Forty-three per cent of a quote is pool arithmetic**, and at the measured
+sixfold that is 46 ms becoming ~7. It is nearly twice what the whole `refine`
+and `split` orchestration is worth put together.
+
+It also explains those stages rather than competing with them. `split` spends
+2.28 ms searching and about 9.5 quoting the neighbourhood it found; `refine`
+spends its probe budget the same way. They are not slow, they are calling
+something slow -- so the models are the fix for them too, and porting the
+stages first would have moved the cheap half.
+
 ## The shape of what is left
 
 The remaining orchestration is **diffuse**, which is the finding that decides
