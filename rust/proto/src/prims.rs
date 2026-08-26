@@ -67,6 +67,18 @@ impl I256 {
         Self::new(self.neg != other.neg, self.mag * other.mag)
     }
 
+    /// Multiply, or `None` on overflow.
+    ///
+    /// The tricrypto cubic computes `d*d/x_j * gamma^2 * ann` before dividing
+    /// it back down by 729, and that product runs to the top of the width. In
+    /// release builds `*` wraps rather than panicking, so an input the
+    /// contract would revert on would come back here as a plausible number.
+    /// Every product that can reach the ceiling goes through this instead.
+    pub fn checked_mul(self, other: Self) -> Option<Self> {
+        self.mag.checked_mul(other.mag)
+            .map(|mag| Self::new(self.neg != other.neg, mag))
+    }
+
     /// Signed division truncating toward zero, as the EVM does it.
     pub fn sdiv(self, other: Self) -> Option<Self> {
         if other.is_zero() {

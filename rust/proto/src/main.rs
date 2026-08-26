@@ -15,6 +15,7 @@
 mod cryptoswap;
 mod prims;
 mod stableswap;
+mod tricrypto;
 mod twocrypto;
 
 use erouter_solve::cycles::cancel_cycles;
@@ -270,6 +271,89 @@ fn prims_bench(path: &str) {
     println!("sdiv : {} vectors, {bad} wrong", v["sdiv"].as_array().unwrap().len());
 }
 
+/// Tricrypto: the shared cbrt, the three-coin cubic, then the quote.
+fn tricrypto_bench(path: &str, reps: usize) {
+    use ruint::aliases::U256;
+    let raw = std::fs::read_to_string(path).expect("read tricrypto");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+    let big = |x: &serde_json::Value| x.as_str().unwrap().parse::<U256>().unwrap();
+
+    let rows = v["cbrt"].as_array().unwrap();
+    let bad = rows.iter().filter(|c| prims::cbrt(big(&c[0])) != Some(big(&c[1]))).count();
+    println!("cbrt (shared with twocrypto): {} vectors · {bad} wrong", rows.len());
+
+    let rows = v["gety"].as_array().unwrap();
+    let (mut wrong, mut refused, mut shown) = (0usize, 0usize, 0usize);
+    for r in rows {
+        let xv: Vec<U256> = r["xp"].as_array().unwrap().iter().map(big).collect();
+        let xp = [xv[0], xv[1], xv[2]];
+        let want = big(&r["y"]);
+        match tricrypto::get_y(big(&r["amp"]), big(&r["gamma"]), &xp, big(&r["d"]),
+                               r["j"].as_u64().unwrap() as usize) {
+            Some((got, _)) if got == want => {}
+            Some((got, _)) => {
+                wrong += 1;
+                if shown < 3 { shown += 1; println!("  want {want}\n  got  {got}"); }
+            }
+            None => refused += 1,
+        }
+    }
+    println!("get_y: {} vectors · {wrong} wrong · {refused} refused", rows.len());
+
+    let mut pools = Vec::new();
+    let mut legacy = 0usize;
+    for spec in v["pools"].as_array().unwrap() {
+        let is_legacy = spec["legacy"].as_bool().unwrap();
+        if is_legacy { legacy += 1; }
+        let b: Vec<U256> = spec["balances"].as_array().unwrap().iter().map(big).collect();
+        let pr: Vec<U256> = spec["precisions"].as_array().unwrap().iter().map(big).collect();
+        let ps: Vec<U256> = spec["price_scale"].as_array().unwrap().iter().map(big).collect();
+        let pool = tricrypto::Pool {
+            balances: [b[0], b[1], b[2]], precisions: [pr[0], pr[1], pr[2]],
+            price_scale: [ps[0], ps[1]], d: big(&spec["d"]),
+            amp: big(&spec["amp"]), gamma: big(&spec["gamma"]),
+            mid_fee: big(&spec["mid_fee"]), out_fee: big(&spec["out_fee"]),
+            fee_gamma: big(&spec["fee_gamma"]), legacy: is_legacy,
+            a_multiplier: big(&spec["a_multiplier"]),
+        };
+        let vectors: Vec<(usize, usize, U256, U256)> = spec["vectors"].as_array()
+            .unwrap().iter().map(|t| (
+                t[0].as_u64().unwrap() as usize, t[1].as_u64().unwrap() as usize,
+                big(&t[2]), big(&t[3]))).collect();
+        pools.push((pool, vectors));
+    }
+    let (mut n, mut wrong, mut refused, mut shown) = (0usize, 0usize, 0usize, 0usize);
+    for (pool, vectors) in &pools {
+        for (i, j, dx, want) in vectors {
+            n += 1;
+            match pool.get_dy(*i, *j, *dx) {
+                Some(got) if got == *want => {}
+                Some(got) => {
+                    wrong += 1;
+                    if shown < 3 { shown += 1; println!("  want {want}\n  got  {got}"); }
+                }
+                None => refused += 1,
+            }
+        }
+    }
+    println!("get_dy: {} pools ({legacy} legacy) · {n} vectors · {wrong} wrong · {refused} refused",
+             pools.len());
+
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let start = Instant::now();
+        let mut sink = U256::ZERO;
+        for (pool, vectors) in &pools {
+            for (i, j, dx, _) in vectors {
+                if let Some(got) = pool.get_dy(*i, *j, *dx) { sink += got; }
+            }
+        }
+        std::hint::black_box(sink);
+        best = best.min(start.elapsed().as_secs_f64() * 1e6);
+    }
+    println!("rust  {:.2} us a call · python was 24.38", best / n as f64);
+}
+
 /// `get_dy` end to end, against what all 84 twocrypto pools answer.
 fn twocrypto_bench(path: &str, reps: usize) {
     use ruint::aliases::U256;
@@ -386,6 +470,11 @@ fn gety_bench(path: &str) {
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: proto <quote.json>");
+    if path.ends_with("tricrypto.json") {
+        tricrypto_bench(&path, std::env::args().nth(2)
+            .and_then(|s| s.parse().ok()).unwrap_or(20));
+        return;
+    }
     if path.ends_with("twocrypto.json") {
         twocrypto_bench(&path, std::env::args().nth(2)
             .and_then(|s| s.parse().ok()).unwrap_or(20));
