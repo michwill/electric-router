@@ -70,6 +70,52 @@ matter: 1,641 evaluations is 1.9 ms exact against 0.1 approximate, on a 95 ms
 quote. The exact width costs under two milliseconds once it is out of Python
 and buys a bound that agrees with the chain to the wei.
 
+## The models, ported
+
+All three families, against real pool state at the pinned block. Every vector
+is a pool a quote actually admitted, asked at three sizes in both directions.
+
+| family | python | rust | vectors | pools |
+|---|---|---|---|---|
+| stableswap | 9.30 us | 1.13 us | 382 | 60 |
+| twocrypto | 22.01 | 2.87 | 504 | 84 |
+| tricrypto | 24.38 | 4.01 | 270 | 15 |
+
+0 wrong, 0 refused, on all 1,156 -- plus 804 for `get_y` and 124 for the
+primitives underneath. A little over sixfold either way, so ~15 ms of a quote
+becomes ~2.
+
+Four things a reading would have passed and a vector did not:
+
+* `cbrt` scales its input up by 1e18 or 1e36 and scales the answer back by 1e6
+  or 1e12 *after* the Newton loop. Missing those five lines put the port a
+  factor of a million out on exactly the inputs a deep pool reaches.
+* tricrypto reaches its Newton fallback on real state -- 4 of 180 -- where
+  twocrypto never does, 0 of 324. The cubic alone passes its own reading.
+* `a_multiplier` is 100 on the 2021 tricrypto pools and 10,000 on everything
+  after. The wrong one quotes about twice wrong.
+* twocrypto's three legacy flags each name a place two deployed generations
+  differ in the last wei. A pool does not announce which it is; it behaves
+  like one.
+
+## Where the boundary is
+
+726 crossings a quote, 25.4 ms inside Rust -- so **74% of a quote is Python**.
+
+| crossing | calls | ms | us each |
+|---|---|---|---|
+| `solve_arrays` | 41 | 19.75 | 481.6 |
+| `calibrate_ladder` | 452 | 2.46 | 5.4 |
+| `shortest_path` | 83 | 1.46 | 17.6 |
+| `split_ascend` | 13 | 0.86 | 66.3 |
+| `cancel_cycles` | 13 | 0.63 | 48.7 |
+| `problem_for` | 124 | 0.22 | 1.8 |
+
+`calibrate` crossing 452 times is the shape the stage move exists to fix --
+not because a crossing is dear (1 to 2 us) but because of what sits between
+them: 452 argument lists built and 452 dataclasses constructed, to wrap
+arithmetic that is already native.
+
 ## The shape of what is left
 
 The remaining orchestration is **diffuse**, which is the finding that decides
