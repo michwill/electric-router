@@ -14,6 +14,7 @@
 
 mod cryptoswap;
 mod prims;
+mod recalibrate;
 mod stableswap;
 mod tricrypto;
 mod twocrypto;
@@ -271,6 +272,95 @@ fn prims_bench(path: &str) {
     println!("sdiv : {} vectors, {bad} wrong", v["sdiv"].as_array().unwrap().len());
 }
 
+/// `_recalibrate` against Python, field by field, then timed.
+fn recalibrate_bench(path: &str, reps: usize) {
+    let raw = std::fs::read_to_string(path).expect("read recalibrate");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+    let rows = v.as_array().unwrap();
+
+    // Exact bit patterns, not decimal text: see `dump_recalibrate.bits`.
+    let bit = |x: &serde_json::Value| -> f64 {
+        f64::from_bits(x.as_str().unwrap().parse::<u64>().unwrap())
+    };
+    let floats = |x: &serde_json::Value| -> Vec<f64> {
+        x.as_array().unwrap().iter()
+            .map(|f| f64::from_bits(f.as_str().unwrap().parse::<u64>().unwrap()))
+            .collect()
+    };
+    let inputs: Vec<recalibrate::Input> = rows.iter().map(|r| recalibrate::Input {
+        deltas: floats(&r["deltas"]),
+        quotes: floats(&r["quotes"]),
+        quantum: bit(&r["quantum"]),
+        // `DRIFT_TOL`, which `_recalibrate` takes by default.
+        drift_tol: 0.25,
+        rate_in: r.get("rate_in").map(&bit).unwrap_or(1.0),
+        rate_out: r.get("rate_out").map(&bit).unwrap_or(1.0),
+        cap_before: r.get("cap_before").map(&bit).unwrap_or(f64::INFINITY),
+    }).collect();
+
+    let got = recalibrate::recalibrate(&inputs);
+    // Bit-identical, or NaN both sides. With the inputs exact there is no
+    // reason to allow a tolerance: the two run the same arithmetic, so any
+    // difference is a difference in the port and not in the floating point.
+    let close = |a: f64, b: f64| -> bool {
+        a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+    };
+
+    let mut bad: Vec<String> = Vec::new();
+    for (k, (row, mine)) in rows.iter().zip(got.iter()).enumerate() {
+        let want = &row["fit"];
+        let Some(mine) = mine else {
+            if !row.get("error").is_some() { bad.push(format!("{k}: refused")); }
+            continue;
+        };
+        let want_cap = bit(&want["cap"]);
+        let cap_before = row.get("cap_before").map(&bit).unwrap_or(f64::INFINITY);
+        let rate_in = row.get("rate_in").map(&bit).unwrap_or(1.0);
+        let expect_cap = cap_before.min(if want_cap.is_finite() {
+            want_cap * rate_in } else { f64::INFINITY });
+        let a_in = bit(&want["a"]);
+        let b_in = bit(&want["B"]);
+        let rate_out = row.get("rate_out").map(&bit).unwrap_or(1.0);
+        let checks: [(&str, bool); 8] = [
+            ("a", close(mine.a, a_in * rate_out / rate_in)),
+            ("B", close(mine.b, b_in * rate_out / (rate_in * rate_in))),
+            ("cap", close(mine.cap, expect_cap)),
+            ("clamped", mine.clamped == want["clamped"].as_bool().unwrap()),
+            ("convex_flag", mine.convex_flag == want["convex_flag"].as_bool().unwrap()),
+            ("flag_reason", mine.flag.as_str() == want["flag_reason"].as_str().unwrap()),
+            ("drift", close(mine.drift, bit(&want["drift"]))),
+            ("eta", close(mine.eta, bit(&want["eta"]))),
+        ];
+        for (field, ok) in checks {
+            if !ok {
+                let (mine_v, want_v) = match field {
+                    "B" => (mine.b, b_in * rate_out / (rate_in * rate_in)),
+                    "drift" => (mine.drift, bit(&want["drift"])),
+                    "eta" => (mine.eta, bit(&want["eta"])),
+                    "a" => (mine.a, a_in * rate_out / rate_in),
+                    "cap" => (mine.cap, expect_cap),
+                    _ => (f64::NAN, f64::NAN),
+                };
+                bad.push(format!("arc {k:>3} {field:<12} rust {mine_v:>18.10e} \
+python {want_v:>18.10e}  n={}", row["deltas"].as_array().unwrap().len()));
+            }
+        }
+    }
+    println!("recalibrate: {} arcs · {} field mismatches", rows.len(), bad.len());
+    for line in bad.iter().take(10) {
+        println!("  {line}");
+    }
+
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let start = Instant::now();
+        let out = recalibrate::recalibrate(&inputs);
+        std::hint::black_box(&out);
+        best = best.min(start.elapsed().as_secs_f64() * 1e3);
+    }
+    println!("rust {best:.3} ms for the stage · python _recalibrate was 3.62 ms");
+}
+
 /// Tricrypto: the shared cbrt, the three-coin cubic, then the quote.
 fn tricrypto_bench(path: &str, reps: usize) {
     use ruint::aliases::U256;
@@ -470,6 +560,11 @@ fn gety_bench(path: &str) {
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: proto <quote.json>");
+    if path.ends_with("recalibrate.json") {
+        recalibrate_bench(&path, std::env::args().nth(2)
+            .and_then(|s| s.parse().ok()).unwrap_or(30));
+        return;
+    }
     if path.ends_with("tricrypto.json") {
         tricrypto_bench(&path, std::env::args().nth(2)
             .and_then(|s| s.parse().ok()).unwrap_or(20));
