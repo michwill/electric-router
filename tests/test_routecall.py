@@ -15,6 +15,7 @@ from hypothesis import strategies as st
 from erouter.core import routecall as rc
 from erouter.core.codec import selector
 from erouter.core.realize import RealizedLeg, RealizedRoute
+from erouter.core.slippage import divide
 from erouter.core.types import ArcKind, Leg
 
 ONE = rc.ONE
@@ -493,3 +494,94 @@ def test_a_small_trade_through_a_coarse_intermediate_encodes():
     call = rc.encode_route(r, receiver=TOKEN[5], quoted_out=1449003)
     assert call.unbounded == ()
     assert 5.9 < call.tolerance_bp < 6.3
+
+
+# --------------------------------------------------------------- a named budget
+
+#: A Wheatstone bridge: S -> A -> T beside S -> B -> T with A -> B across the
+#: middle.  S>A dear and A>T cheap, B the other way round, so the network wants
+#: current in the bridge running against the way the route sends value through
+#: it -- the only shape whose drop comes back negative.  See `core.slippage`.
+DEAR, CHEAP = 1 - 0.01, 1 - 5e-4
+
+
+def bridged():
+    return [leg(0, 1, 500 * UNIT, 495 * UNIT, gamma=DEAR),
+            leg(0, 2, 500 * UNIT, 499 * UNIT, gamma=CHEAP),
+            leg(1, 2, 100 * UNIT, 99 * UNIT, gamma=CHEAP),
+            leg(1, 3, 395 * UNIT, 394 * UNIT, gamma=CHEAP),
+            leg(2, 3, 599 * UNIT, 593 * UNIT, gamma=DEAR)]
+
+
+def shipped(legs, rates):
+    """The tolerance each rate really carries, read back off it."""
+    return [(1 - rate * realized.amount_in / (realized.amount_out * 1e18)) * 1e4
+            for rate, realized in zip(rates, legs, strict=True)]
+
+
+def test_a_named_budget_grants_the_bridge_leg_the_whole_of_it():
+    legs = bridged()
+    r = route(legs, amount_in=1000 * UNIT, dst_slot=3)
+    rates, _ = rc.min_rates(r, slippage_bp=50.0)
+    assert shipped(legs, rates) == pytest.approx(
+        [17.213, 9.037, 50.0, 9.037, 17.213], abs=0.01)
+
+
+def test_only_the_bridge_leg_is_widened():
+    """Every other leg keeps exactly the share the division gave it."""
+    legs = bridged()
+    r = route(legs, amount_in=1000 * UNIT, dst_slot=3)
+    grant = rc.tolerances(r)
+    divided = divide(r, grant, 0.005, backstop=grant)
+    tol = shipped(legs, rc.min_rates(r, slippage_bp=50.0)[0])
+    for k in (0, 1, 3, 4):
+        assert tol[k] == pytest.approx(divided[k] * 1e4, abs=0.01)
+
+
+def test_the_widening_is_paid_for_on_the_path_through_the_bridge():
+    # The two direct paths never reached the budget in the first place -- the
+    # bridge path was the one that did, and it is the one that now spends past
+    # it.  Which is the trade the caller said they would accept losing on.
+    legs = bridged()
+    r = route(legs, amount_in=1000 * UNIT, dst_slot=3)
+    tol = shipped(legs, rc.min_rates(r, slippage_bp=50.0)[0])
+    assert tol[0] + tol[3] == pytest.approx(26.25, abs=0.01)   # S>A>T
+    assert tol[1] + tol[4] == pytest.approx(26.25, abs=0.01)   # S>B>T
+    assert tol[0] + tol[2] + tol[4] == pytest.approx(84.43, abs=0.01)
+
+
+def test_a_route_with_no_bridge_divides_the_budget_and_no_more():
+    legs = [leg(0, 1, 1000 * UNIT, 990 * UNIT, gamma=DEAR),
+            leg(1, 2, 990 * UNIT, 989 * UNIT, gamma=CHEAP)]
+    r = route(legs, amount_in=1000 * UNIT, dst_slot=2)
+    rates, _ = rc.min_rates(r, slippage_bp=50.0)
+    assert sum(shipped(legs, rates)) == pytest.approx(50.0, abs=0.01)
+
+
+def test_what_the_widened_route_can_actually_lose_is_less_than_the_path():
+    """84 bp along the bridge path, 42 bp off the output: it carries a tenth.
+
+    `longest` is a worst path and the promise is a worst *output*, and a split
+    route mixes the branches in proportion to what each of them carries.
+    """
+    legs = bridged()
+    r = route(legs, amount_in=1000 * UNIT, dst_slot=3)
+    out = sum(realized.amount_out for realized in legs[3:])
+    auto = rc.encode_route(r, receiver=TOKEN[5], quoted_out=out)
+    named = rc.encode_route(r, receiver=TOKEN[5], quoted_out=out, slippage_bp=50.0)
+    assert auto.tolerance_bp == pytest.approx(32.99, abs=0.01)
+    assert named.tolerance_bp == pytest.approx(42.00, abs=0.01)
+
+
+def test_an_end_to_end_bound_is_read_only_where_it_is_the_stronger_one():
+    legs = bridged()
+    r = route(legs, amount_in=1000 * UNIT, dst_slot=3)
+    out = sum(realized.amount_out for realized in legs[3:])
+    walked = rc.encode_route(r, receiver=TOKEN[5], quoted_out=out,
+                             slippage_bp=50.0).guaranteed_out
+    loose = rc.encode_route(r, receiver=TOKEN[5], quoted_out=out,
+                            slippage_bp=50.0, min_out=walked // 2)
+    tight = rc.encode_route(r, receiver=TOKEN[5], quoted_out=out,
+                            slippage_bp=50.0, min_out=walked * 2)
+    assert loose.guaranteed_out == walked          # the walk still binds
+    assert tight.guaranteed_out == walked * 2      # `min_out` does

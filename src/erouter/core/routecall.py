@@ -32,7 +32,7 @@ from dataclasses import dataclass
 
 from .codec import encode_call
 from .realize import RealizedRoute
-from .slippage import divide
+from .slippage import divide, widen
 from .types import ArcKind
 
 ONE = 10**18
@@ -397,7 +397,13 @@ def min_rates(
         # leg the network runs backwards, which divides to nothing.
         floors = movement_floors(route, volatile=volatile, floor_bp=floor_bp,
                                  volatile_floor_bp=volatile_floor_bp)
-        share = divide(route, grant, slippage_bp / 1e4, backstop=grant)
+        budget = slippage_bp / 1e4
+        share = divide(route, grant, budget, backstop=grant)
+        # The bridge leg, and only it, is then raised to the whole budget: the
+        # division leaves it at an imbalance the caller never chose, and it is
+        # the leg that reverts on any movement at all.  `min_out` is what
+        # bounds the total once a path spends more than the budget.
+        share = widen(route, grant, budget, share, budget)
         grant = [min(1.0, max(value, floor))
                  for value, floor in zip(share, floors, strict=True)]
     rates: list[int] = []
@@ -562,6 +568,10 @@ def encode_route(
             f"A leg worth that little is not worth executing; re-solve without "
             f"it, or pass allow_unbounded to ship it unprotected")
     promised, _floors = walk_bounds(route, fracs, rates)
+    # Both bounds are enforced, so the guarantee is the stronger one.
+    # It matters where a bridge leg was widened past the budget: the
+    # per-leg walk then reads worse than the caller can actually lose.
+    promised = max(promised, min_out)
 
     tokens: list[str] = []
 

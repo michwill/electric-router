@@ -303,3 +303,40 @@ def test_a_network_that_will_not_solve_still_bounds_every_path():
 
 def test_an_empty_route_divides_into_nothing():
     assert slippage.divide(route([], amount_in=0, dst_slot=1), [], 0.005) == []
+
+
+def test_widening_lifts_the_bridge_and_leaves_the_rest_where_it_was():
+    # What a caller who names 50 bp is told they may lose, granted outright to
+    # the one leg the division cannot price -- and to nothing else.
+    built = bridge()
+    share = slippage.divide(built, BENT, 0.005, backstop=BENT)
+    wide = slippage.widen(built, BENT, 0.005, share, 0.005)
+    assert wide[2] == pytest.approx(0.005)
+    assert [wide[k] for k in (0, 1, 3, 4)] == \
+        pytest.approx([share[k] for k in (0, 1, 3, 4)])
+
+
+def test_widening_spends_past_the_budget_on_the_path_through_the_bridge():
+    # The promise `divide` makes is given up here on purpose: `min_out` is what
+    # bounds the total once a path can spend more than the budget.
+    built = bridge()
+    share = slippage.divide(built, BENT, 0.005, backstop=BENT)
+    wide = slippage.widen(built, BENT, 0.005, share, 0.005)
+    assert slippage.longest(built, share) == pytest.approx(0.005)
+    assert slippage.longest(built, wide) == pytest.approx(0.008443, rel=1e-3)
+
+
+def test_widening_leaves_a_route_with_no_bridge_alone():
+    built = series(1e-4, 20e-4)
+    share = slippage.divide(built, [1e-4, 20e-4], 0.005)
+    assert slippage.widen(built, [1e-4, 20e-4], 0.005, share, 0.005) == \
+        pytest.approx(share)
+
+
+def test_widening_never_tightens_a_bridge_already_granted_more():
+    # A budget smaller than the imbalance the network came back by: the floor
+    # stands, because it is what the leg needs rather than what was granted.
+    built = bridge()
+    share = slippage.divide(built, BENT, 0.0005, backstop=BENT)
+    wide = slippage.widen(built, BENT, 0.0005, share, 0.0005)
+    assert wide[2] >= share[2]

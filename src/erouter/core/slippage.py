@@ -29,7 +29,8 @@ which is no bound at all, and shipping it at the rounding floor would revert on
 any movement: measured, it carries 17-25% of the route.  So it is granted the
 magnitude it came back by -- what the network says the imbalance across it is,
 0.3 to 2.7 bp against a 50 bp budget -- as a floor the rescale may not erode,
-and the rest of the route is pulled back around it.
+and the rest of the route is pulled back around it.  A caller who names a
+budget can raise that floor to the whole of it; see `widen`.
 """
 
 from __future__ import annotations
@@ -170,3 +171,31 @@ def _blend(held: Sequence[float], share: Sequence[float],
            scale: float) -> list[float]:
     return [max(floor, scale * value)
             for floor, value in zip(held, share, strict=True)]
+
+
+def widen(route: RealizedRoute, resistance: Sequence[float], total: float,
+          spend: Sequence[float], floor: float) -> list[float]:
+    """Raise a leg the network runs backwards to `floor`, leaving the rest.
+
+    `divide` normalises so that no path can spend more than the budget, which
+    is the right answer when the budget is all the caller said.  A caller who
+    names one has said something else as well: that they will accept losing
+    that much on the trade.  A bridge leg is the one the automatic rule cannot
+    price -- its drop comes back negative, so it ships at the magnitude of an
+    imbalance rather than at anything the caller chose -- and it is also the
+    leg that reverts on any movement at all.  So it is given the figure they
+    named outright.
+
+    That breaks `divide`'s promise on paths through it, deliberately: such a
+    path now spends the budget plus its share of the rest.  What stands in for
+    it is `min_out`, the end-to-end bound a named budget also buys, which the
+    caller reads off the screen and the router checks once at the end.
+
+    Only backwards legs move, and only upwards -- a bridge already granted more
+    than the budget keeps what it had.
+    """
+    raw = drops(route, resistance, total)
+    if raw is None:
+        return list(spend)
+    return [max(value, floor) if backwards < 0.0 else value
+            for value, backwards in zip(spend, raw, strict=True)]
