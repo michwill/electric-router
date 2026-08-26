@@ -12,6 +12,7 @@
 //! Python. Anything this prints that is close to 18 ms means the solve count is
 //! the problem and porting buys nothing.
 
+mod cryptoswap;
 mod prims;
 mod stableswap;
 
@@ -268,8 +269,44 @@ fn prims_bench(path: &str) {
     println!("sdiv : {} vectors, {bad} wrong", v["sdiv"].as_array().unwrap().len());
 }
 
+/// The cubic, against what 27 mainnet pools actually answer.
+fn gety_bench(path: &str) {
+    use ruint::aliases::U256;
+    let raw = std::fs::read_to_string(path).expect("read gety");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("parse gety");
+    let big = |x: &serde_json::Value| x.as_str().unwrap().parse::<U256>().unwrap();
+
+    let rows = v["cubic"].as_array().unwrap();
+    let mut wrong = 0usize;
+    let mut refused = 0usize;
+    let mut shown = 0usize;
+    for r in rows {
+        let xp: Vec<U256> = r["xp"].as_array().unwrap().iter().map(big).collect();
+        let want = big(&r["y"]);
+        match cryptoswap::get_y(big(&r["amp"]), big(&r["gamma"]), &xp,
+                                big(&r["d"]), r["j"].as_u64().unwrap() as usize,
+                                r["v21"].as_bool().unwrap()) {
+            Some((got, _)) if got == want => {}
+            Some((got, _)) => {
+                wrong += 1;
+                if shown < 3 {
+                    shown += 1;
+                    println!("  want {want}\n  got  {got}");
+                }
+            }
+            None => refused += 1,
+        }
+    }
+    println!("cubic: {} vectors · {wrong} wrong · {refused} refused",
+             rows.len());
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("usage: proto <quote.json>");
+    if path.ends_with("gety.json") {
+        gety_bench(&path);
+        return;
+    }
     if path.ends_with("prims.json") {
         prims_bench(&path);
         return;
