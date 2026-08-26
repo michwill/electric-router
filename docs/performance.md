@@ -116,6 +116,38 @@ not because a crossing is dear (1 to 2 us) but because of what sits between
 them: 452 argument lists built and 452 dataclasses constructed, to wrap
 arithmetic that is already native.
 
+## Which arithmetic the quote path runs
+
+Not the exact one. `exact_probe._price` prefers `get_dy_fast`, and the
+integer form is what *admits* a pool -- `stable_params` compares it against
+the chain wei for wei -- rather than what prices a route. Pricing runs
+thousands of times and ranks candidates that differ by basis points; the float
+form was measured on 263 mainnet stableswaps to be out by at most 5.4e-4 bp.
+
+Which makes `get_dy` the wrong baseline for a port of the hot path, and the
+first numbers here were against it:
+
+| family | python exact | python fast | rust U256 | against fast |
+|---|---|---|---|---|
+| stableswap | 11.30 us | 4.12 | 1.13 | 3.6x |
+| twocrypto | 26.60 | 10.06 | 2.87 | 3.5x |
+| tricrypto | 27.47 | 12.14 | 4.01 | 3.0x |
+
+So the U256 port is worth about 3.5x on the quote path, not the sixfold it
+looked like. The stableswap `f64` probe ran at 0.07 us -- **59x** against the
+4.12 the path really pays -- which is where the hot side belongs.
+
+Two ports, two jobs, and they do not compete:
+
+* **`f64`** prices routes. Hot, 43% of a quote, ranking only, and it has a
+  documented error budget to hit: 5.4e-4 bp.
+* **`U256`** admits pools. Warm-time, once per pool, and wei-exact against the
+  chain is the entire point of it -- a bound that disagrees with the chain by
+  a wei is a bound that reverts.
+
+The 1,156 vectors belong to the second and stay there. The first needs its own
+acceptance test, against the float path's tolerance rather than equality.
+
 ## Where the models are actually called
 
 Counting `probe` alone said the models were ~15 ms of a quote. That was wrong,
