@@ -12,6 +12,7 @@
 //! Python. Anything this prints that is close to 18 ms means the solve count is
 //! the problem and porting buys nothing.
 
+mod prims;
 mod stableswap;
 
 use erouter_solve::cycles::cancel_cycles;
@@ -218,8 +219,61 @@ fn pools_bench(path: &str, reps: usize) {
     println!("python exact was 9.30 us each");
 }
 
+/// The cubic's primitives, against Python's answers.
+fn prims_bench(path: &str) {
+    use ruint::aliases::U256;
+    let raw = std::fs::read_to_string(path).expect("read prims");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("parse prims");
+    let big = |x: &serde_json::Value| x.as_str().unwrap().parse::<U256>().unwrap();
+    let signed = |x: &serde_json::Value| -> prims::I256 {
+        let t = x.as_str().unwrap();
+        match t.strip_prefix('-') {
+            Some(rest) => prims::I256::new(true, rest.parse().unwrap()),
+            None => prims::I256::pos(t.parse().unwrap()),
+        }
+    };
+
+    let mut bad = 0;
+    for c in v["cbrt"].as_array().unwrap() {
+        match prims::cbrt(big(&c[0])) {
+            Some(got) if got == big(&c[1]) => {}
+            got => {
+                bad += 1;
+                if bad <= 2 {
+                    println!("  cbrt({})\n    want {}\n    got  {:?}",
+                             c[0].as_str().unwrap(), c[1].as_str().unwrap(), got);
+                    prims::cbrt_trace(big(&c[0]));
+                }
+            }
+        }
+    }
+    println!("cbrt : {} vectors, {bad} wrong", v["cbrt"].as_array().unwrap().len());
+
+    bad = 0;
+    for c in v["isqrt"].as_array().unwrap() {
+        if prims::isqrt(big(&c[0])) != big(&c[1]) {
+            bad += 1;
+        }
+    }
+    println!("isqrt: {} vectors, {bad} wrong", v["isqrt"].as_array().unwrap().len());
+
+    bad = 0;
+    for c in v["sdiv"].as_array().unwrap() {
+        let want = signed(&c[2]);
+        match signed(&c[0]).sdiv(signed(&c[1])) {
+            Some(got) if got == want => {}
+            _ => bad += 1,
+        }
+    }
+    println!("sdiv : {} vectors, {bad} wrong", v["sdiv"].as_array().unwrap().len());
+}
+
 fn main() {
     let path = std::env::args().nth(1).expect("usage: proto <quote.json>");
+    if path.ends_with("prims.json") {
+        prims_bench(&path);
+        return;
+    }
     if path.ends_with("pools.json") {
         let reps: usize = std::env::args().nth(2)
             .and_then(|s| s.parse().ok()).unwrap_or(20);
