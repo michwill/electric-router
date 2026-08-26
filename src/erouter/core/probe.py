@@ -67,10 +67,22 @@ class ArcRef:
     # What stands on the other side, used to keep the smallest probe above the
     # output token's own resolution; see `plan_deltas`.
     reserve_out: int = 0
+    #: `id` is asked for far more often than an arc is built -- 2,972 times a
+    #: quote against once per arc per preparation, which is cached across
+    #: quotes -- so it is worked out on the first ask and kept.  Out of `eq`
+    #: and `hash` so that an arc which has been asked still equals one that
+    #: has not, and out of `repr` so it does not read as a field.
+    _id: str | None = field(default=None, compare=False, repr=False)
 
     @property
     def id(self) -> str:
-        return f"{self.pool.lower()}:{int(self.kind)}:{self.i}>{self.j}"
+        got = self._id
+        if got is None:
+            got = f"{self.pool.lower()}:{int(self.kind)}:{self.i}>{self.j}"
+            # Frozen, which is exactly what makes the cache safe: nothing the
+            # id is derived from can change under it.
+            object.__setattr__(self, "_id", got)
+        return got
 
 
 #: The fewest units of the output token a probe's answer may consist of.

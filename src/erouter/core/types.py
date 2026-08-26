@@ -8,7 +8,7 @@ back off the deployed contract and asserts equality, so the two cannot drift.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from enum import IntEnum, StrEnum
 
 
@@ -214,6 +214,37 @@ class PoolArc:
     @property
     def resistance(self) -> float:
         return math.inf if self.G <= 0 else 1.0 / self.G
+
+    #: Filled in below, once the field list exists to build it from.
+    __copy__ = None
+
+
+def _fast_copy(cls):
+    """Give a slots dataclass a `__copy__` that calls its own constructor.
+
+    `copy.copy` on a slots class has no `__dict__` to hand over, so it goes
+    through the reduce protocol and sets every field with the `setattr`
+    builtin.  On a 32-field arc that is 4.88 us against 1.88 us for the plain
+    constructor, and a quote copies the whole universe -- 820 arcs, 4.00 ms
+    against 1.54.  The copy itself is what the pipeline needs: `_assemble`
+    writes `G` and `eps` back onto the arcs and the refit re-anchors `B`, so
+    handing the same objects to the next quote would leak this size into it.
+
+    Generated from `fields()` rather than written out, because a copier that
+    can fall behind the class it copies is a silent wrong answer, not a loud
+    one.  `test_types_copy` holds it to that.
+    """
+    names = tuple(f.name for f in fields(cls))
+    source = ("def __copy__(self):\n    return _cls("
+              + ", ".join(f"{n}=self.{n}" for n in names) + ")\n")
+    scope: dict = {"_cls": cls}
+    # Field names only; nothing from outside the class reaches this.
+    exec(source, scope)
+    cls.__copy__ = scope["__copy__"]
+    return cls
+
+
+_fast_copy(PoolArc)
 
 
 @dataclass(slots=True)
