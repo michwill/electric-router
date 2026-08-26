@@ -163,12 +163,28 @@ impl Pool {
 /// the search, which only has to rank. Whether that trade is worth making is a
 /// question about how much of a quote is spent here at all.
 pub mod fast {
+    //! The arithmetic a quote actually runs.
+    //!
+    //! The integer form above *is* the contract, wei for wei, and that is what
+    //! makes the admission gate meaningful: a pool is trusted only when it
+    //! reproduces the chain exactly. But a quote prices thousands of times and
+    //! ranks candidates that differ by basis points, where the last wei buys
+    //! nothing -- measured over 1,052 samples on 263 mainnet stableswaps, the
+    //! float form is out by a median of 2e-9 bp and a worst case of 5.4e-4.
+    //!
+    //! So: integers decide whether a model may be used, floats price with it.
+
+    /// Rates and their inverses are constants of a pool frozen at a block, so
+    /// they are taken once rather than divided by on every call.
     pub struct Pool {
         pub xp: Vec<f64>,
         pub rates: Vec<f64>,
+        pub inv_rates: Vec<f64>,
         pub amp: f64,
         pub fee: f64,
+        pub offpeg_fee_multiplier: f64,
         pub a_precision: f64,
+        pub fee_on_xp: bool,
         pub subtract_one: bool,
     }
 
@@ -177,17 +193,15 @@ pub mod fast {
     /// Relative, not absolute. The integer form stops at `|y - prev| <= 1`
     /// because a wei is a wei; in `f64` at 1e30 an ULP is about 1e14, so the
     /// same test is either never true or trivially true and the iteration runs
-    /// its full 255 and returns nonsense. Matches Python's `_FAST_TOL`.
+    /// its cap and returns whatever it reached. Matches Python's `_FAST_TOL`.
     const FAST_TOL: f64 = 1e-14;
     /// Newton doubles its digits a step, so a solve that has not converged in
-    /// this many is not going to: measured over 2,240 solves on 268 mainnet
-    /// pools, the worst took 12 and none reached 255. Running the rest of the
-    /// cap buys nothing and hides the failure inside a plausible number.
+    /// forty is not going to: measured over 2,240 solves on 268 mainnet pools,
+    /// the worst took 12 and none reached the 255 the contract allows.
     const GIVE_UP: usize = 40;
     /// What to fall back to when it does not. A tolerance that cannot be met
-    /// is a statement about the pool's conditioning, not a reason to return
-    /// the last iterate as though it had converged -- so loosen once, and say
-    /// so, rather than failing a quote that only needed less precision.
+    /// is a statement about the pool's conditioning, not a reason to fail a
+    /// quote that only needed less precision.
     const LOOSE_TOL: f64 = 1e-9;
 
     impl Pool {
@@ -206,6 +220,9 @@ pub mod fast {
             for _ in 0..GIVE_UP {
                 let mut d_p = d;
                 for x in &self.xp {
+                    if *x <= 0.0 {
+                        return None;
+                    }
                     d_p = d_p * d / (*x * n);
                 }
                 let prev = d;
@@ -223,8 +240,7 @@ pub mod fast {
                 .or_else(|| self.y_within(d, i, j, x, LOOSE_TOL))
         }
 
-        fn y_within(&self, d: f64, i: usize, j: usize, x: f64, tol: f64)
-            -> Option<f64> {
+        fn y_within(&self, d: f64, i: usize, j: usize, x: f64, tol: f64) -> Option<f64> {
             let len = self.xp.len();
             let n = len as f64;
             let ann = self.amp * n;
@@ -232,6 +248,9 @@ pub mod fast {
             let mut s = 0.0;
             for (k, item) in self.xp.iter().enumerate().take(len) {
                 let below = if k == i { x } else if k != j { *item } else { continue };
+                if below <= 0.0 {
+                    return None;
+                }
                 s += below;
                 c = c * d / (below * n);
             }
@@ -248,6 +267,21 @@ pub mod fast {
             None
         }
 
+        /// `dynamic_fee`, without squaring a 1e24 integer into a 1e48 one.
+        fn dynamic_fee(&self, xpi: f64, xpj: f64) -> f64 {
+            if self.offpeg_fee_multiplier <= FEE_DENOMINATOR {
+                return self.fee;
+            }
+            let total = xpi + xpj;
+            if total <= 0.0 {
+                return self.fee;
+            }
+            let balanced = 4.0 * xpi * xpj / (total * total);
+            self.offpeg_fee_multiplier * self.fee
+                / ((self.offpeg_fee_multiplier - FEE_DENOMINATOR) * balanced
+                   + FEE_DENOMINATOR)
+        }
+
         pub fn get_dy(&self, i: usize, j: usize, dx: f64) -> Option<f64> {
             if dx <= 0.0 {
                 return Some(0.0);
@@ -259,8 +293,14 @@ pub mod fast {
             if raw <= 0.0 {
                 return Some(0.0);
             }
-            let out = raw * PRECISION / self.rates[j];
-            Some(out - out * self.fee / FEE_DENOMINATOR)
+            // Truncated, as Python's `int(...)` truncates: the caller is
+            // handed wei and a fractional wei is not one.
+            if self.fee_on_xp {
+                let fee = self.dynamic_fee((self.xp[i] + x) * 0.5, (self.xp[j] + y) * 0.5);
+                return Some(((raw - raw * fee / FEE_DENOMINATOR) * self.inv_rates[j]).trunc());
+            }
+            let out = raw * self.inv_rates[j];
+            Some((out - out * self.fee / FEE_DENOMINATOR).trunc())
         }
     }
 }

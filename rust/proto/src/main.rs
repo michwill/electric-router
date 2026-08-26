@@ -133,11 +133,12 @@ fn pools_bench(path: &str, reps: usize) {
             fee_on_xp: spec["fee_on_xp"].as_bool().unwrap(),
             subtract_one: spec["subtract_one"].as_bool().unwrap(),
         };
-        let vectors: Vec<(usize, usize, U256, U256)> = spec["vectors"].as_array()
+        let vectors: Vec<(usize, usize, U256, U256, f64)> = spec["vectors"].as_array()
             .unwrap().iter().map(|t| (
                 t[0].as_u64().unwrap() as usize,
                 t[1].as_u64().unwrap() as usize,
-                big(&t[2]), big(&t[3]))).collect();
+                big(&t[2]), big(&t[3]),
+                t[3 + 1].as_str().unwrap().parse::<f64>().unwrap())).collect();
         pools.push((pool, vectors));
     }
 
@@ -145,7 +146,7 @@ fn pools_bench(path: &str, reps: usize) {
     let mut wrong = 0usize;
     let mut none = 0usize;
     for (pool, vectors) in &pools {
-        for (i, j, dx, want) in vectors {
+        for (i, j, dx, want, _) in vectors {
             n += 1;
             match pool.get_dy(*i, *j, *dx) {
                 Some(got) if got == *want => {}
@@ -162,7 +163,7 @@ fn pools_bench(path: &str, reps: usize) {
         let start = Instant::now();
         let mut sink = U256::ZERO;
         for (pool, vectors) in &pools {
-            for (i, j, dx, _) in vectors {
+            for (i, j, dx, ..) in vectors {
                 if let Some(got) = pool.get_dy(*i, *j, *dx) {
                     sink += got;
                 }
@@ -173,54 +174,62 @@ fn pools_bench(path: &str, reps: usize) {
     }
     println!("rust U256 : {best:.0} us for {n} calls = {:.2} us each", best / n as f64);
 
-    // The same vectors in f64, to price what the exact width costs.
-    let fast: Vec<(stableswap::fast::Pool, Vec<(usize, usize, f64)>)> = pools.iter()
-        .map(|(pool, vectors)| {
+    // The same vectors in f64 -- the arithmetic a quote really runs -- with
+    // the integer answers as ground truth, because they are the chain's.
+    let fast: Vec<(stableswap::fast::Pool, Vec<(usize, usize, f64, U256, f64)>)> =
+        pools.iter().map(|(pool, vectors)| {
             let xp: Vec<f64> = pool.xp().iter().map(|v| f64::from(*v)).collect();
+            let rates: Vec<f64> = pool.rates.iter().map(|r| f64::from(*r)).collect();
+            let inv: Vec<f64> = rates.iter()
+                .map(|r| if *r == 0.0 { 0.0 } else { 1e18 / r }).collect();
             (stableswap::fast::Pool {
-                xp,
-                rates: pool.rates.iter().map(|r| f64::from(*r)).collect(),
+                xp, rates, inv_rates: inv,
                 amp: f64::from(pool.amp),
                 fee: f64::from(pool.fee),
+                offpeg_fee_multiplier: f64::from(pool.offpeg_fee_multiplier),
                 a_precision: f64::from(pool.a_precision),
+                fee_on_xp: pool.fee_on_xp,
                 subtract_one: pool.subtract_one,
             },
-             vectors.iter().map(|(i, j, dx, _)| (*i, *j, f64::from(*dx))).collect())
+             vectors.iter().map(|(i, j, dx, want, py)| (*i, *j, f64::from(*dx), *want, *py))
+                 .collect())
         }).collect();
-    let mut bailed = 0usize;
-    let mut drift = 0.0f64;
-    for ((pool, vectors), (fp, fv)) in pools.iter().zip(fast.iter()) {
-        for ((_, _, _, want), (i, j, dx)) in vectors.iter().zip(fv.iter()) {
-            let _ = pool;
-            match fp.get_dy(*i, *j, *dx) {
+
+    let (mut worst, mut bailed, mut counted) = (0.0f64, 0usize, 0usize);
+    let (mut py_worst, mut vs_py) = (0.0f64, 0.0f64);
+    for (pool, vectors) in &fast {
+        for (i, j, dx, want, py) in vectors {
+            match pool.get_dy(*i, *j, *dx) {
                 None => bailed += 1,
                 Some(got) => {
                     let exact = f64::from(*want);
                     if exact > 0.0 {
-                        drift = drift.max(((got - exact) / exact).abs() * 1e4);
+                        counted += 1;
+                        worst = worst.max(((got - exact) / exact).abs() * 1e4);
+                        py_worst = py_worst.max(((py - exact) / exact).abs() * 1e4);
+                        vs_py = vs_py.max(((got - py) / exact).abs() * 1e4);
                     }
                 }
             }
         }
     }
-    println!("  f64: {bailed} of {n} did not converge · worst drift {drift:.4} bp");
     let mut best_f = f64::INFINITY;
     for _ in 0..reps {
         let start = Instant::now();
         let mut sink = 0.0f64;
         for (pool, vectors) in &fast {
-            for (i, j, dx) in vectors {
-                if let Some(got) = pool.get_dy(*i, *j, *dx) {
-                    sink += got;
-                }
+            for (i, j, dx, ..) in vectors {
+                if let Some(got) = pool.get_dy(*i, *j, *dx) { sink += got; }
             }
         }
         std::hint::black_box(sink);
         best_f = best_f.min(start.elapsed().as_secs_f64() * 1e6);
     }
-    println!("rust f64  : {best_f:.0} us for {n} calls = {:.2} us each",
+    println!("rust f64  : {:.2} us each · {counted} compared · {bailed} bailed",
              best_f / n as f64);
-    println!("python exact was 9.30 us each");
+    println!("  worst drift from exact:  rust {worst:.2e} bp · python {py_worst:.2e} bp");
+    println!("  rust against python fast: {vs_py:.2e} bp");
+    println!("python: exact 11.30 us · fast 4.12 us");
 }
 
 /// The cubic's primitives, against Python's answers.
@@ -434,7 +443,7 @@ fn tricrypto_bench(path: &str, reps: usize) {
         let start = Instant::now();
         let mut sink = U256::ZERO;
         for (pool, vectors) in &pools {
-            for (i, j, dx, _) in vectors {
+            for (i, j, dx, ..) in vectors {
                 if let Some(got) = pool.get_dy(*i, *j, *dx) { sink += got; }
             }
         }
@@ -496,7 +505,7 @@ fn twocrypto_bench(path: &str, reps: usize) {
         let start = Instant::now();
         let mut sink = U256::ZERO;
         for (pool, vectors) in &pools {
-            for (i, j, dx, _) in vectors {
+            for (i, j, dx, ..) in vectors {
                 if let Some(got) = pool.get_dy(*i, *j, *dx) { sink += got; }
             }
         }
