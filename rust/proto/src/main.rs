@@ -15,6 +15,7 @@
 mod cryptoswap;
 mod prims;
 mod stableswap;
+mod twocrypto;
 
 use erouter_solve::cycles::cancel_cycles;
 use erouter_solve::solve::{active_set_solve, Arcs, Options};
@@ -269,6 +270,68 @@ fn prims_bench(path: &str) {
     println!("sdiv : {} vectors, {bad} wrong", v["sdiv"].as_array().unwrap().len());
 }
 
+/// `get_dy` end to end, against what all 84 twocrypto pools answer.
+fn twocrypto_bench(path: &str, reps: usize) {
+    use ruint::aliases::U256;
+    let raw = std::fs::read_to_string(path).expect("read twocrypto");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+    let big = |x: &serde_json::Value| x.as_str().unwrap().parse::<U256>().unwrap();
+    let flag = |s: &serde_json::Value, k: &str| s[k].as_bool().unwrap();
+
+    let mut pools = Vec::new();
+    for spec in v.as_array().unwrap() {
+        let b: Vec<U256> = spec["balances"].as_array().unwrap().iter().map(big).collect();
+        let pr: Vec<U256> = spec["precisions"].as_array().unwrap().iter().map(big).collect();
+        let pool = twocrypto::Pool {
+            balances: [b[0], b[1]], precisions: [pr[0], pr[1]],
+            price_scale: big(&spec["price_scale"]), d: big(&spec["d"]),
+            amp: big(&spec["amp"]), gamma: big(&spec["gamma"]),
+            mid_fee: big(&spec["mid_fee"]), out_fee: big(&spec["out_fee"]),
+            fee_gamma: big(&spec["fee_gamma"]),
+            stable: flag(spec, "stable"), v21: flag(spec, "v21"),
+            legacy_fee: flag(spec, "legacy_fee"),
+            legacy_pool: flag(spec, "legacy_pool"),
+            legacy_mul2: flag(spec, "legacy_mul2"),
+        };
+        let vectors: Vec<(usize, usize, U256, U256)> = spec["vectors"].as_array()
+            .unwrap().iter().map(|t| (
+                t[0].as_u64().unwrap() as usize, t[1].as_u64().unwrap() as usize,
+                big(&t[2]), big(&t[3]))).collect();
+        pools.push((pool, vectors));
+    }
+
+    let (mut n, mut wrong, mut refused, mut shown) = (0usize, 0usize, 0usize, 0usize);
+    for (pool, vectors) in &pools {
+        for (i, j, dx, want) in vectors {
+            n += 1;
+            match pool.get_dy(*i, *j, *dx) {
+                Some(got) if got == *want => {}
+                Some(got) => {
+                    wrong += 1;
+                    if shown < 3 { shown += 1; println!("  want {want}\n  got  {got}"); }
+                }
+                None => refused += 1,
+            }
+        }
+    }
+    println!("twocrypto: {} pools · {n} vectors · {wrong} wrong · {refused} refused",
+             pools.len());
+
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let start = Instant::now();
+        let mut sink = U256::ZERO;
+        for (pool, vectors) in &pools {
+            for (i, j, dx, _) in vectors {
+                if let Some(got) = pool.get_dy(*i, *j, *dx) { sink += got; }
+            }
+        }
+        std::hint::black_box(sink);
+        best = best.min(start.elapsed().as_secs_f64() * 1e6);
+    }
+    println!("rust  {:.2} us a call · python was 22.01", best / n as f64);
+}
+
 /// The cubic, against what 27 mainnet pools actually answer.
 fn gety_bench(path: &str) {
     use ruint::aliases::U256;
@@ -323,6 +386,11 @@ fn gety_bench(path: &str) {
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: proto <quote.json>");
+    if path.ends_with("twocrypto.json") {
+        twocrypto_bench(&path, std::env::args().nth(2)
+            .and_then(|s| s.parse().ok()).unwrap_or(20));
+        return;
+    }
     if path.ends_with("gety.json") {
         gety_bench(&path);
         return;

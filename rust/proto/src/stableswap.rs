@@ -264,3 +264,24 @@ pub mod fast {
         }
     }
 }
+
+/// `solve_y` over explicit parameters rather than a pool.
+///
+/// The FX Swap is a stableswap invariant wearing cryptoswap's machinery, and
+/// it calls this at `A_MULTIPLIER` where stableswap-ng calls it at
+/// `A_PRECISION` -- which is the only difference between them, and is already
+/// a parameter.
+pub fn solve_y_raw(amp: U256, a_precision: U256, xp: &[U256], d: U256,
+                   i: usize, j: usize, x: U256) -> Option<U256> {
+    let pool = Pool {
+        balances: vec![],
+        rates: vec![],
+        amp,
+        fee: U256::ZERO,
+        offpeg_fee_multiplier: U256::ZERO,
+        a_precision,
+        fee_on_xp: false,
+        subtract_one: false,
+    };
+    pool.solve_y(xp, d, i, j, x)
+}
