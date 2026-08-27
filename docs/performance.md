@@ -368,9 +368,29 @@ The rest is Python spread thin:
     collect            1.02     k_shortest_paths 0.75
 
 Fifteen functions, the largest 6.70 ms and the median about 1.4. Nothing here
-is a bottleneck; it is a tail. Two of them are worth a port on their own
-terms -- the split search and `realize` -- and both carry product logic rather
-than arithmetic, so each needs the differential harness rather than a reading.
+is a bottleneck; it is a tail.
+
+**And that list is a third short of the truth.** Accounting for a whole quote
+in one run rather than assembling it from several -- timers on, which inflates
+the total, so read the shares:
+
+| | ms | share |
+|---|---|---|
+| Rust solver (`active_set_solve`) | 19.91 | 26% |
+| named Python functions | 33.69 | 43% |
+| inside a stage, in no named function | 17.06 | 22% |
+| outside every stage span | 6.93 | 9% |
+
+Nearly a third is in no function at all. It is the inline bodies of `route()`
+and the stage blocks -- loops, comprehensions, dicts and lists built between
+the calls, dataclasses constructed to carry a result four lines. Porting
+helpers one at a time cannot reach it, however many of them are ported.
+
+Which is `element_split`'s lesson in another form. Moving a *loop* works;
+moving a *function* mostly does not. So the options are narrower than "keep
+porting": move whole stages with their glue -- which is what the candidate
+prototype did, 40.7 to 17.05 ms by relocating the loop rather than a function
+inside it -- or accept the ~60-67 ms, of which ~20 is already native.
 
 The rest is where the curve flattens. Some of it is not worth taking at any
 price: caching `Ladder.as_float` would save about a millisecond and needs
