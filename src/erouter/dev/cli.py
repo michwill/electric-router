@@ -1471,7 +1471,10 @@ def _report_calldata(result, args, chain, nodes, dst, pools):
         return None
     min_out = 0
     if args.min_out_bp is not None:
-        min_out = int(result.route.modelled_out * (1 - args.min_out_bp / 1e4))
+        # Off what the chain says the route pays, not off the model: see
+        # `RouterSession.plan_call`, where the two stood 50 bp apart.
+        promised = result.verified_out or result.route.modelled_out
+        min_out = int(promised * (1 - args.min_out_bp / 1e4))
     try:
         call = encode_route(
             result.route, receiver=args.receiver,

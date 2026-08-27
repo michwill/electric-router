@@ -466,11 +466,21 @@ class RouterSession:
 
         await self.evm.fill(self.rpc, price, block=hex(block), code_for=self._code_for)
         # An end-to-end bound *as well as* the per-leg ones, when the caller
-        # asks for one.  Taken off the route's own modelled figure, as the CLI
-        # does: `guaranteed_out` already discounts every leg's tolerance, so
-        # deriving it from that would compound the two.
-        min_out = (int(result.route.modelled_out * (1 - min_out_bp / 1e4))
-                   if min_out_bp else 0)
+        # asks for one.  Off `verified_out`, which is what the chain says the
+        # route pays and what the caller was shown -- a promise about the
+        # number on screen has to be measured from that number.
+        #
+        # It used to come off the route's modelled figure, and the model is
+        # not the chain: measured on ETH -> DOLA at block 25,846,510, the
+        # model stood 50.55 bp above what the route really paid, mostly on one
+        # volatile leg.  A 50 bp bound taken off it landed 0.30 bp *above* the
+        # output, so the call reverted on `min_out` at the dry run -- a
+        # promise nothing could keep, from a caller who had asked for 50 bp of
+        # room and been given none.  `guaranteed_out` is still the wrong
+        # reference for the opposite reason: it already discounts every leg's
+        # tolerance, so deriving from it would compound the two.
+        promised = result.verified_out or result.route.modelled_out
+        min_out = int(promised * (1 - min_out_bp / 1e4)) if min_out_bp else 0
         approvals = await self._needs_approvals(result.route, block)
         call = encode_route(
             result.route,
