@@ -1040,6 +1040,7 @@ class RouterSession:
         from .tricrypto_params import build_exact_tricrypto
         from .twocrypto_params import build_exact_twocrypto
         from .vault_params import build_exact_vaults
+        from .wrapper_params import build_exact_wrappers
 
         measured = self.client
 
@@ -1069,6 +1070,7 @@ class RouterSession:
                 build_exact_vaults(vault_arcs, measured),
                 build_exact_lp(carrying, stable, measured),
                 build_exact_crypto_lp(carrying, crypto, measured),
+                build_exact_wrappers(self.chain.wsteth_pairs, measured),
             )
 
         # The gate refuses a pool that will not reproduce its own quote, and
@@ -1079,7 +1081,7 @@ class RouterSession:
         await self._settle(lambda: build(cache=ExactCache.from_bytes(self.chain.chain_id, None)))
         models = build()
         self._rebuild_models = build
-        exact, two, tri, vaults, lp, crypto_lp = models
+        exact, two, tri, vaults, lp, crypto_lp, wrappers = models
         # No probe memoisation under this.  `probe_cache` exists to avoid round
         # trips and there are none here -- and it also memoises *route*
         # verifications, which is wrong for a route that uses one pool twice:
@@ -1089,7 +1091,8 @@ class RouterSession:
         if exact or two or tri:
             self.client = ExactQuoterClient(
                 self.client, exact, two, tri, vaults, lp,
-                models_block=self.block, rebuild=build, crypto_lp=crypto_lp)
+                models_block=self.block, rebuild=build, crypto_lp=crypto_lp,
+                wrappers=wrappers)
         say("models", 1.0)
         return len(exact) + len(two) + len(tri)
 

@@ -153,7 +153,8 @@ class ExactQuoterClient:
 
     def __init__(self, client, exact, twocrypto=None, tricrypto=None,
                  vaults=None, lp=None, *, enabled: bool = True,
-                 models_block: int = 0, rebuild=None, crypto_lp=None):
+                 models_block: int = 0, rebuild=None, crypto_lp=None,
+                 wrappers=None):
         self.client = client
         self.exact = exact
         #: Three-coin crypto pools, whose maths is its own module again.
@@ -173,6 +174,9 @@ class ExactQuoterClient:
         #: has no deposit model -- its own `calc_token_amount` already charges
         #: what `add_liquidity` charges.
         self.crypto_lp = crypto_lp
+        #: Rate wrappers -- wstETH today -- per (token, direction). A
+        #: conversion leg priced here is a leg the EVM does not execute.
+        self.wrappers = wrappers
         self.enabled = enabled
         #: `(pool, kind, i, j) -> model`, cleared whenever the models are
         #: rebuilt.  See `_model`.
@@ -210,6 +214,8 @@ class ExactQuoterClient:
             self.lp = built[4]
         if len(built) > 5:
             self.crypto_lp = built[5]
+        if len(built) > 6:
+            self.wrappers = built[6]
         self.models_block = block
         # The models the cache pointed at are gone.
         self._model_cache.clear()
@@ -320,6 +326,10 @@ class ExactQuoterClient:
             return ONE_TO_ONE
         if kind in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM):
             return self.vaults.get(pool, kind) if self.vaults is not None else None
+        if kind in (ArcKind.WSTETH_WRAP, ArcKind.WSTETH_UNWRAP):
+            # A ratio, in the same shape a vault answers in. Without one the
+            # whole route carrying this leg goes to the EVM.
+            return self.wrappers.get(pool, kind) if self.wrappers is not None else None
         if self.lp is not None and kind is ArcKind.WITHDRAW_STABLE:
             model = self.lp.get(pool)
             return _Withdraw(model) if model is not None else None
