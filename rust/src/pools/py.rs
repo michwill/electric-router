@@ -52,8 +52,8 @@ impl Pools {
     #[allow(clippy::too_many_arguments)]
     fn add_stableswap(&mut self, balances: Vec<String>, rates: Vec<String>,
                       amp: &str, fee: &str, offpeg_fee_multiplier: &str,
-                      a_precision: &str, fee_on_xp: bool, subtract_one: bool)
-        -> PyResult<usize> {
+                      a_precision: &str, fee_on_xp: bool, subtract_one: bool,
+                      admin_fee: Option<&str>) -> PyResult<usize> {
         let exact = stableswap::Pool {
             balances: bigs(&balances)?,
             rates: bigs(&rates)?,
@@ -63,6 +63,12 @@ impl Pools {
             a_precision: big(a_precision)?,
             fee_on_xp,
             subtract_one,
+            // Absent where the pool never told us, and `exchange` then
+            // refuses rather than guessing.
+            admin_fee: match admin_fee {
+                Some(v) => Some(big(v)?),
+                None => None,
+            },
         };
         // `xp` and the inverse rates are constants of a pool frozen at a
         // block, so they are taken once here rather than per call.

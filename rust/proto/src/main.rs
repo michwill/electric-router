@@ -107,6 +107,70 @@ fn realize(tau: &[i64], sig: &[i64], psi: &[f64], n_nodes: usize, amount_in: f64
     legs
 }
 
+/// `exchange`: the payout *and* the pool it leaves, both against Python.
+///
+/// Checking only `dy` would miss the whole point. `exchange` exists so a route
+/// can enter a pool twice, and what the second leg sees is the balances -- an
+/// admin fee applied wrongly is invisible in the first answer and wrong in
+/// every one after it.
+fn exchange_bench(path: &str, reps: usize) {
+    use ruint::aliases::U256;
+    let raw = std::fs::read_to_string(path).expect("read exchange");
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("parse");
+    let big = |x: &serde_json::Value| x.as_str().unwrap().parse::<U256>().unwrap();
+
+    let mut pools = Vec::new();
+    for spec in v.as_array().unwrap() {
+        let pool = stableswap::Pool {
+            balances: spec["balances"].as_array().unwrap().iter().map(big).collect(),
+            rates: spec["rates"].as_array().unwrap().iter().map(big).collect(),
+            amp: big(&spec["amp"]),
+            fee: big(&spec["fee"]),
+            offpeg_fee_multiplier: big(&spec["offpeg_fee_multiplier"]),
+            a_precision: big(&spec["a_precision"]),
+            fee_on_xp: spec["fee_on_xp"].as_bool().unwrap(),
+            subtract_one: spec["subtract_one"].as_bool().unwrap(),
+            admin_fee: Some(big(&spec["admin_fee"])),
+        };
+        let vectors: Vec<(usize, usize, U256, U256, Vec<U256>)> =
+            spec["vectors"].as_array().unwrap().iter().map(|t| (
+                t[0].as_u64().unwrap() as usize, t[1].as_u64().unwrap() as usize,
+                big(&t[2]), big(&t[3]),
+                t[4].as_array().unwrap().iter().map(big).collect())).collect();
+        pools.push((pool, vectors));
+    }
+
+    let (mut n, mut dy_wrong, mut bal_wrong, mut refused) = (0usize, 0, 0, 0usize);
+    for (pool, vectors) in &pools {
+        for (i, j, dx, want_dy, want_bal) in vectors {
+            n += 1;
+            match pool.exchange(*i, *j, *dx) {
+                None => refused += 1,
+                Some((dy, after)) => {
+                    if dy != *want_dy { dy_wrong += 1; }
+                    if &after.balances != want_bal { bal_wrong += 1; }
+                }
+            }
+        }
+    }
+    println!("exchange: {} pools · {n} vectors · {dy_wrong} dy wrong · \
+{bal_wrong} balances wrong · {refused} refused", pools.len());
+
+    let mut best = f64::INFINITY;
+    for _ in 0..reps {
+        let start = Instant::now();
+        let mut sink = U256::ZERO;
+        for (pool, vectors) in &pools {
+            for (i, j, dx, ..) in vectors {
+                if let Some((dy, _)) = pool.exchange(*i, *j, *dx) { sink += dy; }
+            }
+        }
+        std::hint::black_box(sink);
+        best = best.min(start.elapsed().as_secs_f64() * 1e6);
+    }
+    println!("rust {:.2} us a call", best / n as f64);
+}
+
 /// Replay real pools and their Python answers: exactness first, then speed.
 fn pools_bench(path: &str, reps: usize) {
     use ruint::aliases::U256;
@@ -128,6 +192,7 @@ fn pools_bench(path: &str, reps: usize) {
             a_precision: big(&spec["a_precision"]),
             fee_on_xp: spec["fee_on_xp"].as_bool().unwrap(),
             subtract_one: spec["subtract_one"].as_bool().unwrap(),
+            admin_fee: None,
         };
         let vectors: Vec<(usize, usize, U256, U256, f64)> = spec["vectors"].as_array()
             .unwrap().iter().map(|t| (
@@ -644,6 +709,11 @@ fn main() {
     }
     if path.ends_with("prims.json") {
         prims_bench(&path);
+        return;
+    }
+    if path.ends_with("exchange.json") {
+        exchange_bench(&path, std::env::args().nth(2)
+            .and_then(|s| s.parse().ok()).unwrap_or(20));
         return;
     }
     if path.ends_with("pools.json") {

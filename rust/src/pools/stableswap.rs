@@ -11,6 +11,7 @@ use ruint::aliases::U256;
 
 const MAX_ITER: usize = 255;
 
+#[derive(Clone)]
 pub struct Pool {
     pub balances: Vec<U256>,
     pub rates: Vec<U256>,
@@ -20,6 +21,10 @@ pub struct Pool {
     pub a_precision: U256,
     pub fee_on_xp: bool,
     pub subtract_one: bool,
+    /// The DAO's share of the fee. Negative in Python means "unknown"; here
+    /// `None`, and `exchange` refuses rather than guessing -- a pool advanced
+    /// without it is left richer than it is and quotes the next leg too well.
+    pub admin_fee: Option<U256>,
 }
 
 fn precision() -> U256 {
@@ -126,6 +131,54 @@ impl Pool {
         let four = U256::from(4u64);
         self.offpeg_fee_multiplier * self.fee
             / ((self.offpeg_fee_multiplier - fd) * four * xpi * xpj / xps2 + fd)
+    }
+
+    /// `(dy, the pool after the trade)` -- what `exchange` would leave.
+    ///
+    /// A view-only chained quoter cannot see its own earlier leg, which is why
+    /// a route may not touch a pool twice. That is a limitation of *asking the
+    /// chain*, not of the arithmetic: for a pool the wei-exact gate admitted,
+    /// the state after a trade is as computable as the trade itself, and
+    /// stableswap makes it easy because `D` is derived from the balances
+    /// rather than stored.
+    ///
+    /// The update is the contract's own, and it keeps the LP's share of the
+    /// fee while losing the DAO's. Skipping `dy_admin_fee` would leave the
+    /// pool richer than it is.
+    pub fn exchange(&self, i: usize, j: usize, dx: U256) -> Option<(U256, Pool)> {
+        let admin_fee = self.admin_fee?;
+        if dx.is_zero() {
+            return Some((U256::ZERO, self.clone()));
+        }
+        let p = precision();
+        let fd = fee_denominator();
+        let xp = self.xp();
+        let d = self.d(&xp)?;
+        let x = xp[i] + dx * self.rates[i] / p;
+        let y = self.solve_y(&xp, d, i, j, x)?;
+        let sub = if self.subtract_one { U256::from(1u64) } else { U256::ZERO };
+        if xp[j] <= y + sub {
+            return Some((U256::ZERO, self.clone()));
+        }
+        let raw = xp[j] - y - sub;
+        let two = U256::from(2u64);
+        let (dy, admin) = if self.fee_on_xp {
+            let fee = self.dynamic_fee((xp[i] + x) / two, (xp[j] + y) / two);
+            let charged = raw * fee / fd;
+            ((raw - charged) * p / self.rates[j],
+             charged * admin_fee / fd * p / self.rates[j])
+        } else {
+            let out = raw * p / self.rates[j];
+            let charged = out * self.fee / fd;
+            (out - charged, charged * admin_fee / fd)
+        };
+        let mut balances = self.balances.clone();
+        balances[i] += dx;
+        if balances[j] < dy + admin {
+            return None;
+        }
+        balances[j] -= dy + admin;
+        Some((dy, Pool { balances, ..self.clone() }))
     }
 
     /// Exactly what `get_dy(i, j, dx)` returns on chain.
@@ -322,6 +375,7 @@ pub fn solve_y_raw(amp: U256, a_precision: U256, xp: &[U256], d: U256,
         a_precision,
         fee_on_xp: false,
         subtract_one: false,
+        admin_fee: None,
     };
     pool.solve_y(xp, d, i, j, x)
 }

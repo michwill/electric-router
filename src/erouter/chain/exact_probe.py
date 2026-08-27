@@ -177,7 +177,10 @@ class _Native:
                 [str(b) for b in model.balances], [str(r) for r in model.rates],
                 str(model.amp), str(model.fee),
                 str(model.offpeg_fee_multiplier), str(model.a_precision),
-                bool(model.fee_on_xp), bool(model.subtract_one))
+                bool(model.fee_on_xp), bool(model.subtract_one),
+                # Negative means the pool never told us, and a pool advanced
+                # without the DAO's share is left richer than it is.
+                str(model.admin_fee) if model.admin_fee >= 0 else None)
         if name == "Twocrypto":
             return self.pools.add_twocrypto(
                 [str(b) for b in model.balances],
