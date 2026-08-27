@@ -256,8 +256,49 @@ MINIMAL_ERC20 = """[
   {"name":"balanceOf","type":"function","stateMutability":"view",
    "inputs":[{"name":"a","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
   {"name":"approve","type":"function","stateMutability":"nonpayable",
-   "inputs":[{"name":"s","type":"address"},{"name":"v","type":"uint256"}],"outputs":[]}
+   "inputs":[{"name":"s","type":"address"},{"name":"v","type":"uint256"}],"outputs":[]},
+  {"name":"transfer","type":"function","stateMutability":"nonpayable",
+   "inputs":[{"name":"t","type":"address"},{"name":"v","type":"uint256"}],"outputs":[]},
+  {"name":"decimals","type":"function","stateMutability":"view",
+   "inputs":[],"outputs":[{"name":"","type":"uint8"}]},
+  {"name":"totalSupply","type":"function","stateMutability":"view",
+   "inputs":[],"outputs":[{"name":"","type":"uint256"}]}
 ]"""
+
+
+def _funded_depositor(boa, erc20, spend_token: str, wrapper: str) -> str:
+    """Someone to mint with, when nothing on the graph holds the asset.
+
+    `no holder` left nine mainnet vaults untested, and three of them refuse the
+    mint: NaraUSD in a hook, USPC and tETH on the asset's own transfer.  A
+    verdict of "we could not ask" reads the same as "yes" to everything
+    downstream, so it is worth asking properly.
+
+    Two ways, in that order.  A vault holds its own asset, so it can fund the
+    probe; and when the asset refuses a plain transfer -- tETH's reverts
+    `Unauthorized()` -- the balance is written instead, because that refusal is
+    a fact about the asset rather than an answer about the mint.
+
+    Minting only.  Fabricating *shares* would fake a claim the vault never
+    issued, and a false `redeem: False` gates a merge.
+    """
+    token = erc20.at(spend_token)
+    who = boa.env.generate_address()
+    boa.env.set_balance(who, 10 ** 19)
+
+    with contextlib.suppress(Exception):
+        pool = token.balanceOf(wrapper)
+        if pool > 0:
+            with boa.env.prank(wrapper):
+                token.transfer(who, max(pool // 1000, 1))
+            if token.balanceOf(who) > 0:
+                return who
+
+    with contextlib.suppress(Exception):
+        boa.deal(token, who, 100 * 10 ** token.decimals())
+        if token.balanceOf(who) > 0:
+            return who
+    return ""
 
 WRAPPER_ABI = {
     "ctoken": """[
@@ -302,12 +343,20 @@ def probe_wrappers_by_prank(wrappers, holders, *, share: int = 4) -> list[Capabi
         erc20 = boa.loads_abi(MINIMAL_ERC20)
 
         for direction, spend_token in (("mint", underlying), ("redeem", token)):
-            holder = (holders or {}).get(spend_token.lower(), "")
-            if not holder:
+            known = (holders or {}).get(spend_token.lower(), "")
+            if not known and direction != "mint":
                 got.notes[direction] = "no holder"
                 continue
             try:
                 with boa.env.anchor():
+                    # Only where there was no holder at all: a known holder is
+                    # left exactly as it was, so no verdict already measured can
+                    # move because of this.
+                    holder = known or _funded_depositor(
+                        boa, erc20, spend_token, token)
+                    if not holder:
+                        got.notes[direction] = "no holder"
+                        continue
                     held = erc20.at(spend_token).balanceOf(holder)
                     if held <= 0:
                         got.notes[direction] = "holder is empty"

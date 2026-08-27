@@ -11,6 +11,9 @@ USD3 and loAZND.
 
 from __future__ import annotations
 
+import contextlib
+from typing import ClassVar
+
 from erouter.chain.wrappers import build_stake_arcs
 
 
@@ -26,7 +29,7 @@ class Nodes:
     whole vault set -- the gate is what is under test, not `mintable_vaults`.
     """
 
-    node_of: dict = {}
+    node_of: ClassVar[dict] = {}
 
     def has(self, address: str) -> bool:
         return True
@@ -60,10 +63,8 @@ OTHER = "0x" + "a2" * 20
 
 def _asked(vaults, facts) -> set[str]:
     client = Client()
-    try:
+    with contextlib.suppress(AssertionError):
         build_stake_arcs(Nodes(), Chain(vaults), client, facts)
-    except AssertionError:
-        pass
     return set(client.asked)
 
 
