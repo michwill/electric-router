@@ -330,7 +330,55 @@ small and accounted for: `modelled` by 620,670 wei (1.5e-11, the float drift
 feeding back through calibration) and `verified` by 7.76e-10 bp, which is the
 wstETH leg no longer going through the EVM.
 
+## Where it ended up
+
+A warm quote, same block, same pair, after the models and the wiring:
+
+| stage | before | after |
+|---|---|---|
+| candidates | 40.66 | 26.58 |
+| refine | 18.63 | 13.81 |
+| split | 17.29 | **6.20** |
+| **wall total** | **95.37** | **~60-68** |
+
+`split` collapsed because its cost was never the search. It spends 2.28 ms
+searching and the rest quoting, and the quoting is models.
+
+What each change was worth, measured interleaved rather than in sequence:
+
+| change | measured |
+|---|---|
+| Rust pool models (`probe`, `element_split`) | 24.6 ms |
+| wstETH modelled instead of executed | 11.5 ms |
+| `local_evm` on `erouter_evm` rather than pyrevm | 1.77x on the binding |
+| batched calibration | 1.71 ms |
+
 ## The shape of what is left
+
+**21 ms of a ~67 ms quote is the Rust solver** -- 37 `active_set_solve` calls
+-- and it does not move without changing the algorithm, which is out of scope.
+The rest is Python spread thin:
+
+    optimise_splits    6.70    (of which _ascend 1.03 and probes 0.87 are Rust)
+    realize_candidates 4.21
+    plan_sized         2.43     _assemble       2.33
+    _recalibrate       2.13     seed_subgraph   2.11
+    price_legs         1.41     element_of_arcs 1.40
+    merge              1.29     conflicting_pools 1.25
+    collect            1.02     k_shortest_paths 0.75
+
+Fifteen functions, the largest 6.70 ms and the median about 1.4. Nothing here
+is a bottleneck; it is a tail. Two of them are worth a port on their own
+terms -- the split search and `realize` -- and both carry product logic rather
+than arithmetic, so each needs the differential harness rather than a reading.
+
+The rest is where the curve flattens. Some of it is not worth taking at any
+price: caching `Ladder.as_float` would save about a millisecond and needs
+invalidating at two in-place mutation sites, and a stale ladder calibrates on
+old probe data and returns a wrong fit silently. That is the wrong trade, and
+noting it here is cheaper than rediscovering it.
+
+
 
 The remaining orchestration is **diffuse**, which is the finding that decides
 the strategy. Inside `refine`:
