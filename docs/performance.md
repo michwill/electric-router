@@ -164,24 +164,49 @@ exactly, a decade per decade:
 | 1e-4 | 1.00e-7 | 5.76e-1 | 1.94e-7 | 2.52e-7 |
 | 1e-2 | 6.78e-8 | 5.80e-3 | 9.83e-10 | 1.35e-9 |
 
-The worst column looks alarming and is not. Every one of those cases is one or
-two wei:
+The worst column is small outputs, not bad arithmetic: 5.03e+01 bp is one wei
+on an output of 199 units, 1.00 bp is two wei on 19,933. And the router
+declines to ask there -- `probe.py` floors every probe at
+`MIN_OUT_QUANTA = 10,000` output units, because "an answer of `n` units
+carries a rounding error of `1/n`".
 
-    5.03e+01 bp   =  1 wei on an output of 199 units
-    5.21e+00      =  1 wei on 1,918
-    1.00e+00      =  2 wei on 19,933
+**But the error is not a wei, and calling it one was wrong.** Over a proper
+size range it is a relative error that scales with the *pool's* magnitude:
 
-534 of 2,656 samples differ by a single wei. So the figure is not a property
-of the arithmetic, it is a property of how many units the answer has -- and
-the router already declines to ask at sizes where that is few. `probe.py`
-floors every probe at `MIN_OUT_QUANTA = 10,000` output units, because "an
-answer of `n` units carries a rounding error of `1/n`". Above that floor the
-worst case over all three families is **1.00 bp, and it is two wei**; below
-it, 50 bp on 199 units.
+    absolute error in dy, wei      relative error in y
+      p50         11,314,133         p50   2.54e-16     ~1 ulp
+      p90     79,299,036,762         p90   9.35e-16
+      p100   309,870,984,527         p100  3.50e-09
 
-Which is the answer to whether the float path is safe to price with: it is
-wrong by a couple of wei, always, and what that is worth in basis points is
-decided by the size, not by `f64`.
+    dy > 1e18 units: median error 1,244,702,346 wei
+    dy <= 1e12 units: median error 0 wei
+
+Two things follow, and the second is the one worth keeping.
+
+`y` converges to about one ulp -- 2.54e-16, well *below* `_FAST_TOL` of 1e-14,
+because Newton doubles its digits and overshoots the stopping test. So the
+tolerance is not what limits the answer and tightening it would buy nothing.
+
+And `dy = xp[j] - y - 1` inherits `y`'s **absolute** error unreduced. One ulp
+of a balance at 1e30 is about 1e14 wei, which is where the p100 comes from.
+The transfer is not clean either -- measured against one ulp of `y` it is 4.5
+at the median and 7,452 at p90 -- so there is real accumulation through the
+subtraction, not just round-off carried over.
+
+The clinching evidence that convergence is not the driver: the pools where `y`
+converges *worst* have the *smallest* `dy` errors.
+
+    y relative 3.50e-09  ->  dy out by 2 wei on 24,128,260 units
+    y relative 2.21e-09  ->  2 wei
+    y relative 4.50e-10  ->  1 wei
+
+Those are the cases where `dy` is a large share of the pool, so `y/dy` is
+small and there is nothing to amplify. Convergence and amplification pull in
+opposite directions, and amplification wins.
+
+So: the float path is wrong by `y`'s round-off transferred through a
+subtraction, which is ~1e-11 of `dy` or better at any size the router probes,
+and it is not fixable by iterating harder.
 
 ## Where the models are actually called
 
