@@ -415,15 +415,29 @@ fn tricrypto_bench(path: &str, reps: usize) {
             fee_gamma: big(&spec["fee_gamma"]), legacy: is_legacy,
             a_multiplier: big(&spec["a_multiplier"]),
         };
-        let vectors: Vec<(usize, usize, U256, U256)> = spec["vectors"].as_array()
+        let vectors: Vec<(usize, usize, U256, U256, f64)> = spec["vectors"].as_array()
             .unwrap().iter().map(|t| (
                 t[0].as_u64().unwrap() as usize, t[1].as_u64().unwrap() as usize,
-                big(&t[2]), big(&t[3]))).collect();
+                big(&t[2]), big(&t[3]),
+                t[4].as_str().unwrap().parse::<f64>().unwrap())).collect();
         pools.push((pool, vectors));
     }
     let (mut n, mut wrong, mut refused, mut shown) = (0usize, 0usize, 0usize, 0usize);
+    let (mut worst, mut py_worst, mut vs_py, mut bailed) =
+        (0.0f64, 0.0f64, 0.0f64, 0usize);
     for (pool, vectors) in &pools {
-        for (i, j, dx, want) in vectors {
+        for (i, j, dx, want, py) in vectors {
+            let exact = f64::from(*want);
+            match pool.get_dy_fast(*i, *j, *dx) {
+                None => bailed += 1,
+                Some(f) if exact > 0.0 => {
+                    let g = f64::from(f);
+                    worst = worst.max(((g - exact) / exact).abs() * 1e4);
+                    py_worst = py_worst.max(((py - exact) / exact).abs() * 1e4);
+                    vs_py = vs_py.max(((g - py) / exact).abs() * 1e4);
+                }
+                _ => {}
+            }
             n += 1;
             match pool.get_dy(*i, *j, *dx) {
                 Some(got) if got == *want => {}
@@ -437,6 +451,8 @@ fn tricrypto_bench(path: &str, reps: usize) {
     }
     println!("get_dy: {} pools ({legacy} legacy) · {n} vectors · {wrong} wrong · {refused} refused",
              pools.len());
+    println!("  f64 drift from exact: rust {worst:.2e} bp · python {py_worst:.2e} bp \
+· rust vs python {vs_py:.2e} bp · {bailed} bailed");
 
     let mut best = f64::INFINITY;
     for _ in 0..reps {
@@ -450,7 +466,20 @@ fn tricrypto_bench(path: &str, reps: usize) {
         std::hint::black_box(sink);
         best = best.min(start.elapsed().as_secs_f64() * 1e6);
     }
-    println!("rust  {:.2} us a call · python was 24.38", best / n as f64);
+    println!("rust U256 {:.2} us a call · python exact 25.52", best / n as f64);
+    let mut best_f = f64::INFINITY;
+    for _ in 0..reps {
+        let start = Instant::now();
+        let mut sink = U256::ZERO;
+        for (pool, vectors) in &pools {
+            for (i, j, dx, ..) in vectors {
+                if let Some(g) = pool.get_dy_fast(*i, *j, *dx) { sink += g; }
+            }
+        }
+        std::hint::black_box(sink);
+        best_f = best_f.min(start.elapsed().as_secs_f64() * 1e6);
+    }
+    println!("rust f64  {:.2} us a call · python fast 11.65", best_f / n as f64);
 }
 
 /// `get_dy` end to end, against what all 84 twocrypto pools answer.
@@ -476,16 +505,19 @@ fn twocrypto_bench(path: &str, reps: usize) {
             legacy_pool: flag(spec, "legacy_pool"),
             legacy_mul2: flag(spec, "legacy_mul2"),
         };
-        let vectors: Vec<(usize, usize, U256, U256)> = spec["vectors"].as_array()
+        let vectors: Vec<(usize, usize, U256, U256, f64)> = spec["vectors"].as_array()
             .unwrap().iter().map(|t| (
                 t[0].as_u64().unwrap() as usize, t[1].as_u64().unwrap() as usize,
-                big(&t[2]), big(&t[3]))).collect();
+                big(&t[2]), big(&t[3]),
+                t[4].as_str().unwrap().parse::<f64>().unwrap())).collect();
         pools.push((pool, vectors));
     }
 
     let (mut n, mut wrong, mut refused, mut shown) = (0usize, 0usize, 0usize, 0usize);
+    let (mut worst, mut py_worst, mut vs_py, mut bailed) =
+        (0.0f64, 0.0f64, 0.0f64, 0usize);
     for (pool, vectors) in &pools {
-        for (i, j, dx, want) in vectors {
+        for (i, j, dx, want, py) in vectors {
             n += 1;
             match pool.get_dy(*i, *j, *dx) {
                 Some(got) if got == *want => {}
@@ -495,10 +527,23 @@ fn twocrypto_bench(path: &str, reps: usize) {
                 }
                 None => refused += 1,
             }
+            let exact = f64::from(*want);
+            match pool.get_dy_fast(*i, *j, *dx) {
+                None => bailed += 1,
+                Some(f) if exact > 0.0 => {
+                    let g = f64::from(f);
+                    worst = worst.max(((g - exact) / exact).abs() * 1e4);
+                    py_worst = py_worst.max(((py - exact) / exact).abs() * 1e4);
+                    vs_py = vs_py.max(((g - py) / exact).abs() * 1e4);
+                }
+                _ => {}
+            }
         }
     }
     println!("twocrypto: {} pools · {n} vectors · {wrong} wrong · {refused} refused",
              pools.len());
+    println!("  f64 drift from exact: rust {worst:.2e} bp · python {py_worst:.2e} bp \
+· rust vs python {vs_py:.2e} bp · {bailed} bailed");
 
     let mut best = f64::INFINITY;
     for _ in 0..reps {
@@ -512,7 +557,20 @@ fn twocrypto_bench(path: &str, reps: usize) {
         std::hint::black_box(sink);
         best = best.min(start.elapsed().as_secs_f64() * 1e6);
     }
-    println!("rust  {:.2} us a call · python was 22.01", best / n as f64);
+    println!("rust U256 {:.2} us a call · python exact 23.63", best / n as f64);
+    let mut best_f = f64::INFINITY;
+    for _ in 0..reps {
+        let start = Instant::now();
+        let mut sink = U256::ZERO;
+        for (pool, vectors) in &pools {
+            for (i, j, dx, ..) in vectors {
+                if let Some(g) = pool.get_dy_fast(*i, *j, *dx) { sink += g; }
+            }
+        }
+        std::hint::black_box(sink);
+        best_f = best_f.min(start.elapsed().as_secs_f64() * 1e6);
+    }
+    println!("rust f64  {:.2} us a call · python fast  8.21", best_f / n as f64);
 }
 
 /// The cubic, against what 27 mainnet pools actually answer.

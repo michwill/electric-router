@@ -10,8 +10,8 @@
 //! differ in the last wei, and every one of them was found by reading a
 //! deployed contract rather than a repository copy.
 
-use crate::cryptoswap::{get_y, newton_y};
-use crate::stableswap::solve_y_raw;
+use crate::cryptoswap::{get_y, newton_y, newton_y_fast};
+use crate::stableswap::{solve_y_raw, solve_y_raw_fast, to_u256};
 use ruint::aliases::U256;
 
 const N_COINS: u64 = 2;
@@ -91,8 +91,48 @@ impl Pool {
                     xp[other])
     }
 
+    /// `_y`, with the invariant solved in floating point.
+    ///
+    /// Only the iteration moves. It returns an integer because everything
+    /// downstream -- the fee, the price scale, the precisions -- is still the
+    /// contract's own arithmetic, and pricing does not need the last wei.
+    fn y_fast(&self, xp: &[U256; 2], j: usize) -> Option<U256> {
+        let p = 1e18f64;
+        if self.stable && !self.legacy_pool {
+            let other = 1 - j;
+            let xpf = [f64::from(xp[0]), f64::from(xp[1])];
+            let y = solve_y_raw_fast(f64::from(self.amp), A_MULTIPLIER as f64,
+                                     &xpf, f64::from(self.d), other, j,
+                                     xpf[other])?;
+            return to_u256(y);
+        }
+        // The `K0_i` window in the same units as everything else: the legacy
+        // pools fix it at 100, the optimized math narrows it once gamma
+        // passes MAX_GAMMA_SMALL, exactly as `get_y` does.
+        let mut lim = 100.0f64;
+        let small = f64::from(e(16)) * 2.0;
+        let gamma = f64::from(self.gamma);
+        if !self.legacy_pool && self.v21 && gamma > small {
+            lim = lim * small / gamma;
+        }
+        let xpf = [f64::from(xp[0]) / p, f64::from(xp[1]) / p];
+        let y = newton_y_fast(f64::from(self.amp) / A_MULTIPLIER as f64,
+                              gamma / p, &xpf, f64::from(self.d) / p, j, lim,
+                              self.legacy_pool, self.legacy_mul2)?;
+        to_u256(y * p)
+    }
+
     /// Exactly what the pool's `get_dy(i, j, dx)` returns on chain.
     pub fn get_dy(&self, i: usize, j: usize, dx: U256) -> Option<U256> {
+        self.quote(i, j, dx, false)
+    }
+
+    /// `get_dy`, with the invariant in floating point.
+    pub fn get_dy_fast(&self, i: usize, j: usize, dx: U256) -> Option<U256> {
+        self.quote(i, j, dx, true)
+    }
+
+    fn quote(&self, i: usize, j: usize, dx: U256, fast: bool) -> Option<U256> {
         if i == j || i >= 2 || j >= 2 {
             return None;
         }
@@ -124,7 +164,7 @@ impl Pool {
             },
         ];
 
-        let y = self.y(&xp, j)?;
+        let y = if fast { self.y_fast(&xp, j)? } else { self.y(&xp, j)? };
         if y >= xp[j] {
             return None;
         }

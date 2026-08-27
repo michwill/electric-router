@@ -325,3 +325,39 @@ pub fn solve_y_raw(amp: U256, a_precision: U256, xp: &[U256], d: U256,
     };
     pool.solve_y(xp, d, i, j, x)
 }
+
+/// `solve_y_fast` over explicit parameters, for the FX Swap backend.
+pub fn solve_y_raw_fast(amp: f64, a_precision: f64, xp: &[f64], d: f64,
+                        i: usize, j: usize, x: f64) -> Option<f64> {
+    let pool = fast::Pool {
+        xp: xp.to_vec(),
+        rates: vec![],
+        inv_rates: vec![],
+        amp,
+        fee: 0.0,
+        offpeg_fee_multiplier: 0.0,
+        a_precision,
+        fee_on_xp: false,
+        subtract_one: false,
+    };
+    pool.solve_y(d, i, j, x)
+}
+
+/// A float back to the integer space, truncating as Python's `int()` does.
+///
+/// The invariant iteration is the only thing that moves to `f64`; everything
+/// downstream -- the fee, the price scale, the precisions -- is still the
+/// contract's integer arithmetic, so `y` has to come back.
+pub fn to_u256(x: f64) -> Option<U256> {
+    if !x.is_finite() || x < 0.0 {
+        return None;
+    }
+    let t = x.trunc();
+    if t < 3.4e38 {
+        return Some(U256::from(t as u128));
+    }
+    // Above u128, split at 2^128 rather than saturating.
+    let high = (t / 3.402_823_669_209_385e38).trunc();
+    let low = t - high * 3.402_823_669_209_385e38;
+    Some((U256::from(high as u128) << 128) + U256::from(low as u128))
+}

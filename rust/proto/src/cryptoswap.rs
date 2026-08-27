@@ -267,3 +267,82 @@ pub fn newton_y(ann: U256, gamma: U256, x: &[U256], d: U256, i: usize,
     }
     None
 }
+
+/// `newton_y`, in dollars.
+///
+/// Not a transcription of the integer form: a dimensional reduction of it.
+/// `a` is `ann / A_MULTIPLIER`, `gamma` is `gamma / 1e18`, and `x` and `d` are
+/// the dollars the algorithm was written in before it was made to fit in
+/// integers -- so every 1e18 cancels and what is left is the Newton iteration
+/// the whitepaper describes, self-correcting rather than accumulating the
+/// rounding of a closed form.
+///
+/// `lim` is the `K0_i` window, `lim_mul / 1e18`. Not decoration: a pool
+/// outside it reverts, so a float path that skipped the test would quote
+/// sizes the chain refuses.
+pub fn newton_y_fast(a: f64, gamma: f64, x: &[f64], d: f64, i: usize, lim: f64,
+                     inline: bool, mul2_over_sum: bool) -> Option<f64> {
+    const N: f64 = 2.0;
+    const FAST_TOL: f64 = 1e-14;
+    const GIVE_UP: usize = 60;
+
+    let x_j = x[1 - i];
+    if x_j <= 0.0 || d <= 0.0 || a <= 0.0 || gamma <= 0.0 {
+        return None;
+    }
+    let mut y = d * d / (x_j * N * N);
+    let k0_i = N * x_j / d;
+    if inline {
+        // `1e16 * N < K0_i < 1e20 * N`, with the 1e18 divided out.
+        if !(0.01 * N < k0_i && k0_i < 100.0 * N) {
+            return None;
+        }
+    } else if !(1.0 / lim <= k0_i && k0_i <= lim) {
+        return None;
+    }
+
+    for _ in 0..GIVE_UP {
+        let y_prev = y;
+        if y <= 0.0 {
+            return None;
+        }
+        let k0 = k0_i * y * N / d;
+        if k0 <= 0.0 {
+            return None;
+        }
+        let s = x_j + y;
+        let g1k0 = (gamma + 1.0 - k0).abs();
+        if g1k0 <= 0.0 {
+            return None;
+        }
+        let mul1 = d * g1k0 * g1k0 / (gamma * gamma * a);
+        let mul2 = if mul2_over_sum {
+            (1.0 + 2.0 * k0) / g1k0
+        } else {
+            1.0 + 2.0 * k0 / g1k0
+        };
+        let mut yfprime = y + s * mul2 + mul1;
+        let dyfprime = d * mul2;
+        if yfprime < dyfprime {
+            y = y_prev * 0.5;
+            continue;
+        }
+        yfprime -= dyfprime;
+        let fprime = yfprime / y;
+        if fprime <= 0.0 {
+            return None;
+        }
+        let mut y_minus = mul1 / fprime;
+        let y_plus = (yfprime + d) / fprime + y_minus / k0;
+        y_minus += s / fprime;
+        y = if y_plus < y_minus { y_prev * 0.5 } else { y_plus - y_minus };
+
+        if (y - y_prev).abs() < FAST_TOL * y {
+            if inline && !(0.01 < y / d && y / d < 100.0) {
+                return None;
+            }
+            return Some(y);
+        }
+    }
+    None
+}

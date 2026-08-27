@@ -6,6 +6,7 @@
 //! identical, so it is shared rather than transcribed twice.
 
 use crate::prims::{cbrt, isqrt, I256};
+use crate::stableswap::to_u256;
 use ruint::aliases::U256;
 
 const N_COINS: u64 = 3;
@@ -205,6 +206,15 @@ impl Pool {
 
     /// Exactly what the pool's `get_dy(i, j, dx)` returns on chain.
     pub fn get_dy(&self, i: usize, j: usize, dx: U256) -> Option<U256> {
+        self.quote(i, j, dx, false)
+    }
+
+    /// `get_dy`, with the invariant in floating point.
+    pub fn get_dy_fast(&self, i: usize, j: usize, dx: U256) -> Option<U256> {
+        self.quote(i, j, dx, true)
+    }
+
+    fn quote(&self, i: usize, j: usize, dx: U256, fast: bool) -> Option<U256> {
         if i == j || i >= 3 || j >= 3 {
             return None;
         }
@@ -224,7 +234,35 @@ impl Pool {
 
         // The legacy generation goes through Newton rather than the cubic,
         // and applies the input bound the optimized math dropped.
-        let y = if self.legacy {
+        let y = if fast {
+            // The range checks the contract makes on A, gamma and D are
+            // comparisons against the integers it holds, so they are made
+            // here rather than re-derived in floating point.
+            let one = U256::from(1u64);
+            if !self.legacy {
+                let n3 = U256::from(N_COINS * N_COINS * N_COINS);
+                let am = U256::from(A_MULTIPLIER);
+                if !(self.amp > n3 * am / U256::from(100u64) - one
+                     && self.amp < U256::from(1000u64) * am * n3 + one) {
+                    return None;
+                }
+                if !(self.gamma > e(10) - one
+                     && self.gamma < U256::from(5u64) * e(16) + one) {
+                    return None;
+                }
+                if !(self.d > e(17) - one && self.d < e(15) * e(18) + one) {
+                    return None;
+                }
+            }
+            let f = 1e18f64;
+            let xpf = [f64::from(xp[0]) / f, f64::from(xp[1]) / f,
+                       f64::from(xp[2]) / f];
+            let got = newton_y_fast(
+                f64::from(self.amp) / f64::from(self.a_multiplier),
+                f64::from(self.gamma) / f, &xpf, f64::from(self.d) / f, j,
+                self.legacy)?;
+            to_u256(got * f)?
+        } else if self.legacy {
             newton_y(self.amp, self.gamma, &xp, self.d, j, true, self.a_multiplier)?
         } else {
             get_y(self.amp, self.gamma, &xp, self.d, j)?.0
@@ -354,6 +392,82 @@ pub fn newton_y(ann: U256, gamma: U256, x: &[U256; 3], d: U256, i: usize,
             if !(frac > e(16) - one && frac < e(20) + one) {
                 return None;
             }
+            return Some(y);
+        }
+    }
+    None
+}
+
+/// `newton_y`, in dollars, three coins.
+///
+/// `a` is `ann / a_multiplier` and `gamma` is `gamma / 1e18`. The range checks
+/// on `A`, `gamma` and `D` stay with the caller, which still holds them as the
+/// integers the contract compares.
+pub fn newton_y_fast(a: f64, gamma: f64, x: &[f64; 3], d: f64, i: usize,
+                     check_inputs: bool) -> Option<f64> {
+    const N: f64 = 3.0;
+    const FAST_TOL: f64 = 1e-14;
+    const GIVE_UP: usize = 60;
+
+    let mut others: Vec<f64> = x.iter().enumerate()
+        .filter(|(k, _)| *k != i).map(|(_, v)| *v).collect();
+    others.sort_by(|p, q| q.partial_cmp(p).unwrap());
+    if others[others.len() - 1] <= 0.0 || d <= 0.0 || a <= 0.0 || gamma <= 0.0 {
+        return None;
+    }
+    if check_inputs {
+        for (k, item) in x.iter().enumerate() {
+            if k != i && !(0.01 <= *item / d && *item / d <= 100.0) {
+                return None;
+            }
+        }
+    }
+
+    let mut y = d / N;
+    let mut s_i = 0.0;
+    for j in 2..=3usize {
+        let item = others[3 - j];
+        y = y * d / (item * N);
+        s_i += item;
+    }
+    let mut k0_i = 1.0;
+    for item in others.iter().take(2) {
+        k0_i = k0_i * *item * N / d;
+    }
+
+    for _ in 0..GIVE_UP {
+        let y_prev = y;
+        if y <= 0.0 {
+            return None;
+        }
+        let k0 = k0_i * y * N / d;
+        let s = s_i + y;
+        if k0 <= 0.0 {
+            return None;
+        }
+        let g1k0 = (gamma + 1.0 - k0).abs();
+        if g1k0 <= 0.0 {
+            return None;
+        }
+        let mul1 = d * g1k0 * g1k0 / (gamma * gamma * a);
+        let mul2 = 1.0 + 2.0 * k0 / g1k0;
+        let mut yfprime = y + s * mul2 + mul1;
+        let dyfprime = d * mul2;
+        if yfprime < dyfprime {
+            y = y_prev * 0.5;
+            continue;
+        }
+        yfprime -= dyfprime;
+        let fprime = yfprime / y;
+        if fprime <= 0.0 {
+            return None;
+        }
+        let mut y_minus = mul1 / fprime;
+        let y_plus = (yfprime + d) / fprime + y_minus / k0;
+        y_minus += s / fprime;
+        y = if y_plus < y_minus { y_prev * 0.5 } else { y_plus - y_minus };
+
+        if (y - y_prev).abs() < FAST_TOL * y {
             return Some(y);
         }
     }
