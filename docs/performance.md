@@ -231,6 +231,46 @@ spends its probe budget the same way. They are not slow, they are calling
 something slow -- so the models are the fix for them too, and porting the
 stages first would have moved the cheap half.
 
+## What is wired, and what it is worth
+
+Interleaved in one process, toggling the Rust models at runtime, because
+sequential whole-quote totals on this machine swing two to one within a
+session:
+
+    verified_out   rust 40237910250133590325   python 40237910250133590325
+
+    rust    min  76.71   median  78.90 ms cpu
+    python  min 101.29   median 103.82
+    1.32x  ·  24.6 ms saved
+
+The identical `verified_out` is the correctness statement. The route is chosen
+and priced through different arithmetic and comes out the same to the wei.
+
+| path | ms | state |
+|---|---|---|
+| `element_split` | 17.89 | wired -- 1,348 to 84 us a split, 16x |
+| `quote_routes` | 15.21 | still Python; needs `walk_route` |
+| `probe` | 13.09 | wired -- 8.85 to 3.75 us a probe, 2.36x |
+
+`element_split` paid where `probe` did not, and the reason generalises. A probe
+is under a microsecond of arithmetic behind a 1-2 us crossing, so batching
+helps and cannot do more than that. An element split is ~100 stateful
+exchanges behind one call, so moving the *loop* carries everything with it.
+Batch where the work is small; move the loop where it is not.
+
+### Installing it
+
+Neither native extension is in `uv.lock` or `pyproject.toml`. `uv sync` is
+therefore destructive and always has been -- it uninstalls `erouter-solve`,
+`erouter-evm` and `maturin`, which is `uv sync --dry-run` on a clean tree, not
+a consequence of anything here. The Python path still answers without them, so
+nothing breaks; it quietly gets slower, which is worse.
+
+Rebuild after touching `rust/`:
+
+    uv pip install --reinstall --no-deps ./rust
+    uv pip install --reinstall --no-deps ./rust/evm
+
 ## The shape of what is left
 
 The remaining orchestration is **diffuse**, which is the finding that decides
