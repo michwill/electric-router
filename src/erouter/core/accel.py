@@ -142,6 +142,36 @@ def solve_arrays(
     return got
 
 
+def calibrate_many(rows, drift_tol: float):
+    """Every arc's fit in one crossing, as raw tuples.
+
+    `_recalibrate` fits ~450 arcs a quote and paid for each of them twice: a
+    trip across the boundary, and a `Calibration` built to carry twelve
+    numbers back. The fit itself has been compiled all along.
+
+    Tuples rather than `Calibration` on purpose. The dataclass exists to hold
+    postconditions -- `B >= 0`, `clamped implies a finite cap` -- and the
+    caller here assigns straight onto an arc that has its own; building 450 of
+    them to read nine fields off each was most of what the batch cost. The
+    single-arc `calibrate_ladder` still returns one, for the callers that want
+    the checks.
+
+    `None` in a slot is an arc the fit refused, which the caller skips exactly
+    as it skips a `CalibrationError`.
+    """
+    if _rust is None:
+        return None
+    fn = getattr(_rust, "calibrate_many", None)
+    if fn is None:
+        return None
+    deltas, quotes, quanta = [], [], []
+    for row_deltas, row_quotes, quantum in rows:
+        deltas.append([float(v) for v in row_deltas])
+        quotes.append([float(v) for v in row_quotes])
+        quanta.append(float(quantum))
+    return fn(deltas, quotes, quanta, float(drift_tol))
+
+
 def calibrate_ladder(deltas, quotes, *, delta_bar, structural_flag, drift_tol,
                      cap, f_at_cap, quantum):
     """One arc's ladder through the compiled fit, or `None` if it is absent.

@@ -14,12 +14,15 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import time
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
-from .calibrate import Calibration, CalibrationError, calibrate
+from . import accel as _accel
+from .calibrate import DRIFT_TOL, Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
 from .gas import GasTable, min_useful_flow, shape_cost, value_per_gas
 from .graph import MAX_CONDITION, ArcArrays, build, scale
@@ -62,7 +65,7 @@ from .split import ScoutResult as ScoutSplits
 from .split import optimise as optimise_splits
 from .split import scout as scout_splits
 from .split import should_optimise, split_groups
-from .types import ArcKind, PoolArc, Probe
+from .types import ArcKind, FlagReason, PoolArc, Probe
 from .verify import (
     IMPACT_FRACTION,
     LEG_COST_BP,
@@ -1944,20 +1947,64 @@ def _assemble(
     return arcs, g
 
 
+#: Opt-in on the same switch as the rest of the port.
+_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
+
+
+class _Fitted(NamedTuple):
+    """A batched fit, in the shape the single-arc one answers in.
+
+    Deliberately not a `Calibration`: that class holds the postconditions --
+    `B >= 0`, `clamped implies a finite cap` -- and is the one place a `B` is
+    produced, which is what makes them meaningful. They are checked on the
+    Rust side of `calibrate` before these numbers exist, and building 450
+    dataclasses to read nine fields off each is what the batch exists to skip.
+    """
+
+    a: float
+    B: float
+    cap: float
+    clamped: bool
+    convex_flag: bool
+    flag: str
+    drift: float
+    eta: float
+    calib_delta: float
+
+    @property
+    def flag_reason(self):
+        return FlagReason(self.flag)
+
+
 def _recalibrate(arcs: list[PoolArc], ladders, nodes: NodeMap) -> int:
     """Re-fit the arcs whose ladders just gained points."""
     by_id = {lad.arc.id: lad for lad in ladders}
     changed = 0
-    for arc in arcs:
-        ladder = by_id.get(arc.id)
-        if ladder is None or len(ladder.deltas) < 3:
-            continue
-        deltas, quotes = ladder.as_float()
-        try:
-            fit = calibrate(deltas, quotes,
-                            quantum=_quantum(ladder.arc.decimals_out))
-        except CalibrationError:
-            continue
+
+    # One crossing for the whole stage where the compiled fit is there.
+    # `wanted` keeps the arcs in the order the batch answers in.
+    wanted = [(arc, by_id[arc.id]) for arc in arcs
+              if arc.id in by_id and len(by_id[arc.id].deltas) >= 3]
+    fits: list = [None] * len(wanted)
+    if _ACCEL_ON and _accel.available():
+        batched = _accel.calibrate_many(
+            [(*ladder.as_float(), _quantum(ladder.arc.decimals_out))
+             for _arc, ladder in wanted],
+            DRIFT_TOL)
+        if batched is not None:
+            fits = list(batched)
+
+    for k, (arc, ladder) in enumerate(wanted):
+        got = fits[k]
+        if got is not None:
+            fit = _Fitted(*got)
+        else:
+            deltas, quotes = ladder.as_float()
+            try:
+                fit = calibrate(deltas, quotes,
+                                quantum=_quantum(ladder.arc.decimals_out))
+            except CalibrationError:
+                continue
         a, B = rescale(fit.a, fit.B, nodes.rate(arc.token_in), nodes.rate(arc.token_out))
         arc.a, arc.B = a, B
         # **A cap only ever tightens.**  A fit can discover a wall the ladder

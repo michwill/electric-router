@@ -12,6 +12,7 @@
 //! the fiddliest part of shipping a native module.
 
 use pyo3::prelude::*;
+use pyo3::types::PyList;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
 
 use crate::solve::{active_set_solve, Arcs, Options};
@@ -357,10 +358,47 @@ fn pack<'py>(py: Python<'py>, out: crate::solve::Solution) -> PyResult<Bound<'py
     Ok(d)
 }
 
+/// Every arc's ladder in one crossing.
+///
+/// `_recalibrate` fits ~450 arcs a quote and was paying for each of them
+/// twice: a trip across the boundary, and a `Calibration` built on the far
+/// side to carry twelve numbers back. The fit itself has been here all along.
+/// Raw tuples out, so the caller assigns them straight onto the arc.
+///
+/// `None` in a slot is an arc the fit refused, which the caller skips exactly
+/// as it skips a `CalibrationError` today.
+#[pyfunction]
+#[pyo3(signature = (deltas, quotes, quanta, drift_tol))]
+fn calibrate_many<'py>(
+    py: Python<'py>,
+    deltas: Vec<Vec<f64>>,
+    quotes: Vec<Vec<f64>>,
+    quanta: Vec<f64>,
+    drift_tol: f64,
+) -> PyResult<Bound<'py, PyList>> {
+    if deltas.len() != quotes.len() || deltas.len() != quanta.len() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "deltas/quotes/quanta must be the same length"));
+    }
+    let mut out: Vec<Option<(f64, f64, f64, bool, bool, &'static str, f64, f64, f64)>> =
+        Vec::with_capacity(deltas.len());
+    for k in 0..deltas.len() {
+        out.push(
+            crate::calibrate::calibrate(&deltas[k], &quotes[k], None, false,
+                                        drift_tol, None, None, quanta[k])
+                .ok()
+                .map(|f| (f.a, f.b, f.cap, f.clamped, f.convex_flag,
+                          f.flag.as_str(), f.drift, f.eta, f.calib_delta)),
+        );
+    }
+    PyList::new(py, out)
+}
+
 #[pymodule]
 fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate, m)?)?;
+    m.add_function(wrap_pyfunction!(calibrate_many, m)?)?;
     m.add_function(wrap_pyfunction!(cancel_cycles, m)?)?;
     m.add_function(wrap_pyfunction!(find_cycle, m)?)?;
     m.add_function(wrap_pyfunction!(split_ascend, m)?)?;
