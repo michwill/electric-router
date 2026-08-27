@@ -26,6 +26,7 @@ tracer: what neither can do is let a missing slot read as a plausible zero.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import time
 from dataclasses import dataclass, field
@@ -359,6 +360,20 @@ class RouterSession:
                 await self._settle(lambda: self._rebuild_models(
                     block, cache=ExactCache.from_bytes(self.chain.chain_id, None)))
             refresh_at(block)
+        # Gas moves with the block, and it is not a decoration: it sets the
+        # tie tolerance in `verify.score`, whose bucket 0 is sorted by fewest
+        # legs -- so the price decides how many legs a route may spend.  Read
+        # once at the warm and never again, a tab open since a quiet hour went
+        # on choosing routes sized for gas that had stopped applying: measured
+        # on ETH -> DOLA, 0.05 gwei buys ten legs where 0.2 buys five.
+        #
+        # Guarded, because this is the cheap half of a sweep that has already
+        # done the expensive part.  An endpoint that will not answer for the
+        # gas price should not cost the caller the state it did answer for;
+        # the old figure is stale but it is not wrong the way losing the
+        # re-read would be.
+        with contextlib.suppress(Exception):
+            self.gas_price_wei = await self._gas_price() or self.gas_price_wei
         # A preparation is a function of (universe, block); the pair has to be
         # re-prepared before the next quote is comparable to the last.
         self.prepared = None

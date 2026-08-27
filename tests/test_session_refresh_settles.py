@@ -133,3 +133,85 @@ def test_a_session_that_never_built_models_still_refreshes():
 
     assert run(made.refresh()) == 101
     assert [entry[0] for entry in log] == ["repin", "commit"]
+
+
+# -- the gas price moves with the block -------------------------------------
+
+
+class PricedRpc(Rpc):
+    """Answers the block *and* the gas price, counting the latter."""
+
+    def __init__(self, price: int = 3_000_000_000) -> None:
+        self.price = price
+        self.asked = 0
+
+    async def call(self, method: str, params: list):
+        if method == "eth_gasPrice":
+            self.asked += 1
+            return hex(self.price)
+        return await super().call(method, params)
+
+
+def priced_session(log: list, rpc: PricedRpc, was: int = 1_000_000_000):
+    made = session_at_block(log)
+    made.rpc = rpc
+    made.gas_price_wei = was
+    return made
+
+
+def test_a_refresh_re_reads_the_gas_price():
+    """It sets the tie tolerance in `verify.score`, whose bucket 0 is sorted by
+    fewest legs -- so the price decides how many legs a route may spend.  Read
+    once at the warm and never again, a session open since a quiet hour went on
+    choosing routes sized for gas that had stopped applying.
+    """
+    rpc = PricedRpc(3_000_000_000)
+    made = priced_session([], rpc)
+
+    run(made.refresh())
+
+    assert rpc.asked == 1, "the gas price was not re-read"
+    assert made.gas_price_wei == 3_000_000_000
+
+
+def test_a_block_that_did_not_move_is_not_asked_again():
+    """Gas moves with the block, so an unchanged block has nothing to say."""
+    rpc = PricedRpc()
+    made = priced_session([], rpc)
+    made.block = 101                      # already at what the header reports
+
+    run(made.refresh())
+
+    assert rpc.asked == 0
+
+
+def test_an_endpoint_that_will_not_price_gas_keeps_the_old_figure():
+    """The cheap half of a sweep that has already done the expensive part: a
+    gas read that fails must not cost the caller the state that succeeded.
+    """
+    class Refusing(PricedRpc):
+        async def call(self, method: str, params: list):
+            if method == "eth_gasPrice":
+                self.asked += 1
+                raise RuntimeError("no gas price here")
+            return await Rpc.call(self, method, params)
+
+    rpc = Refusing()
+    made = priced_session([], rpc)
+
+    block = run(made.refresh())
+
+    assert block == 101, "the refresh was lost to the gas read"
+    assert made.gas_price_wei == 1_000_000_000, "the old figure was not kept"
+    assert rpc.asked == 1
+
+
+def test_a_zero_answer_does_not_erase_what_was_known():
+    """`_gas_price` answers 0 for a shape it cannot read, and a route priced at
+    zero gas branches for free -- which is the wrong way to fail."""
+    rpc = PricedRpc(0)
+    made = priced_session([], rpc)
+
+    run(made.refresh())
+
+    assert made.gas_price_wei == 1_000_000_000
