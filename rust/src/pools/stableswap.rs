@@ -415,3 +415,87 @@ pub fn to_u256(x: f64) -> Option<U256> {
     let low = t - high * 3.402_823_669_209_385e38;
     Some((U256::from(high as u128) << 128) + U256::from(low as u128))
 }
+
+/// The best `(bps, bps)` split of `dx` between two output coins.
+///
+/// Priced as one *element*: the second port sees the pool the first one left,
+/// which is the thing two independent arcs cannot express. That coupling is
+/// the whole reason this exists, and it is why it needs `exchange` rather than
+/// `get_dy`.
+///
+/// Ternary search, because the objective is concave in the split -- each
+/// port's output is concave in its own share, and a sum of concave functions
+/// of a linear split is concave. True for `exchange` on a stableswap in its
+/// normal range, and not asserted for one being pushed off its peg, where the
+/// caller should not be here.
+///
+/// The ports are valued in the pool's own common denominator rather than raw
+/// wei: 3pool pays USDC in 6 decimals and DAI in 18, so comparing the two
+/// directly would hand the whole trade to whichever coin carries more digits.
+pub fn best_split(pool: &Pool, i: usize, j1: usize, j2: usize, dx: U256)
+    -> Option<(u16, u16)> {
+    const BPS: u64 = 10_000;
+    const ROUNDS: usize = 25;
+
+    let n = pool.balances.len();
+    if i >= n || j1 >= n || j2 >= n || i == j1 || i == j2 || j1 == j2 {
+        return None;
+    }
+    if dx.is_zero() {
+        return None;
+    }
+    let bps = U256::from(BPS);
+    let scale = 1e18f64;
+
+    // `-inf` for a split the element refuses, so the search walks away from
+    // it rather than treating a refusal as a zero payout.
+    let payout = |at: u64| -> f64 {
+        let first = dx * U256::from(at) / bps;
+        if first.is_zero() || first >= dx {
+            return f64::NEG_INFINITY;
+        }
+        // The last port takes the remainder, which is what `Leg.bps` does on
+        // chain: shares are integers and a rounded-down last share would
+        // strand wei in the slot.
+        let second = dx - first;
+        let mut state = pool.clone();
+        let mut total = 0.0f64;
+        for (coin, share) in [(j1, first), (j2, second)] {
+            match state.exchange(i, coin, share) {
+                None => return f64::NEG_INFINITY,
+                Some((dy, after)) => {
+                    total += f64::from(dy) * f64::from(pool.rates[coin]) / scale;
+                    state = after;
+                }
+            }
+        }
+        total
+    };
+
+    let (mut low, mut high) = (1u64, BPS - 1);
+    for _ in 0..ROUNDS {
+        if high - low < 3 {
+            break;
+        }
+        let left = low + (high - low) / 3;
+        let right = high - (high - low) / 3;
+        if payout(left) < payout(right) {
+            low = left;
+        } else {
+            high = right;
+        }
+    }
+    let mut best = low;
+    let mut found = f64::NEG_INFINITY;
+    for at in low..=high {
+        let got = payout(at);
+        if got > found {
+            found = got;
+            best = at;
+        }
+    }
+    if found == f64::NEG_INFINITY {
+        return None;
+    }
+    Some((best as u16, (BPS - best) as u16))
+}

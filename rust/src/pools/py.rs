@@ -126,6 +126,20 @@ impl Pools {
         Ok(self.models.len() - 1)
     }
 
+    /// The best two-way split of `dx` across two output coins.
+    ///
+    /// One call rather than a batch: the caller asks once per element, and
+    /// what is behind it is ~100 stateful exchanges, so the crossing is
+    /// nothing beside it.
+    fn element_split(&self, which: usize, i: u8, j1: u8, j2: u8, dx: u128)
+        -> Option<(u16, u16)> {
+        match self.models.get(which) {
+            Some(Model::Stable(exact, _)) => stableswap::best_split(
+                exact, i as usize, j1 as usize, j2 as usize, U256::from(dx)),
+            _ => None,
+        }
+    }
+
     /// Price a whole batch. `None` where the pool would refuse.
     ///
     /// `fast` picks the float invariant, which is what a quote wants; the

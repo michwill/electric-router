@@ -209,6 +209,13 @@ class _Native:
         """One crossing for the whole batch, through the float invariant."""
         return self.pools.price(which, i, j, dx, True)
 
+    def element_split(self, model, i, j1, j2, dx):
+        """The best two-way split, searched on the Rust side, or None."""
+        idx = self.index_of(model)
+        if idx is None or dx > self.MAX_AMOUNT:
+            return None
+        return self.pools.element_split(idx, i, j1, j2, dx)
+
 
 def _price(model, i: int, j: int, dx: int) -> int:
     """`get_dy`, through the model's float path when it has one.
@@ -626,6 +633,15 @@ class ExactQuoterClient:
             return None
         lp = self.lp.get(pool) if self.lp is not None else None
         n = model.n
+        # The search is ~100 stateful exchanges; on the Rust side that is one
+        # crossing rather than a hundred, and the answer is a pair of bps.
+        # Only where there is no LP port -- an element with one is a different
+        # shape and stays here.
+        native = self._native()
+        if native is not None and lp is None:
+            got = native.element_split(model, i, j1, j2, dx)
+            if got is not None:
+                return got
         if not (0 <= i < n and 0 <= j1 < n and 0 <= j2 < n):
             return None
         try:
