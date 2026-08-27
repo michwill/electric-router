@@ -271,6 +271,44 @@ Rebuild after touching `rust/`:
     uv pip install --reinstall --no-deps ./rust
     uv pip install --reinstall --no-deps ./rust/evm
 
+## Why `quote_routes` was not ported
+
+It looked like the last model path at 15.21 ms. It is not a model path.
+
+    quote_routes      14.50 ms a quote · 39 routes
+      of which revm   11.55 ms · 24 routes (80%)  at 481 us each
+      walked here      2.95 ms · 15 routes        at 197 us each
+
+Counting first, as `walk_route` would have needed: of 156 routes over four
+quotes, only **56 are walkable in Rust at all**, and they hold 188 of 1,252
+legs -- 15% of the work. The 92 that are not are blocked by a single leg kind,
+and every one of them by the same one:
+
+    first blocking kind, per route      all legs by kind
+      WSTETH_UNWRAP     92                SWAP_CRYPTO    672
+                                          SWAP_STABLE    348
+                                          WSTETH_UNWRAP   92
+                                          WRAP_NATIVE     92
+
+`WSTETH_UNWRAP` resolves to **no model at all** -- not an unported one, none.
+So those routes are not slow because Python prices them slowly; they are sent
+whole to revm, at 481 us against 197 for a walked one. Porting `walk_route`
+would chase the 2.95 ms and leave the 11.55 exactly where it is.
+
+The gap is a missing model, not a missing port. `wrappers.py` already reads
+the rate at the warm -- it merges wstETH and stETH into one node and records
+that `getStETHByWstETH` is linear to 1.3e-19 across eight decades -- so the
+number is in hand and simply never reaches `_resolve_model`. A linear model
+for it would take 24 routes off revm, which is worth about 7 ms, against ~2.5
+for the walk.
+
+It is a decision rather than a transcription, which is why it is written down
+here rather than done. `1.3e-19` is a measurement of linearity, not a proof of
+exactness, and the exact models are admitted by reproducing the chain **wei for
+wei**. The ERC4626 vaults are the precedent -- they are ratios admitted the
+same way -- so the shape exists; whether this one clears that bar is a
+question for whoever adds it.
+
 ## The shape of what is left
 
 The remaining orchestration is **diffuse**, which is the finding that decides
