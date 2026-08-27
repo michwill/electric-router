@@ -1006,7 +1006,7 @@ class RouterSession:
         def stages():
             nodes, wrappers = build_node_map(
                 self.pools, self.chain, client, facts=self.facts, token_client=client)
-            stake = build_stake_arcs(nodes, self.chain, client)
+            stake = build_stake_arcs(nodes, self.chain, client, self.facts)
             stake = stake + build_transmuter_arcs(nodes, self.chain, client)
             stake = stake + build_lending_arcs(nodes, self.chain, client, self.facts)
             return nodes, wrappers, stake
