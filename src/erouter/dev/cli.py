@@ -1108,6 +1108,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     # these match; a run whose fingerprint moved was handed a different market.
     print(f"  universe {load.fingerprint} · {len(load.pools)} pools · "
           f"{load.source} {load.age:.0f}s old")
+    print(f"  gas {gas_price_wei / 1e9:.4f} gwei"
+          f"{'' if args.gas_price is not None else ' (live)'}")
     if getattr(args, "timings", False):
         print(_boot_line(started))
     if not nodes.has(src) or not nodes.has(dst):
