@@ -309,6 +309,27 @@ wei**. The ERC4626 vaults are the precedent -- they are ratios admitted the
 same way -- so the shape exists; whether this one clears that bar is a
 question for whoever adds it.
 
+### The models do not change the answer
+
+`verified - modelled` is expected to be **positive**: the quadratic overstates
+loss by construction, so the chain beating it is the right sign and the
+reverse means a calibration bug. A CLI route once printed it negative, which
+is worth recording as checked rather than assumed. The same route, priced four
+ways at a pinned block:
+
+| rust models | wstETH | ver - mod |
+|---|---|---|
+| on | on | +2.27 bp |
+| on | off | +2.27 |
+| off | on | +2.27 |
+| off | off | +2.27 |
+
+Identical in all four, so neither change touches it -- the CLI reading was a
+different block, live rather than pinned. What the arms *do* differ by is
+small and accounted for: `modelled` by 620,670 wei (1.5e-11, the float drift
+feeding back through calibration) and `verified` by 7.76e-10 bp, which is the
+wstETH leg no longer going through the EVM.
+
 ## The shape of what is left
 
 The remaining orchestration is **diffuse**, which is the finding that decides
