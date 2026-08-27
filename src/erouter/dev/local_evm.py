@@ -91,6 +91,104 @@ PRIME_STREAMS = 16
 # than seven big `eth_call`s, while a public endpoint is ~334x the other way.
 # `prefer_dump` turns it on where requests are counted.  The keyed drpc cannot
 # use it at all -- the blob rides an `eth_call` state override and that key's
+# --------------------------------------------------------------- the engine
+#
+# Two bindings over revm, and the choice is not a preference.
+#
+# `erouter_evm` is this repo's own wrapper -- the one `RouterSession` and the
+# wasm build already run -- and it is measurably the cheaper trip: 2,224 ns
+# against 3,932 for the same bytecode, the same storage and the same call, so
+# the 1.7x is the binding rather than the execution.
+#
+# But it cannot fork. It serves a miss by *reporting* it, which is what
+# `take_misses` is for, and the caller fetches. `strict=True` already works
+# that way -- it passes pyrevm no `fork_url` either -- so there the two are the
+# same shape and the faster one wins. `strict=False` deliberately gives up the
+# bulk load and reads lazily through the fork at ~34 ms a read, and that has no
+# equivalent here, so it stays on pyrevm.
+
+
+class _Account:
+    """`nonce`, `code`, `balance` -- what either binding needs to be told."""
+
+    __slots__ = ("balance", "code", "nonce")
+
+    def __init__(self, nonce: int = 0, code: bytes | None = None,
+                 balance: int = 0) -> None:
+        self.nonce, self.code, self.balance = nonce, code, balance
+
+
+class _Revm:
+    """`erouter_evm` behind the surface the rest of this module speaks.
+
+    Hex in and out, because that is what the portable backend takes: JSON-RPC
+    already speaks it and a 256-bit integer has no representation that
+    survives both bindings.
+    """
+
+    def __init__(self, chain_id: int) -> None:
+        import erouter_evm
+
+        self.evm = erouter_evm.Evm("Osaka", chain_id)
+        # `take_misses` reports what a call could not read; balances are not
+        # among them, so the ones set here are remembered rather than asked
+        # for back.
+        self._balances: dict[str, int] = {}
+
+    def set_block_env(self, env) -> None:
+        self.evm.set_block(env.number, env.timestamp, basefee=env.basefee,
+                           gas_limit=env.gas_limit, coinbase=env.coinbase,
+                           prevrandao="0x" + bytes(env.prevrandao).hex())
+
+    def set_balance(self, address: str, balance: int) -> None:
+        self._balances[address.lower()] = int(balance)
+        self.evm.set_balance(address, "0x" + f"{int(balance):x}")
+
+    def get_balance(self, address: str) -> int:
+        return self._balances.get(address.lower(), 0)
+
+    def insert_account_info(self, address: str, info) -> None:
+        self.evm.insert_account(address, int(getattr(info, "nonce", 0) or 0),
+                                "0x" + f"{int(getattr(info, 'balance', 0) or 0):x}",
+                                getattr(info, "code", None))
+
+    def insert_account_storage(self, address: str, slot: int, value: int) -> None:
+        self.evm.insert_storage(address, hex(int(slot)), hex(int(value)))
+
+    def message_call(self, *, caller: str, to: str, calldata: bytes) -> bytes:
+        """Bytes on success, an exception on revert -- pyrevm's contract.
+
+        The rest of this module was written against that and catches a bare
+        `Exception` for a revert, so the dict this really returns is turned
+        back into it here rather than at four call sites.
+        """
+        got = self.evm.call(caller, to, bytes(calldata))
+        if not got.get("success"):
+            raise EvmReverted(str(got.get("revert_reason")
+                                  or got.get("halt_reason") or "reverted"))
+        return bytes(got.get("output") or b"")
+
+    def take_misses(self) -> dict:
+        return self.evm.take_misses()
+
+
+class EvmReverted(RuntimeError):
+    """A call that did not succeed, in the shape pyrevm raises one."""
+
+
+def _account(backend, *, nonce: int = 0, code: bytes | None = None):
+    """An account in whichever shape the live backend takes.
+
+    `_Revm` duck-types on the attributes, so it takes ours; pyrevm wants its
+    own `AccountInfo` and is imported only when it is the one running.
+    """
+    if isinstance(backend, _Revm):
+        return _Account(nonce=nonce, code=code)
+    from pyrevm import AccountInfo
+
+    return AccountInfo(nonce=nonce, code=code)
+
+
 # `eth_call` is restricted to the quoter.
 #
 # Calldata is a run of 32-byte slot numbers, the return their values in order.
@@ -173,14 +271,21 @@ class LocalEvm:
     stats: WarmStats = field(default_factory=WarmStats)
 
     def __post_init__(self) -> None:
-        from pyrevm import EVM, BlockEnv
+        from pyrevm import BlockEnv
 
         header = self.rpc.fetch("eth_getBlockByNumber", [self.rpc.pin.hex_block, False])
-        self._evm = EVM(
-            fork_url=None if self.strict else self.rpc.url,
-            fork_block=None if self.strict else str(self.rpc.block),
-            tracing=False, spec_id="CANCUN",
-        )
+        if self.strict:
+            # No fork either way here, so the cheaper binding wins. The chain
+            # id picks the spec; a transport that does not carry one is a test
+            # double running no chain-specific opcode, so mainnet serves.
+            self._evm = _Revm(getattr(self.rpc, "chain_id", 1))
+        else:
+            from pyrevm import EVM
+
+            self._evm = EVM(
+                fork_url=self.rpc.url, fork_block=str(self.rpc.block),
+                tracing=False, spec_id="CANCUN",
+            )
         # pyrevm does not take the block env from anywhere, and zero is not a
         # harmless default: 3pool's `A()` ramps off `block.timestamp` and
         # underflows at zero, so every call would revert.
@@ -252,14 +357,12 @@ class LocalEvm:
         """Honour an `eth_call` code override by inserting the code locally."""
         if not overrides:
             return
-        from pyrevm import AccountInfo
-
         for address, entry in overrides.items():
             code = entry.get("code") if isinstance(entry, dict) else None
             if not code or address in self._injected:
                 continue
             raw = bytes.fromhex(code[2:] if code.startswith("0x") else code)
-            self._evm.insert_account_info(address, AccountInfo(nonce=0, code=raw))
+            self._evm.insert_account_info(address, _account(self._evm, nonce=0, code=raw))
             self._evm.set_balance(address, 0)
             self._injected.add(address)
 
@@ -289,9 +392,8 @@ class LocalEvm:
             if address in self._loaded:
                 continue
             blob = self.cache.bytecode(address)
-            from pyrevm import AccountInfo
-
-            self._evm.insert_account_info(address, AccountInfo(nonce=1, code=blob))
+            self._evm.insert_account_info(
+                address, _account(self._evm, nonce=1, code=blob))
             self._loaded.add(address)
         self._read_values(wanted, block, funded=self.cache.funded)
         self.stats.ms += (_t.perf_counter() - started) * 1000
@@ -517,8 +619,6 @@ class LocalEvm:
         completion, reported success, and wrote an empty file -- worse than
         failing, because the next run finds a cache and believes it.
         """
-        from pyrevm import AccountInfo
-
         touched: dict[str, set[int]] = {}
         for raw_address, entry in state.items():
             address = raw_address.lower()
@@ -528,8 +628,8 @@ class LocalEvm:
                 code = entry.get("code") or ""
                 blob = bytes.fromhex(code[2:]) if code.startswith("0x") else b""
                 self._evm.insert_account_info(
-                    address, AccountInfo(nonce=int(entry.get("nonce", 0) or 0),
-                                         code=blob or None))
+                    address, _account(self._evm, nonce=int(entry.get("nonce", 0) or 0),
+                                      code=blob or None))
                 self._evm.set_balance(address, int(entry.get("balance", "0x0") or "0x0", 16))
                 self._loaded.add(address)
                 if self.cache is not None and blob:
@@ -649,8 +749,6 @@ class LocalEvm:
         if not wanted:
             return True
 
-        from pyrevm import AccountInfo
-
         cold = [a for a in wanted if a not in self._loaded]
         # Code only for what the disk cache cannot supply: `eth_getCode` ships
         # whole contracts and was 6,265 ms for 198 accounts, and code does not
@@ -673,7 +771,7 @@ class LocalEvm:
             blob = blobs.get(address)
             if blob is None and self.cache is not None:
                 blob = self.cache.bytecode(address)
-            self._evm.insert_account_info(address, AccountInfo(nonce=1, code=blob or None))
+            self._evm.insert_account_info(address, _account(self._evm, nonce=1, code=blob or None))
             self._loaded.add(address)
 
         self._read_values(wanted, block)
