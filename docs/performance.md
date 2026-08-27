@@ -353,6 +353,38 @@ What each change was worth, measured interleaved rather than in sequence:
 | `local_evm` on `erouter_evm` rather than pyrevm | 1.77x on the binding |
 | batched calibration | 1.71 ms |
 
+## Moving `refine`, if it is moved
+
+`refine` is the stage worth moving: 13.8 ms, and its named functions account
+for 14.6 of its 15.4, so unlike `direct` there is almost no inline glue and
+porting the functions *is* moving the stage.
+
+`scripts/dump_refine.py` freezes it -- 840 ladders, 1,374 planned probes, 478
+arcs, 3 seeds, every float as an exact bit pattern -- so a port has something
+to be held to. A ported stage has no natural acceptance test the way a ported
+model does; this is the one it gets.
+
+**It is all or nothing, and that is the finding.** The stage is
+`plan_sized -> probe -> collect -> merge -> _recalibrate -> _assemble -> scale
+-> seed_subgraph`, and no single piece is worth porting alone:
+
+* `plan_sized` is 3.24 ms over 840 ladders. Porting it alone means marshalling
+  those ladders across -- ~10,000 integers each way, 1 to 2 ms -- so it nets
+  about a millisecond and adds a module.
+* `_recalibrate` is the same shape from the other side. Its remaining 2.80 ms
+  is mostly `Ladder.as_float`, marshalling 450 float lists on every quote.
+
+The win is *residency*. If the ladders live on the Rust side for the whole
+stage, `as_float` does not get faster, it stops existing, and `plan_sized`,
+`collect` and `merge` all read them in place. That is worth on the order of
+10 ms and it cannot be had in pieces.
+
+One wrinkle the design has to answer: `probe` in the middle needs the models,
+which are resident already, but it also serves vaults, LP tokens and the 1:1
+wrappers from Python. So either those port too, or the stage returns its
+unservable probes as holes for Python to fill and takes the answers back --
+two crossings rather than one, which is still 450 fewer than today.
+
 ## The shape of what is left
 
 **21 ms of a ~67 ms quote is the Rust solver** -- 37 `active_set_solve` calls
