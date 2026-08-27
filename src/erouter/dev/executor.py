@@ -51,6 +51,20 @@ ERC20_ABI = """[
 GAS_HEADROOM_WEI = 10**19
 
 
+#: What one line of failure is allowed to cost.
+DESCRIBE_LIMIT = 400
+#: Per frame, once the whole message is over budget.
+FRAME_LIMIT = 170
+
+
+def _frame(line: str, budget: int = FRAME_LIMIT) -> str:
+    """A frame from both ends: it opens with the call and closes with why."""
+    line = line.strip()
+    if len(line) <= budget:
+        return line
+    return f"{line[:budget - 60]} ... {line[-55:]}"
+
+
 def describe(exc: BaseException) -> str:
     """One line for a failure, even when the failure will not be rendered.
 
@@ -58,11 +72,26 @@ def describe(exc: BaseException) -> str:
     frame with an empty selector -- paying native out is one -- has no method
     id to decode, so `str(exc)` raises from inside the formatter.  A reporter
     that cannot report is worse than a short message.
+
+    **Keep the ends, not the head.**  A frame carries its arguments, and a
+    six-leg route's arguments are longer than the whole budget, so slicing the
+    front reported the call and threw the cause away -- every multi-leg failure
+    read `BoaError:` and a truncated tuple.  boa marks each reverting frame
+    `[E]`, outermost first, so the first says what was asked and the last says
+    what refused.
     """
     try:
-        return f"{type(exc).__name__}: {exc}".strip()[:400]
+        text = f"{type(exc).__name__}: {exc}".strip()
     except Exception:
         return f"{type(exc).__name__} (boa could not render its own trace)"
+    if len(text) <= DESCRIBE_LIMIT:
+        return text
+    frames = [line for line in text.splitlines() if line.lstrip().startswith("[E]")]
+    if not frames:
+        return text[:DESCRIBE_LIMIT]
+    picked = [_frame(frames[0])] if len(frames) == 1 else [
+        _frame(frames[0]), _frame(frames[-1])]
+    return f"{type(exc).__name__}: " + " <- ".join(picked)
 
 #: `transfer`, for funding out of a holder when the balance slot cannot be
 #: found.  Declared as returning a bool, which is the common spelling; a token
