@@ -1040,9 +1040,24 @@ class RouterSession:
         from .tricrypto_params import build_exact_tricrypto
         from .twocrypto_params import build_exact_twocrypto
         from .vault_params import build_exact_vaults
-        from .wrapper_params import build_exact_wrappers
+        from .wrapper_params import build_exact_lending, build_exact_wrappers
 
         measured = self.client
+
+        def _rate_wrappers(client):
+            """Every rate wrapper, in one table keyed by (token, direction).
+
+            wstETH and the cTokens are the same shape -- a ratio, gated by
+            reproducing what the chain answers -- and differ only in which
+            call establishes the ratio, so they share a table rather than
+            each having one.
+            """
+            got = build_exact_wrappers(self.chain.wsteth_pairs, client)
+            lending = build_exact_lending(self.stake_arcs, client)
+            got.by_key.update(lending.by_key)
+            got.checked += lending.checked
+            got.rejected.extend(lending.rejected)
+            return got
 
         def build(block: int = 0, cache=None):
             cache = self.verdicts if cache is None else cache
@@ -1070,7 +1085,7 @@ class RouterSession:
                 build_exact_vaults(vault_arcs, measured),
                 build_exact_lp(carrying, stable, measured),
                 build_exact_crypto_lp(carrying, crypto, measured),
-                build_exact_wrappers(self.chain.wsteth_pairs, measured),
+                _rate_wrappers(measured),
             )
 
         # The gate refuses a pool that will not reproduce its own quote, and
