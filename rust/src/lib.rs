@@ -16,6 +16,7 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod chol;
+pub mod pools;
 pub mod lu;
 pub mod solve;
 

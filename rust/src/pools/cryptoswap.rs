@@ -7,7 +7,7 @@
 //! truncates toward zero where Python's `//` floors. They agree only when the
 //! operands share a sign, which here they often do not.
 
-use crate::prims::{cbrt, isqrt, I256};
+use crate::pools::prims::{cbrt, isqrt, I256};
 use ruint::aliases::U256;
 
 const N_COINS: u64 = 2;

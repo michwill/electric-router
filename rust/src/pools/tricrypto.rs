@@ -5,8 +5,8 @@
 //! `additional_prec` rescale that has no counterpart there. `_cbrt` is
 //! identical, so it is shared rather than transcribed twice.
 
-use crate::prims::{cbrt, isqrt, I256};
-use crate::stableswap::to_u256;
+use crate::pools::prims::{cbrt, isqrt, I256};
+use crate::pools::stableswap::to_u256;
 use ruint::aliases::U256;
 
 const N_COINS: u64 = 3;

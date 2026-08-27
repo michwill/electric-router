@@ -10,8 +10,8 @@
 //! differ in the last wei, and every one of them was found by reading a
 //! deployed contract rather than a repository copy.
 
-use crate::cryptoswap::{get_y, newton_y, newton_y_fast};
-use crate::stableswap::{solve_y_raw, solve_y_raw_fast, to_u256};
+use crate::pools::cryptoswap::{get_y, newton_y, newton_y_fast};
+use crate::pools::stableswap::{solve_y_raw, solve_y_raw_fast, to_u256};
 use ruint::aliases::U256;
 
 const N_COINS: u64 = 2;

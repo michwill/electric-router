@@ -12,14 +12,10 @@
 //! Python. Anything this prints that is close to 18 ms means the solve count is
 //! the problem and porting buys nothing.
 
-mod cryptoswap;
-mod prims;
 mod recalibrate;
-mod stableswap;
-mod tricrypto;
-mod twocrypto;
 
 use erouter_solve::cycles::cancel_cycles;
+use erouter_solve::pools::{cryptoswap, prims, stableswap, tricrypto, twocrypto};
 use erouter_solve::solve::{active_set_solve, Arcs, Options};
 use std::time::Instant;
 

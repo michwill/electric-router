@@ -365,6 +365,7 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(find_cycle, m)?)?;
     m.add_function(wrap_pyfunction!(split_ascend, m)?)?;
     m.add_class::<Problem>()?;
+    m.add_class::<crate::pools::py::Pools>()?;
     m.add("__doc__", "The router's active-set QP, in Rust.")?;
     Ok(())
 }

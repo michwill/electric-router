@@ -134,6 +134,79 @@ class _OneToOne:
 ONE_TO_ONE = _OneToOne()
 
 
+class _Native:
+    """The three pool families, held on the Rust side and priced in batches.
+
+    A crossing is 1 to 2 us and the arithmetic it carries is 0.08 to 0.84, so
+    the models are handed over once -- at the first probe that names them --
+    and a batch afterwards names them by index. Anything else the client can
+    price (vaults, LP tokens, the 1:1 wrappers) is left to Python: those are a
+    handful of operations, not an iteration, and porting them would buy
+    nothing.
+
+    `keep` holds a reference to every model handed over, because the index is
+    keyed on `id()` and a collected object would let a later one reuse the
+    number.
+    """
+
+    #: Not portable: resolved once and remembered, so the check is not redone
+    #: on every probe of a vault.
+    ABSENT = object()
+
+    def __init__(self) -> None:
+        import erouter_solve
+
+        self.pools = erouter_solve.Pools()
+        self.index: dict[int, object] = {}
+        self.keep: list = []
+
+    def index_of(self, model):
+        """This model's index on the Rust side, or None if it has no place."""
+        got = self.index.get(id(model))
+        if got is not None:
+            return None if got is self.ABSENT else got
+        made = self._add(model)
+        self.index[id(model)] = self.ABSENT if made is None else made
+        self.keep.append(model)
+        return made
+
+    def _add(self, model):
+        name = type(model).__name__
+        if name == "StableSwap":
+            return self.pools.add_stableswap(
+                [str(b) for b in model.balances], [str(r) for r in model.rates],
+                str(model.amp), str(model.fee),
+                str(model.offpeg_fee_multiplier), str(model.a_precision),
+                bool(model.fee_on_xp), bool(model.subtract_one))
+        if name == "Twocrypto":
+            return self.pools.add_twocrypto(
+                [str(b) for b in model.balances],
+                [str(v) for v in model.precisions],
+                str(model.price_scale), str(model.d), str(model.amp),
+                str(model.gamma), str(model.mid_fee), str(model.out_fee),
+                str(model.fee_gamma), bool(model.stable), bool(model.v21),
+                bool(model.legacy_fee), bool(model.legacy_pool),
+                bool(model.legacy_mul2))
+        if name == "Tricrypto":
+            return self.pools.add_tricrypto(
+                [str(b) for b in model.balances],
+                [str(v) for v in model.precisions],
+                [str(v) for v in model.price_scale],
+                str(model.d), str(model.amp), str(model.gamma),
+                str(model.mid_fee), str(model.out_fee), str(model.fee_gamma),
+                bool(model.legacy), str(model.a_multiplier))
+        return None
+
+    #: What an amount may be and still cross as a `u128`: 3.4e38, a token
+    #: with 18 decimals and 1e20 units. Anything larger goes to Python rather
+    #: than being truncated.
+    MAX_AMOUNT = (1 << 128) - 1
+
+    def price(self, which, i, j, dx):
+        """One crossing for the whole batch, through the float invariant."""
+        return self.pools.price(which, i, j, dx, True)
+
+
 def _price(model, i: int, j: int, dx: int) -> int:
     """`get_dy`, through the model's float path when it has one.
 
@@ -191,6 +264,23 @@ class ExactQuoterClient:
         self.models_block = models_block
         self._rebuild = rebuild
 
+    def _native(self):
+        """The Rust-side pools, built on first use.
+
+        Absent when the extension is not installed, which is the same
+        condition every other accelerated path checks -- `core` has to stay
+        importable with nothing but numpy.
+        """
+        got = getattr(self, "_native_pools", None)
+        if got is not None:
+            return None if got is False else got
+        try:
+            made = _Native()
+        except ImportError:
+            made = False
+        self._native_pools = made
+        return None if made is False else made
+
     def refresh_at(self, block: int) -> int:
         """Rebuild the models if the chain moved out from under them.
 
@@ -219,6 +309,11 @@ class ExactQuoterClient:
         self.models_block = block
         # The models the cache pointed at are gone.
         self._model_cache.clear()
+        # And so are the copies handed to Rust. Dropping the whole set rather
+        # than updating it: a rebuild changes every balance, so there is
+        # nothing to keep, and holding the old models alive by `id()` would
+        # add a second copy of the universe on every refresh.
+        self._native_pools = None
         self._reentrant = None
         self.stats = ExactStats()
         return (len(self.exact) + len(self.twocrypto or ())
@@ -245,8 +340,45 @@ class ExactQuoterClient:
 
         out: list[Quote | None] = [None] * len(probes)
         holes: list[int] = []
+
+        # The families with a Rust model go over in one batch; everything else
+        # -- vaults, LP tokens, the 1:1 wrappers -- takes the Python path
+        # below, which is where it was already.
+        # Resolved once. The lookup is memoised but not free -- it hashes a
+        # (pool, kind, i, j) tuple -- and doing it again for the probes the
+        # batch did not take was most of what the batch saved.
+        models = [self._model_for(probe) for probe in probes]
+
+        native = self._native()
+        done: set[int] = set()
+        if native is not None:
+            which, ii, jj, dd, at = [], [], [], [], []
+            for k, probe in enumerate(probes):
+                model = models[k]
+                if model is None:
+                    continue
+                idx = native.index_of(model)
+                if idx is None or probe.dx > native.MAX_AMOUNT:
+                    continue
+                which.append(idx)
+                ii.append(probe.i)
+                jj.append(probe.j)
+                dd.append(probe.dx)
+                at.append(k)
+            if which:
+                for k, value in zip(at, native.price(which, ii, jj, dd),
+                                    strict=True):
+                    if value is None:
+                        continue
+                    out[k] = Quote(Status.VALUE if value > 0 else Status.REVERTED,
+                                   value)
+                    done.add(k)
+                self.stats.computed += len(done)
+
         for k, probe in enumerate(probes):
-            model = self._model_for(probe)
+            if k in done:
+                continue
+            model = models[k]
             if model is None:
                 holes.append(k)
                 continue

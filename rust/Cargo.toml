@@ -28,6 +28,12 @@ default = []
 # PyO3 is optional so the same core compiles to wasm32 with no Python at all.
 python = ["dep:pyo3"]
 
+# The pool models are 256-bit integer arithmetic on the admission path.
+# `ruint` is no-std and has no build script, so it crosses to wasm32 with the
+# rest of the crate.
+[dependencies]
+ruint = { version = "1", default-features = false }
+
 [dependencies.pyo3]
 version = "0.23"
 features = ["extension-module", "abi3-py311"]
