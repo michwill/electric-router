@@ -70,11 +70,24 @@ class CalibrationError(ValueError):
 class Calibration:
     """The result of one arc's ladder.
 
-    `B >= 0` and `clamped => isfinite(cap)` are enforced here, in the *only*
-    place that produces a `B`.  That is what makes a negative conductance
-    structurally impossible rather than something the solver has to guard
-    against: `G = nu a / B` can then only be positive or (clamped) infinite,
-    and the infinite case is bounded in G-space by the §9.7 ceiling.
+    `B >= 0` and `clamped => isfinite(cap)` are enforced here.  That is what
+    makes a negative conductance structurally impossible rather than something
+    the solver has to guard against: `G = nu a / B` can then only be positive
+    or (clamped) infinite, and the infinite case is bounded in G-space by the
+    §9.7 ceiling.
+
+    **This is no longer the only place that produces a `B`.**
+    `pipeline._recalibrate` takes a batched fit straight off
+    `accel.calibrate_many` as a tuple, to avoid building 450 of these a quote
+    to read nine fields off each.  Both invariants still hold on that path --
+    `rust/src/calibrate.rs` clamps with `b.max(0.0)` at its single return site
+    and refuses a clamped arc without a finite cap -- so the property is intact
+    and the *single chokepoint* argument for it is not.  What is gone is the
+    tripwire: if the two fits ever diverge, nothing checks it at the boundary
+    and a negative `B` would surface later as an indefinite Laplacian, which
+    §11.2 says returns a plausible route rather than an error.  Cheap to
+    restore -- a comparison over the returned rows, not a constructor -- if it
+    is ever wanted back.
     """
 
     a: float
