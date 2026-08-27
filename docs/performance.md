@@ -148,6 +148,41 @@ Two ports, two jobs, and they do not compete:
 The 1,156 vectors belong to the second and stay there. The first needs its own
 acceptance test, against the float path's tolerance rather than equality.
 
+## What the float path's error actually is
+
+The drift is measured on `dy` -- the delta, not the invariant -- and it is
+**wei quantisation, not floating-point divergence**. `dy = xp[j] - y - 1`
+differences two numbers of the pool's magnitude to get one of the trade's, so
+a relative error in `y` reaches `dy` multiplied by `y/dy`, which is the
+inverse of the trade's share of the pool. The measured drift follows that
+exactly, a decade per decade:
+
+| dx / balance | stableswap median | worst | twocrypto worst | tricrypto worst |
+|---|---|---|---|---|
+| 1e-9 | 1.99e-3 bp | 5.03e+1 | 8.19e-3 | 3.08e-2 |
+| 1e-6 | 1.60e-6 | 4.56e+0 | 1.21e-5 | 1.33e-5 |
+| 1e-4 | 1.00e-7 | 5.76e-1 | 1.94e-7 | 2.52e-7 |
+| 1e-2 | 6.78e-8 | 5.80e-3 | 9.83e-10 | 1.35e-9 |
+
+The worst column looks alarming and is not. Every one of those cases is one or
+two wei:
+
+    5.03e+01 bp   =  1 wei on an output of 199 units
+    5.21e+00      =  1 wei on 1,918
+    1.00e+00      =  2 wei on 19,933
+
+534 of 2,656 samples differ by a single wei. So the figure is not a property
+of the arithmetic, it is a property of how many units the answer has -- and
+the router already declines to ask at sizes where that is few. `probe.py`
+floors every probe at `MIN_OUT_QUANTA = 10,000` output units, because "an
+answer of `n` units carries a rounding error of `1/n`". Above that floor the
+worst case over all three families is **1.00 bp, and it is two wei**; below
+it, 50 bp on 199 units.
+
+Which is the answer to whether the float path is safe to price with: it is
+wrong by a couple of wei, always, and what that is worth in basis points is
+decided by the size, not by `f64`.
+
 ## Where the models are actually called
 
 Counting `probe` alone said the models were ~15 ms of a quote. That was wrong,
