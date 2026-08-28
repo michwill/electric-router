@@ -650,6 +650,12 @@
    "rates": "plain",
    "subtract_one": true
   },
+  "0x4ca9b3063ec5866a4b82e437059d2c43d1be596f": {
+   "family": "stable",
+   "fee_on_xp": false,
+   "rates": "plain",
+   "subtract_one": true
+  },
   "0x4d9f9d15101eec665f77210cb999639f760f831e": {
    "family": "stable",
    "fee_on_xp": true,
