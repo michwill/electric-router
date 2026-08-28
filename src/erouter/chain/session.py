@@ -55,7 +55,10 @@ from .universe import (
 
 #: Where a `DataSource` is asked for each committed file.  Directory names
 #: match `data/` so one implementation can serve a checkout and a web root.
-STATE_FILE = "evm-state/{name}.json.gz"
+STATE_FILE = "evm-state/{name}.msgpack"
+#: Still read, so a checkout that predates the format change warms rather
+#: than starting cold.
+LEGACY_STATE_FILE = "evm-state/{name}.json.gz"
 EXACT_FILE = "exact/{name}.json"
 FACTS_FILE = "facts/{name}.json"
 QUOTER_FILE = "quoter/RouteQuoter.runtime.hex"
@@ -286,8 +289,10 @@ class RouterSession:
 
         say("caches", 0.0)
         name = self.chain.name.lower()
-        self.state = StateCache.from_bytes(
-            self.chain.chain_id, await self.data.load(STATE_FILE.format(name=name)))
+        blob = await self.data.load(STATE_FILE.format(name=name))
+        if blob is None:
+            blob = await self.data.load(LEGACY_STATE_FILE.format(name=name))
+        self.state = StateCache.from_bytes(self.chain.chain_id, blob)
         self.verdicts = ExactCache.from_bytes(
             self.chain.chain_id, await self.data.load(EXACT_FILE.format(name=name)))
         self.facts = FactsCache.from_bytes(

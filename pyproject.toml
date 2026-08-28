@@ -13,7 +13,15 @@ requires-python = ">=3.11"
 # The core solver is stdlib + numpy and nothing else, so it can be lifted into a
 # Pyodide/Flet frontend unchanged.  See docs/quadratic-flow-router.md and
 # tests/test_purity.py, which fails the build if anything else creeps in.
-dependencies = ["numpy>=2,<3"]
+dependencies = [
+    "numpy>=2,<3",
+    # The state cache is msgpack+zstd: 5.1 MB of json.gz against 1.5 MB, and
+    # 96 ms to load against 32 in the browser, which is where it is fetched.
+    "msgpack>=1.1",
+    # `compression.zstd` is stdlib from 3.14 and compiled into Pyodide, so the
+    # wheel is only for older desktops.
+    "zstandard>=0.22; python_version < '3.14'",
+]
 
 [dependency-groups]
 dev = [
