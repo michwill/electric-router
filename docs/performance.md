@@ -1243,6 +1243,58 @@ Everything that decides is ported, everything that *encodes* is ported, and so
 now is the model-free floor. What is left is fetching. The renderers stay the
 CLI's.
 
+### Where a warm quote goes, with everything that is wired turned on
+
+Measured at block 25,870,667-82, USDC -> WETH at $100k, `EROUTER_ACCEL=1`,
+private endpoint, min of the reps.
+
+    arms          rust 75.23 ms   python 92.01 ms   1.22x, 16.78 ms saved
+                  verified_out identical to the wei
+
+    stages        candidates 72.2%   refine 6.5%   solve 5.0%   direct 3.1%
+                  realize 1.6%   legs 1.3%   seed 1.3%   graph 1.2%
+
+    crossings     404 per quote, 56.11 ms inside Rust (74.0%)
+                  of which solve_arrays 52.65 ms over 67 calls
+                  everything else that crosses:      3.45 ms
+                  Python around it:                 19.74 ms (26.0%)
+
+    solves        65 per quote, 60.13 ms, 71.3% of the whole quote
+                  61 of them asked for by `candidates.resolve`
+
+**Two thirds of a warm quote is already native, and it is all one function.**
+`solve_arrays` is 71% of the quote; the crossings that are not it cost 3.45 ms
+in total, across 337 calls. The boundary is not what is left to win.
+
+**What `EROUTER_ACCEL=1` actually turns on**, which is less than the port:
+`solve`, `calibrate`, `seed`'s shortest path, `realize`, `split`, and
+`pipeline`'s resident pool models with the batched refit. That is six places.
+The modules ported after them -- `candidates`, `prices`, `slippage`, `refit`,
+`routecall`, `verify`, `multiport`, `graph`, `nodes`, `curves`, `gas`, `risk`
+and now `naive` -- have Rust twins under differential test and **no caller in
+the Python quote path**. They are reachable from wasm, where the whole thing is
+Rust, and directly through `erouter_solve`. So the 1.22x above is the six, not
+the port; the rest of the port is portability, exactly as this document has
+said, and the number that bounds what wiring it would buy is the 19.74 ms of
+Python around the crossings -- not the 72% in `candidates`, which is already
+native solving.
+
+### The EVM is 0.3% of a warm quote
+
+`erouter_evm` is revm, so it could move inside the solver crate and stop
+crossing at all. Measured before deciding, per warm quote:
+
+    call                  2 crossings    0.21 ms    0.3%
+
+Two. The exact pool models answer from resident Rust state, so the sweep is
+what makes their getters free (§ the exact-model warm) and the EVM is left
+holding almost nothing on this path. There is no round-trip count to optimise
+away, and folding revm in would buy at most 0.21 ms while making the crate
+depend on an EVM to do arithmetic. It stays outside.
+
+That is a statement about the **warm** path only. The warm-up sweep is a
+different question and is not measured here.
+
 ### The floor, and what porting a function that quotes looks like
 
 `direct_candidates` is pure and crossed as one call. `two_step_candidates` did
