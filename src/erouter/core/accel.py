@@ -288,3 +288,58 @@ def ladders_from(ladders):
                 int(max(0, arc.reserve_in)), [int(d) for d in lad.deltas],
                 [int(q) for q in lad.quotes], int(lad.attempted))
     return out
+
+
+def ballot(g, arcs, src, dst, psi_total, base_psi, *, base_certificate,
+           max_candidates, top_k, gas_floor, max_legs, max_slots,
+           element_split=None):
+    """The whole generation, in Rust.  `None` when it cannot run.
+
+    The graph crosses through `Graph.from_arrays` rather than `Graph.build`:
+    by the time the pipeline reaches the ballot, `g` has already been scaled,
+    clamped and merged, and re-deriving `G` from `a`, `B` and `nu` here would
+    answer a different question.  Generation reads `tau`, `sig`, `G`, `eps`,
+    `cap` and `n_nodes`, so those are what cross.
+
+    Arcs cross once per quote rather than once per solve.  `generate` is called
+    a single time and re-solves 45-106 times behind that one call, so the arc
+    list is built here and the boundary is not crossed again.
+    """
+    if _rust is None:
+        return None
+    graph = _rust.Graph.from_arrays(
+        [int(v) for v in g.tau], [int(v) for v in g.sig],
+        [float(v) for v in g.G], [float(v) for v in g.eps],
+        # A capless arc is `inf` here as it is in `problem_for`, and for the
+        # same reason: anything else non-finite would be a bug upstream.
+        [float(v) if np.isfinite(v) else np.inf for v in g.cap],
+        # Not a detail: the pin sweep is defined over the flagged active arcs,
+        # so dropping this deletes the family rather than degrading it.
+        [bool(v) for v in g.flagged],
+        g.n_nodes,
+    )
+    built = _rust.Arcs()
+    for arc in arcs:
+        built.add(arc.id, arc.pool, int(arc.kind), arc.i, arc.j, arc.n_coins,
+                  arc.token_in, arc.token_out, arc.tau, arc.sigma,
+                  arc.a, arc.B, arc.cap, arc.G, arc.eps, arc.reserve_in,
+                  arc.decimals_in, arc.tvl_usd, arc.gamma_live, arc.note)
+
+    # The reference's pricer takes two `PoolArc`s; the port has no such object
+    # to hand back, so it names them by index into the list it was given.
+    priced = None
+    if element_split is not None:
+        def priced(k1, k2, psi1, psi2):
+            return element_split(arcs[k1], arcs[k2], psi1, psi2)
+
+    return _rust.Ballot.generate(
+        graph, built, src, dst, float(psi_total),
+        [float(v) for v in base_psi],
+        base_certificate=bool(base_certificate),
+        max_candidates=int(max_candidates),
+        top_k=[int(v) for v in top_k],
+        gas_floor=float(gas_floor),
+        max_legs=int(max_legs),
+        max_slots=int(max_slots),
+        element_split=priced,
+    )

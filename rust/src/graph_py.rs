@@ -60,6 +60,58 @@ impl Graph {
         Ok(Graph { inner })
     }
 
+    /// A graph from arrays that are already built, rather than from `a`, `B`
+    /// and `nu`.
+    ///
+    /// `build` derives `G` and `eps`, then scales, clamps and merges. By the
+    /// time the pipeline reaches the ballot all of that has happened, and
+    /// re-deriving it here would answer a different question -- `g_scale`
+    /// alone moves every conductance. Generation reads `tau`, `sig`, `G`,
+    /// `eps`, `cap`, `flagged` and `n_nodes` and nothing else, so those are
+    /// what cross.
+    ///
+    /// `flagged` is not optional in practice: the pin sweep is *defined* over
+    /// the flagged active arcs, so defaulting it to false does not degrade the
+    /// ballot, it deletes a family from it.
+    #[staticmethod]
+    #[pyo3(signature = (tau, sig, g, eps, cap, flagged, n_nodes))]
+    fn from_arrays(
+        tau: Vec<i64>,
+        sig: Vec<i64>,
+        g: Vec<f64>,
+        eps: Vec<f64>,
+        cap: Vec<f64>,
+        flagged: Vec<bool>,
+        n_nodes: usize,
+    ) -> PyResult<Graph> {
+        let m = tau.len();
+        if sig.len() != m || g.len() != m || eps.len() != m || cap.len() != m
+            || flagged.len() != m
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "tau, sig, G, eps, cap and flagged must be the same length",
+            ));
+        }
+        Ok(Graph {
+            inner: crate::graph::ArcArrays {
+                tau,
+                sig,
+                a: vec![0.0; m],
+                b: vec![0.0; m],
+                g,
+                eps,
+                cap,
+                flagged,
+                clamped: vec![false; m],
+                n_nodes,
+                g_scale: 1.0,
+                ill_conditioned: 0.0,
+                sources: (0..m).map(|k| vec![k]).collect(),
+                dropped: Vec::new(),
+            },
+        })
+    }
+
     /// (M3) conductance and (M4) forward drop, without assembling anything.
     #[staticmethod]
     fn arc_params(

@@ -132,10 +132,13 @@ def arms(session, args):
     The arms alternate rep by rep rather than running in sequence, because
     sequential totals on this machine swing two to one within a session and
     whichever ran second lost.  Two things separate them, and both are what
-    the port added to the quote path: the Rust pool models, held on the
-    client, and the batched fit `_recalibrate` reads off `pipeline._ACCEL_ON`.
-    Turning both off is master's arithmetic in this process, which is a fairer
+    the port added to the quote path: the Rust pool models held on the client,
+    the batched fit `_recalibrate` reads off `pipeline._ACCEL_ON`, and the
+    whole of generation behind `candidates._ACCEL_ON`.
+    Turning them off is master's arithmetic in this process, which is a fairer
     comparison than a second checkout -- same universe, same block, same warm.
+    `toggle` has to name every module that reads `_ACCEL_ON`; one left out is
+    an arm that is not master, and the failure is silent.
 
     The outputs are compared, not only the times, and they are required to
     agree **to the wei** -- a speed-up that changes the answer is a bug report.
@@ -152,11 +155,17 @@ def arms(session, args):
     they are says what broke: a few ULP is a marshalling difference, basis
     points is a different route.
     """
-    from erouter.core import pipeline
+    from erouter.core import candidates, pipeline
 
     def toggle(on):
         session.client._native_pools = None if on else False
         pipeline._ACCEL_ON = on and _ACCEL_ENV
+        # Every module that reads the flag has to be listed here, or the arm
+        # that is meant to be master keeps whichever accelerators were added
+        # since this function was last touched -- and then the comparison
+        # silently measures nothing.  `candidates` was added and this was not,
+        # which read as a 1.32x that survived turning the wiring off.
+        candidates._ACCEL_ON = on and _ACCEL_ENV
 
     cpu = {True: [], False: []}
     got = {}

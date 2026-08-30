@@ -26,6 +26,57 @@ pub struct Graph {
 
 #[wasm_bindgen]
 impl Graph {
+    /// A graph from arrays that are already built, rather than from `a`, `B`
+    /// and `nu`.
+    ///
+    /// `build` derives `G` and `eps`, then scales, clamps and merges. A
+    /// caller that already has those -- the ballot's, which runs after all of
+    /// it -- would answer a different question by re-deriving them, because
+    /// `g_scale` alone moves every conductance. Generation reads `tau`,
+    /// `sig`, `G`, `eps`, `cap`, `flagged` and `n_nodes` and nothing else.
+    ///
+    /// `flagged` is not optional in practice: the pin sweep is *defined* over
+    /// the flagged active arcs, so an empty one does not degrade the ballot,
+    /// it deletes a family from it.
+    #[wasm_bindgen(js_name = fromArrays)]
+    pub fn from_arrays(
+        tau: Vec<i64>,
+        sig: Vec<i64>,
+        g: Vec<f64>,
+        eps: Vec<f64>,
+        cap: Vec<f64>,
+        flagged: Vec<u8>,
+        n_nodes: usize,
+    ) -> Result<Graph, JsValue> {
+        let m = tau.len();
+        if sig.len() != m || g.len() != m || eps.len() != m || cap.len() != m
+            || flagged.len() != m
+        {
+            return Err(JsError::new(
+                "tau, sig, G, eps, cap and flagged must be the same length",
+            )
+            .into());
+        }
+        Ok(Graph {
+            inner: erouter_solve::graph::ArcArrays {
+                tau,
+                sig,
+                a: vec![0.0; m],
+                b: vec![0.0; m],
+                g,
+                eps,
+                cap,
+                flagged: flagged.iter().map(|&v| v != 0).collect(),
+                clamped: vec![false; m],
+                n_nodes,
+                g_scale: 1.0,
+                ill_conditioned: 0.0,
+                sources: (0..m).map(|k| vec![k]).collect(),
+                dropped: Vec::new(),
+            },
+        })
+    }
+
     /// Assemble solver arrays (§9.5-9.7). `require` is `[src, dst]`: the pair
     /// the dust floor may not disconnect, or `undefined` for no constraint.
     #[wasm_bindgen(js_name = build)]

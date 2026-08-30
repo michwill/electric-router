@@ -1248,8 +1248,11 @@ CLI's.
 Measured at block 25,870,667-82, USDC -> WETH at $100k, `EROUTER_ACCEL=1`,
 private endpoint, min of the reps.
 
-    arms          rust 75.23 ms   python 92.01 ms   1.22x, 16.78 ms saved
+    arms          rust 110.44 ms  python 156.31 ms  1.42x, 45.86 ms saved
                   verified_out identical to the wei
+                  (1.22x before generation was wired in; the absolute times
+                   drifted with the universe between sessions, so the ratio is
+                   what compares, and only within one interleaved run)
 
     stages        candidates 72.2%   refine 6.5%   solve 5.0%   direct 3.1%
                   realize 1.6%   legs 1.3%   seed 1.3%   graph 1.2%
@@ -1268,16 +1271,55 @@ in total, across 337 calls. The boundary is not what is left to win.
 
 **What `EROUTER_ACCEL=1` actually turns on**, which is less than the port:
 `solve`, `calibrate`, `seed`'s shortest path, `realize`, `split`, and
-`pipeline`'s resident pool models with the batched refit. That is six places.
-The modules ported after them -- `candidates`, `prices`, `slippage`, `refit`,
-`routecall`, `verify`, `multiport`, `graph`, `nodes`, `curves`, `gas`, `risk`
-and now `naive` -- have Rust twins under differential test and **no caller in
-the Python quote path**. They are reachable from wasm, where the whole thing is
+`pipeline`'s resident pool models with the batched refit, and `candidates`'
+whole generation. That is seven places.
+The modules ported after them -- `prices`, `slippage`, `refit`, `routecall`,
+`verify`, `multiport`, `graph`, `nodes`, `curves`, `gas`, `risk` and `naive` --
+have Rust twins under differential test and **no caller in the Python quote
+path**. They are reachable from wasm, where the whole thing is
 Rust, and directly through `erouter_solve`. So the 1.22x above is the six, not
 the port; the rest of the port is portability, exactly as this document has
 said, and the number that bounds what wiring it would buy is the 19.74 ms of
 Python around the crossings -- not the 72% in `candidates`, which is already
 native solving.
+
+### Wiring generation in, and what it was actually worth
+
+`candidates.generate` was the one stage both hot and fully ported, so it got a
+caller. `Graph.from_arrays` is new and is the reason it works: by the ballot,
+`g` has been scaled, clamped and merged, and `Graph.build` would re-derive `G`
+from `a`, `B` and `nu` and answer a different question -- `g_scale` alone moves
+every conductance. `flagged` crosses with it, not as a nicety: the pin sweep is
+*defined* over the flagged active arcs, and defaulting it to false deleted the
+family outright. A test caught that, not a review.
+
+Measured interleaved, everything else held on:
+
+    rust generation      90.26 ms      python generation   96.81 ms
+    1.07x, 6.55 ms saved, verified_out identical to the wei
+
+**1.07x, not the 1.42x** the arms now report for the branch as a whole. That
+is the prediction this document made a section earlier holding up: the 72% in
+`candidates` was already native solving, and what wiring the generator could
+reach was the Python loop *around* it. 6.55 ms of ~19.7 ms.
+
+The boundary is not where it went, either:
+
+    graph      0.07 ms   0.1%      arcs (477 adds)  0.29 ms   0.3%
+    generate  53.03 ms  53.5%      of a 99.2 ms quote
+
+Marshalling the whole universe across costs 0.36 ms once per quote. Generation
+is now a single call holding 53% of the quote, where it was 61 separate solve
+crossings with Python between them.
+
+**A measurement bug worth recording, because it read as a result.** `arms`
+fakes master by turning accelerators off, and its `toggle` names the modules to
+turn off one by one. `candidates` was added and `toggle` was not, so both arms
+ran the Rust generator and the run reported 1.32x -- a number that survives
+turning the thing being measured off. `toggle` now names it, and the docstring
+says why every future accelerator has to be added there too. The failure is
+silent by construction: an arm that is not master still produces a plausible
+ratio.
 
 ### The EVM is 0.3% of a warm quote
 

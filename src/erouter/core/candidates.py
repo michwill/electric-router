@@ -22,10 +22,12 @@ can find the interior optimum.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import accel as _accel
 from .graph import ArcArrays
 from .multiport import MultiPortError, element_of_arcs
 from .quoter import MAX_LEGS, MAX_SLOTS
@@ -37,6 +39,12 @@ from .types import PoolArc
 # Sparsification levels.  The relaxation routinely activates dozens of arcs
 # chasing fitted dislocations; these ask "what if you only had k pools?" and
 # double as §11.1's gas-sparsification candidates.
+#: Generation is the one stage that is both hot and fully ported: 61 of a warm
+#: quote's 65 solves are asked for by `resolve`, and the loop around them is
+#: this module.  Off by default like every other accelerator -- `core` must
+#: stay importable with nothing but numpy -- so `EROUTER_ACCEL=1` opts in.
+_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
+
 TOP_K = (1, 2, 3, 4, 6, 8, 12)
 PIN_LADDER = (0.0, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0)
 # An arc carrying less than this fraction of the trade cannot change the outcome,
@@ -255,6 +263,32 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
     return out
 
 
+def _from_ballot(got) -> CandidateSet:
+    """A native ballot as the dataclasses the rest of the pipeline reads.
+
+    Only the seven fields generation sets.  The other eight -- `route`,
+    `verified_out`, `status`, `note`, `rank`, `gas`, `survival` -- are filled
+    by `realize_candidates` and `verify` further down, and taking their
+    defaults here is what the Python path does too.
+    """
+    losses = got.modelled_loss()
+    out = CandidateSet(
+        skipped=got.skipped, solves=got.solves,
+        pivots=got.pivots, skipped_wide=got.skipped_wide,
+    )
+    for k, label in enumerate(got.labels()):
+        out.candidates.append(Candidate(
+            label=label,
+            psi=np.asarray(got.psi(k), dtype=float),
+            certificate=got.certificates()[k],
+            reason=got.reasons()[k],
+            kind=got.kinds()[k],
+            n_arcs=got.n_arcs()[k],
+            modelled_loss=losses[k],
+        ))
+    return out
+
+
 def generate(
     g: ArcArrays,
     arcs: list[PoolArc],
@@ -271,6 +305,16 @@ def generate(
     max_legs: int = MAX_LEGS,
     element_split=None,
 ) -> CandidateSet:
+    if _ACCEL_ON and _accel.available():
+        got = _accel.ballot(
+            g, arcs, src, dst, Psi, base.psi,
+            base_certificate=base_certificate, max_candidates=max_candidates,
+            top_k=top_k, gas_floor=gas_floor, max_legs=max_legs,
+            max_slots=MAX_SLOTS, element_split=element_split,
+        )
+        if got is not None:
+            return _from_ballot(got)
+
     out = CandidateSet()
     seen: set[tuple] = set()
 
