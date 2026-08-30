@@ -1321,6 +1321,59 @@ says why every future accelerator has to be added there too. The failure is
 silent by construction: an arm that is not master still produces a plausible
 ratio.
 
+### The warm-up sweep is the network, and nothing else
+
+The one thing the EVM measurement left open. Same process, same endpoint,
+block 25,870,860, 383 pools / 856 arcs / 368 exact models, caches warm so
+nothing was re-fetched:
+
+    warm phase         wall ms    cpu ms  cpu/wall
+    block                121.3       0.9      0.01
+    caches                90.2      89.8      1.00
+    code                  56.2      56.1      1.00
+    storage            10130.2     138.1      0.01
+    universe               4.1       4.1      0.99
+    pools               3511.2    1426.8      0.41
+    wrappers            1028.7      98.8      0.10
+    arcs                  86.2      86.1      1.00
+    models              1637.0    1133.1      0.69
+    ------------------------------------------------
+    warm total         16665.5    3034.1      0.18
+
+**18% CPU.** The storage sweep alone is ten seconds of wall for a tenth of a
+second of work -- 1% -- and it is the single largest phase. Making every
+remaining line of Python free would take 16.7 s to 13.6 s.
+
+`refresh`, which is what runs on a timer once warm, is worse: **10.9 s wall,
+0.60 s CPU, 6%**. It re-reads every loaded slot at the newest block and that
+is all it does.
+
+So there is nothing here for the port, and the earlier note that the EVM
+measurement covered only the warm path is now closed rather than open: revm
+inside would not help the sweep either, because the sweep is not executing --
+it is waiting for a socket.
+
+### Turning the accelerator on makes the *warm* slower
+
+Which is worth stating plainly, because it is the opposite of the direction
+everything else in this document points.
+
+    accel      warm cpu     warm quote
+    on          3034 ms       87.06 ms
+    off         2569 ms      403.46 ms
+    delta       +465 ms      -316 ms
+
+`prepare` builds `_Resident` -- the Rust-side pool models -- only when the flag
+is on, and that build is warm-time work the quote then reads for free. So the
+accelerator does not remove work, it *moves* it: 465 ms more in the sweep,
+316 ms less in every quote after. It pays for itself in **1.5 quotes**, and the
+router is not built to quote once.
+
+The 4.6x here is against pure numpy, not against master: this arm has the
+solver in Python too, where `master` has had it in Rust for some time. Against
+master the figure is the arms' 1.42x. Both are real; they answer different
+questions, and neither should be quoted without saying which.
+
 ### The EVM is 0.3% of a warm quote
 
 `erouter_evm` is revm, so it could move inside the solver crate and stop
@@ -1334,8 +1387,8 @@ holding almost nothing on this path. There is no round-trip count to optimise
 away, and folding revm in would buy at most 0.21 ms while making the crate
 depend on an EVM to do arithmetic. It stays outside.
 
-That is a statement about the **warm** path only. The warm-up sweep is a
-different question and is not measured here.
+That was a statement about the warm path only when it was written; the sweep
+is measured above and is 18% CPU, so it does not change the answer.
 
 ### The floor, and what porting a function that quotes looks like
 
