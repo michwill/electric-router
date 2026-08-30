@@ -163,6 +163,50 @@ if (job.op === "solve") {
   Object.assign(out, { split: r ? [r.a, r.b] : null });
   if (r) r.free();
   pools.free();
+} else if (job.op === "ladders") {
+  // The whole refine stage as the browser would run it: build the coarse
+  // ladders, plan what is missing, fold the answers in, fit.  u128 crosses as
+  // lo/hi halves, which is why every amount here is a pair.
+  const M = (1n << 64n) - 1n;
+  const pack = (xs) => {
+    const out = new BigUint64Array(xs.length * 2);
+    xs.forEach((v, k) => { const b = BigInt(v); out[2 * k] = b & M; out[2 * k + 1] = b >> 64n; });
+    return out;
+  };
+  const unpack = (buf) => {
+    const out = [];
+    for (let k = 0; k < buf.length; k += 2) out.push(((buf[k + 1] << 64n) | buf[k]).toString());
+    return out;
+  };
+  const outHolder = out;
+  const L = new glue.Ladders();
+  for (const m of job.ladders) {
+    L.add(m.decimals_in, m.decimals_out, BigInt(m.reserve_in) & M,
+          BigInt(m.reserve_in) >> 64n, pack(m.deltas), pack(m.quotes), m.attempted);
+  }
+  const plan = L.planSized(Uint32Array.from(job.slots), pack(job.want),
+                           Uint32Array.from(job.spans.map((v) => v * 2)));
+  const at = Array.from(plan.slot);
+  const deltas = unpack(plan.delta);
+  const built = { slots: at, deltas };
+  if (job.values) {
+    L.absorb(Uint32Array.from(at), pack(deltas), pack(job.values),
+             Uint8Array.from(job.status), job.names);
+    built.points = job.ladders.map((_, k) => unpack(L.points(k)));
+    built.attempted = job.ladders.map((_, k) => L.attempted(k));
+  }
+  if (job.fit) {
+    const got = L.recalibrate(Uint32Array.from(job.fit), job.driftTol);
+    // Hex, not JSON numbers: a fit's `cap` is routinely Infinity and `eta`
+    // NaN, and JSON.stringify writes both as null.  Same reason the solver's
+    // vectors cross as hex here.
+    built.fits = got.map((f) => f === undefined ? null : {
+      nums: hex(Float64Array.of(f.a, f.b, f.cap, f.drift, f.eta, f.calibDelta)),
+      clamped: f.clamped, convexFlag: f.convexFlag, flag: f.flag,
+    });
+  }
+  L.free();
+  Object.assign(outHolder, built);
 } else {
   throw new Error(`unknown op: ${job.op}`);
 }

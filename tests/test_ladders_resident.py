@@ -176,9 +176,9 @@ def _same(a: _Fitted, b: _Fitted) -> bool:
     call two identical fits different.
     """
     for x, y in zip(a, b, strict=True):
-        if isinstance(x, float) and isinstance(y, float):
-            if math.isnan(x) and math.isnan(y):
-                continue
+        if (isinstance(x, float) and isinstance(y, float)
+                and math.isnan(x) and math.isnan(y)):
+            continue
         if x != y:
             return False
     return True

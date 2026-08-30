@@ -24,6 +24,7 @@ import pytest
 
 from erouter.core import graph
 from erouter.core.accel import available
+from erouter.core.calibrate import DRIFT_TOL
 from erouter.core.solve import TOL
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -471,7 +472,113 @@ def test_the_browser_splits_an_element_the_same_way():
                "model": _spec_for_js("stableswap", GNOSIS_3POOL),
                "i": 0, "j1": 1, "j2": 2, "dx": str(dx)})
     import erouter_solve
+
     from test_pools_differential import _add
     pools = erouter_solve.Pools()
     _add(pools, "stableswap", GNOSIS_3POOL)
     assert tuple(got["split"]) == pools.element_split(0, 0, 1, 2, dx)
+
+
+# ------------------------------------------------------------------ ladders
+
+def _ladder_job(seed: int, *, answer: bool, fit: bool):
+    """The refine stage's inputs, in the shape the harness hands to `Ladders`."""
+    from erouter.core.probe import plan_sized
+    from test_ladders_resident import _answers, _ladders, _sizes
+
+    ladders = _ladders(seed)
+    sizes = _sizes(ladders, seed)
+    by_id = {lad.arc.id: k for k, lad in enumerate(ladders)}
+    slots, want, spans = [], [], [0]
+    for arc_id, values in sizes.items():
+        slots.append(by_id[arc_id])
+        want.extend(int(v) for v in values)
+        spans.append(len(want))
+
+    job = {
+        "op": "ladders",
+        "ladders": [{"decimals_in": lad.arc.decimals_in,
+                     "decimals_out": lad.arc.decimals_out,
+                     "reserve_in": str(max(0, lad.arc.reserve_in)),
+                     "deltas": [str(d) for d in lad.deltas],
+                     "quotes": [str(q) for q in lad.quotes],
+                     "attempted": lad.attempted} for lad in ladders],
+        "slots": slots, "want": [str(v) for v in want], "spans": spans,
+    }
+    plan = plan_sized(ladders, sizes)
+    if answer:
+        got = _answers(plan.probes, seed)
+        names, status, values = [], [], []
+        for one in got:
+            if one.status is not None and one.status.name != "VALUE":
+                if one.status.name not in names:
+                    names.append(one.status.name)
+                status.append(names.index(one.status.name) + 1)
+                values.append(0)
+            else:
+                status.append(0)
+                values.append(max(0, int(one.value)))
+        job.update(values=[str(v) for v in values], status=status, names=names)
+    if fit:
+        job.update(fit=list(range(len(ladders))), driftTol=DRIFT_TOL)
+    return job, ladders, sizes, plan
+
+
+@pytest.mark.parametrize("seed", [1, 3, 5])
+def test_the_browser_plans_the_same_probes(seed):
+    """The plan, and its order -- the answers are zipped back against it."""
+    job, _lads, _sz, plan = _ladder_job(seed, answer=False, fit=False)
+    got = run(job)
+    assert [int(v) for v in got["deltas"]] == [p.dx for p in plan.probes]
+
+
+@pytest.mark.parametrize("seed", [1, 3, 5])
+def test_the_browser_merges_the_same_way(seed):
+    """Every ladder's points and counts after absorbing the same answers."""
+    from erouter.core.probe import collect, merge
+
+    _j, ladders, _sz, plan = _ladder_job(seed, answer=False, fit=False)
+    job, _l2, _sz2, _p = _ladder_job(seed, answer=True, fit=False)
+    got = run(job)
+
+    from test_ladders_resident import _answers
+    merge(ladders, collect(plan, _answers(plan.probes, seed)))
+    for k, lad in enumerate(ladders):
+        half = len(got["points"][k]) // 2
+        assert [int(v) for v in got["points"][k][:half]] == lad.deltas, f"slot {k}"
+        assert [int(v) for v in got["points"][k][half:]] == lad.quotes, f"slot {k}"
+        assert got["attempted"][k] == lad.attempted, f"slot {k}"
+
+
+@pytest.mark.parametrize("seed", [1, 3, 5])
+def test_the_browser_fits_what_the_extension_fits(seed):
+    """The fits, field for field, against the native extension.
+
+    Against the extension rather than Python for the same reason the float
+    models are: two targets, one source, one compiler -- so an exact match is
+    the expectation and anything else is marshalling.
+    """
+    import math
+
+    from erouter.core.accel import ladders_from
+
+    job, ladders, _sz, _plan = _ladder_job(seed, answer=False, fit=True)
+    got = run(job)["fits"]
+    want = ladders_from(ladders).recalibrate(list(range(len(ladders))), DRIFT_TOL)
+
+    assert len(got) == len(want)
+    for k, (a, b) in enumerate(zip(got, want, strict=True)):
+        assert (a is None) == (b is None), f"slot {k}: one side refused"
+        if a is None:
+            continue
+        # (a, B, cap, drift, eta, calib_delta) against the tuple's
+        # (a, B, cap, clamped, convex, flag, drift, eta, calib_delta).
+        nums = floats(a["nums"])
+        for f, (x, y) in enumerate(zip(nums, (b[0], b[1], b[2], b[6], b[7], b[8]),
+                                       strict=True)):
+            if math.isnan(x) and math.isnan(y):
+                continue
+            assert x == y, f"slot {k} float {f}: {x} != {y}"
+        assert a["clamped"] == b[3], f"slot {k}: clamped"
+        assert a["convexFlag"] == b[4], f"slot {k}: convex_flag"
+        assert a["flag"] == b[5], f"slot {k}: flag"

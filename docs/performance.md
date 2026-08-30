@@ -931,3 +931,50 @@ rather than a budget, and the arms are back to requiring the wei.
 Which leaves the error budget where it belongs. The quote path carries 8e-2 bp
 of float-versus-exact approximation, on both sides equally, by choice; the port
 carries none.
+
+## What the browser can do, and what is left
+
+The ladders were added with a PyO3 binding and no wasm one -- the same hole
+`pools` had, repeated inside one session, and found by reading again. Both are
+closed now, and `test_bindings_match.py` reads the two binding files and
+compares what they name, so the third time it will fail a build instead. It is
+a structural test on purpose: the failure mode is silent, nothing errors, the
+browser simply cannot do something the extension can.
+
+**Reachable from JavaScript today**, each with a differential test that holds
+it to the extension: the solver (`Problem`, `SolveResult`), `calibrate`,
+`cancelCycles`, `findCycle`, `splitAscend`, the EVM, every pool model through
+`Pools` -- the three swap families, vaults, lending wrappers, wstETH, the 1:1
+wraps and both LP directions -- and the refine stage's `Ladders`, which plans,
+merges and fits without the ladders crossing.
+
+**What a quote still needs that has no Rust form:**
+
+| module | lines | what it is |
+|---|---|---|
+| `pipeline` | 2,381 | the stage orchestrator |
+| `realize` | 1,059 | flow to legs |
+| `candidates` | 620 | the ballot, around a native solver |
+| `graph` | 392 | `ArcArrays`, `build`, `scale` |
+| `verify` | 349 | realisation and its gates |
+| `multiport` | 324 | elements; its `best_split` is already native |
+| `nodes`, `gas`, `risk`, `slippage`, `refit`, `curves` | ~1,200 | the tables a route is priced against |
+
+Roughly 6,000 lines, and it is a rewrite rather than a port: these hold Python
+objects -- `PoolArc`, `NodeMap`, `RealizedRoute` -- where the ported pieces
+held numbers. That is the whole reason the boundary sat where it did.
+
+`routecall`, `quoter`, `codec`, `transport`, `evm` and the renderers are not on
+this list. Calldata and chain I/O are the browser's own to do, and the
+renderers are the CLI's.
+
+**The order that follows from what depends on what:** `graph` and `nodes`
+first, because everything above them takes an `ArcArrays` or a rate; then
+`multiport` and `realize`, which turn a flow into legs; then `verify` and
+`candidates`, which are loops over those; `pipeline` last, and only once the
+stages beneath it no longer need to come back for anything.
+
+None of it will show in the arms. `candidates` is 92% a native solver,
+`realize` is 2.4 ms, and `graph` and `nodes` are smaller again. This is the
+portability half of the goal, and the measurements in this document are the
+reason to say so plainly rather than let a 1.4x figure imply otherwise.
