@@ -351,9 +351,13 @@ def test_the_achievable_kcl_floor_agrees_in_magnitude(seed):
     """A different eigensolver, so this is an order-of-magnitude claim.
 
     The reference calls `np.linalg.cond`, which is LAPACK's SVD; the port runs
-    a cyclic Jacobi because it cannot reach for LAPACK.  Same quantity, and it
-    feeds a safety factor of 100 -- so what has to agree is the scale, which is
-    what the caller compares its residual against.
+    a cyclic Jacobi, because `rust/README.md` rules out BLAS and LAPACK -- no
+    wasm build, and at `n ~ 50` a hand-written kernel wins anyway.  Binding it
+    would not make this exact regardless: numpy's OpenBLAS is `DYNAMIC_ARCH`
+    and threaded, so it is not one fixed sequence of operations.
+
+    Same quantity, and it feeds a safety factor of 100 -- so what has to agree
+    is the scale, which is what the caller compares its residual against.
     """
     import erouter_solve
 

@@ -422,10 +422,14 @@ pub fn achievable_kcl(g: &ArcArrays, active: &[bool], dst: usize) -> f64 {
 /// `np.linalg.cond` in the 2-norm: the ratio of the extreme singular values.
 ///
 /// The Laplacian restricted to `keep` is symmetric positive definite, so its
-/// singular values are its eigenvalues and a symmetric QR is enough. This is
-/// the one place the port cannot reach for LAPACK, and the answer feeds a
-/// safety factor of 100 -- so what matters is the order of magnitude, which
-/// this gets.
+/// singular values are its eigenvalues and a symmetric eigensolver is enough.
+///
+/// Written here rather than bound because `README.md` rules out BLAS and
+/// LAPACK: no wasm build, and at `n ~ 50` a hand-written kernel wins anyway.
+/// It would not buy an exact match either -- numpy's OpenBLAS is built
+/// `DYNAMIC_ARCH` and threaded, so it is not one fixed sequence of operations.
+/// The answer feeds a safety factor of 100, so what matters is the order of
+/// magnitude, which this gets.
 fn condition_number(matrix: &[f64], n: usize) -> Option<f64> {
     if n == 0 {
         return None;

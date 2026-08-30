@@ -1113,11 +1113,24 @@ generators that build their candidates *while* fetching. The renderers stay the
 CLI's.
 
 **Three approximations, each documented where it is.** `route_conductance`,
-`achievable_kcl` and the reference-price fit each solve a small dense system
-and the port cannot reach for LAPACK -- `lu.rs` and a cyclic Jacobi against
-numpy's LU and SVD. Same quantities, different implementations, so those
-comparisons carry a relative tolerance. Plus the `geomspace` ULP above.
-Everything else in these suites is exact.
+`achievable_kcl` and the reference-price fit each solve a small dense system,
+and the two sides solve it differently: `lu.rs` and a cyclic Jacobi here
+against numpy's LU and SVD there.
+
+Not because LAPACK is out of reach -- it binds from Rust, and `faer` and
+`nalgebra` are pure-Rust and would cross to wasm. `rust/README.md` rules it
+out on its own terms: at `n ~ 50`, the measured median, a forty-line LU beats
+the cost of binding a Fortran library with no wasm build.
+
+And it would not buy exactness anyway. numpy here is linked against OpenBLAS
+0.3.34 built `DYNAMIC_ARCH` with `MAX_THREADS=64` -- the kernel is chosen from
+the CPU at runtime and the work is threaded, so `np.linalg.solve` is not one
+fixed sequence of operations even between two runs on different machines.
+Matching it exactly would mean matching one build's dispatch, which is the
+opposite of the README's determinism rule. The tolerance is the price of that
+rule, and the *reference* is the less reproducible of the two.
+
+Plus the `geomspace` ULP above. Everything else in these suites is exact.
 
 None of this shows in the arms. `candidates` is 92% a native solver, `realize`
 is 2.4 ms, and the Python pipeline still calls Python at every stage -- nothing
