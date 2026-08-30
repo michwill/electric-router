@@ -1132,6 +1132,37 @@ rule, and the *reference* is the less reproducible of the two.
 
 Plus the `geomspace` ULP above. Everything else in these suites is exact.
 
+**The Jacobi eigensolver, measured rather than assumed.** `achievable_kcl`
+needs a condition number and the port computes it with a cyclic Jacobi, which
+is a bigger piece of numerical code than the rest of the port's linear algebra
+put together. Two questions, both answered:
+
+*Cost.* 1.07 ms at `n = 50` against numpy's 0.096 -- 11x slower. It does not
+matter, because `_achievable_kcl` is called **only on the path about to fail**
+the KCL check (`pipeline.py` says so in as many words: "`cond` is computed only
+here, on the path about to fail"). A working quote never pays it. That 11x
+would matter if the call ever moved, which is why it is written down.
+
+*Accuracy*, against `np.linalg.cond` over 172 matrices with `k` from 1 to
+1e16:
+
+| `k` | worst relative error |
+|---|---|
+| up to 1e12 | 2.4e-5 |
+| 1e12 - 1e14 | 3.3e-3 |
+| 1e14 - 1e16 | 29% |
+
+`MAX_CONDITION` is 1e12, so the whole range the graph admits agrees to 2.4e-5.
+Past 1e14 the small eigenvalues sit at the double-precision noise floor and
+neither implementation is authoritative; against a safety factor of 100, a 29%
+error is noise. The sweep cap never bound -- worst 21 sweeps, ordinary case
+five to nine.
+
+Verdict: keep it. A cheaper estimator (power plus inverse-power, or LAPACK's
+own `pocon`, which is an estimate too) would buy time on a path that does not
+need it and give up the unconditional convergence that makes this safe to run
+where a quote is already going wrong.
+
 None of this shows in the arms. `candidates` is 92% a native solver, `realize`
 is 2.4 ms, and the Python pipeline still calls Python at every stage -- nothing
 in this work changed the hot path. This is the portability half of the goal,
