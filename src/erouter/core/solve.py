@@ -81,19 +81,28 @@ PERTURB_SCALE = 1e-11
 # see.
 PIVOT_TIE = 1e-9
 
-# The compiled solve is **opt-in**, and stays that way until it agrees with the
-# reference on the paths that matter.
+# The compiled solve is **opt-in**, and the reason it stays that way has
+# changed -- read this before assuming the old one still holds.
 #
-# Replaying 94 problems off live quotes, it takes the identical pivot count on 93
-# and agrees on feasibility on all 94, at 23.8us per pivot against numpy's 130us.
-# What it does not reproduce is the degenerate tail: where the reference itself
-# comes back PARTIAL or cycles, the two wander differently and the quote lands
-# hundreds of bp apart.  Those sizes sit at theta in the hundreds of percent,
-# where the model is out of its range anyway, but "the answer depends on which
-# solver ran" is not a property to ship.
+# It was the degenerate tail.  Replaying 94 problems off live quotes, the port
+# took the identical pivot count on 93 and agreed on feasibility on all 94, at
+# 23.8us per pivot against numpy's 130us -- but where the reference itself came
+# back PARTIAL or cycled, the two wandered apart and the quote landed hundreds
+# of bp away.  "The answer depends on which solver ran" is not shippable.
 #
-# So `EROUTER_ACCEL=1` opts in, for developing the port and running the
-# differential.  Nothing else uses it.
+# Three defects were behind that, all of them in code a converging problem
+# never reaches: a Cholesky factor reused across a basis it did not describe, a
+# cycle-breaking perturbation that reached the drop rule but not the
+# right-hand side, and ties settled by whichever arc the solve rounded higher
+# (`PIVOT_TIE`, above).  `test_the_degenerate_tail_agrees` now holds the two to
+# exact agreement on reason *and* flow over 216 solves, 144 of them PARTIAL,
+# and `test_over_constrained_pins_agree` over 72 pinned re-solves -- the sweep
+# that found the defects ran 676 of those and is in `docs/performance.md`.
+#
+# What that does not settle: both are synthetic, and the claim above was
+# measured on live quotes at theta in the hundreds of percent. Flipping the
+# default wants that replay repeated, not a synthetic stand-in for it.  Until
+# then `EROUTER_ACCEL=1` opts in.
 _ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 
 

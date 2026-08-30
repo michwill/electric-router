@@ -1,7 +1,14 @@
 # erouter-solve
 
-The router's hot path in Rust: `active_set_solve` and the primitives it runs
-once per pivot (component reachability, Laplacian assembly, dense LU).
+The router in Rust. It began as the hot path -- `active_set_solve` and the
+primitives it runs once per pivot -- and now carries the stages between the
+fetches too: graph assembly and node merging, multi-port elements, `realize`,
+the candidate ballot with `verify`/`gas`/`risk`, the pricing tables
+(`curves`, `prices`, `slippage`, `refit`), calldata (`keccak`, `codec`,
+`routecall`), and `pipeline` over the top.
+
+What is deliberately *not* here is anything that talks to a chain: `evm.py`,
+`quoter.py`, `transport.py`. Those are I/O, and the rules below forbid it.
 
 Written to run in three places without changing:
 
@@ -33,41 +40,52 @@ when it is absent.
 
 ## Status
 
-**Opt-in, not yet the default.**  Set `EROUTER_ACCEL=1` to route through it.
+**Opt-in, not yet the default.** Set `EROUTER_ACCEL=1` to route through it.
 
-What is established: it reproduces `core/solve.py` to 1e-12 on six shaped
-problems and twelve fuzzed graphs, honours pins and forbidden arcs identically,
-and matches OSQP's objective on all of them (`tests/test_accel_differential.py`).
-The whole Python suite passes with it enabled.
+What is established. It reproduces `core/solve.py` on every differential in
+`tests/`, which now includes the paths that matter rather than only the clean
+ones: the degenerate tail (`test_the_degenerate_tail_agrees` -- 216 solves,
+two-thirds returning PARTIAL, exact on reason and flow at budgets of 12, 40 and
+600) and §6.3's over-constrained pin sweep
+(`test_over_constrained_pins_agree` -- 72 pinned re-solves over 12 universes;
+the sweep that fixed it ran 676 over 120 and is recorded in
+`docs/performance.md`).  It matches OSQP's objective, and
+`test_wasm_differential` holds the browser build to **byte equality** with the
+native one.
 
-What is not: on real quotes it still diverges where the solve does not converge
-cleanly.  `USDC->WETH $20M` returned 9,052 WETH through Python and 4,681
-through Rust.  Those quotes reach `maxit`, cycle under Bland's rule and return
-`PARTIAL` -- paths a clean synthetic problem never takes, which is why the unit
-differential passed while the real quote did not.  **The lesson is about the
-tests, not the port**: a differential over problems that converge in a handful
-of pivots cannot cover a solver whose interesting behaviour is what it does
-when it fails to converge.
+End to end at a pinned block, toggling the Rust models in one process:
+**1.32x**, 78.90 ms against 103.82 median, with `verified_out` identical to the
+wei. See `docs/performance.md` for where that came from and what it cost.
 
-It is also not yet faster end to end -- 0.9x on four of five real quotes.  The
-solve is about a quarter of a warm quote, and marshalling the arrays across the
-boundary costs roughly what the arithmetic saves.  The 20x seen on a 20-node
-synthetic problem is real and irrelevant: the measured per-pivot system is
-n = 49 median, and the crossing happens 45 times a quote.
+What is not established. The reason the default has not flipped is no longer a
+known divergence -- it is that the evidence is synthetic. The claim this
+crate was gated on ("the quote lands hundreds of bp apart") was measured by
+replaying 94 problems off live quotes at theta in the hundreds of percent, and
+the three defects behind it are fixed and covered. Repeating that replay is
+what remains, and it needs a chain.
 
 ### What to do next, in order
 
-1. **Force the hard paths in the differential.**  Small `maxit`, graphs built
-   to cycle, `partial_ok=True`.  Until those are covered the port cannot be
-   trusted, and with them the remaining divergence is findable in minutes.
-2. **Then fix the divergence**, which is somewhere in the cycling and
-   exhaustion branches -- the same region where a phantom `CLEANUP_ROUNDS`
-   phase (reverted in the Python, ported from memory) was already found and
-   removed.
-3. **Then reconsider the boundary.**  Lists cost; numpy's buffer protocol would
-   avoid a copy, at the price of the numpy C API and a harder Pyodide build.
-   Or move more of the pipeline across -- `calibrate` is another ~25% and has
-   no such marshalling problem, since it is called far less often.
+1. **Repeat the live replay** that produced the original divergence claim, and
+   flip the default if it agrees. Everything below it is smaller.
+2. **`WSTETH_UNWRAP` has no model at all** -- not an unported one, none. It is
+   the first blocking leg on 92 of 156 routes, which is why they go whole to
+   revm at 481 us instead of being walked at 197. `wrappers.py` already reads
+   the rate at the warm and records `getStETHByWstETH` as linear to 1.3e-19
+   across eight decades, so the number is in hand. Whether that clears the
+   wei-for-wei bar the other exact models are admitted by is a decision, not a
+   transcription; `docs/performance.md` states the case.
+3. **Then `walk_route`**, which is worth ~2.5 ms and is mostly blocked by the
+   above -- 56 of 156 routes are walkable in Rust at all today.
+4. **Then the boundary.** Lists cost; numpy's buffer protocol would avoid a
+   copy, at the price of the numpy C API and a harder Pyodide build.
+
+Still in Python: `schema.py`, `poolfee.py`, the two renderers, and the
+planning half of `probe.py` -- `ladders.rs` holds the ladders and `plan_sized`,
+but `plan_grid`, `plan_refine` and `plan_deltas` are not across, and
+`pipeline.py` imports them. None of it is on the measured hot path. Whether a
+browser quote can be driven end to end without them has not been tried, so
+treat that as open rather than answered.
 
 ### Browser build
 

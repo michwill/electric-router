@@ -308,3 +308,78 @@ def test_over_constrained_pins_agree():
     assert not disagreed, (
         f"{len(disagreed)} over-constrained pin(s) diverge across "
         f"{len({d[0] for d in disagreed})} universes: {disagreed[:4]}")
+
+
+def _tie_heavy(seed, n=6):
+    """A graph built to make the basis repeat.
+
+    Duplicated arcs between every pair, half of them at a cost perturbed by
+    1e-13 -- close enough that which one the pivot rule prefers is decided
+    below the noise floor of the solve, which is what sends a basis back to
+    where it was.
+    """
+    rng = np.random.default_rng(seed)
+    tau, sig, a, B = [], [], [], []
+    for tail in range(n):
+        for head in range(n):
+            if tail == head:
+                continue
+            for _ in range(2 + int(rng.integers(0, 3))):
+                tau.append(tail)
+                sig.append(head)
+                base = rng.uniform(0.990, 0.999)
+                a.append(float(base if rng.random() < 0.5
+                               else base * (1 + rng.normal(0, 1e-13))))
+                B.append(float(np.exp(rng.uniform(np.log(1e-7), np.log(1e-4)))))
+    return graph.build(np.array(tau, np.int64), np.array(sig, np.int64),
+                       np.array(a, float), np.array(B, float), np.ones(n),
+                       1.0, n_nodes=n, merge_duplicates=False)
+
+
+@pytest.mark.parametrize("maxit", [12, 40, 600])
+def test_the_degenerate_tail_agrees(maxit):
+    """Where the solver does *not* converge cleanly, which is the hard part.
+
+    `core/solve.py` keeps the compiled path behind `EROUTER_ACCEL` and gives
+    this as the reason: where the reference comes back PARTIAL or cycles, the
+    two were said to wander apart and land hundreds of bp from each other.  The
+    caveat is older than the fixes to the stale Cholesky factor, the
+    unperturbed right-hand side and `PIVOT_TIE`, all three of which lived
+    exactly here -- a clean problem never reaches them.
+
+    So this pins the region rather than the happy path.  Two thirds of these
+    return PARTIAL, at a median of 40 pivots and up to 107, and the budgets are
+    chosen to force exhaustion (12) as well as to let it run (600).
+
+    What it does *not* establish: the original claim was measured by replaying
+    94 problems off live quotes at theta in the hundreds of percent, and this
+    is synthetic.  Flipping the default still wants that replay.
+    """
+    import erouter_solve
+
+    partial = 0
+    for seed in range(24):
+        g = _tie_heavy(seed)
+        for demand in (1.0, 50.0, 5000.0):
+            ours = active_set_solve(g, 0, 5, demand, min_flow=1e-4,
+                                    maxit=maxit, partial_ok=True)
+            problem = erouter_solve.Problem(
+                [int(v) for v in g.tau], [int(v) for v in g.sig],
+                [float(v) for v in g.G], [float(v) for v in g.eps],
+                [float(v) for v in g.cap], g.n_nodes)
+            got = problem.solve(0, 5, demand, forbidden=[False] * g.m,
+                                min_flow=1e-4, maxit=maxit, partial_ok=True)
+            theirs = np.frombuffer(got["psi"], dtype=np.float64)
+            partial += (ours.reason or "OK") == "PARTIAL"
+
+            assert (ours.reason or "OK") == (str(got["reason"]) or "OK"), (
+                seed, demand, ours.reason, got["reason"])
+            assert np.allclose(ours.psi, theirs, rtol=1e-9,
+                               atol=1e-9 * demand), (
+                seed, demand, float(np.max(np.abs(ours.psi - theirs))))
+
+    if maxit == 12:
+        # The coverage claim above, asserted rather than described: a budget
+        # this small must exhaust nearly everything, and if a later change
+        # makes these converge the test has quietly stopped testing the tail.
+        assert partial >= 60, partial
