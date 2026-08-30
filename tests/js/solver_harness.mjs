@@ -98,6 +98,59 @@ if (job.op === "solve") {
   });
   r.free();
   p.free();
+} else if (job.op === "price") {
+  // The models are built the way a warm builds them -- every parameter as a
+  // decimal string -- and then a batch names them by index, so this exercises
+  // the marshalling the browser will actually use.
+  const pools = new glue.Pools();
+  for (const m of job.models) {
+    if (m.kind === "stableswap") {
+      pools.addStableswap(m.balances, m.rates, m.amp, m.fee,
+        m.offpeg_fee_multiplier, m.a_precision, m.fee_on_xp, m.subtract_one,
+        m.admin_fee ?? undefined);
+    } else if (m.kind === "twocrypto") {
+      pools.addTwocrypto(m.balances, m.precisions, m.price_scale, m.d, m.amp,
+        m.gamma, m.mid_fee, m.out_fee, m.fee_gamma, m.stable, m.v21,
+        m.legacy_fee, m.legacy_pool, m.legacy_mul2);
+    } else {
+      pools.addTricrypto(m.balances, m.precisions, m.price_scale, m.d, m.amp,
+        m.gamma, m.mid_fee, m.out_fee, m.fee_gamma, m.legacy, m.a_multiplier);
+    }
+  }
+  // Each dx as lo/hi halves of a u128: there is no BigUint128Array, and a
+  // u64 would cap a probe at eighteen tokens at eighteen decimals.
+  const M = (1n << 64n) - 1n;
+  const dx = new BigUint64Array(job.dx.length * 2);
+  job.dx.forEach((v, k) => {
+    const b = BigInt(v);
+    dx[2 * k] = b & M;
+    dx[2 * k + 1] = b >> 64n;
+  });
+  const r = pools.price(
+    Uint32Array.from(job.which), Uint8Array.from(job.i), Uint8Array.from(job.j),
+    dx, job.fast);
+  const values = r.values, ok = r.ok;
+  // Reassembled here rather than crossing as BigInt per probe: the buffer is
+  // lo/hi halves, which is how a u128 fits a BigUint64Array.
+  const dy = [];
+  for (let k = 0; k < ok.length; k++) {
+    dy.push(ok[k] ? ((values[2 * k + 1] << 64n) | values[2 * k]).toString() : null);
+  }
+  Object.assign(out, { dy });
+  r.free();
+  pools.free();
+} else if (job.op === "element_split") {
+  const pools = new glue.Pools();
+  const m = job.model;
+  pools.addStableswap(m.balances, m.rates, m.amp, m.fee,
+    m.offpeg_fee_multiplier, m.a_precision, m.fee_on_xp, m.subtract_one,
+    m.admin_fee ?? undefined);
+  const d = BigInt(job.dx);
+  const r = pools.elementSplit(0, job.i, job.j1, job.j2,
+    d & ((1n << 64n) - 1n), d >> 64n);
+  Object.assign(out, { split: r ? [r.a, r.b] : null });
+  if (r) r.free();
+  pools.free();
 } else {
   throw new Error(`unknown op: ${job.op}`);
 }

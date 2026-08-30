@@ -11,9 +11,11 @@
 //! together, and one instantiation is one fetch.
 
 mod evm;
+mod pools;
 mod solve;
 
 pub use evm::{BatchResult, CallResult, Evm, MissReport};
+pub use pools::{Pools, PriceResult, SplitOut};
 pub use solve::{
     calibrate, cancel_cycles, find_cycle, split_ascend, AscendResult, CalibrationOut,
     CycleResult, PathResult, Problem, SolveResult,

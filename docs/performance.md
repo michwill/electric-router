@@ -464,3 +464,77 @@ On half the pairs the tail of the ballot buys nothing; on the other half it
 buys 2.19 to 3.45 bp, which is 22 to 35 dollars on a 100,000 trade for 26 ms
 that costs nothing in gas. 9 ms is that trade declined -- the right call for a
 bot, the wrong one for a router quoting a user's swap.
+
+## The models, in the browser
+
+The port was built for the PyO3 boundary and reached only that one. The maths
+was never the obstacle -- `pools/` has no I/O, no clock and no threading, and
+compiles to wasm32 with the solver -- but nothing under `rust/wasm/src/`
+referenced it, so the linker stripped every byte of it from the module. The
+bundle exported `calibrate`, `cancel`, `find`, `split` and the two classes, and
+a browser had no way to price a pool at all.
+
+Wiring it in cost 168 KB of wasm, which is the measure of how much was being
+dropped: 1,432,448 bytes to 1,601,003.
+
+**Both bindings now wrap one registry.** `pools::registry::Registry` holds the
+models and the arithmetic; `pools/py.rs` and `wasm/src/pools.rs` only marshal.
+That is not tidiness. The two boundaries have to price a pool identically --
+the browser is meant to answer what the extension answers -- and two
+hand-written copies of the construction would have drifted at the first legacy
+flag, which is exactly where two deployed generations differ in the last wei.
+
+### What the boundary costs, and one thing it nearly cost
+
+`u128` has no typed array. The first version narrowed `dx` to `u64` to get one,
+which caps a probe at 1.8e19 wei -- eighteen tokens at eighteen decimals, a
+rounding error rather than a trade -- and the differential test caught it
+immediately, quoting 1,426,559,818 against 5,981,843. So amounts cross as the
+low and high halves of a `u128` interleaved in a `BigUint64Array`, which is the
+same shape the answers come back in, and the alternative of an array of `BigInt`
+allocates one object per probe on the path the batch exists to keep cheap.
+
+### Held to the reference, standing rather than once
+
+The 1,156 vectors above were run by hand, once. They are now a test, and the
+three arithmetics are held to different contracts because they answer different
+questions:
+
+| pair | contract | measured |
+|---|---|---|
+| Rust exact vs Python exact | equality, wei for wei | 240 of 240 |
+| wasm exact vs Python exact | equality, wei for wei | 240 of 240 |
+| wasm float vs extension float | equality | 240 of 240 |
+| Rust float vs Python float | the quote path's budget | 5.5e-11 bp worst |
+
+The last row is the only one that is not equality, and deliberately: `dy =
+xp[j] - y - 1` inherits `y`'s absolute round-off, and the two sides do not have
+to reach `y` by the same sequence. 12 of 240 differ, all cryptoswap at a tenth
+of the pool, all under 5.5e-11 bp against a budget of 5.4e-4.
+
+That budget is seven orders of magnitude above what the port actually costs, so
+on its own it would not notice the port going gradually wrong. The median
+carries that: it is exactly zero -- most vectors do agree bit for bit -- so a
+median that moves at all means the two sides stopped running the same sequence,
+whatever the worst case still says.
+
+The two wasm rows are equality because both targets are the same source through
+the same compiler. Python is allowed to differ from both by the budget; wasm
+drifting from the extension would mean the browser ranks routes differently
+from the CLI, and nothing budgets for that.
+
+### Measuring it, repeatably
+
+`scripts/bench_quote.py --arms` runs this branch's quote path against master's,
+interleaved rep by rep, because sequential totals on this machine swing two to
+one within a session. Both arms are in one process -- the Rust models toggle on
+the client, the batched fit on `pipeline._ACCEL_ON` -- so it is the same
+universe, the same block and the same warm, which a second checkout would not
+be. The arms are required to agree to the wei; a speed-up that changes the
+answer is a bug report.
+
+    arm                        min ms   median
+    rust (this branch)          48.76    49.91
+    python (master)             60.04    62.28
+    speed-up                     1.23x
+    saved                       11.28 ms

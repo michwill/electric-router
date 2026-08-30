@@ -331,3 +331,117 @@ def test_shortest_path_agrees():
     assert native["found"] == wasm["found"]
     assert np.float64(native["length"]).tobytes() == bytes.fromhex(wasm["length"])
     assert list(native["negative_cycle"]) == wasm["negativeCycle"]
+
+
+# --------------------------------------------------------------- pool models
+
+def _spec_for_js(kind, spec):
+    """One model in the shape the harness hands to `Pools`.
+
+    Every integer as a decimal string, which is the boundary both bindings
+    use: a balance does not survive a JSON number, and `JSON.parse` would
+    round it silently rather than failing.
+    """
+    out = {"kind": kind}
+    if kind == "stableswap":
+        out.update(
+            balances=[str(v) for v in spec["balances"]],
+            rates=[str(v) for v in spec["rates"]],
+            amp=str(spec["amp"]), fee=str(spec["fee"]),
+            offpeg_fee_multiplier=str(spec.get("offpeg_fee_multiplier", 0)),
+            a_precision=str(spec.get("a_precision", 100)),
+            fee_on_xp=spec.get("fee_on_xp", True),
+            subtract_one=spec.get("subtract_one", True),
+            admin_fee=(str(spec["admin_fee"])
+                       if spec.get("admin_fee", -1) >= 0 else None))
+    elif kind == "twocrypto":
+        out.update(
+            balances=[str(v) for v in spec["balances"]],
+            precisions=[str(v) for v in spec["precisions"]],
+            price_scale=str(spec["price_scale"]), d=str(spec["d"]),
+            amp=str(spec["amp"]), gamma=str(spec["gamma"]),
+            mid_fee=str(spec["mid_fee"]), out_fee=str(spec["out_fee"]),
+            fee_gamma=str(spec["fee_gamma"]),
+            stable=spec.get("stable", True), v21=spec.get("v21", True),
+            legacy_fee=spec.get("legacy_fee", False),
+            legacy_pool=spec.get("legacy_pool", False),
+            legacy_mul2=spec.get("legacy_mul2", False))
+    else:
+        out.update(
+            balances=[str(v) for v in spec["balances"]],
+            precisions=[str(v) for v in spec["precisions"]],
+            price_scale=[str(v) for v in spec["price_scale"]],
+            d=str(spec["d"]), amp=str(spec["amp"]), gamma=str(spec["gamma"]),
+            mid_fee=str(spec["mid_fee"]), out_fee=str(spec["out_fee"]),
+            fee_gamma=str(spec["fee_gamma"]),
+            legacy=spec.get("legacy", False),
+            a_multiplier=str(spec.get("a_multiplier", 10000)))
+    return out
+
+
+def _priced_in_the_browser(fast):
+    """Every shared vector through the wasm module, in one batch."""
+    from test_pools_differential import CASES
+
+    models, which, ii, jj, dd = [], [], [], [], []
+    for kind, _n, spec, i, j, dx in CASES:
+        models.append(_spec_for_js(kind, spec))
+        which.append(len(models) - 1)
+        ii.append(i)
+        jj.append(j)
+        dd.append(dx)
+    got = run({"op": "price", "models": models, "which": which, "i": ii,
+               "j": jj, "dx": [str(v) for v in dd], "fast": fast})
+    return [int(v) if v is not None else None for v in got["dy"]]
+
+
+def test_the_browser_prices_a_pool_wei_for_wei():
+    """The exact path, through wasm, against Python.
+
+    Same crate and same compiler as the extension, so this is not a second
+    implementation being checked -- it is the marshalling being checked: the
+    balances cross as strings and the answers come back as lo/hi halves of a
+    `u128`, and either of those is somewhere a digit can be lost.
+    """
+    from test_pools_differential import CASES, _ids, _model, _python_price
+
+    want = [_python_price(_model(k, s), i, j, dx, False)
+            for k, _n, s, i, j, dx in CASES]
+    wrong = [(n, w, g) for n, w, g in
+             zip(_ids(), want, _priced_in_the_browser(False), strict=True)
+             if w != g]
+    assert not wrong, f"{len(wrong)} of {len(CASES)} disagree: {wrong[:5]}"
+
+
+def test_the_browser_float_path_matches_the_extension_exactly():
+    """The float path, through wasm, against the *native* extension.
+
+    Against the extension rather than against Python, and that is the point:
+    the two Rust targets run the same source through the same compiler, so
+    here an exact match is the expectation.  Python is allowed to differ from
+    both by the quote path's budget -- `test_pools_differential` holds that --
+    but wasm drifting from the extension would mean the browser ranks routes
+    differently from the CLI, which nothing budgets for.
+    """
+    from test_pools_differential import _batch, _ids
+
+    _want, native = _batch(True)
+    wrong = [(n, a, b) for n, a, b in
+             zip(_ids(), native, _priced_in_the_browser(True), strict=True)
+             if a != b]
+    assert not wrong, f"{len(wrong)} disagree with the extension: {wrong[:5]}"
+
+
+def test_the_browser_splits_an_element_the_same_way():
+    """The split search, which moves a loop rather than batching a call."""
+    from test_pools_differential import GNOSIS_3POOL
+
+    dx = GNOSIS_3POOL["balances"][0] // 100
+    got = run({"op": "element_split",
+               "model": _spec_for_js("stableswap", GNOSIS_3POOL),
+               "i": 0, "j1": 1, "j2": 2, "dx": str(dx)})
+    import erouter_solve
+    from test_pools_differential import _add
+    pools = erouter_solve.Pools()
+    _add(pools, "stableswap", GNOSIS_3POOL)
+    assert tuple(got["split"]) == pools.element_split(0, 0, 1, 2, dx)

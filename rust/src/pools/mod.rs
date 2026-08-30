@@ -27,6 +27,7 @@ pub mod cryptoswap;
 #[cfg(feature = "python")]
 pub mod py;
 pub mod prims;
+pub mod registry;
 pub mod stableswap;
 pub mod tricrypto;
 pub mod twocrypto;

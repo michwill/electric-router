@@ -13,6 +13,7 @@ Three rules, each learned by getting it wrong first:
   work or from a counter, never from a profiler's share.
 
     python scripts/bench_quote.py --block N --reps 25
+    python scripts/bench_quote.py --arms        # this branch against master
     python scripts/bench_quote.py --solves      # who asks for each solve
     python scripts/bench_quote.py --boundary    # FFI crossing vs Rust compute
 """
@@ -22,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import collections
+import os
 import statistics
 import sys
 import time
@@ -116,6 +118,59 @@ def stages(session, args):
           f"-- 1.0 means nothing waited on a socket")
 
 
+_ACCEL_ENV = os.environ.get("EROUTER_ACCEL", "") == "1"
+
+
+def arms(session, args):
+    """This branch's quote path against master's, interleaved.
+
+    The arms alternate rep by rep rather than running in sequence, because
+    sequential totals on this machine swing two to one within a session and
+    whichever ran second lost.  Two things separate them, and both are what
+    the port added to the quote path: the Rust pool models, held on the
+    client, and the batched fit `_recalibrate` reads off `pipeline._ACCEL_ON`.
+    Turning both off is master's arithmetic in this process, which is a fairer
+    comparison than a second checkout -- same universe, same block, same warm.
+
+    The outputs are compared, not only the times.  A speed-up that changes the
+    answer is a bug report, so the arms are required to agree to the wei.
+    """
+    from erouter.core import pipeline
+
+    def toggle(on):
+        session.client._native_pools = None if on else False
+        pipeline._ACCEL_ON = on and _ACCEL_ENV
+
+    cpu = {True: [], False: []}
+    got = {}
+    for rep in range(args.reps * 2):
+        on = rep % 2 == 0
+        toggle(on)
+        session.quote(args.amount)
+        c0 = time.process_time()
+        result = session.quote(args.amount)
+        cpu[on].append((time.process_time() - c0) * 1e3)
+        got.setdefault(on, result.verified_out)
+    toggle(True)
+
+    fast, slow = min(cpu[True]), min(cpu[False])
+    print(f"\n{'arm':<24}{'min ms':>9}{'median':>9}")
+    print(f"{'rust (this branch)':<24}{fast:>9.2f}"
+          f"{statistics.median(cpu[True]):>9.2f}")
+    print(f"{'python (master)':<24}{slow:>9.2f}"
+          f"{statistics.median(cpu[False]):>9.2f}")
+    print("-" * 42)
+    print(f"{'speed-up':<24}{slow / fast:>8.2f}x")
+    print(f"{'saved':<24}{slow - fast:>9.2f} ms")
+
+    agree = got[True] == got[False]
+    print(f"\nverified_out  rust   {got[True]}")
+    print(f"              python {got[False]}")
+    print("same to the wei" if agree
+          else "*** ARMS DISAGREE -- the port is wrong ***")
+    return 0 if agree else 1
+
+
 def solves(session, args):
     """Who asks for each solve.  The solver is already native; the count is not."""
     original = accel.solve_arrays
@@ -167,12 +222,16 @@ def main() -> int:
     p.add_argument("--min-tvl", type=float, default=10_000.0)
     p.add_argument("--reps", type=int, default=25)
     p.add_argument("--private", action="store_true", default=True)
+    p.add_argument("--arms", action="store_true",
+                   help="this branch against master, interleaved")
     p.add_argument("--solves", action="store_true", help="who asks for each solve")
     args = p.parse_args()
 
     session = warm(args)
     print(f"block {session.block:,}  ·  accel {accel.available()}  ·  "
           f"n={args.reps}")
+    if args.arms:
+        return arms(session, args)
     if args.solves:
         solves(session, args)
     else:
