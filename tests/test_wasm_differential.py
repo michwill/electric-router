@@ -720,3 +720,172 @@ def test_the_browser_merges_the_same_nodes():
     assert got["isAlias"] == [want.is_alias(t) for t in ask]
     assert floats(got["rescale"]).tolist() == list(
         erouter_solve.NodeMap.rescale(*rescale_args))
+
+
+# ------------------------------------------------------------ elements
+#
+# An element is where the shape rules and the advancing state meet, and both
+# have to cross intact: the ports go over as parallel coin and share arrays
+# because a pair has no typed form, and getting that wrong would silently
+# transpose a split.
+
+
+def test_the_browser_refuses_the_same_shapes():
+    from erouter.core.multiport import BPS, LP, MultiPort, MultiPortError, Port
+
+    cases = [
+        (3, [(0, BPS)], [(1, 5_000), (2, 5_000)]),
+        (2, [(0, BPS)], [(1, 5_000), (2, 5_000)]),
+        (3, [(0, BPS)], [(0, 5_000), (1, 5_000)]),
+        (2, [(0, 5_000), (1, 5_000)], [(LP, BPS)]),
+        (3, [(0, BPS)], [(1, 4_000), (2, 5_000)]),
+    ]
+    for n_coins, inputs, outputs in cases:
+        want = None
+        try:
+            made = MultiPort(pool="0xp", n_coins=n_coins,
+                             inputs=tuple(Port(*p) for p in inputs),
+                             outputs=tuple(Port(*p) for p in outputs))
+        except MultiPortError as e:
+            want = str(e)
+        got = run({
+            "op": "element", "pool": "0xp", "n_coins": n_coins,
+            "in_coins": [c for c, _ in inputs], "in_bps": [b for _, b in inputs],
+            "out_coins": [c for c, _ in outputs], "out_bps": [b for _, b in outputs],
+        })
+        if want is None:
+            assert "error" not in got, got
+            # `inputs()` interleaves coin and share, which is how a pair
+            # crosses without a typed form for it.
+            assert got["inputs"] == [v for p in made.inputs for v in (p.coin, p.bps)]
+            assert got["outputs"] == [v for p in made.outputs for v in (p.coin, p.bps)]
+            assert got["ports"] == made.ports
+        else:
+            assert got.get("error", "").endswith(want), (got, want)
+
+
+@pytest.mark.parametrize("dx", [10**18, 10_000 * 10**18])
+def test_the_browser_advances_the_pool_between_ports(dx):
+    import erouter_solve
+
+    from test_multiport_differential import ADDRESS, POOL, native
+
+    pools, which, _ = native(POOL)
+    want = pools.element_evaluate(which, None, 3, [(0, 10_000)],
+                                  [(1, 3_000), (2, 7_000)], str(dx))
+    got = run({
+        "op": "element", "pool": ADDRESS, "n_coins": 3,
+        "in_coins": [0], "in_bps": [10_000],
+        "out_coins": [1, 2], "out_bps": [3_000, 7_000],
+        "dx": str(dx),
+        "models": {
+            "balances": [str(b) for b in POOL.balances],
+            "rates": [str(r) for r in POOL.rates],
+            "amp": str(POOL.amp), "fee": str(POOL.fee),
+            "offpeg_fee_multiplier": str(POOL.offpeg_fee_multiplier),
+            "a_precision": str(POOL.a_precision), "fee_on_xp": POOL.fee_on_xp,
+            "subtract_one": POOL.subtract_one, "admin_fee": str(POOL.admin_fee),
+        },
+        "weights": [str(POOL.rates[1]), str(POOL.rates[2])],
+    })
+    assert got["dy"] == list(want)
+    first, second, payout = pools.element_best_split(
+        which, None, 3, [(0, 10_000)], [(1, 3_000), (2, 7_000)], str(dx),
+        [str(POOL.rates[1]), str(POOL.rates[2])])
+    assert got["split"] == [first, second]
+    assert floats(got["payout"])[0] == payout
+    assert erouter_solve is not None
+
+
+# ----------------------------------------------------------- realisation
+
+
+def test_the_browser_realises_the_same_route():
+    """The leg list is the executable artefact, so it crosses field for field."""
+    import erouter_solve
+
+    from test_realize_differential import (
+        CRVUSD,
+        POOL_A,
+        POOL_B,
+        SCRVUSD,
+        USDC,
+        WETH,
+        build_nodes,
+        make_arc,
+        port_arcs,
+    )
+
+    reference, ported = build_nodes()
+    arcs = [
+        make_arc(POOL_A, WETH, USDC, reference, a=3000.0, B=1e-3),
+        make_arc(POOL_B, USDC, CRVUSD, reference, a=1.0, B=1e-9),
+    ]
+    psi = [1.0, 1.0]
+    nu = [1.0] * reference.n_nodes
+    want = erouter_solve.Route.realize(
+        port_arcs(arcs), psi, nu, ported, WETH, SCRVUSD, str(10**18), None)
+
+    got = run({
+        "op": "realize",
+        "tokens": [
+            {"address": WETH, "symbol": "WETH", "decimals": 18},
+            {"address": USDC, "symbol": "USDC", "decimals": 6},
+            {"address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+             "symbol": "USDT", "decimals": 6},
+            {"address": CRVUSD, "symbol": "crvUSD", "decimals": 18},
+            {"address": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+             "symbol": "ETH", "decimals": 18},
+            {"address": SCRVUSD, "symbol": "scrvUSD", "decimals": 18},
+        ],
+        "merges": [
+            {"kind": "NATIVE_WRAP",
+             "token": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+             "canonical": WETH, "rate_num": "1", "rate_den": "1", "target": WETH},
+            {"kind": "ERC4626", "token": SCRVUSD, "canonical": CRVUSD,
+             "rate_num": str(11 * 10**17), "rate_den": str(10**18),
+             "target": SCRVUSD},
+        ],
+        "arcs": [
+            {"id": a.id, "pool": a.pool, "kind": int(a.kind), "i": a.i, "j": a.j,
+             "n_coins": a.n_coins, "token_in": a.token_in,
+             "token_out": a.token_out, "tau": a.tau, "sigma": a.sigma,
+             "a": a.a, "B": a.B,
+             "cap": None if not np.isfinite(a.cap) else a.cap,
+             "G": a.G, "eps": a.eps, "reserve_in": str(a.reserve_in),
+             "decimals_in": a.decimals_in, "tvl_usd": a.tvl_usd,
+             "gamma_live": None if np.isnan(a.gamma_live) else a.gamma_live,
+             "note": a.note}
+            for a in arcs
+        ],
+        "psi": psi, "nu": nu, "src": WETH, "dst": SCRVUSD,
+        "amount_in": str(10**18),
+    })
+
+    assert got["wireLegs"] == [t for t, *_ in want.wire_legs()]
+    assert got["wireNumbers"] == [
+        v for _, *rest in want.wire_legs() for v in rest]
+    assert got["targets"] == want.targets()
+    assert got["kinds"] == list(want.kinds())
+    assert got["tokensIn"] == want.tokens_in()
+    assert got["tokensOut"] == want.tokens_out()
+    assert got["amountsIn"] == want.amounts_in()
+    assert got["amountsOut"] == want.amounts_out()
+    assert got["arcIds"] == want.arc_ids()
+    assert got["poolNames"] == want.pool_names()
+    # `gamma_live` is NaN on a conversion leg, and NaN is not equal to itself.
+    numbers, expected = floats(got["numbers"]), np.array(want.numbers())
+    agree = (numbers == expected) | (np.isnan(numbers) & np.isnan(expected))
+    assert agree.all(), (numbers[~agree], expected[~agree])
+    assert got["modelled"] == [int(v) for v in want.modelled()]
+    assert got["isConversion"] == [int(v) for v in want.is_conversion()]
+    assert got["slots"] == [t for t, _ in want.slots()]
+    assert got["slotIndices"] == [k for _, k in want.slots()]
+    assert got["nodeOfSlot"] == [v for pair in want.node_of_slot() for v in pair]
+    assert got["dstSlot"] == want.dst_slot
+    assert got["modelledOut"] == want.modelled_out
+    assert got["paths"] == [">".join(p) for p in want.paths()]
+    assert got["warnings"] == want.warnings()
+    assert got["poolsUsed"] == want.pools_used()
+    assert floats(got["maxTheta"])[0] == want.max_theta()
+    assert floats(got["routeConductance"])[0] == want.route_conductance()

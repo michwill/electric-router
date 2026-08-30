@@ -12,6 +12,7 @@
 //! formatting is paid once per pool at the warm, where it costs nothing.
 
 use crate::pools::lp::{StableLp, TriLp};
+use crate::multiport::{self, MultiPort, MultiPortError, Port};
 use crate::pools::{stableswap, tricrypto, twocrypto};
 use ruint::aliases::U256;
 
@@ -40,6 +41,15 @@ enum Model {
     /// A tricrypto LP burn. Withdrawal only -- its deposits are already exact
     /// through the pool's own getter.
     TriWithdraw(Box<TriLp>),
+}
+
+fn amount_of(text: &str) -> Result<U256, MultiPortError> {
+    text.parse::<U256>()
+        .map_err(|_| MultiPortError(format!("not a u256: {text}")))
+}
+
+fn ports(flat: &[(i32, i64)]) -> Vec<Port> {
+    flat.iter().map(|&(coin, bps)| Port::new(coin, bps)).collect()
 }
 
 fn big(s: &str) -> Result<U256, String> {
@@ -289,6 +299,100 @@ impl Registry {
             ),
             _ => None,
         }
+    }
+
+    /// The stableswap pool at `which`, and the LP model at `lp` if asked for.
+    ///
+    /// An element needs both halves of one pool: `evaluate` advances the swap
+    /// state and the LP state together, and a caller that hands over two
+    /// unrelated indices gets the same answer the reference would -- whatever
+    /// those two models say -- rather than a check this cannot make.
+    fn element_models(
+        &self, which: usize, lp: Option<usize>,
+    ) -> Result<(&stableswap::Pool, Option<&StableLp>), MultiPortError> {
+        let pool = match self.models.get(which) {
+            Some(Model::Stable(exact, _)) => exact.as_ref(),
+            _ => return Err(MultiPortError(format!("model {which} is not a stableswap"))),
+        };
+        let model = match lp {
+            None => None,
+            Some(slot) => match self.models.get(slot) {
+                Some(Model::StableDeposit(m) | Model::StableWithdraw(m)) => Some(m.as_ref()),
+                _ => {
+                    return Err(MultiPortError(format!("model {slot} is not a stableswap LP")))
+                }
+            },
+        };
+        Ok((pool, model))
+    }
+
+    /// One unit of an element through one pool: what each output port pays.
+    ///
+    /// The ports cross flat -- a coin and a share per port, per side -- which
+    /// is the shape both bindings can carry without a nested structure.
+    pub fn element_evaluate(
+        &self, which: usize, lp: Option<usize>, n_coins: i32,
+        inputs: &[(i32, i64)], outputs: &[(i32, i64)], amount_in: U256,
+    ) -> Result<Vec<U256>, MultiPortError> {
+        let (pool, model) = self.element_models(which, lp)?;
+        let element = MultiPort::new("", n_coins, ports(inputs), ports(outputs))?;
+        Ok(multiport::evaluate(&element, pool, model, amount_in)?.outputs)
+    }
+
+    /// The best two-way split of `amount_in` across two output ports.
+    ///
+    /// `weights` values each port's token in one denominator, one integer per
+    /// output port: the payout is `float(amount * weight) / 1e18`, which is
+    /// how the reference's caller prices a 6-decimal coin against an
+    /// 18-decimal one. Returns `(first bps, second bps, payout)`.
+    pub fn element_best_split(
+        &self, which: usize, lp: Option<usize>, n_coins: i32,
+        inputs: &[(i32, i64)], outputs: &[(i32, i64)], amount_in: U256,
+        weights: &[U256],
+    ) -> Result<(i64, i64, f64), MultiPortError> {
+        let (pool, model) = self.element_models(which, lp)?;
+        let element = MultiPort::new("", n_coins, ports(inputs), ports(outputs))?;
+        if weights.len() != element.outputs.len() {
+            return Err(MultiPortError("one weight per output port".into()));
+        }
+        let value = |k: usize, amount: U256| -> f64 {
+            // One rounding, not two: the reference multiplies as integers and
+            // converts once, and `float(a) * float(w)` is a different number.
+            f64::from(amount * weights[k]) / 1e18
+        };
+        let (tuned, payout) =
+            multiport::best_split(&element, pool, model, amount_in, value, 25)?;
+        Ok((tuned.outputs[0].bps, tuned.outputs[1].bps, payout))
+    }
+
+    /// `element_evaluate` as the bindings carry it: amounts as decimal
+    /// strings, in and out.
+    ///
+    /// Parsing lives here rather than in each binding for the reason the pool
+    /// models do -- one spelling of the refusal, and no binding has to name
+    /// `U256` to hold an amount that does not fit an `f64`.
+    pub fn element_evaluate_str(
+        &self, which: usize, lp: Option<usize>, n_coins: i32,
+        inputs: &[(i32, i64)], outputs: &[(i32, i64)], dx: &str,
+    ) -> Result<Vec<String>, MultiPortError> {
+        let amount = amount_of(dx)?;
+        Ok(self
+            .element_evaluate(which, lp, n_coins, inputs, outputs, amount)?
+            .iter()
+            .map(|v| v.to_string())
+            .collect())
+    }
+
+    /// `element_best_split` the same way.
+    #[allow(clippy::too_many_arguments)]
+    pub fn element_best_split_str(
+        &self, which: usize, lp: Option<usize>, n_coins: i32,
+        inputs: &[(i32, i64)], outputs: &[(i32, i64)], dx: &str, weights: &[String],
+    ) -> Result<(i64, i64, f64), MultiPortError> {
+        let amount = amount_of(dx)?;
+        let parsed: Result<Vec<U256>, MultiPortError> =
+            weights.iter().map(|w| amount_of(w)).collect();
+        self.element_best_split(which, lp, n_coins, inputs, outputs, amount, &parsed?)
     }
 
     /// Price one probe. `None` where the pool would refuse, or where the answer

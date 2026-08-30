@@ -948,74 +948,83 @@ it to the extension: the solver (`Problem`, `SolveResult`), `calibrate`,
 wraps and both LP directions -- the refine stage's `Ladders`, which plans,
 merges and fits without the ladders crossing, and now `Graph` and `NodeMap`.
 
-### The first two off the list
+### What is ported, and what it cost to get right
 
-`graph` and `nodes` are ported, with `types` under them. They were the right
-place to start for the reason they were listed first: everything above takes
-an `ArcArrays` or a rate.
+`types`, `graph`, `nodes`, `multiport` and `realize` are done. They went in
+that order because it is the dependency order: everything above takes an
+`ArcArrays`, a rate, or a `PoolArc`.
 
-The differential tests are bit-exact rather than tolerant -- 216 comparisons on
-`graph`, over universes carrying clamped arcs, flagged arcs, forced duplicates
-and spreads wide enough to move the adaptive dust floor. That strictness paid
-twice, and both times on the same thing:
+The differential tests are bit-exact rather than tolerant, and that is what
+found every one of the following. None of them would have failed a test with a
+tolerance in it, and none would have raised in production.
 
-* `laplacian` assembles in **four passes, not one**. The reference writes every
-  head diagonal, then every tail diagonal, then every `(head, tail)`, then
-  every `(tail, head)` -- four `np.add.at` calls. Folding them per-arc is the
-  obvious transcription and gives a different sum: float addition is not
-  associative, and where a node pair carries arcs in both directions the
-  off-diagonal accumulates `p1, p2, p3` instead of `p1, p3, p2`. Two of forty
-  seeds caught it. A tolerance would have caught neither.
-* `ceiling_conductance` reads `np.where(isfinite(G), G, inf)` before its
-  minimum, so `-inf` and `NaN` both take the ceiling. A bare `min` leaves them
-  where they are.
+**`laplacian` assembles in four passes, not one.** The reference makes four
+`np.add.at` calls -- every head diagonal, then every tail diagonal, then every
+`(head, tail)`, then every `(tail, head)`. Folding them per-arc is the obvious
+transcription and sums the off-diagonal in a different order where a node pair
+carries arcs both ways: `p1, p2, p3` instead of `p1, p3, p2`. Float addition is
+not associative. Two of forty seeds found it.
 
-Three smaller things the mirror settled rather than approximated. Duplicate
-groups key on `round(a, 12)`, which is decimal rounding, ties to even, and not
-anything `f64` does -- formatting to twelve places and reading it back is the
-operation CPython performs, and it agrees on the ties. `np.median` averages the
-middle pair on an even count, which is not either of them. And the reference's
-error strings are contract: `_assemble` matches on part of one, so Python's
-`1e+12` had to stop being Rust's `1e12` (`pyfmt`), and one `ValueError` was
-leaking a numpy repr -- `[np.int64(0)]` -- which is fixed on the Python side
-rather than reproduced on the Rust one.
+**`ceiling_conductance` maps every non-finite `G` to `inf` before its
+minimum**, so `-inf` and `NaN` both take the ceiling. A bare `min` leaves them
+alone.
 
-**One deliberate divergence, and it is loud.** `Conversion.to_canonical` is
-Python `int` on the reference side and has no ceiling. On the Rust side the
-product widens to 512 bits, so every representable answer is exact; a quotient
-past `2**256` -- more wei than an ERC20 can hold -- is refused rather than
-silently wrapped. Found by the differential test at `2**200`, where a plain
-`U256` multiply had been quietly giving a wrong number.
+**`int / int` is correctly rounded in CPython, and three roundings are not.**
+`f64::from(a) / f64::from(b)` is two conversions and a division. The quotient
+sets `theta`, `share_of_node`, a conversion `rate`, and -- through
+`round(BPS * share / total)` -- the `bps` a leg is emitted with. A last-bit
+difference in the last of those is different calldata. `pools::divided` takes
+the quotient with 55 bits of headroom and folds the remainder back as a sticky
+low bit, so one rounding decides it; 3,200 random 256-bit pairs agree exactly.
+
+**`round()` is ties-to-even and `f64::round` is not.** Two equal branches out
+of one node put `BPS * share / total` exactly on a half every time.
+
+**`to_canonical` is unbounded Python `int`.** A `U256` multiply is not, and at
+`2**200` it was quietly wrapping. The product now widens to 512 bits and a
+quotient past `2**256` is refused rather than wrapped -- the mirror's one
+deliberate divergence, and it is loud.
+
+Three smaller mirrorings: duplicate groups key on `round(a, 12)`, which is
+decimal ties-to-even and not an `f64` operation; `np.median` averages the
+middle pair; and the reference's error strings are contract, so `pyfmt` spells
+a float the way CPython does. One of those strings was leaking a numpy repr --
+`[np.int64(0)]` -- fixed on the Python side rather than reproduced here.
+
+`realize` is the first ported stage whose output is an *artefact* rather than a
+number, and its three ordering rules each exist because of a measured failure:
+a capped arc must never sweep (9,960 USDC into a vault whose `maxDeposit` is
+1,142), one fill per spoke rather than one per arc drawing on it, and two arcs
+on one spoke are one `bps` group. Each has a case in
+`test_realize_differential.py`. Every ordered map on the Rust side is a `Vec`
+of pairs rather than a `HashMap`, because the reference iterates its dicts and
+the order decides which leg sweeps.
+
+**One documented approximation.** `route_conductance` solves a small dense
+system; the reference uses numpy's LAPACK and the port uses `lu.rs`. Same
+algorithm, different implementation, so that one comparison carries a relative
+tolerance. Everything else in these suites is exact.
 
 **What a quote still needs that has no Rust form:**
 
 | module | lines | what it is |
 |---|---|---|
 | `pipeline` | 2,381 | the stage orchestrator |
-| `realize` | 1,059 | flow to legs |
 | `candidates` | 620 | the ballot, around a native solver |
 | `verify` | 349 | realisation and its gates |
-| `multiport` | 324 | elements; its `best_split` is already native |
 | `gas`, `risk`, `slippage`, `refit`, `curves` | ~1,000 | the tables a route is priced against |
 
-Roughly 5,400 lines, and it is a rewrite rather than a port: these hold Python
-objects -- `PoolArc`, `RealizedRoute` -- where the earlier pieces held numbers.
-That is the whole reason the boundary sat where it did. `types` is now ported
-too, which is what makes the rest addressable: `ArcKind`, `Probe`, `Leg` and
-`PoolArc` are what every stage above the solver is written in terms of.
+Roughly 4,350 lines. `routecall`, `quoter`, `codec`, `transport`, `evm` and the
+renderers are not on this list: calldata and chain I/O are the browser's own to
+do, and the renderers are the CLI's.
 
-`routecall`, `quoter`, `codec`, `transport`, `evm` and the renderers are not on
-this list. Calldata and chain I/O are the browser's own to do, and the
-renderers are the CLI's.
-
-**The order that follows from what depends on what:** `multiport` and
-`realize` next, which turn a flow into legs; then `verify` and `candidates`,
-which are loops over those; `pipeline` last, and only once the stages beneath
-it no longer need to come back for anything.
+**The order that follows from what depends on what:** `verify` and
+`candidates` next, which are loops over what `realize` now produces; `pipeline`
+last, and only once the stages beneath it no longer need to come back for
+anything.
 
 None of it will show in the arms. `candidates` is 92% a native solver,
 `realize` is 2.4 ms, and `graph` and `nodes` were smaller again -- the Python
-pipeline still calls Python `graph.build`, and nothing here changed the hot
-path. This is the portability half of the goal, and the measurements in this
-document are the reason to say so plainly rather than let a 1.4x figure imply
-otherwise.
+pipeline still calls Python `realize`, and nothing here changed the hot path.
+This is the portability half of the goal, and the measurements in this document
+are the reason to say so plainly rather than let a 1.4x figure imply otherwise.

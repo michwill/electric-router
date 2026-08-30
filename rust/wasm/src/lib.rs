@@ -13,15 +13,19 @@
 mod evm;
 mod graph;
 mod ladders;
+mod multiport;
 mod nodes;
 mod pools;
+mod realize;
 mod solve;
 
 pub use evm::{BatchResult, CallResult, Evm, MissReport};
 pub use graph::Graph;
+pub use multiport::Element;
 pub use nodes::NodeMap;
+pub use realize::{Arcs, PruneOut, Route};
 pub use ladders::{FitOut, Ladders, PlanOut};
-pub use pools::{Pools, PriceResult, SplitOut};
+pub use pools::{BestSplitOut, Pools, PriceResult, SplitOut};
 pub use solve::{
     calibrate, cancel_cycles, find_cycle, split_ascend, AscendResult, CalibrationOut,
     CycleResult, PathResult, Problem, SolveResult,

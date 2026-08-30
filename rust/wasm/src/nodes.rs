@@ -18,7 +18,7 @@ fn kind_of(name: &str) -> Result<ConversionKind, JsValue> {
 
 #[wasm_bindgen]
 pub struct NodeMap {
-    inner: Inner,
+    pub(crate) inner: Inner,
 }
 
 impl Default for NodeMap {

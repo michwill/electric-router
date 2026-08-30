@@ -21,6 +21,26 @@
 use erouter_solve::pools::registry::Registry;
 use wasm_bindgen::prelude::*;
 
+/// The general element search's answer: the two shares and what they pay.
+#[wasm_bindgen]
+pub struct BestSplitOut {
+    #[wasm_bindgen(readonly)]
+    pub a: i64,
+    #[wasm_bindgen(readonly)]
+    pub b: i64,
+    #[wasm_bindgen(readonly)]
+    pub payout: f64,
+}
+
+/// Ports as the registry takes them, from the two arrays a typed array can
+/// carry.
+fn pairs(coins: &[i32], bps: &[i64]) -> Result<Vec<(i32, i64)>, JsValue> {
+    if coins.len() != bps.len() {
+        return Err(JsError::new("each side needs one share per coin").into());
+    }
+    Ok(coins.iter().zip(bps.iter()).map(|(&c, &b)| (c, b)).collect())
+}
+
 /// A batch's answers: `values[k]` is meaningful where `ok[k]` is 1.
 ///
 /// Getters rather than fields so the buffers are only materialised as JS
@@ -175,6 +195,46 @@ impl Pools {
                               gamma, mid_fee, out_fee, fee_gamma, legacy,
                               a_multiplier, total_supply)
             .map_err(|e| JsError::new(&e))
+    }
+
+    /// One unit of an element through one pool: what each output port pays,
+    /// as decimal strings.
+    ///
+    /// `lp` names the pool's LP model where the element has an LP port, and is
+    /// `undefined` otherwise. Ports cross as parallel coin and share arrays,
+    /// which is the shape `Element` reads back.
+    #[wasm_bindgen(js_name = elementEvaluate)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn element_evaluate(
+        &self, which: usize, lp: Option<usize>, n_coins: i32,
+        in_coins: Vec<i32>, in_bps: Vec<i64>,
+        out_coins: Vec<i32>, out_bps: Vec<i64>, dx: &str,
+    ) -> Result<Vec<String>, JsValue> {
+        let (inputs, outputs) = (pairs(&in_coins, &in_bps)?, pairs(&out_coins, &out_bps)?);
+        self.inner
+            .element_evaluate_str(which, lp, n_coins, &inputs, &outputs, dx)
+            .map_err(|e| JsError::new(&e.0).into())
+    }
+
+    /// The best two-way split, as `[first bps, second bps]` with the payout in
+    /// `payout`.
+    ///
+    /// `weights` values each output port's token in one denominator -- the
+    /// payout is `float(amount * weight) / 1e18` -- because the ports pay
+    /// different tokens and only the caller knows what they are worth.
+    #[wasm_bindgen(js_name = elementBestSplit)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn element_best_split(
+        &self, which: usize, lp: Option<usize>, n_coins: i32,
+        in_coins: Vec<i32>, in_bps: Vec<i64>,
+        out_coins: Vec<i32>, out_bps: Vec<i64>, dx: &str, weights: Vec<String>,
+    ) -> Result<BestSplitOut, JsValue> {
+        let (inputs, outputs) = (pairs(&in_coins, &in_bps)?, pairs(&out_coins, &out_bps)?);
+        let (a, b, payout) = self
+            .inner
+            .element_best_split_str(which, lp, n_coins, &inputs, &outputs, dx, &weights)
+            .map_err(|e| -> JsValue { JsError::new(&e.0).into() })?;
+        Ok(BestSplitOut { a, b, payout })
     }
 
     /// The best two-way split of `dx` across two output coins, or `undefined`

@@ -263,6 +263,100 @@ if (job.op === "solve") {
     rescale: hex(Float64Array.from(glue.NodeMap.rescale(...job.rescale))),
   });
   map.free();
+} else if (job.op === "element") {
+  // The shape rules and the arithmetic, as the browser gets them.  Ports
+  // cross as parallel coin and share arrays; a pair has no typed form.
+  const shape = {};
+  try {
+    const el = new glue.Element(job.pool, job.n_coins,
+      Int32Array.from(job.in_coins), BigInt64Array.from(job.in_bps.map(BigInt)),
+      Int32Array.from(job.out_coins), BigInt64Array.from(job.out_bps.map(BigInt)));
+    shape.inputs = Array.from(el.inputs(), Number);
+    shape.outputs = Array.from(el.outputs(), Number);
+    shape.ports = el.ports;
+    el.free();
+  } catch (e) {
+    shape.error = String(e.message ?? e);
+  }
+  Object.assign(out, shape);
+  if (job.models) {
+    const pools = new glue.Pools();
+    const m = job.models;
+    const which = pools.addStableswap(m.balances, m.rates, m.amp, m.fee,
+      m.offpeg_fee_multiplier, m.a_precision, m.fee_on_xp, m.subtract_one,
+      m.admin_fee ?? undefined);
+    let lp;
+    if (job.supply) {
+      lp = pools.addStableLp(m.balances, m.rates, m.amp, m.fee,
+        m.offpeg_fee_multiplier, m.a_precision, m.fee_on_xp, m.subtract_one,
+        job.supply, false, m.admin_fee ?? undefined);
+    }
+    const ports = (coins, bps) => [Int32Array.from(coins),
+                                   BigInt64Array.from(bps.map(BigInt))];
+    try {
+      out.dy = pools.elementEvaluate(which, lp, job.n_coins,
+        ...ports(job.in_coins, job.in_bps), ...ports(job.out_coins, job.out_bps),
+        job.dx);
+    } catch (e) {
+      out.evaluateError = String(e.message ?? e);
+    }
+    if (job.weights) {
+      const best = pools.elementBestSplit(which, lp, job.n_coins,
+        ...ports(job.in_coins, job.in_bps), ...ports(job.out_coins, job.out_bps),
+        job.dx, job.weights);
+      out.split = [Number(best.a), Number(best.b)];
+      out.payout = hex(Float64Array.of(best.payout));
+      best.free();
+    }
+    pools.free();
+  }
+} else if (job.op === "realize") {
+  // A whole route, built the way a quote builds one.  Amounts cross as
+  // decimal strings and the diagnostics as hex, for the usual reason: a
+  // `cap_in` is routinely Infinity and JSON writes that as null.
+  const map = new glue.NodeMap();
+  for (const t of job.tokens) map.addToken(t.address, t.symbol, t.decimals);
+  for (const m of job.merges) {
+    map.merge(m.kind, m.token, m.canonical, m.rate_num, m.rate_den, m.target);
+  }
+  const arcs = new glue.Arcs();
+  for (const a of job.arcs) {
+    arcs.add(a.id, a.pool, a.kind, a.i, a.j, a.n_coins, a.token_in, a.token_out,
+             a.tau, a.sigma, a.a, a.B, a.cap === null ? Infinity : a.cap,
+             a.G, a.eps, a.reserve_in, a.decimals_in, a.tvl_usd,
+             a.gamma_live === null ? NaN : a.gamma_live, a.note);
+  }
+  const route = glue.Route.realize(arcs, Float64Array.from(job.psi),
+    Float64Array.from(job.nu), map, job.src, job.dst, job.amount_in,
+    job.potentials ? Float64Array.from(job.potentials) : undefined);
+  Object.assign(out, {
+    wireLegs: route.wireLegs(),
+    wireNumbers: Array.from(route.wireNumbers()),
+    targets: route.targets(),
+    kinds: Array.from(route.kinds()),
+    tokensIn: route.tokensIn(),
+    tokensOut: route.tokensOut(),
+    amountsIn: route.amountsIn(),
+    amountsOut: route.amountsOut(),
+    arcIds: route.arcIds(),
+    poolNames: route.poolNames(),
+    numbers: hex(route.numbers()),
+    modelled: Array.from(route.modelled()),
+    isConversion: Array.from(route.isConversion()),
+    slots: route.slots(),
+    slotIndices: Array.from(route.slotIndices()),
+    nodeOfSlot: Array.from(route.nodeOfSlot()),
+    dstSlot: route.dstSlot,
+    modelledOut: route.modelledOut,
+    paths: route.paths(),
+    warnings: route.warnings(),
+    poolsUsed: route.poolsUsed(),
+    maxTheta: hex(Float64Array.of(route.maxTheta())),
+    routeConductance: hex(Float64Array.of(route.routeConductance())),
+  });
+  route.free();
+  arcs.free();
+  map.free();
 } else {
   throw new Error(`unknown op: ${job.op}`);
 }

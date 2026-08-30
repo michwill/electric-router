@@ -24,8 +24,10 @@
 
 pub mod chol;
 pub mod graph;
+pub mod multiport;
 pub mod nodes;
 pub mod pyfmt;
+pub mod realize;
 pub mod types;
 pub mod ladders;
 pub mod pools;
@@ -37,7 +39,11 @@ mod graph_py;
 #[cfg(feature = "python")]
 mod ladders_py;
 #[cfg(feature = "python")]
+mod multiport_py;
+#[cfg(feature = "python")]
 mod nodes_py;
+#[cfg(feature = "python")]
+mod realize_py;
 #[cfg(feature = "python")]
 mod py;
 pub mod calibrate;

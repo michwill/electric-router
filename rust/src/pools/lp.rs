@@ -160,6 +160,16 @@ impl StableLp {
     /// `add_liquidity` returns, and it needs no `admin_fee`: the DAO's share
     /// changes what the pool keeps, never what the depositor is handed.
     pub fn calc_token_amount_charged(&self, amounts: &[U256]) -> Option<U256> {
+        Some(self.deposit(amounts)?.0)
+    }
+
+    /// `(minted, fee per coin, balances before the fee is split)`.
+    ///
+    /// The mint is priced against balances less the *whole* fee -- the
+    /// depositor pays all of it -- while the pool keeps all but the DAO's
+    /// share. Two subtractions off one figure, which is why this returns the
+    /// pieces rather than just the mint.
+    pub fn deposit(&self, amounts: &[U256]) -> Option<(U256, Vec<U256>, Vec<U256>)> {
         let n = self.n();
         if self.total_supply.is_zero() || amounts.len() != n {
             return None;
@@ -177,21 +187,77 @@ impl StableLp {
             return None;
         }
         let fee = self.imbalance_fee();
+        let mut charged = vec![U256::ZERO; n];
         let mut priced = new.clone();
         for (k, v) in priced.iter_mut().enumerate().take(n) {
             let ideal = d1.checked_mul(self.pool.balances[k])? / d0;
             let difference = if ideal > new[k] { ideal - new[k] } else { new[k] - ideal };
-            let charged = fee.checked_mul(difference)? / fee_denominator();
-            if charged > *v {
+            charged[k] = fee.checked_mul(difference)? / fee_denominator();
+            if charged[k] > *v {
                 return None;
             }
-            *v -= charged;
+            *v -= charged[k];
         }
         let d2 = self.pool.d(&self.xp_of(&priced))?;
+        // The reference computes `supply * (d2 - d0) / d0` unguarded, which is
+        // a negative mint in Python and would wrap here. Refusing is the same
+        // answer a caller can act on.
         if d2 <= d0 {
             return None;
         }
-        Some(self.total_supply.checked_mul(d2 - d0)? / d0)
+        Some((self.total_supply.checked_mul(d2 - d0)? / d0, charged, new))
+    }
+
+    /// `(LP minted, the pool after)` -- what `add_liquidity` really does.
+    ///
+    /// The depositor is priced against balances less the whole fee; the pool
+    /// keeps all but the DAO's share, so what is left behind is higher than
+    /// what the mint was priced from. Using one figure for both would leave
+    /// the pool poorer than it is and misprice every later leg through it.
+    ///
+    /// `None` without an `admin_fee`: a pool advanced without it is left
+    /// richer than it is, which is the error advancing exists to avoid.
+    pub fn add_liquidity(&self, amounts: &[U256]) -> Option<(U256, StableLp)> {
+        let admin_fee = self.pool.admin_fee?;
+        let (minted, charged, new) = self.deposit(amounts)?;
+        let fd = fee_denominator();
+        let stored: Vec<U256> = new
+            .iter()
+            .zip(charged.iter())
+            .map(|(v, f)| *v - *f * admin_fee / fd)
+            .collect();
+        Some((minted, self.with_balances(stored, self.total_supply + minted)))
+    }
+
+    /// A copy of this model, for a caller that is about to advance it.
+    ///
+    /// Not `#[derive(Clone)]`: the two arithmetics have to stay in step, and a
+    /// derived clone would let a caller move one without the other.
+    pub fn clone_model(&self) -> StableLp {
+        self.with_balances(self.pool.balances.clone(), self.total_supply)
+    }
+
+    /// The same LP model over a pool someone else advanced.
+    ///
+    /// `replace(lp, pool=pool)` on the reference side: a swap moves the pool
+    /// under the LP model without minting or burning, so the supply stands.
+    pub fn with_pool(&self, pool: stableswap::Pool) -> StableLp {
+        self.with_balances(pool.balances.clone(), self.total_supply)
+    }
+
+    /// The same pool with different balances, both arithmetics in step.
+    ///
+    /// The float mirror is rebuilt from the exact `xp` rather than advanced on
+    /// its own: it is the same derivation the registry makes when the pool is
+    /// first read, so an advanced pool and a freshly built one agree.
+    pub fn with_balances(&self, balances: Vec<U256>, total_supply: U256) -> StableLp {
+        let pool = stableswap::Pool { balances, ..self.pool.clone() };
+        let xp = pool.xp().iter().map(|v| f64::from(*v)).collect();
+        StableLp {
+            fast: stableswap::fast::Pool { xp, ..self.fast.clone() },
+            pool,
+            total_supply,
+        }
     }
 
     /// `calc_token_amount_charged`, with the three invariants in floats.

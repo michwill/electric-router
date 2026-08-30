@@ -229,6 +229,7 @@ pub mod fast {
 
     /// Rates and their inverses are constants of a pool frozen at a block, so
     /// they are taken once rather than divided by on every call.
+    #[derive(Clone)]
     pub struct Pool {
         pub xp: Vec<f64>,
         pub rates: Vec<f64>,

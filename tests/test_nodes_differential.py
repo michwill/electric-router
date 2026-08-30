@@ -251,3 +251,29 @@ def test_a_zero_denominator_is_caught_where_it_is_set():
     _, ported = populated()
     with pytest.raises(ValueError, match="rate_den must not be zero"):
         ported.merge("ERC4626", "0xdeadbeef", WETH, "1", "0")
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_a_rate_is_the_correctly_rounded_quotient(seed):
+    """`rate` is `int / int`, which CPython rounds correctly and three
+    roundings do not.
+
+    Converting each side to a float and then dividing is three roundings, and
+    on wei-scale numbers it lands one ULP out often enough to matter -- the
+    same quotient sets `theta`, `share_of_node` and the `bps` a leg is emitted
+    with, and a last-bit difference in the last of those is different
+    calldata.  So this fuzzes the whole 256-bit range rather than the rates a
+    vault happens to report.
+    """
+    import random
+
+    rng = random.Random(seed)
+    _, ported = populated()
+    token = "0x" + f"{seed:040x}"
+    ported.add_token(token, "FUZZ", 18)
+    for _ in range(400):
+        num = rng.getrandbits(rng.randint(1, 256))
+        den = rng.getrandbits(rng.randint(1, 256)) or 1
+        ported.merge("ERC4626", token, WETH, str(num), str(den))
+        got, want = ported.rate(token), num / den
+        assert got == want, (num, den, got.hex(), want.hex())

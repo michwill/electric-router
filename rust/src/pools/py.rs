@@ -119,6 +119,38 @@ impl Pools {
     /// One call rather than a batch: the caller asks once per element, and
     /// what is behind it is ~100 stateful exchanges, so the crossing is
     /// nothing beside it.
+    /// One unit of an element through one pool: what each output port pays.
+    ///
+    /// `lp` names the pool's LP model where the element has an LP port, and
+    /// is `None` otherwise. Amounts come back as decimal strings, which is
+    /// what every other 256-bit answer in this binding does.
+    #[pyo3(signature = (which, lp, n_coins, inputs, outputs, dx))]
+    fn element_evaluate(
+        &self, which: usize, lp: Option<usize>, n_coins: i32,
+        inputs: Vec<(i32, i64)>, outputs: Vec<(i32, i64)>, dx: &str,
+    ) -> PyResult<Vec<String>> {
+        self.inner
+            .element_evaluate_str(which, lp, n_coins, &inputs, &outputs, dx)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.0))
+    }
+
+    /// The best two-way split, as `(first bps, second bps, payout)`.
+    ///
+    /// `weights` values each output port's token in one denominator -- the
+    /// payout is `float(amount * weight) / 1e18` -- because the ports pay
+    /// different tokens and only the caller knows what they are worth.
+    #[pyo3(signature = (which, lp, n_coins, inputs, outputs, dx, weights))]
+    #[allow(clippy::too_many_arguments)]
+    fn element_best_split(
+        &self, which: usize, lp: Option<usize>, n_coins: i32,
+        inputs: Vec<(i32, i64)>, outputs: Vec<(i32, i64)>, dx: &str,
+        weights: Vec<String>,
+    ) -> PyResult<(i64, i64, f64)> {
+        self.inner
+            .element_best_split_str(which, lp, n_coins, &inputs, &outputs, dx, &weights)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.0))
+    }
+
     fn element_split(&self, which: usize, i: u8, j1: u8, j2: u8, dx: u128)
         -> Option<(u16, u16)> {
         self.inner.element_split(which, i, j1, j2, dx)

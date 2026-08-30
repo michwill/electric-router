@@ -129,10 +129,9 @@ impl Conversion {
 
     /// Canonical units per unit of `token`, in human terms.
     pub fn rate(&self) -> f64 {
-        // Both sides through the same correctly-rounded conversion the pool
-        // models use, so a 256-bit rate does not lose its low bits on the way
-        // to an `f64` the way `as` would.
-        crate::pools::scaled(self.rate_num, 0) / crate::pools::scaled(self.rate_den, 0)
+        // One rounding, not three: the reference divides two `int`s, which
+        // CPython rounds correctly, and converting each side first would not.
+        crate::pools::divided(self.rate_num, self.rate_den)
     }
 
     pub fn to_canonical(&self, amount: U256) -> Option<U256> {

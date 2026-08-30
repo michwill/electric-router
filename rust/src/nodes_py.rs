@@ -18,7 +18,7 @@ fn kind_of(name: &str) -> PyResult<ConversionKind> {
 
 #[pyclass]
 pub struct NodeMap {
-    inner: Inner,
+    pub(crate) inner: Inner,
 }
 
 #[pymethods]

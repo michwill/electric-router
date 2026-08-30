@@ -55,6 +55,62 @@ pub mod twocrypto;
 /// `1e30`. Past `1e30` the quotient itself passes `2^53` and about 1.5% of
 /// values land 2 ULP out; no pool state reaches there, and `scaled` is still
 /// nearer than the spelling it replaced.
+/// `a / b` for two integers, correctly rounded -- which is what CPython's
+/// `int / int` gives and what `f64::from(a) / f64::from(b)` does not.
+///
+/// Two conversions and a division are three roundings; this is one. It shows
+/// up wherever a wei-scale ratio becomes a float and is then compared:
+/// `theta = amount / reserve`, `share_of_node = take / base`, and the `bps`
+/// a leg is emitted with. A last-bit difference in the last of those is a
+/// different `bps` in the calldata.
+///
+/// The quotient is taken with 55 bits of headroom and the remainder folded
+/// back as a sticky low bit, so the single rounding below sees everything the
+/// exact quotient would have. Scaling by a power of two afterwards is exact.
+pub fn divided(a: ruint::aliases::U256, b: ruint::aliases::U256) -> f64 {
+    use ruint::aliases::{U256, U512};
+    if b.is_zero() {
+        return if a.is_zero() { f64::NAN } else { f64::INFINITY };
+    }
+    if a.is_zero() {
+        return 0.0;
+    }
+    let wide = |v: U256| U512::from_limbs_slice(v.as_limbs());
+    // Enough bits that the two below the f64 mantissa are the guard and round
+    // bits, and the third is free to carry the sticky flag.
+    let shift: i32 = 55 + b.bit_len() as i32 - a.bit_len() as i32;
+    let (num, den) = if shift >= 0 {
+        (wide(a) << (shift as usize), wide(b))
+    } else {
+        (wide(a), wide(b) << ((-shift) as usize))
+    };
+    let mut q = num / den;
+    if !(num % den).is_zero() {
+        // Sticky: the discarded tail is non-zero, so this is above the tie
+        // rather than on it. `q` has at least 55 bits, so its lowest is free.
+        q |= U512::from(1u8);
+    }
+    // `as f64` on an integer rounds to nearest, ties to even -- the one
+    // rounding this whole function is allowed.
+    let value = q.to::<u128>() as f64;
+    scale_by_two(value, -shift)
+}
+
+/// `x * 2^n`, exactly, without asking `powi` to reach a subnormal in one step.
+fn scale_by_two(x: f64, n: i32) -> f64 {
+    let mut value = x;
+    let mut left = n;
+    while left > 1000 {
+        value *= 2f64.powi(1000);
+        left -= 1000;
+    }
+    while left < -1000 {
+        value *= 2f64.powi(-1000);
+        left += 1000;
+    }
+    value * 2f64.powi(left)
+}
+
 pub fn scaled(v: ruint::aliases::U256, d: u32) -> f64 {
     use ruint::aliases::U256;
     let p = U256::from(10u64).pow(U256::from(d));
