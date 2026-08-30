@@ -49,6 +49,17 @@ pub const PERTURB_ROUNDS: usize = 4;
 /// noise it meant to clear.
 pub const PERTURB_SCALE: f64 = 1e-11;
 
+/// Relative distance within which two candidates count as tied, the lower
+/// index winning.
+///
+/// Degenerate ties are real: two arcs carrying the same flow score identically
+/// in exact arithmetic, and the bits that separate them are whatever the solve
+/// left behind.  Comparing with `>` lets that rounding choose the pivot, and
+/// the reference rounds differently -- measured at `psi` -0.499999999999865
+/// against -0.499999999998981 on one pair, which swapped their rank and sent
+/// the two solvers to different answers.
+pub const PIVOT_TIE: f64 = 1e-9;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stop {
     Optimal,
@@ -312,15 +323,22 @@ fn component_of(root: usize, arcs: &Arcs, active: &[bool], out: &mut [bool]) {
 
 /// Most-violating candidate; ties to the lowest index, as numpy's argmax does.
 fn steepest(mask: &[bool], score: &[f64]) -> usize {
-    let mut best = usize::MAX;
     let mut best_score = f64::NEG_INFINITY;
     for (i, &on) in mask.iter().enumerate() {
         if on && score[i] > best_score {
-            best = i;
             best_score = score[i];
         }
     }
-    best
+    // Second pass for the lowest index within `PIVOT_TIE` of the best, rather
+    // than the first arc to reach it: a later arc can beat an earlier one by
+    // rounding alone, and then the winner is noise.
+    let floor = best_score - PIVOT_TIE * best_score.abs();
+    for (i, &on) in mask.iter().enumerate() {
+        if on && score[i] >= floor {
+            return i;
+        }
+    }
+    usize::MAX
 }
 
 /// Bland's rule: lowest index. Guarantees termination once a basis repeats.
@@ -415,6 +433,11 @@ pub fn active_set_solve(
     // Whether the factor in hand came from an update rather than a
     // factorisation, and so has to justify itself against the residual.
     let mut updated = false;
+    // Set where the active set moves by something other than one arc, which
+    // the rank-1 term cannot describe.  Clearing `pending` alone is not
+    // enough: with `keep` unchanged and the factor the right *size*, nothing
+    // else in the rebuild test can tell that it factorises a different matrix.
+    let mut basis_dirty = false;
 
     for _ in 0..opt.maxit {
         mark.lap(&mut timings[6]);
@@ -460,6 +483,7 @@ pub fn active_set_solve(
                     }
                 }
                 pending = None;
+                basis_dirty = true;
                 pivots += 1;
                 continue;
             }
@@ -472,6 +496,8 @@ pub fn active_set_solve(
             if !reseeded && any && candidates != active {
                 active = candidates;
                 reseeded = true;
+                pending = None;
+                basis_dirty = true;
                 continue;
             }
             return Solution {
@@ -479,18 +505,36 @@ pub fn active_set_solve(
                 rho: vec![0.0; m], pivots, stop: Stop::SrcDetached, chol_failures, keep_changes, refits, timings };
         }
 
+        // Each of these four scatters is a separate pass, because the
+        // reference's are four separate `np.add.at` calls and float addition
+        // does not associate.  A node that is `tau` of one arc and `sig` of
+        // another accumulates in a different order if the two are interleaved,
+        // and the difference -- a few ulp in `rhs` -- reaches `psi` multiplied
+        // by a conductance and decides a pivot.  Measured: interleaving cost
+        // six of the pinned re-solves in §6.3's sweep.
         let mut rhs = s_hat.clone();
         for p in 0..m {
             if active[p] {
-                let flow = arcs.g[p] * arcs.eps[p];
-                rhs[arcs.tau[p] as usize] += flow;
-                rhs[arcs.sig[p] as usize] -= flow;
+                // `eps`, not `arcs.eps`: once a cycling basis is perturbed the
+                // shifted costs have to reach the right-hand side too, or the
+                // solve answers a different problem from the one the drop rule
+                // is then reading, and the perturbation buys nothing.
+                rhs[arcs.tau[p] as usize] += arcs.g[p] * eps[p];
+            }
+        }
+        for p in 0..m {
+            if active[p] {
+                rhs[arcs.sig[p] as usize] -= arcs.g[p] * eps[p];
+            }
+        }
+        for p in 0..m {
+            if upper[p] {
+                rhs[arcs.tau[p] as usize] -= psi_upper[p];
             }
         }
         let mut stray: Vec<usize> = Vec::new();
         for p in 0..m {
             if upper[p] {
-                rhs[arcs.tau[p] as usize] -= psi_upper[p];
                 rhs[arcs.sig[p] as usize] += psi_upper[p];
                 if !comp[arcs.tau[p] as usize] || !comp[arcs.sig[p] as usize] {
                     stray.push(p);
@@ -527,9 +571,13 @@ pub fn active_set_solve(
             for (slot, &node) in keep.iter().enumerate() {
                 index[node] = slot;
             }
-            let rebuild = !opt.rank1 || keep != last_keep || factor_l.len() != k * k;
+            let moved = keep != last_keep;
+            let rebuild = !opt.rank1 || moved || factor_l.len() != k * k || basis_dirty;
+            basis_dirty = false;
             if rebuild {
-                keep_changes += 1;
+                if moved {
+                    keep_changes += 1;
+                }
                 last_keep = keep.clone();
                 pending = None;
                 // Drop the factor as well as the pending term: a different set
@@ -678,6 +726,7 @@ pub fn active_set_solve(
         for p in 0..m {
             rho[p] = u[arcs.tau[p] as usize] - u[arcs.sig[p] as usize] - eps[p];
         }
+
 
         mark.lap(&mut timings[4]);
         let mut signature = vec![0u64; 2 * words];

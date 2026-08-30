@@ -1067,21 +1067,62 @@ the reference still pays for. `test_candidates_differential` keeps `solves`,
 `skipped` and `skipped_wide` exact and bounds `pivots`, because `pivots` counts
 steps of the numerical path and the two kernels are different by design.
 
-### What is left: over-constrained pins
+### The over-constrained pins: two bugs and one decision
 
-One divergence survives, and it is not the same animal. Pin a route at 2x or 4x
-its unconstrained optimum -- outside the sweep of §6.3 -- and the two take
-different pivot paths through a degenerate program. Refinement moves this by
-exactly nothing, which is the evidence that it is not an accuracy problem.
+The last divergence was on §6.3's pin sweep, which forces an arc to carry a
+multiple of what the relaxation gave it. Six of 112 pinned re-solves ended
+somewhere different, in both directions. Refinement moved it by exactly
+nothing -- which was the clue, because it meant accuracy was not the problem.
 
-Measured across 112 pinned re-solves: at `maxit = 60`, 27-28 differ, but 18-19
-of those are both-PARTIAL -- the two ran out of *budget* in different places,
-which is not disagreement. Raise it to `maxit = 600` and 10 differ; the
-reference converges on all ten, the port on two, and 4 of the ten are the
-rank-1 chain. It is reproduced and `xfail`ed in `test_solve_differential` (6
-pins across seeds 3, 8 and 11), not absorbed as a tolerance, because it changes
-*which candidates reach the ballot* and a candidate that is never generated is
-a route the user never sees.
+Traced pivot by pivot against the reference, it was three separate things, and
+only the last was a judgement call.
+
+**1. A Cholesky factor reused across a basis it does not describe.** Two paths
+move the active set by more than one arc: the reconnect admits a whole path at
+once, and the reseed replaces the set outright. Both cleared the *pending*
+rank-1 term. Neither cleared the factor. With `keep` unchanged and the factor
+still `k * k`, nothing left in the rebuild test could tell that it factorised a
+different matrix -- so the next solve ran against a stale one. The drift guard
+could not catch it either: it only prices a factor that came from an update,
+and this one had not been updated at all. A `basis_dirty` flag now says so.
+Measured at the point of failure: `u` off by 7e-2 on a solution of size 8e-3.
+
+**2. A perturbation that reached half the problem.** On a cycling basis the
+solver shifts every arc's cost by a distinct vanishing amount. The port wrote
+those shifts into a local `eps`, which `psi` and `rho` read -- but built the
+right-hand side from `arcs.eps`, the original. So the perturbation moved the
+drop rule and not the solve, and the two answered different problems. Caught by
+noticing that the reference's `u` moved between two solves of an identical
+basis and the port's was bit-identical: the reference had perturbed and the
+port had not.
+
+**3. Ties decided by rounding.** With both bugs fixed, four of 220 remained.
+Two arcs carrying the same flow score *identically* in exact arithmetic; what
+separated them was `psi = -0.499999999999865` against `-0.499999999998981`,
+a part in 1e12. Both implementations picked with `>`, which is a faithful
+mirror -- and which lets the last bits of the linear solve choose the pivot.
+
+That one needed a decision rather than a fix, because it is a real degeneracy
+and not a porting error. `PIVOT_TIE = 1e-9`, relative: candidates within that
+of the best count as tied and the lowest index wins, which is what the
+docstring already claimed for exact ties. Relative with no absolute floor,
+because the four pivot categories score in two different units and a floor big
+enough to cover `psi ~ 1` would swallow distinct candidates in `rho`.
+
+**Result: 0 of 676** pinned re-solves over 120 universes disagree, at
+`maxit = 60` and at 600. Was 6 of 112. The `xfail` is now a regression test.
+
+It is also *faster*, which was not the point but follows from the first bug:
+the same 105 pinned solves cost 7.62 ms before and 6.81 ms after (-11%) while
+taking 6% *more* pivots -- 1.58 to 1.33 us/pivot. A stale factor makes every
+downstream refinement step work and sometimes fails Cholesky into the LU
+fallback; a correct one converges immediately.
+
+One consequence worth recording: the reference's pivot counts moved. Seed 3's
+ballot took 39 pivots and now takes 37, meeting the port, because `PIVOT_TIE`
+stops it from chasing a tie the other way. `test_candidates_differential` is
+back to asserting `pivots` equality exactly, which it had been loosened to a
+bound to accommodate.
 
 The candidate universes are chosen to be well conditioned -- `a < 1` so every
 `eps` is positive and no arbitrage cycles exist, with a real spread between

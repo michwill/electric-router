@@ -328,30 +328,23 @@ def test_the_same_candidates_are_generated_in_the_same_order(seed):
 def test_the_generator_took_the_same_path_not_just_the_same_place(seed):
     """How the ballot was reached, not just what it is.
 
-    `solves`, `skipped` and `skipped_wide` are exact: they count decisions the
-    generator made, and every one of those is structural.
+    All four are exact.  `pivots` counts steps of the numerical path, so it is
+    the one that could reasonably have been kernel-dependent -- and for a while
+    it was: the port reached seed 3's ballot in 37 steps where the reference
+    spent 39, and this asserted a bound rather than equality to admit that.
 
-    `pivots` is not, and the equality this was first written with was too
-    strong a claim.  It counts steps of the *numerical* path, so it depends on
-    the linear algebra underneath -- and the two kernels are deliberately
-    different (`rust/README.md` rules out BLAS; numpy's OpenBLAS is
-    `DYNAMIC_ARCH` and threaded).  Measured over these ten universes the counts
-    agree on nine and differ by two out of thirty-nine on the tenth, where the
-    port's iterative refinement saves it a drop-and-re-admit pair the reference
-    still spends: numpy's residual there is already exactly zero, so refinement
-    has nothing left to correct and cannot follow.
-
-    Same ballot, same flows, same solves -- two fewer steps to reach them.  So
-    the bound is a small absolute one, which still catches a generator that has
-    started wandering while admitting a kernel difference that is there by
-    design.
+    It is equality again.  `PIVOT_TIE` decides degenerate ties by index instead
+    of by whichever arc the linear solve happened to round higher, which is
+    what the two kernels disagreed about; the reference now takes the shorter
+    path too.  Keep it strict -- a bound here would hide exactly the drift the
+    test exists to catch.
     """
     skip_where_the_solver_diverges(seed)
     *_, want, got = both_ballots(seed)
     assert got.solves == want.solves
     assert got.skipped == want.skipped
     assert got.skipped_wide == want.skipped_wide
-    assert abs(got.pivots - want.pivots) <= 4, (got.pivots, want.pivots)
+    assert got.pivots == want.pivots
 
 
 @pytest.mark.parametrize("budget", [1, 3, 6, 12, 20])

@@ -63,6 +63,23 @@ PERTURB_ROUNDS = 4
 # each round multiplies by ten in case the first was inside the noise it meant
 # to clear.
 PERTURB_SCALE = 1e-11
+# When two candidates score within this *relative* distance of each other, treat
+# them as tied and take the lower index.
+#
+# Degenerate ties are real here: two arcs carrying exactly the same flow score
+# identically in exact arithmetic, and the last bits that separate them are
+# whatever the linear solve happened to leave.  Comparing with `>` then lets
+# rounding pick the pivot, and the two sides of the port round differently --
+# measured on a pinned re-solve where `psi` was -0.499999999999865 against
+# -0.499999999998981 for the same pair, the arcs swapping rank between
+# implementations and the solves ending in different places.
+#
+# Relative with no absolute floor, deliberately: the four pivot categories score
+# in two different units (flow and potential), and a floor large enough to cover
+# `psi ~ 1` would swallow genuinely distinct candidates in `rho`.  At 1e-9 the
+# window is ~500x the observed noise and still far below anything a quote can
+# see.
+PIVOT_TIE = 1e-9
 
 # The compiled solve is **opt-in**, and stays that way until it agrees with the
 # reference on the paths that matter.
@@ -90,9 +107,12 @@ def accel_in_use() -> bool:
 
 
 def _steepest_pick(mask: np.ndarray, score: np.ndarray) -> int:
-    """Most-violating candidate; ties go to the lowest index."""
+    """Most-violating candidate; ties -- exact or within `PIVOT_TIE` -- go to
+    the lowest index."""
     where = np.flatnonzero(mask)
-    return int(where[np.argmax(score[where])])
+    best = float(np.max(score[where]))
+    tied = where[score[where] >= best - PIVOT_TIE * abs(best)]
+    return int(tied[0])
 
 
 def _bland_pick(mask: np.ndarray, score: np.ndarray) -> int:
@@ -376,6 +396,7 @@ def active_set_solve(
         # satisfying no conservation law and impossible to order for execution.
         psi[~(comp[g.tau] & comp[g.sig])] = 0.0
         rho = u[g.tau] - u[g.sig] - eps
+
 
         # A repeated basis means the pivot sequence is going in circles.  The
         # first remedy is Bland's rule (lowest index), which guarantees

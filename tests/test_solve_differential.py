@@ -219,45 +219,42 @@ def test_a_restricted_resolve_from_a_narrow_warm_start_agrees():
     assert np.allclose(ours.psi, theirs, atol=1e-6), (ours.psi, theirs)
 
 
-def test_an_over_constrained_pin_still_diverges():
-    """What is left of the solver divergence, recorded rather than hidden.
+def test_over_constrained_pins_agree():
+    """§6.3's pin sweep, which is where the last solver divergence lived.
 
-    §6.3's pin sweep deliberately over-constrains: it forces an arc to carry
+    The sweep deliberately over-constrains: it forces an arc to carry
     `{0, 1/8, 1/4, 1/2, 1, 2, 4}` times what the relaxation gave it, because
-    the model's *allocation* is the thing not to be trusted.  The 2x and 4x
-    pins put the program in a degenerate region where the pivot sequence runs
-    forty to sixty steps, and there the two solvers part.
+    the model's *allocation* is the thing not to be trusted.  The high pins put
+    the program in a degenerate region where the pivot sequence runs forty to
+    sixty steps, and it used to be that the two solvers parted there -- six of
+    112 re-solves, in both directions.
 
-    Measured over ten generated universes, 112 pinned re-solves:
+    Three defects, none of them a tolerance:
 
-    * at `CANDIDATE_PIVOTS` (60), 27 disagree -- but 19 of those are *both*
-      sides returning PARTIAL, which is the pivot budget stopping them in
-      different places rather than a disagreement about the answer.  That
-      distinction was missing when this was first written down, and it is most
-      of the number;
-    * with the budget lifted to 600, 10 disagree.  The reference converges on
-      all ten; the port converges on two and returns PARTIAL or refuses on the
-      rest;
-    * four of those ten are the rank-1 Cholesky chain: with `rank1` off the
-      count is five.
+    * the port reused its Cholesky factor across the two paths that move the
+      active set by more than one arc (a reconnect admits a whole path, a
+      reseed replaces the set outright).  Both cleared the pending rank-1 term,
+      neither cleared the factor, and with `keep` unchanged and the size still
+      matching, nothing downstream could tell it factorised a different matrix.
+      `basis_dirty` now says so.  Because the guard only prices a factor that
+      came from an *update*, a stale one was never even measured;
+    * the port perturbed a cycling basis into a local `eps` but still built the
+      right-hand side from `arcs.eps`, so the perturbation reached the drop
+      rule and not the solve.  The reference perturbs both;
+    * both then picked pivots by `>` on scores that tie in exact arithmetic --
+      two arcs at `psi` -0.499999999999865 against -0.499999999998981 -- so the
+      last bits of the solve chose, and the two sides round differently.
+      `PIVOT_TIE` makes a near-tie go to the lower index in both.
 
-    This is *not* the accuracy problem that
-    `test_a_restricted_resolve_from_a_narrow_warm_start_agrees` documents.
-    Iterative refinement fixed that one completely and moves this one by
-    nothing at all.  It is a pivot-path divergence in a degenerate program,
-    where a difference far below any tolerance is amplified over dozens of
-    pivots.
+    Only the third needed a decision rather than a fix; the first two were the
+    port failing to be the mirror it claims to be.
 
-    Swept over seeds rather than pinned to one, because it is a class: on this
-    generator, three universes in twelve carry at least one.
-
-    Marked `xfail` because it is the reproducer, and it matters -- a pinned
-    candidate the port cannot solve never reaches the ballot, and the pin sweep
-    exists precisely to find the splits the model would otherwise get wrong.
+    Swept wide because the failures were sparse: on this generator they were
+    three universes in twelve.  676 re-solves over 120 universes agree at both
+    budgets; this keeps a cheaper slice of that in the suite.
     """
     import erouter_solve
     import numpy as np
-    import pytest as _pytest
 
     from erouter.core.realize import cancel_cycles
     from erouter.core.solve import active_set_solve
@@ -291,7 +288,7 @@ def test_an_over_constrained_pin_still_diverges():
             [float(v) for v in g.G], [float(v) for v in g.eps],
             [float(v) for v in g.cap], g.n_nodes)
         for idx in [k for k in range(g.m) if base.psi[k] > 0][:6]:
-            for step in (2.0, 4.0):
+            for step in (1.5, 2.0, 4.0, 8.0):
                 pin = min(base.psi[idx] * step, g.cap[idx])
                 if pin <= 0:
                     continue
@@ -308,9 +305,6 @@ def test_an_over_constrained_pin_still_diverges():
                     disagreed.append((seed, idx, step, ours.reason or "OK",
                                       str(got["reason"]) or "OK"))
 
-    if disagreed:
-        _pytest.xfail(
-            f"known: {len(disagreed)} over-constrained pin(s) diverge across "
-            f"{len({d[0] for d in disagreed})} universes, e.g. {disagreed[0]}; "
-            f"see this test's docstring")
-    assert not disagreed
+    assert not disagreed, (
+        f"{len(disagreed)} over-constrained pin(s) diverge across "
+        f"{len({d[0] for d in disagreed})} universes: {disagreed[:4]}")
