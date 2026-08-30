@@ -115,9 +115,9 @@ impl Pool {
         if !self.legacy_pool && self.v21 && gamma > small {
             lim = lim * small / gamma;
         }
-        let xpf = [f64::from(xp[0]) / p, f64::from(xp[1]) / p];
+        let xpf = [crate::pools::scaled(xp[0], 18), crate::pools::scaled(xp[1], 18)];
         let y = newton_y_fast(f64::from(self.amp) / A_MULTIPLIER as f64,
-                              gamma / p, &xpf, f64::from(self.d) / p, j, lim,
+                              gamma / p, &xpf, crate::pools::scaled(self.d, 18), j, lim,
                               self.legacy_pool, self.legacy_mul2)?;
         to_u256(y * p)
     }

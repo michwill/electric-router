@@ -288,33 +288,57 @@ def test_the_exact_port_is_wei_for_wei():
     assert not wrong, f"{len(wrong)} of {len(CASES)} disagree: {wrong[:5]}"
 
 
-def test_the_float_port_stays_inside_the_quote_path_budget():
-    """The float path ranks routes; it does not admit pools.
+def test_the_float_port_is_exact_too():
+    """The float path ranks routes rather than admitting pools, so it was
+    written against a tolerance -- and then did not need one.
 
-    So the question is not whether the two agree to the wei -- they do not, and
-    `docs/performance.md` explains why: `dy = xp[j] - y - 1` inherits `y`'s
-    absolute round-off, and the two sides do not have to reach `y` by the same
-    sequence.  The question is whether the disagreement stays under what a
-    ranking can absorb.  Both sides' refusals must still line up exactly.
+    It differed on 12 of these vectors until the cause was found, and the
+    cause was not the Newton iteration: it was `f64::from(v) / 1e18` rounding
+    twice where Python's `int / int` rounds once. A pool balance is past
+    `2^53`, so the conversion lost bits before the division ran, and
+    `dy = xp[j] - y - 1` multiplied that by `y/dy` on the way out. With
+    `pools::scaled` the two run the same sequence on the same inputs and there
+    is nothing left to differ by.
+
+    So this asserts equality, and the budget below is what it may fall back to
+    if a future change reintroduces a difference that is genuinely arithmetic
+    rather than marshalling. **Do not loosen it to make a failure go away**:
+    the failure means the two paths stopped agreeing on their inputs.
     """
     want, rust = _batch(True)
-    drift = []
-    for name, w, r in zip(_ids(), want, rust, strict=True):
-        assert (w is None) == (r is None), f"{name}: one side refused, {w} {r}"
-        if w is not None and w != 0:
-            drift.append((abs(r - w) / w * 10_000, name))
-    worst, where = max(drift)
-    assert worst <= FLOAT_BUDGET_BP, (
-        f"worst {worst:.3e} bp at {where}, budget {FLOAT_BUDGET_BP:.1e}")
+    wrong = [(n, w, r) for n, w, r in zip(_ids(), want, rust, strict=True)
+             if w != r]
+    for name, w, r in wrong:
+        assert (w is None) == (r is None), f"{name}: one side refused"
+    if wrong:
+        worst = max(abs(r - w) / w * 10_000 for _n, w, r in wrong if w)
+        raise AssertionError(
+            f"{len(wrong)} of {len(CASES)} differ, worst {worst:.3e} bp "
+            f"(budget {FLOAT_BUDGET_BP:.1e}): {wrong[:3]}")
 
-    # The budget is the contract and it is seven orders of magnitude above what
-    # this actually costs, so on its own it would not notice a port going
-    # gradually wrong.  The median does: most vectors agree bit for bit -- only
-    # the large-share cryptoswap ones amplify `y`'s round-off -- so a median
-    # that is no longer zero means the two sides stopped running the same
-    # sequence, whatever the worst case says.
-    median = sorted(bp for bp, _ in drift)[len(drift) // 2]
-    assert median == 0.0, f"median drift {median:.3e} bp, expected exact"
+
+def test_the_float_and_exact_paths_differ_by_the_documented_budget():
+    """And this is the drift that *is* real, on both sides equally.
+
+    `python float vs python exact` and `rust float vs rust exact` are the same
+    number because the float form is the same approximation in both languages.
+    That is the error the quote path actually carries, and it is nine orders
+    above anything the port contributes -- which is why conflating the two
+    would misplace the whole error budget.
+    """
+    py_exact, rust_exact = _batch(False)
+    py_float, rust_float = _batch(True)
+
+    def worst(a, b):
+        return max((abs(x - y) / x * 10_000
+                    for x, y in zip(a, b, strict=True) if x and y), default=0.0)
+
+    py_drift = worst(py_exact, py_float)
+    rust_drift = worst(rust_exact, rust_float)
+    assert py_drift > 0, "the float path is not approximating anything"
+    assert py_drift == rust_drift, (
+        f"the two languages approximate differently: {py_drift:.3e} bp "
+        f"against {rust_drift:.3e}")
 
 
 def test_a_refusal_is_a_refusal_on_both_sides():

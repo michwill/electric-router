@@ -883,3 +883,51 @@ That is the same contract the models have always had, arriving one path later:
 integers admit a pool, floats rank a route.
 
 **The quote: 1.41x, from 1.27x.**
+
+## Where the Rust/Python drift actually came from
+
+The float arms were held to a 5.4e-4 bp budget on the assumption that the two
+languages simply compute floats differently. **They do not**, and conflating
+three different drifts is what made it look like they did. Measured on the same
+411 vectors:
+
+| comparison | worst bp | vectors differing |
+|---|---|---|
+| python float vs python **exact** | 8.012e-02 | 163 / 411 |
+| rust float vs rust **exact** | 8.012e-02 | 163 / 411 |
+| rust float vs python float | 5.515e-11 | 12 / 411 |
+| rust exact vs python exact | 0 | 0 / 411 |
+
+The first two are **the same number**, because the float form is the same
+approximation in both languages -- that is the error the quote path really
+carries, and it belongs to the algorithm rather than to the port. The port's
+own contribution was nine orders smaller, and it was not arithmetic either.
+
+All twelve were cryptoswap; no stableswap, and not even the twocrypto variant
+that runs the stableswap invariant. The Newton loops are line for line
+identical -- same expressions, same order, same `1e-14` tolerance. **The
+difference was in the inputs.**
+
+    python   v / 10**18        one rounding, of the exact quotient
+    rust     f64::from(v) / 1e18   rounds v to f64, then divides -- two
+
+A pool balance is around 1e24, which passes `2^53` by about 77,000x, so the
+conversion has already lost bits before the division runs. On real twocrypto
+state the two spellings land 1 ULP apart:
+
+    v = 1195163862946386689613
+      python 1195.1638629463866
+      rust   1195.1638629463869
+
+One ULP in, and `dy = xp[j] - y - 1` carries a relative error in `y` out
+multiplied by `y/dy`. That is the same amplification this document already
+describes for the float path itself -- it just had a second, avoidable source
+feeding it.
+
+`pools::scaled` divides the way Python does, and **the two float paths now
+agree on all 411 vectors**. `test_the_float_port_is_exact_too` asserts equality
+rather than a budget, and the arms are back to requiring the wei.
+
+Which leaves the error budget where it belongs. The quote path carries 8e-2 bp
+of float-versus-exact approximation, on both sides equally, by choice; the port
+carries none.

@@ -32,3 +32,41 @@ pub mod registry;
 pub mod stableswap;
 pub mod tricrypto;
 pub mod twocrypto;
+
+/// `v / 10^d` as a double, the way Python's `int / int` computes it.
+///
+/// `f64::from(v) / 1e18` rounds **twice**: a pool balance is past `2^53`, so
+/// the conversion loses bits before the division ever runs. Measured on real
+/// twocrypto state that is 1 ULP -- and `dy = xp[j] - y - 1` multiplies a
+/// relative error in `y` by `y/dy` on the way out, which is how one ULP in the
+/// input reached 5.5e-11 bp of a quote and made the two float paths disagree
+/// on 12 of 411 vectors. With this they agree on all 411.
+///
+/// Three cases, because no single spelling is right at every magnitude:
+///
+/// * `v < 2^53`: the numerator is exact, so one division is one rounding.
+/// * `v < 10^d` but past `2^53`: shift the mantissa full before dividing,
+///   since the quotient alone would carry no bits.
+/// * otherwise: split. The quotient of a balance by `1e18` is small enough to
+///   be exact and the remainder contributes under one unit, so its own
+///   rounding lands below the result's last bit.
+///
+/// Exact against Python over 20,000 random values a decade across `1` to
+/// `1e30`. Past `1e30` the quotient itself passes `2^53` and about 1.5% of
+/// values land 2 ULP out; no pool state reaches there, and `scaled` is still
+/// nearer than the spelling it replaced.
+pub fn scaled(v: ruint::aliases::U256, d: u32) -> f64 {
+    use ruint::aliases::U256;
+    let p = U256::from(10u64).pow(U256::from(d));
+    if p.is_zero() {
+        return 0.0;
+    }
+    let q = v / p;
+    if q.is_zero() {
+        if v < U256::from(1u64 << 53) {
+            return f64::from(v) / 10f64.powi(d as i32);
+        }
+        return f64::from((v << 64) / p) * 2f64.powi(-64);
+    }
+    f64::from(q) + f64::from(v % p) / 10f64.powi(d as i32)
+}

@@ -255,11 +255,12 @@ impl Pool {
                 }
             }
             let f = 1e18f64;
-            let xpf = [f64::from(xp[0]) / f, f64::from(xp[1]) / f,
-                       f64::from(xp[2]) / f];
+            let xpf = [crate::pools::scaled(xp[0], 18),
+                       crate::pools::scaled(xp[1], 18),
+                       crate::pools::scaled(xp[2], 18)];
             let got = newton_y_fast(
                 f64::from(self.amp) / f64::from(self.a_multiplier),
-                f64::from(self.gamma) / f, &xpf, f64::from(self.d) / f, j,
+                f64::from(self.gamma) / f, &xpf, crate::pools::scaled(self.d, 18), j,
                 self.legacy)?;
             to_u256(got * f)?
         } else if self.legacy {

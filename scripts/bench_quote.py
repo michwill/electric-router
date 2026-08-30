@@ -137,17 +137,20 @@ def arms(session, args):
     Turning both off is master's arithmetic in this process, which is a fairer
     comparison than a second checkout -- same universe, same block, same warm.
 
-    The outputs are compared, not only the times.  They are no longer required
-    to agree to the wei, and the reason is worth stating: the arms now run
-    *different float arithmetic* on the leg-pricing path -- `_quote_leg` goes
-    to the resident models with the accelerator on and to the Python ones
-    without it -- so they are held to the float path's own budget instead,
-    5.4e-4 bp, the same number `test_pools_differential` uses.
+    The outputs are compared, not only the times, and they are required to
+    agree **to the wei** -- a speed-up that changes the answer is a bug report.
 
-    In practice they usually still agree exactly; the drift appears only where
-    the difference is large enough to tip a bps rounding, and measured there it
-    is 1.2e-11 bp.  The budget is seven orders above that, so anything it
-    catches is a real regression rather than round-off.
+    That was briefly relaxed, and the story is worth keeping.  When
+    `_quote_leg` moved to the resident models the arms began running different
+    float arithmetic on the leg-pricing path, and they drifted by 1.2e-11 bp.
+    The budget below was set to the float path's 5.4e-4 to accommodate it.
+    Then the drift turned out not to be arithmetic at all: `f64::from(v) / 1e18`
+    rounded twice where Python's `int / int` rounds once, and `pools::scaled`
+    fixed it.  The arms agree to the wei again, so they are asked to.
+
+    The budget stays as the message a failure carries, because how far apart
+    they are says what broke: a few ULP is a marshalling difference, basis
+    points is a different route.
     """
     from erouter.core import pipeline
 
@@ -184,14 +187,11 @@ def arms(session, args):
     print(f"              python {b}")
     if a == b:
         print("same to the wei")
-    elif drift <= FLOAT_BUDGET_BP:
-        print(f"drift {drift:.3e} bp -- inside the float path's budget "
-              f"({FLOAT_BUDGET_BP:.1e})")
-    else:
-        print(f"*** ARMS DISAGREE by {drift:.3e} bp, budget "
-              f"{FLOAT_BUDGET_BP:.1e} -- the port is wrong ***")
-        return 1
-    return 0
+        return 0
+    scale = ("a few ULP -- look at the marshalling" if drift < 1e-9
+             else f"{drift:.3e} bp -- look at which route each arm chose")
+    print(f"*** ARMS DISAGREE: {scale} ***")
+    return 1
 
 
 def boundary(session, args):
