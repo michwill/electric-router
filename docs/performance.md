@@ -618,3 +618,68 @@ The vector count is the other half of that claim: 411, from 6 stableswaps, 6
 twocryptos, 2 tricryptos, 7 ratios, 12 stableswap LP directions and 2 tricrypto
 LPs, each at several sizes in every direction. Exact against Python and exact
 against the extension, in both arithmetics.
+
+## Is the boundary the thing to remove?
+
+It is worth asking, because the obvious next move after porting every model is
+to stop crossing at all and let a quote live on the Rust side. So: what does
+the crossing actually cost?
+
+**Measured, with nothing behind it.** A 1:1 wrapper does no arithmetic, so a
+batch of them prices the boundary and nothing else:
+
+| batch | us a call | us an item |
+|---|---|---|
+| 1 | 1.076 | 1.0757 |
+| 10 | 2.175 | 0.2175 |
+| 100 | 14.713 | 0.1471 |
+| 1000 | 138.521 | 0.1385 |
+
+Which separates into a fixed **0.94 us a crossing** and **0.138 us an item**
+of marshalling. A quote makes 287 crossings and batches 1,637 items, so:
+
+    fixed        0.269 ms
+    marshalling  0.225 ms
+    border       0.494 ms   of a ~78 ms quote -- 0.6%
+
+**So the border is not the cost, and removing it buys half a millisecond.**
+That is a change from when this document first counted: it was 726 crossings,
+452 of them `calibrate`, each building an argument list and a dataclass around
+arithmetic that was already native. Batching the models and the fit is what
+fixed it, and it is fixed -- `calibrate_many` is one crossing now, and the
+1,637 model evaluations are 14.
+
+What is left is not boundary, it is Python doing work:
+
+| | ms | share |
+|---|---|---|
+| `candidates` | 39.45 | 50.5% |
+| `refine` | 12.16 | 15.6% |
+| `direct` | 4.21 | 5.4% |
+| `split` | 3.75 | 4.8% |
+| `solve` | 3.70 | 4.7% |
+| `scout` | 3.21 | 4.1% |
+| everything else | ~6 | 7.7% |
+
+And `candidates` is mostly not Python either. Of its 39.45 ms, **30.19 is 36
+`active_set_solve` calls from `candidates.resolve`** at 839 us each -- already
+native, and the document's standing position is that they do not move without
+changing the algorithm. Four more come from `_quote` itself.
+
+    solver (already Rust)   ~34 ms   42%
+    Python orchestration    ~40 ms   50%
+    the boundary             0.5 ms   0.6%
+
+**So "let it all live in Rust" is the right instinct for the right reason and
+the wrong one for the obvious reason.** It is not worth doing to stop crossing;
+it is worth doing because 40 ms of a quote is Python arranging work rather than
+doing it, and because a stage left in Python is a stage the browser cannot run
+at all. The ceiling is roughly 78 ms to somewhere near 45 -- the solver does
+not move, so it sets the floor.
+
+That also says where to start, and it is not the biggest number. `refine` is
+12 ms, its named functions account for nearly all of it, and
+`scripts/dump_refine.py` already freezes it -- 840 ladders, 1,374 planned
+probes, 478 arcs, every float as an exact bit pattern -- so a port has an
+acceptance test waiting. `candidates` is half the quote but three quarters of
+it is the solver, so moving the stage buys the 9 ms around it, not the 39.

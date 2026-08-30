@@ -171,6 +171,77 @@ def arms(session, args):
     return 0 if agree else 1
 
 
+def boundary(session, args):
+    """Every crossing a quote makes, and what it costs to make it.
+
+    The question this answers is whether the boundary is worth removing. It
+    is not "how fast is Rust" -- that is settled -- but how much of a quote is
+    spent *arriving* there: argument lists built, buffers copied, results
+    unpacked. A crossing that carries a millisecond of work does not matter at
+    any count; one that carries a microsecond matters at four hundred.
+
+    Timed from Python, so each figure is the crossing *and* the work behind it.
+    That is the number that would go away if the stage above it moved, which
+    is what is being priced.
+    """
+    from erouter.chain import exact_probe
+    from erouter.core import accel
+
+    count: collections.Counter = collections.Counter()
+    cost: collections.Counter = collections.Counter()
+    items: collections.Counter = collections.Counter()
+    originals = {}
+
+    def wrap(owner, name, label, size=None):
+        fn = getattr(owner, name)
+        originals[(owner, name)] = fn
+
+        def traced(*a, **kw):
+            start = time.perf_counter()
+            try:
+                return fn(*a, **kw)
+            finally:
+                count[label] += 1
+                cost[label] += time.perf_counter() - start
+                if size is not None:
+                    items[label] += size(*a, **kw)
+        setattr(owner, name, traced)
+
+    for name in ("solve_arrays", "calibrate_ladder", "calibrate_many",
+                 "shortest_path", "cancel_cycles", "split_ascend",
+                 "problem_for"):
+        wrap(accel, name, name)
+    wrap(exact_probe._Native, "price", "pool batch",
+         size=lambda self, which, *a: len(which))
+    wrap(exact_probe._Native, "element_split", "element_split")
+
+    try:
+        session.quote(args.amount)
+        count.clear(), cost.clear(), items.clear()
+        c0 = time.process_time()
+        for _ in range(args.reps):
+            session.quote(args.amount)
+        total = (time.process_time() - c0) * 1e3 / args.reps
+    finally:
+        for (owner, name), fn in originals.items():
+            setattr(owner, name, fn)
+
+    print(f"\nquote {total:.1f} ms cpu\n")
+    print(f"{'crossing':<20}{'calls':>8}{'items':>9}{'ms':>9}{'us each':>10}")
+    inside = 0.0
+    for label, n in count.most_common():
+        ms = cost[label] * 1e3 / args.reps
+        inside += ms
+        per = ms / (n / args.reps) * 1000
+        got = items[label] // args.reps
+        print(f"{label:<20}{n // args.reps:>8}{got or '':>9}{ms:>9.2f}{per:>10.1f}")
+    print("-" * 56)
+    print(f"{'inside rust':<20}{sum(count.values()) // args.reps:>8}"
+          f"{'':>9}{inside:>9.2f}{inside / total * 100:>9.1f}%")
+    print(f"{'python around it':<20}{'':>8}{'':>9}{total - inside:>9.2f}"
+          f"{(total - inside) / total * 100:>9.1f}%")
+
+
 def solves(session, args):
     """Who asks for each solve.  The solver is already native; the count is not."""
     original = accel.solve_arrays
@@ -222,6 +293,8 @@ def main() -> int:
     p.add_argument("--min-tvl", type=float, default=10_000.0)
     p.add_argument("--reps", type=int, default=25)
     p.add_argument("--private", action="store_true", default=True)
+    p.add_argument("--boundary", action="store_true",
+                   help="every crossing a quote makes, and what it costs")
     p.add_argument("--arms", action="store_true",
                    help="this branch against master, interleaved")
     p.add_argument("--solves", action="store_true", help="who asks for each solve")
@@ -230,6 +303,9 @@ def main() -> int:
     session = warm(args)
     print(f"block {session.block:,}  ·  accel {accel.available()}  ·  "
           f"n={args.reps}")
+    if args.boundary:
+        boundary(session, args)
+        return 0
     if args.arms:
         return arms(session, args)
     if args.solves:
