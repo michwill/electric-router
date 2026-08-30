@@ -1321,6 +1321,31 @@ says why every future accelerator has to be added there too. The failure is
 silent by construction: an arm that is not master still produces a plausible
 ratio.
 
+### A second pair, and where the 1.42x actually comes from
+
+`crvUSD -> sDOLA` at $100 is nothing like `USDC -> WETH` at $100k: a hundred
+dollars through a two-hop stable route, `candidates` 62% of the quote rather
+than 72%. Pinned at block 25,871,000, interleaved:
+
+    rust (this branch)   67.42 ms      python (master)   95.70 ms
+    1.42x, 28.28 ms saved, verified_out identical to the wei
+
+The same ratio as the other pair, which is worth more than either number alone:
+the win is not an artefact of one route's shape.
+
+It does not come from where the recent work went, though. Stage by stage
+against master at that block:
+
+    refine       15.24 -> 4.41 ms     the resident pool models
+    candidates   58.28 -> 49.69 ms    generation in Rust
+
+Generation -- the thing wired in most recently -- is 7.8 ms of the 28, and on
+its own is 1.12x (measured by toggling `candidates._ACCEL_ON` rep by rep in one
+process). The larger single piece is `refine`, which the resident models and
+the batched refit cut by 3.5x. That is the same lesson as §the wiring: the
+stage that *looks* expensive is mostly native solving already, and the wins are
+in the Python around it.
+
 ### The warm-up sweep is the network, and nothing else
 
 The one thing the EVM measurement left open. Same process, same endpoint,
