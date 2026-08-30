@@ -155,7 +155,7 @@ def build(
     unbounded = clamped & ~np.isfinite(cap)
     if unbounded.any():
         raise ValueError(
-            f"clamped arcs {list(np.flatnonzero(unbounded))} have no finite cap; "
+            f"clamped arcs {[int(k) for k in np.flatnonzero(unbounded)]} have no finite cap; "
             "flow would be unbounded (§2.3 rule 2)"
         )
 

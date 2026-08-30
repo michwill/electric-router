@@ -1,9 +1,16 @@
-//! The quadratic-flow router's hot path (spec §5.4), in Rust.
+//! The quadratic-flow router (spec §5.4), in Rust.
 //!
-//! Scope is deliberately narrow: the active-set QP and the primitives it runs
-//! once per pivot.  Everything above it -- candidate generation, calibration,
-//! realisation, verification -- stays in Python, where it is still changing.
-//! This is the part that is numerically settled and measured to dominate.
+//! The goal is a router that runs without Python at all -- in a browser, in a
+//! JS runtime, anywhere a wasm module loads -- so this is growing upward from
+//! the QP rather than staying at it.  Settled so far: the active-set solve and
+//! its per-pivot primitives, the pool models, the refine stage's ladders, and
+//! now the graph assembly and the node map that feed them.  Still Python-only:
+//! candidate generation, realisation, verification and the pipeline that
+//! drives them.  `docs/performance.md` keeps the running inventory.
+//!
+//! `core/*.py` stays the reference.  Every change lands there first and is
+//! mirrored here -- which is why the differential tests compare bit for bit
+//! rather than within a tolerance.
 //!
 //! It runs unchanged in CPython, in Pyodide, and in a bare Web Worker, which
 //! is why there is no I/O, no threading, no clock and no BLAS anywhere in it.
@@ -16,13 +23,21 @@
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
 pub mod chol;
+pub mod graph;
+pub mod nodes;
+pub mod pyfmt;
+pub mod types;
 pub mod ladders;
 pub mod pools;
 pub mod lu;
 pub mod solve;
 
 #[cfg(feature = "python")]
+mod graph_py;
+#[cfg(feature = "python")]
 mod ladders_py;
+#[cfg(feature = "python")]
+mod nodes_py;
 #[cfg(feature = "python")]
 mod py;
 pub mod calibrate;

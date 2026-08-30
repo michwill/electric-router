@@ -61,6 +61,8 @@ def _read(paths) -> str:
 CASES = [
     ("pools", [RUST / "pools" / "py.rs"], [WASM / "pools.rs"]),
     ("ladders", [RUST / "ladders_py.rs"], [WASM / "ladders.rs"]),
+    ("graph", [RUST / "graph_py.rs"], [WASM / "graph.rs"]),
+    ("nodes", [RUST / "nodes_py.rs"], [WASM / "nodes.rs"]),
 ]
 
 
@@ -90,7 +92,8 @@ def test_every_pyo3_binding_file_has_a_wasm_counterpart():
                    if p.name == "py.rs" or p.name.endswith("_py.rs")}
     # `src/py.rs` is the module's own function exports, whose twin is
     # `wasm/src/solve.rs` rather than a same-named file.
-    known = {"py.rs": "solve.rs", "ladders_py.rs": "ladders.rs"}
+    known = {"py.rs": "solve.rs", "ladders_py.rs": "ladders.rs",
+             "graph_py.rs": "graph.rs", "nodes_py.rs": "nodes.rs"}
     for got in sorted(py_bindings):
         twin = known.get(got)
         assert twin is not None, (

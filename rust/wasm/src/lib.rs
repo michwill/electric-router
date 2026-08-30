@@ -11,11 +11,15 @@
 //! together, and one instantiation is one fetch.
 
 mod evm;
+mod graph;
 mod ladders;
+mod nodes;
 mod pools;
 mod solve;
 
 pub use evm::{BatchResult, CallResult, Evm, MissReport};
+pub use graph::Graph;
+pub use nodes::NodeMap;
 pub use ladders::{FitOut, Ladders, PlanOut};
 pub use pools::{Pools, PriceResult, SplitOut};
 pub use solve::{

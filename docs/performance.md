@@ -945,8 +945,47 @@ browser simply cannot do something the extension can.
 it to the extension: the solver (`Problem`, `SolveResult`), `calibrate`,
 `cancelCycles`, `findCycle`, `splitAscend`, the EVM, every pool model through
 `Pools` -- the three swap families, vaults, lending wrappers, wstETH, the 1:1
-wraps and both LP directions -- and the refine stage's `Ladders`, which plans,
-merges and fits without the ladders crossing.
+wraps and both LP directions -- the refine stage's `Ladders`, which plans,
+merges and fits without the ladders crossing, and now `Graph` and `NodeMap`.
+
+### The first two off the list
+
+`graph` and `nodes` are ported, with `types` under them. They were the right
+place to start for the reason they were listed first: everything above takes
+an `ArcArrays` or a rate.
+
+The differential tests are bit-exact rather than tolerant -- 216 comparisons on
+`graph`, over universes carrying clamped arcs, flagged arcs, forced duplicates
+and spreads wide enough to move the adaptive dust floor. That strictness paid
+twice, and both times on the same thing:
+
+* `laplacian` assembles in **four passes, not one**. The reference writes every
+  head diagonal, then every tail diagonal, then every `(head, tail)`, then
+  every `(tail, head)` -- four `np.add.at` calls. Folding them per-arc is the
+  obvious transcription and gives a different sum: float addition is not
+  associative, and where a node pair carries arcs in both directions the
+  off-diagonal accumulates `p1, p2, p3` instead of `p1, p3, p2`. Two of forty
+  seeds caught it. A tolerance would have caught neither.
+* `ceiling_conductance` reads `np.where(isfinite(G), G, inf)` before its
+  minimum, so `-inf` and `NaN` both take the ceiling. A bare `min` leaves them
+  where they are.
+
+Three smaller things the mirror settled rather than approximated. Duplicate
+groups key on `round(a, 12)`, which is decimal rounding, ties to even, and not
+anything `f64` does -- formatting to twelve places and reading it back is the
+operation CPython performs, and it agrees on the ties. `np.median` averages the
+middle pair on an even count, which is not either of them. And the reference's
+error strings are contract: `_assemble` matches on part of one, so Python's
+`1e+12` had to stop being Rust's `1e12` (`pyfmt`), and one `ValueError` was
+leaking a numpy repr -- `[np.int64(0)]` -- which is fixed on the Python side
+rather than reproduced on the Rust one.
+
+**One deliberate divergence, and it is loud.** `Conversion.to_canonical` is
+Python `int` on the reference side and has no ceiling. On the Rust side the
+product widens to 512 bits, so every representable answer is exact; a quotient
+past `2**256` -- more wei than an ERC20 can hold -- is refused rather than
+silently wrapped. Found by the differential test at `2**200`, where a plain
+`U256` multiply had been quietly giving a wrong number.
 
 **What a quote still needs that has no Rust form:**
 
@@ -955,26 +994,28 @@ merges and fits without the ladders crossing.
 | `pipeline` | 2,381 | the stage orchestrator |
 | `realize` | 1,059 | flow to legs |
 | `candidates` | 620 | the ballot, around a native solver |
-| `graph` | 392 | `ArcArrays`, `build`, `scale` |
 | `verify` | 349 | realisation and its gates |
 | `multiport` | 324 | elements; its `best_split` is already native |
-| `nodes`, `gas`, `risk`, `slippage`, `refit`, `curves` | ~1,200 | the tables a route is priced against |
+| `gas`, `risk`, `slippage`, `refit`, `curves` | ~1,000 | the tables a route is priced against |
 
-Roughly 6,000 lines, and it is a rewrite rather than a port: these hold Python
-objects -- `PoolArc`, `NodeMap`, `RealizedRoute` -- where the ported pieces
-held numbers. That is the whole reason the boundary sat where it did.
+Roughly 5,400 lines, and it is a rewrite rather than a port: these hold Python
+objects -- `PoolArc`, `RealizedRoute` -- where the earlier pieces held numbers.
+That is the whole reason the boundary sat where it did. `types` is now ported
+too, which is what makes the rest addressable: `ArcKind`, `Probe`, `Leg` and
+`PoolArc` are what every stage above the solver is written in terms of.
 
 `routecall`, `quoter`, `codec`, `transport`, `evm` and the renderers are not on
 this list. Calldata and chain I/O are the browser's own to do, and the
 renderers are the CLI's.
 
-**The order that follows from what depends on what:** `graph` and `nodes`
-first, because everything above them takes an `ArcArrays` or a rate; then
-`multiport` and `realize`, which turn a flow into legs; then `verify` and
-`candidates`, which are loops over those; `pipeline` last, and only once the
-stages beneath it no longer need to come back for anything.
+**The order that follows from what depends on what:** `multiport` and
+`realize` next, which turn a flow into legs; then `verify` and `candidates`,
+which are loops over those; `pipeline` last, and only once the stages beneath
+it no longer need to come back for anything.
 
 None of it will show in the arms. `candidates` is 92% a native solver,
-`realize` is 2.4 ms, and `graph` and `nodes` are smaller again. This is the
-portability half of the goal, and the measurements in this document are the
-reason to say so plainly rather than let a 1.4x figure imply otherwise.
+`realize` is 2.4 ms, and `graph` and `nodes` were smaller again -- the Python
+pipeline still calls Python `graph.build`, and nothing here changed the hot
+path. This is the portability half of the goal, and the measurements in this
+document are the reason to say so plainly rather than let a 1.4x figure imply
+otherwise.

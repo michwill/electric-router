@@ -582,3 +582,141 @@ def test_the_browser_fits_what_the_extension_fits(seed):
         assert a["clamped"] == b[3], f"slot {k}: clamped"
         assert a["convexFlag"] == b[4], f"slot {k}: convex_flag"
         assert a["flag"] == b[5], f"slot {k}: flag"
+
+
+# --------------------------------------------------------------- the graph
+#
+# `graph.build` is the assembly the solver's arrays come out of, and it is the
+# first stage above the QP to have a wasm form.  Comparing it against the
+# *Python* reference rather than the extension would test the port twice and
+# the marshalling not at all -- so this compares the two Rust builds, which is
+# where a typed-array bug would live.
+
+
+def graph_job(seed: int) -> dict:
+    """The same nasty universes `test_graph_differential` generates."""
+    from test_graph_differential import universe
+
+    u = universe(seed)
+    caps = [None if not np.isfinite(v) else float(v) for v in u["cap"]]
+    return {
+        "op": "graph",
+        "tau": [int(v) for v in u["tau"]],
+        "sig": [int(v) for v in u["sig"]],
+        "a": [float(v) for v in u["a"]],
+        "B": [float(v) for v in u["B"]],
+        "nu": [float(v) for v in u["nu"]],
+        "Psi": u["Psi"],
+        "cap": caps,
+        "flagged": [int(v) for v in u["flagged"]],
+        "n_nodes": int(u["n_nodes"]),
+        "scale": u["Psi"],
+    }
+
+
+@pytest.mark.parametrize("seed", [0, 3, 7, 11, 19])
+def test_the_browser_assembles_the_same_graph(seed):
+    import erouter_solve
+
+    job = graph_job(seed)
+    got = run(job)
+    want = erouter_solve.Graph.build(
+        job["tau"], job["sig"], job["a"], job["B"], job["nu"], job["Psi"],
+        cap=[np.inf if v is None else v for v in job["cap"]],
+        flagged=[bool(v) for v in job["flagged"]],
+        n_nodes=job["n_nodes"],
+    )
+
+    assert got["tau"] == list(want.tau)
+    assert got["sig"] == list(want.sig)
+    for field, native_value in (("a", want.a), ("B", want.b), ("G", want.g),
+                                ("eps", want.eps), ("cap", want.cap)):
+        assert floats(got[field]).tolist() == list(native_value), field
+    assert [bool(v) for v in got["flagged"]] == want.flagged
+    assert [bool(v) for v in got["clamped"]] == want.clamped
+    assert got["nNodes"] == want.n_nodes
+    assert floats(got["condition"])[0] == want.condition()
+    assert floats(got["illConditioned"])[0] == want.ill_conditioned
+
+    flat, spans = want.sources()
+    assert got["sources"] == list(flat)
+    assert got["sourceSpans"] == list(spans)
+    index, reason = want.dropped()
+    assert got["dropped"] == list(index)
+    assert got["droppedReason"] == list(reason)
+
+    # `scale` mutates, so it is compared after everything read from `want`.
+    psi_scaled = want.scale(job["scale"])
+    assert floats(got["psiScaled"])[0] == psi_scaled
+    assert floats(got["gScale"])[0] == want.g_scale
+    assert floats(got["scaledG"]).tolist() == list(want.g)
+    assert floats(got["scaledCap"]).tolist() == list(want.cap)
+
+
+# ------------------------------------------------------------- the nodes
+
+
+def test_the_browser_merges_the_same_nodes():
+    import erouter_solve
+
+    from test_nodes_differential import (
+        ALL_TOKENS,
+        CRVUSD,
+        ETH,
+        SCRVUSD,
+        STETH,
+        VAULT_DEN,
+        VAULT_NUM,
+        WETH,
+        WSTETH,
+    )
+
+    tokens = [
+        {"address": WETH, "symbol": "WETH", "decimals": 18},
+        {"address": ETH, "symbol": "ETH", "decimals": 18},
+        {"address": CRVUSD, "symbol": "crvUSD", "decimals": 18},
+        {"address": SCRVUSD, "symbol": "scrvUSD", "decimals": 18},
+        {"address": STETH, "symbol": "stETH", "decimals": 18},
+        {"address": WSTETH, "symbol": "wstETH", "decimals": 18},
+        {"address": "0xdac17f958d2ee523a2206206994597c13d831ec7",
+         "symbol": "USDT", "decimals": 6},
+    ]
+    merges = [
+        {"kind": "NATIVE_WRAP", "token": ETH, "canonical": WETH,
+         "rate_num": "1", "rate_den": "1", "target": WETH},
+        {"kind": "ERC4626", "token": SCRVUSD, "canonical": CRVUSD,
+         "rate_num": str(VAULT_NUM), "rate_den": str(VAULT_DEN), "target": SCRVUSD},
+        {"kind": "WSTETH", "token": WSTETH, "canonical": STETH,
+         "rate_num": "1204183982113311744", "rate_den": str(10**18), "target": WSTETH},
+    ]
+    ask = [*ALL_TOKENS, "0xnotatoken"]
+    amount = str(3 * 10**24 + 7)
+    rescale_args = [0.9997, 4.2e-9, 1.0432519443827714, 1.0]
+
+    got = run({"op": "nodes", "tokens": tokens, "merges": merges, "ask": ask,
+               "amount": amount, "rescale": rescale_args})
+
+    want = erouter_solve.NodeMap()
+    for t in tokens:
+        want.add_token(t["address"], t["symbol"], t["decimals"])
+    for m in merges:
+        want.merge(m["kind"], m["token"], m["canonical"],
+                   m["rate_num"], m["rate_den"], m["target"])
+
+    assert got["nNodes"] == want.n_nodes()
+    assert got["mergedNodes"] == want.merged_nodes()
+    assert got["node"] == [want.node(t) if want.has(t) else None for t in ask]
+    assert got["canonical"] == [want.canonical(t) if want.has(t) else None for t in ask]
+    assert got["symbol"] == [want.symbol(t) for t in ask]
+    assert got["decimals"] == [want.decimals(t) for t in ask]
+    assert floats(got["rate"]).tolist() == [want.rate(t) for t in ask]
+    assert got["toCanonical"] == [want.to_canonical_wei(t, amount) for t in ask]
+    assert got["fromCanonical"] == [want.from_canonical_wei(t, amount) for t in ask]
+    assert got["nodeSymbol"] == [want.node_symbol(k) for k in range(want.n_nodes())]
+    assert got["tokensOf"] == [want.tokens_of(k) for k in range(want.n_nodes())]
+    # An empty array is how the wasm side spells `None`: JS has no tuple.
+    assert got["conversion"] == [list(want.conversion(t) or ()) for t in ask]
+    assert got["conversionKinds"] == [list(want.conversion_kinds(t) or ()) for t in ask]
+    assert got["isAlias"] == [want.is_alias(t) for t in ask]
+    assert floats(got["rescale"]).tolist() == list(
+        erouter_solve.NodeMap.rescale(*rescale_args))

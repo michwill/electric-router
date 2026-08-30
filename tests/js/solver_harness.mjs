@@ -207,6 +207,62 @@ if (job.op === "solve") {
   }
   L.free();
   Object.assign(outHolder, built);
+} else if (job.op === "graph") {
+  // The whole assembly as the browser would run it: build, then read the
+  // arrays back.  Hex for the floats -- a bit-exact comparison is the point,
+  // and JSON cannot spell Infinity, which every uncapped arc carries.
+  const g = glue.Graph.build(
+    BigInt64Array.from(job.tau.map(BigInt)), BigInt64Array.from(job.sig.map(BigInt)),
+    Float64Array.from(job.a), Float64Array.from(job.B), Float64Array.from(job.nu),
+    job.Psi,
+    job.cap ? Float64Array.from(job.cap.map((v) => (v === null ? Infinity : v))) : undefined,
+    job.flagged ? Uint8Array.from(job.flagged) : undefined,
+    job.clamped ? Uint8Array.from(job.clamped) : undefined,
+    job.n_nodes, undefined, undefined, undefined,
+    job.require ? Uint32Array.from(job.require) : undefined,
+  );
+  const built = {
+    tau: Array.from(g.tau, Number), sig: Array.from(g.sig, Number),
+    a: hex(g.a), B: hex(g.b), G: hex(g.g), eps: hex(g.eps), cap: hex(g.cap),
+    flagged: Array.from(g.flagged), clamped: Array.from(g.clamped),
+    nNodes: g.nNodes, illConditioned: hex(Float64Array.of(g.illConditioned)),
+    condition: hex(Float64Array.of(g.condition())),
+    sources: Array.from(g.sources()), sourceSpans: Array.from(g.sourceSpans()),
+    dropped: Array.from(g.dropped()), droppedReason: g.droppedReason(),
+  };
+  if (job.scale !== undefined) {
+    built.psiScaled = hex(Float64Array.of(g.scale(job.scale)));
+    built.gScale = hex(Float64Array.of(g.gScale));
+    built.scaledG = hex(g.g);
+    built.scaledCap = hex(g.cap);
+  }
+  g.free();
+  Object.assign(out, built);
+} else if (job.op === "nodes") {
+  // Built by the same calls a warm makes, then asked the same questions.
+  const map = new glue.NodeMap();
+  for (const t of job.tokens) map.addToken(t.address, t.symbol, t.decimals);
+  for (const m of job.merges) {
+    map.merge(m.kind, m.token, m.canonical, m.rate_num, m.rate_den, m.target);
+  }
+  Object.assign(out, {
+    nNodes: map.nNodes(),
+    mergedNodes: Array.from(map.mergedNodes()),
+    node: job.ask.map((t) => (map.has(t) ? map.node(t) : null)),
+    canonical: job.ask.map((t) => (map.has(t) ? map.canonical(t) : null)),
+    symbol: job.ask.map((t) => map.symbol(t)),
+    decimals: job.ask.map((t) => map.decimals(t)),
+    rate: hex(Float64Array.from(job.ask.map((t) => map.rate(t)))),
+    toCanonical: job.ask.map((t) => map.toCanonicalWei(t, job.amount)),
+    fromCanonical: job.ask.map((t) => map.fromCanonicalWei(t, job.amount)),
+    nodeSymbol: Array.from({ length: map.nNodes() }, (_, k) => map.nodeSymbol(k)),
+    tokensOf: Array.from({ length: map.nNodes() }, (_, k) => map.tokensOf(k)),
+    conversion: job.ask.map((t) => map.conversion(t)),
+    conversionKinds: job.ask.map((t) => Array.from(map.conversionKinds(t))),
+    isAlias: job.ask.map((t) => map.isAlias(t)),
+    rescale: hex(Float64Array.from(glue.NodeMap.rescale(...job.rescale))),
+  });
+  map.free();
 } else {
   throw new Error(`unknown op: ${job.op}`);
 }
