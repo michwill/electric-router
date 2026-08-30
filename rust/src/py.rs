@@ -398,7 +398,9 @@ fn calibrate_many<'py>(
 fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::candidates_py::Ballot>()?;
     m.add_class::<crate::candidates_py::Tables>()?;
+    m.add_class::<crate::curves_py::Curve>()?;
     m.add_class::<crate::graph_py::Graph>()?;
+    m.add_class::<crate::refit_py::Refit>()?;
     m.add_class::<crate::ladders_py::Ladders>()?;
     m.add_class::<crate::multiport_py::Element>()?;
     m.add_class::<crate::nodes_py::NodeMap>()?;
@@ -421,6 +423,19 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(crate::pipeline_py::split_groups, m)?,
         wrap_pyfunction!(crate::pipeline_py::pricing_layers, m)?,
         wrap_pyfunction!(crate::pipeline_py::quantum, m)?,
+        wrap_pyfunction!(crate::prices_py::price_fit_weights, m)?,
+        wrap_pyfunction!(crate::prices_py::reference_prices, m)?,
+        wrap_pyfunction!(crate::prices_py::dislocations, m)?,
+        wrap_pyfunction!(crate::prices_py::pool_mid, m)?,
+        wrap_pyfunction!(crate::prices_py::gamma_live, m)?,
+        wrap_pyfunction!(crate::prices_py::check_pair_drops, m)?,
+        wrap_pyfunction!(crate::slippage_py::drops, m)?,
+        wrap_pyfunction!(crate::slippage_py::longest, m)?,
+        wrap_pyfunction!(crate::slippage_py::backstops, m)?,
+        wrap_pyfunction!(crate::slippage_py::divide, m)?,
+        wrap_pyfunction!(crate::slippage_py::widen, m)?,
+        wrap_pyfunction!(crate::refit_py::round_stats, m)?,
+        wrap_pyfunction!(crate::refit_py::b_change, m)?,
     ] {
         m.add_function(f)?;
     }

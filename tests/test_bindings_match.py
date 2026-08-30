@@ -78,6 +78,10 @@ CASES = [
     ("realize", [RUST / "realize_py.rs"], [WASM / "realize.rs"]),
     ("candidates", [RUST / "candidates_py.rs"], [WASM / "candidates.rs"]),
     ("pipeline", [RUST / "pipeline_py.rs"], [WASM / "pipeline.rs"]),
+    ("curves", [RUST / "curves_py.rs"], [WASM / "curves.rs"]),
+    ("prices", [RUST / "prices_py.rs"], [WASM / "prices.rs"]),
+    ("slippage", [RUST / "slippage_py.rs"], [WASM / "slippage.rs"]),
+    ("refit", [RUST / "refit_py.rs"], [WASM / "refit.rs"]),
 ]
 
 
@@ -110,7 +114,9 @@ def test_every_pyo3_binding_file_has_a_wasm_counterpart():
     known = {"py.rs": "solve.rs", "ladders_py.rs": "ladders.rs",
              "graph_py.rs": "graph.rs", "nodes_py.rs": "nodes.rs",
              "multiport_py.rs": "multiport.rs", "realize_py.rs": "realize.rs",
-             "candidates_py.rs": "candidates.rs", "pipeline_py.rs": "pipeline.rs"}
+             "candidates_py.rs": "candidates.rs", "pipeline_py.rs": "pipeline.rs",
+             "curves_py.rs": "curves.rs", "prices_py.rs": "prices.rs",
+             "slippage_py.rs": "slippage.rs", "refit_py.rs": "refit.rs"}
     for got in sorted(py_bindings):
         twin = known.get(got)
         assert twin is not None, (

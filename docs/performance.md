@@ -951,8 +951,9 @@ merges and fits without the ladders crossing, and now `Graph` and `NodeMap`.
 ### What is ported, and what it cost to get right
 
 `types`, `graph`, `nodes`, `multiport`, `realize`, `gas`, `risk`, `candidates`,
-`verify` and `pipeline`'s stage logic are done; `seed` gained Yen's
-`k_shortest_paths` and `split` its `split_groups`. They went in
+`verify`, `pipeline`'s stage logic, `curves`, `prices`, `slippage` and `refit`
+are done; `seed` gained Yen's `k_shortest_paths` and `split` its
+`split_groups`. They went in
 that order because it is the dependency order: everything above takes an
 `ArcArrays`, a rate, or a `PoolArc`.
 
@@ -1069,17 +1070,54 @@ implementations, so those two comparisons carry a relative tolerance.
 scale. Everything else in these suites is exact -- including `quantum`, where
 `powi` drifted a ULP at 24 decimals and `powf` does not.
 
+### The pricing tables, and one measured limit
+
+`curves`, `prices`, `slippage` and `refit` are the tables a route is priced
+*against*, and each fails quietly in its own way -- a curve that evaluates
+differently is a different split, a frame that fits differently moves `eps` and
+`G` for every arc, a budget divided differently ships a minimum-out that either
+reverts on any movement or protects nothing.
+
+`refit` splits at the chain the way `verify` does: `plan` says what to quote,
+`apply` folds the answers back, `rebuild` recomputes the arrays, and the caller
+probes and re-solves between them. Its two floors are ported with it, which
+matters -- without `REFIT_MIN_FRACTION` a refit at a realised delta of 3 USDC
+replaced a fit made at a million and clamped the best pool for the pair to a
+cap of 3.
+
+**A gap in `Arcs`, found by porting `refit`.** The arc builder never carried
+`calib_delta` or `decimals_out`. Nothing errored: `REFIT_MIN_FRACTION` compares
+against a `calib_delta` that was always zero, so the guard was silently off on
+the Rust side, and the quote scale was always 18 decimals. Both bindings carry
+them now.
+
+**One measured limit, in `curves::sizes`.** `np.geomspace` raises its interior
+through `np.power`, a vectorised loop that is not correctly rounded; two nodes
+in twenty-four land one ULP from libm's `pow`. That is 1.8e-16 on a probe size
+of 1.8e17 -- below the pool's own integer quantum and below what the fit
+reading the ladder can resolve. So that one comparison is relative while the
+ladder's *shape* -- node count, strictly increasing, exact at the top -- stays
+exact. Chasing it further would be chasing an implementation detail of numpy's
+SIMD loop, which is not stable across its own releases.
+
 **What has no Rust form:**
 
 | module | lines | what it is |
 |---|---|---|
 | `pipeline`'s I/O half | ~1,400 | `prepare`, `route`, the probe and quote loops |
 | `probe`, `quoter`, `transport`, `evm`, `routecall`, `codec` | — | the chain itself |
-| `slippage`, `refit`, `curves`, `prices` | ~800 | the rest of the pricing tables |
+| the model-free candidate families | ~200 | `direct_candidates`, `two_step_candidates`, wound into the probe loop |
 
-`refit` and the model-free candidate families (`direct_candidates`,
-`two_step_candidates`) are the largest pure things left; both are wound into
-the probe loop and are the natural next piece. The renderers stay the CLI's.
+Everything that decides is ported. What is left is fetching, and the two
+generators that build their candidates *while* fetching. The renderers stay the
+CLI's.
+
+**Three approximations, each documented where it is.** `route_conductance`,
+`achievable_kcl` and the reference-price fit each solve a small dense system
+and the port cannot reach for LAPACK -- `lu.rs` and a cyclic Jacobi against
+numpy's LU and SVD. Same quantities, different implementations, so those
+comparisons carry a relative tolerance. Plus the `geomspace` ULP above.
+Everything else in these suites is exact.
 
 None of this shows in the arms. `candidates` is 92% a native solver, `realize`
 is 2.4 ms, and the Python pipeline still calls Python at every stage -- nothing

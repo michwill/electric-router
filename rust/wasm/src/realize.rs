@@ -51,6 +51,7 @@ impl Arcs {
         token_in: &str, token_out: &str, tau: usize, sigma: usize,
         a: f64, b: f64, cap: f64, g: f64, eps: f64, reserve_in: &str,
         decimals_in: u32, tvl_usd: f64, gamma_live: f64, note: Option<String>,
+        calib_delta: Option<f64>, decimals_out: Option<u32>,
     ) -> Result<usize, JsValue> {
         let reserve = reserve_in
             .parse::<u128>()
@@ -69,6 +70,9 @@ impl Arcs {
         arc.tvl_usd = tvl_usd;
         arc.gamma_live = gamma_live;
         arc.note = note.unwrap_or_default();
+        // The refit reads both -- see the PyO3 twin.
+        arc.calib_delta = calib_delta.unwrap_or(0.0);
+        arc.decimals_out = decimals_out.unwrap_or(18);
         self.inner.push(arc);
         Ok(self.inner.len() - 1)
     }

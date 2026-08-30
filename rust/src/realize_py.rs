@@ -42,12 +42,13 @@ impl Arcs {
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (id, pool, kind, i, j, n_coins, token_in, token_out, tau, sigma,
                         a, b, cap, g, eps, reserve_in, decimals_in, tvl_usd,
-                        gamma_live, note=""))]
+                        gamma_live, note="", calib_delta=0.0, decimals_out=18))]
     fn add(
         &mut self, id: &str, pool: &str, kind: u8, i: i32, j: i32, n_coins: i32,
         token_in: &str, token_out: &str, tau: usize, sigma: usize,
         a: f64, b: f64, cap: f64, g: f64, eps: f64, reserve_in: u128,
         decimals_in: u32, tvl_usd: f64, gamma_live: f64, note: &str,
+        calib_delta: f64, decimals_out: u32,
     ) -> PyResult<usize> {
         let mut arc = PoolArc::new(
             id.to_string(), pool.to_string(), kind_of(kind)?, i, j, n_coins,
@@ -63,6 +64,11 @@ impl Arcs {
         arc.tvl_usd = tvl_usd;
         arc.gamma_live = gamma_live;
         arc.note = note.to_string();
+        // The refit reads both: `calib_delta` is what `REFIT_MIN_FRACTION`
+        // compares a realised size against, and without it that guard is
+        // silently off; `decimals_out` scales the quote it fits against.
+        arc.calib_delta = calib_delta;
+        arc.decimals_out = decimals_out;
         self.inner.push(arc);
         Ok(self.inner.len() - 1)
     }

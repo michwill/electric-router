@@ -13,10 +13,8 @@
 //! curve evaluation is 0.7 us and a crossing is ~2 us, so moving `at` alone
 //! would have lost; the loop had to come with it.
 
-/// One leg's output as a function of its input, through sampled points.
-///
-/// `u = x / f(x)` on the probe sizes, interpolated linearly; `rate0` closes
-/// the gap below the first probe and `tail` extrapolates past the last.
+pub use crate::curves::Curve;
+
 /// Indices of each contiguous run of legs leaving one slot, where it splits.
 ///
 /// Contiguity is the quoter's own grouping rule: it snapshots a slot's balance
@@ -36,50 +34,6 @@ pub fn split_groups(legs: &[crate::types::Leg]) -> Vec<Vec<usize>> {
         }
     }
     runs.into_iter().filter(|run| run.len() > 1).collect()
-}
-
-pub struct Curve {
-    pub x: Vec<f64>,
-    pub u: Vec<f64>,
-    pub slope: Vec<f64>,
-    pub rate0: f64,
-    pub tail: f64,
-}
-
-impl Curve {
-    #[inline]
-    pub fn at(&self, v: f64) -> f64 {
-        if v <= 0.0 {
-            return 0.0;
-        }
-        let x = &self.x;
-        if v <= x[0] {
-            return v * self.rate0;
-        }
-        let inverse = if v >= x[x.len() - 1] {
-            self.u[self.u.len() - 1] + (v - x[x.len() - 1]) * self.tail
-        } else {
-            // `bisect_right(x, v) - 1`, and the branch above has ruled out
-            // both ends, so the index is in range.
-            let k = match x.binary_search_by(|p| p.partial_cmp(&v).unwrap()) {
-                // An exact hit: `bisect_right` returns the slot *after* the
-                // last equal element, so walk forward over any duplicates.
-                Ok(mut hit) => {
-                    while hit + 1 < x.len() && x[hit + 1] <= v {
-                        hit += 1;
-                    }
-                    hit
-                }
-                Err(insert) => insert - 1,
-            };
-            self.u[k] + (v - x[k]) * self.slope[k]
-        };
-        if inverse > 0.0 {
-            v / inverse
-        } else {
-            0.0
-        }
-    }
 }
 
 /// Everything the walk needs that does not change between evaluations.

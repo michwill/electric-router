@@ -11,6 +11,7 @@
 //! together, and one instantiation is one fetch.
 
 mod candidates;
+mod curves;
 mod evm;
 mod graph;
 mod ladders;
@@ -18,11 +19,16 @@ mod multiport;
 mod nodes;
 mod pipeline;
 mod pools;
+mod prices;
+mod refit;
+mod slippage;
 mod realize;
 mod solve;
 
 pub use evm::{BatchResult, CallResult, Evm, MissReport};
 pub use candidates::{Ballot, Tables};
+pub use curves::Curve;
+pub use refit::Refit;
 pub use graph::Graph;
 pub use multiport::Element;
 pub use nodes::NodeMap;
