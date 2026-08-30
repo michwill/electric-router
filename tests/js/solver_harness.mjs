@@ -411,6 +411,54 @@ if (job.op === "solve") {
   arcs.free();
   g.free();
   map.free();
+} else if (job.op === "stages") {
+  // The quote's stages in order, as a browser would run them between fetches.
+  const map = new glue.NodeMap();
+  for (const t of job.tokens) map.addToken(t.address, t.symbol, t.decimals);
+  for (const m of job.merges ?? []) {
+    map.merge(m.kind, m.token, m.canonical, m.rate_num, m.rate_den, m.target);
+  }
+  const arcs = new glue.Arcs();
+  for (const a of job.arcs) {
+    arcs.add(a.id, a.pool, a.kind, a.i, a.j, a.n_coins, a.token_in, a.token_out,
+             a.tau, a.sigma, a.a, a.B, a.cap === null ? Infinity : a.cap,
+             a.G, a.eps, a.reserve_in, a.decimals_in, a.tvl_usd,
+             a.gamma_live === null ? NaN : a.gamma_live, a.note);
+  }
+  const st = new glue.Stages(arcs);
+  st.pruneDeadEndNodes(job.src, job.dst);
+  const afterPrune = st.arcIds();
+  st.restrictToComponent(job.dst, job.n_nodes);
+  const afterRestrict = st.arcIds();
+  const paired = st.pairDirections();
+  const g = st.assemble(Float64Array.from(job.nu), job.Psi, map, job.src, job.dst);
+  Object.assign(out, {
+    afterPrune, afterRestrict, paired,
+    arcIds: st.arcIds(),
+    counters: st.counters(),
+    counterValues: Array.from(st.counterValues()),
+    warnings: st.warnings(),
+    arcNumbers: hex(st.arcNumbers()),
+    arcFlags: Array.from(st.arcFlags()),
+    gammaLive: hex(st.gammaLive()),
+    reverseIds: st.reverseIds(),
+    G: hex(g.g), eps: hex(g.eps),
+    kclTolerance: hex(Float64Array.of(glue.kclTolerance(job.Psi, 1.0))),
+    kclDetail: hex(glue.kclDetail(g, Float64Array.from(job.psi), job.src, job.dst,
+                                  job.Psi)),
+    achievableKcl: hex(Float64Array.of(
+      glue.achievableKcl(g, Uint8Array.from(job.active), job.dst))),
+    dstPerEth: hex(Float64Array.of(
+      glue.dstPerEth(map, Float64Array.from(job.nu), job.dst_token))),
+    gasCost: hex(Float64Array.of(
+      glue.gasCost(map, Float64Array.from(job.nu), job.dst_token,
+                   job.gas_price_wei, job.g_scale))),
+    quantum: hex(Float64Array.of(glue.quantum(job.decimals_out))),
+  });
+  g.free();
+  st.free();
+  arcs.free();
+  map.free();
 } else {
   throw new Error(`unknown op: ${job.op}`);
 }

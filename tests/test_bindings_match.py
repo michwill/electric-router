@@ -43,15 +43,26 @@ def _camel(name: str) -> str:
 
 
 def _methods(text: str) -> set[str]:
-    """Every method the file exposes, by name.
+    """Every name the file exposes, whether a method or a free function.
 
-    Indented, because a method sits inside an `impl` block and a free function
-    at column zero is a helper -- `err`, `halves`, `whole` -- which is the
-    binding's own business rather than surface either side has to match.
+    Two shapes count.  A method sits inside an `impl` block and is therefore
+    indented.  A free function is surface only when it carries an export
+    attribute -- `#[pyfunction]` on one side, `#[wasm_bindgen]` on the other --
+    which is what tells `kcl_tolerance` from a helper like `err` or `flatten`.
+
+    Attributes were not checked at first, and the whole of `pipeline`'s
+    function surface sat at column zero and went unread: nine exported
+    functions that the guard was silently ignoring.
     """
-    return {m.group(1) for m in
-            re.finditer(r"^[ \t]+(?:pub )?fn\s+([a-z_][a-z0-9_]*)\s*[(<]",
-                        text, re.MULTILINE)}
+    found = {m.group(1) for m in
+             re.finditer(r"^[ \t]+(?:pub )?fn\s+([a-z_][a-z0-9_]*)\s*[(<]",
+                         text, re.MULTILINE)}
+    found |= {m.group(1) for m in
+              re.finditer(r"^#\[(?:pyfunction|wasm_bindgen)[^\]]*\]\n"
+                          r"(?:^#\[[^\]]*\]\n)*"
+                          r"^(?:pub )?fn\s+([a-z_][a-z0-9_]*)\s*[(<]",
+                          text, re.MULTILINE)}
+    return found
 
 
 def _read(paths) -> str:
@@ -66,6 +77,7 @@ CASES = [
     ("multiport", [RUST / "multiport_py.rs"], [WASM / "multiport.rs"]),
     ("realize", [RUST / "realize_py.rs"], [WASM / "realize.rs"]),
     ("candidates", [RUST / "candidates_py.rs"], [WASM / "candidates.rs"]),
+    ("pipeline", [RUST / "pipeline_py.rs"], [WASM / "pipeline.rs"]),
 ]
 
 
@@ -98,7 +110,7 @@ def test_every_pyo3_binding_file_has_a_wasm_counterpart():
     known = {"py.rs": "solve.rs", "ladders_py.rs": "ladders.rs",
              "graph_py.rs": "graph.rs", "nodes_py.rs": "nodes.rs",
              "multiport_py.rs": "multiport.rs", "realize_py.rs": "realize.rs",
-             "candidates_py.rs": "candidates.rs"}
+             "candidates_py.rs": "candidates.rs", "pipeline_py.rs": "pipeline.rs"}
     for got in sorted(py_bindings):
         twin = known.get(got)
         assert twin is not None, (

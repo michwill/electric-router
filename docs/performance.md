@@ -950,8 +950,9 @@ merges and fits without the ladders crossing, and now `Graph` and `NodeMap`.
 
 ### What is ported, and what it cost to get right
 
-`types`, `graph`, `nodes`, `multiport`, `realize`, `gas`, `risk`, `candidates`
-and `verify` are done, and `seed` gained Yen's `k_shortest_paths`. They went in
+`types`, `graph`, `nodes`, `multiport`, `realize`, `gas`, `risk`, `candidates`,
+`verify` and `pipeline`'s stage logic are done; `seed` gained Yen's
+`k_shortest_paths` and `split` its `split_groups`. They went in
 that order because it is the dependency order: everything above takes an
 `ArcArrays`, a rate, or a `PoolArc`.
 
@@ -1030,33 +1031,58 @@ The candidate universes are chosen to be well conditioned -- `a < 1` so every
 parallel arcs so no ties are left for a pivot rule to break arbitrarily -- so
 that test measures the generator rather than re-measuring the solver.
 
-### What `verify` is, now that the chain is not in it
+### What `verify` and `pipeline` are, now that the chain is not in them
 
 `verify.py` holds a `QuoterClient` and puts every candidate out in one
-`quote_routes` at the pinned block. The port takes the quotes as an argument:
-`ready()` says which candidates need pricing and `verify()` folds back what
-came back. Chain I/O is the host's -- a browser has its own RPC. Everything
-that decides *which* candidate wins is ported, including the two rules that are
-not "largest wins": the tie inside one leg's gas goes to the shorter route, and
-a direct candidate is a hard floor.
+`quote_routes` at the pinned block. `pipeline.py` is the same thing one layer
+up: `prepare` probes, `route` runs the quote loop, `_price_once` calls the
+quoter, the scout batches probes.
 
-**What a quote still needs that has no Rust form:**
+Neither's I/O is ported, and that is the boundary rather than a shortfall.
+Chain I/O is the host's -- a browser has its own RPC, the CLI has `transport`.
+What is ported is everything that turns a chain answer into a decision, so a
+host that can fetch can route. `ready()` says which candidates need pricing and
+`verify()` folds back what came in; `Stages` runs the six things a quote does
+between fetches.
+
+Those six, in the order a quote runs them: reduce the universe
+(`prune_dead_end_nodes`, `restrict_to_component`), assemble the graph
+(`clamp_unphysical_depth`, `assemble`), check what the solve returned (the
+`kcl_*` family), read the flow back out (`realised_delta`, `realised_theta`),
+rank (`scout_priority`, `gas_cost`), and layer the pricing walk
+(`pricing_layers`).
+
+Two of them decide what the router can *see*, which is why they are compared
+in both directions. `prune_dead_end_nodes` drops a node touched by one pool, on
+structure rather than a list of names: wrong one way and the long tail of
+single-pool tokens is back on the ballot, wrong the other and `HLX -> USDC` --
+a fair question whose single pool is the answer -- returns no route.
+`clamp_unphysical_depth` decides which arcs are bottomless, and an arc wrongly
+clamped is one the solve will happily fill.
+
+**Two approximations, both documented where they are.** `route_conductance`
+and `achievable_kcl` each solve a small dense system, and the port cannot reach
+for LAPACK: the first uses `lu.rs` against numpy's LU, the second a cyclic
+Jacobi against `np.linalg.cond`'s SVD. Same quantities, different
+implementations, so those two comparisons carry a relative tolerance.
+`achievable_kcl` feeds a safety factor of 100, so what has to agree is the
+scale. Everything else in these suites is exact -- including `quantum`, where
+`powi` drifted a ULP at 24 decimals and `powf` does not.
+
+**What has no Rust form:**
 
 | module | lines | what it is |
 |---|---|---|
-| `pipeline` | 2,381 | the stage orchestrator |
+| `pipeline`'s I/O half | ~1,400 | `prepare`, `route`, the probe and quote loops |
+| `probe`, `quoter`, `transport`, `evm`, `routecall`, `codec` | — | the chain itself |
 | `slippage`, `refit`, `curves`, `prices` | ~800 | the rest of the pricing tables |
 
-Roughly 3,200 lines. `routecall`, `quoter`, `codec`, `transport`, `evm` and the
-renderers are not on this list: calldata and chain I/O are the browser's own to
-do, and the renderers are the CLI's.
+`refit` and the model-free candidate families (`direct_candidates`,
+`two_step_candidates`) are the largest pure things left; both are wound into
+the probe loop and are the natural next piece. The renderers stay the CLI's.
 
-`pipeline` is what is left, and it is the one that has to come last -- it is
-the stage orchestrator, and until the stages beneath it stopped needing to come
-back for anything there was nothing to orchestrate. They have.
-
-None of it shows in the arms. `candidates` is 92% a native solver, `realize` is
-2.4 ms, and the Python pipeline still calls Python at every stage -- nothing in
-this work changed the hot path. This is the portability half of the goal, and
-the measurements in this document are the reason to say so plainly rather than
-let a 1.4x figure imply otherwise.
+None of this shows in the arms. `candidates` is 92% a native solver, `realize`
+is 2.4 ms, and the Python pipeline still calls Python at every stage -- nothing
+in this work changed the hot path. This is the portability half of the goal,
+and the measurements in this document are the reason to say so plainly rather
+than let a 1.4x figure imply otherwise.

@@ -402,6 +402,7 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::ladders_py::Ladders>()?;
     m.add_class::<crate::multiport_py::Element>()?;
     m.add_class::<crate::nodes_py::NodeMap>()?;
+    m.add_class::<crate::pipeline_py::Stages>()?;
     m.add_class::<crate::realize_py::Arcs>()?;
     m.add_class::<crate::realize_py::Route>()?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
@@ -410,6 +411,19 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cancel_cycles, m)?)?;
     m.add_function(wrap_pyfunction!(find_cycle, m)?)?;
     m.add_function(wrap_pyfunction!(split_ascend, m)?)?;
+    for f in [
+        wrap_pyfunction!(crate::pipeline_py::kcl_tolerance, m)?,
+        wrap_pyfunction!(crate::pipeline_py::kcl_detail, m)?,
+        wrap_pyfunction!(crate::pipeline_py::achievable_kcl, m)?,
+        wrap_pyfunction!(crate::pipeline_py::dst_per_eth, m)?,
+        wrap_pyfunction!(crate::pipeline_py::gas_cost, m)?,
+        wrap_pyfunction!(crate::pipeline_py::scout_priority, m)?,
+        wrap_pyfunction!(crate::pipeline_py::split_groups, m)?,
+        wrap_pyfunction!(crate::pipeline_py::pricing_layers, m)?,
+        wrap_pyfunction!(crate::pipeline_py::quantum, m)?,
+    ] {
+        m.add_function(f)?;
+    }
     m.add_class::<Problem>()?;
     m.add_class::<crate::pools::py::Pools>()?;
     m.add("__doc__", "The router's active-set QP, in Rust.")?;

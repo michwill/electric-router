@@ -71,7 +71,7 @@ impl Arcs {
 /// A solved flow, realised into legs.
 #[pyclass]
 pub struct Route {
-    inner: RealizedRoute,
+    pub(crate) inner: RealizedRoute,
 }
 
 #[pymethods]

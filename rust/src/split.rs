@@ -17,6 +17,27 @@
 ///
 /// `u = x / f(x)` on the probe sizes, interpolated linearly; `rate0` closes
 /// the gap below the first probe and `tail` extrapolates past the last.
+/// Indices of each contiguous run of legs leaving one slot, where it splits.
+///
+/// Contiguity is the quoter's own grouping rule: it snapshots a slot's balance
+/// when `src_slot` changes, so a run is exactly one `bps` budget. A run of one
+/// is not a split -- there is nothing to move.
+pub fn split_groups(legs: &[crate::types::Leg]) -> Vec<Vec<usize>> {
+    if legs.is_empty() {
+        return Vec::new();
+    }
+    let mut runs: Vec<Vec<usize>> = vec![vec![0]];
+    for k in 1..legs.len() {
+        let last = *runs.last().unwrap().last().unwrap();
+        if legs[k].src_slot == legs[last].src_slot {
+            runs.last_mut().unwrap().push(k);
+        } else {
+            runs.push(vec![k]);
+        }
+    }
+    runs.into_iter().filter(|run| run.len() > 1).collect()
+}
+
 pub struct Curve {
     pub x: Vec<f64>,
     pub u: Vec<f64>,

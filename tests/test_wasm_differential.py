@@ -983,3 +983,97 @@ def test_the_browser_builds_and_ranks_the_same_ballot():
     assert got["pathSpans"] == spans
     assert got["carries"] == [
         int(v) for v in erouter_solve.Ballot.carries(base_psi, Psi)]
+
+
+# ------------------------------------------------------------ the stages
+#
+# The last thing a browser needs to route by itself: the stages between
+# fetches. Compared against the extension, because what is under test here is
+# the marshalling -- counters as two parallel arrays, flags interleaved, and
+# every float as hex so an `Infinity` cap survives the trip.
+
+
+def test_the_browser_runs_the_same_stages():
+    import erouter_solve
+
+    from test_pipeline_differential import (
+        TOKENS,
+        build_nodes,
+        stages,
+        universe,
+    )
+
+    reference, ported_nodes = build_nodes()
+    arcs = universe(0, reference)
+    src, dst = reference.node(TOKENS[0][0]), reference.node(TOKENS[3][0])
+    nu = [1.0] * reference.n_nodes
+    psi_total = 1.0
+
+    want = stages(arcs)
+    want.prune_dead_end_nodes(src, dst)
+    after_prune = want.arc_ids()
+    want.restrict_to_component(dst, reference.n_nodes)
+    after_restrict = want.arc_ids()
+    paired = want.pair_directions()
+    g = want.assemble(nu, psi_total, ported_nodes, src, dst)
+
+    rng = np.random.default_rng(11)
+    psi = [float(v) for v in rng.random(len(g.g))]
+    active = [int(v) for v in (rng.random(len(g.g)) > 0.4)]
+
+    share = "0x" + "66" * 20
+    got = run({
+        "op": "stages",
+        "tokens": [{"address": a, "symbol": s, "decimals": d} for a, s, d in TOKENS]
+                  + [{"address": share, "symbol": "scrvUSD", "decimals": 18}],
+        "merges": [{"kind": "ERC4626", "token": share, "canonical": TOKENS[3][0],
+                    "rate_num": str(11 * 10**17), "rate_den": str(10**18),
+                    "target": share}],
+        "arcs": [
+            {"id": x.id, "pool": x.pool, "kind": int(x.kind), "i": x.i, "j": x.j,
+             "n_coins": x.n_coins, "token_in": x.token_in, "token_out": x.token_out,
+             "tau": x.tau, "sigma": x.sigma, "a": x.a, "B": x.B,
+             "cap": None if not np.isfinite(x.cap) else x.cap,
+             "G": x.G, "eps": x.eps, "reserve_in": str(x.reserve_in),
+             "decimals_in": x.decimals_in, "tvl_usd": x.tvl_usd,
+             "gamma_live": None if np.isnan(x.gamma_live) else x.gamma_live,
+             "note": x.note}
+            for x in arcs
+        ],
+        "src": src, "dst": dst, "n_nodes": int(reference.n_nodes),
+        "nu": nu, "Psi": psi_total, "psi": psi, "active": active,
+        "dst_token": TOKENS[3][0], "gas_price_wei": 45_000_000, "g_scale": 7.6e7,
+        "decimals_out": 18,
+    })
+
+    assert got["afterPrune"] == after_prune
+    assert got["afterRestrict"] == after_restrict
+    assert got["paired"] == paired
+    assert got["arcIds"] == want.arc_ids()
+    assert list(zip(got["counters"], got["counterValues"], strict=True)) == \
+        [(k, float(v)) for k, v in want.counters()]
+    assert got["warnings"] == want.warnings()
+
+    numbers, expected = floats(got["arcNumbers"]), np.array(want.arc_numbers())
+    agree = (numbers == expected) | (np.isnan(numbers) & np.isnan(expected))
+    assert agree.all(), (numbers[~agree], expected[~agree])
+    assert got["arcFlags"] == [int(v) for pair in want.arc_flags() for v in pair]
+
+    gammas, expected = floats(got["gammaLive"]), np.array(want.gamma_live())
+    agree = (gammas == expected) | (np.isnan(gammas) & np.isnan(expected))
+    assert agree.all()
+    assert got["reverseIds"] == want.reverse_ids()
+
+    assert floats(got["G"]).tolist() == list(g.g)
+    assert floats(got["eps"]).tolist() == list(g.eps)
+
+    assert floats(got["kclTolerance"])[0] == erouter_solve.kcl_tolerance(psi_total, 1.0)
+    detail = erouter_solve.kcl_detail(g, psi, src, dst, psi_total)
+    assert floats(got["kclDetail"]).tolist() == [float(v) for v in detail]
+    assert floats(got["achievableKcl"])[0] == \
+        erouter_solve.achievable_kcl(g, [bool(v) for v in active], dst)
+    assert floats(got["dstPerEth"])[0] == \
+        erouter_solve.dst_per_eth(ported_nodes, nu, TOKENS[3][0])
+    assert floats(got["gasCost"])[0] == \
+        erouter_solve.gas_cost(ported_nodes, nu, TOKENS[3][0], 45_000_000, 7.6e7)
+    assert floats(got["quantum"])[0] == erouter_solve.quantum(18)

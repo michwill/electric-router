@@ -34,6 +34,7 @@ pub mod realize;
 pub mod types;
 pub mod verify;
 pub mod ladders;
+pub mod pipeline;
 pub mod pools;
 pub mod lu;
 pub mod solve;
@@ -50,6 +51,8 @@ mod multiport_py;
 mod nodes_py;
 #[cfg(feature = "python")]
 mod realize_py;
+#[cfg(feature = "python")]
+mod pipeline_py;
 #[cfg(feature = "python")]
 mod py;
 pub mod calibrate;
