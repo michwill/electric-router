@@ -778,3 +778,51 @@ arcs are Python objects.
 
 The whole-quote arms, for the record: **1.25x**, from 1.22 before this stage
 moved.
+
+## `candidates` cannot be ported, and the measurement says why
+
+It is half the quote and the obvious next stage. It is also **92% a solver
+that is already native**, which is the whole finding:
+
+| piece | calls | ms |
+|---|---|---|
+| `solve_arrays` | 41 | 22.86 |
+| `cancel_cycles` | 25 | 0.91 |
+| `conflicting_pools` | 36 | 0.83 |
+| `prune_dust` | 11 | 0.55 |
+| `problem_for` | 164 | 0.21 |
+| `_signature`, `repair_order`, `keep_only`, `carries`, `_pool_of` | | <0.35 |
+| **`generate`** | 1 | **24.84** |
+
+`solve_arrays` and `cancel_cycles` are Rust already. What is left to move is
+about 1.4 ms, and no arrangement of it changes a stage whose cost is 41 solves
+at 557 us. Porting `generate` would be a portability job -- real, for the
+browser -- but it is not a performance one, and this document should not let
+anyone believe otherwise by pointing at 50%.
+
+### What was there was repeated work, not Python
+
+`conflicting_pools` is asked thirty-six times a quote about arcs that do not
+change between calls. It was lowering every active arc's address each time,
+and re-deriving the element from the same indices each time -- 98 calls to
+`element_of_arcs` where there are 19 distinct sets.
+
+Lowering the addresses once and memoising the element check on the index tuple
+is worth, interleaved and with the same answer to the wei:
+
+    arm                           min ms    median
+    cached                         56.42     57.37
+    recomputed                     58.18     59.53
+    saved                           1.76 ms
+
+`conflicting_pools` itself halves, 1.61 ms to 0.83, and `element_of_arcs` drops
+from 98 calls to 19. Both caches are optional arguments: without them the
+function is its own reference, which is what the tests compare against.
+
+**Three findings in a row now have this shape** -- the ladders that were
+rebuilt every quote, the 1,380 `Probe` objects, and these thirty-six repeated
+groupings. None of them was Python being slow at arithmetic. All of them were
+the same answer computed again, and a port would have carried the repetition
+across the boundary with it.
+
+The whole-quote arms: **1.27x**, from 1.22 before refine moved.

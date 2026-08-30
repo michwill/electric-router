@@ -214,7 +214,8 @@ def carries(psi: np.ndarray, Psi: float) -> np.ndarray:
 
 
 def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
-                      Psi: float = 0.0) -> dict[str, list[int]]:
+                      Psi: float = 0.0, *, pools: np.ndarray | None = None,
+                      cache: dict | None = None) -> dict[str, list[int]]:
     """Pools carrying flow on more than one arc whose arcs are not one element.
 
     The same rule `check_one_arc_per_pool` applies to realised legs, asked here
@@ -223,18 +224,34 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
     stage and the rule does not need it: admissibility is a property of which
     ports are used, not of the sequence.
 
+    `pools` and `cache` are the same answer asked twice.  `generate` calls this
+    thirty-six times a quote against arcs that do not change, so lowering every
+    active arc's address and re-deriving the element from the same indices is
+    work the second call already knows the answer to.  Both are optional: the
+    function is its own reference without them.
     """
+    lowered = pools if pools is not None else _pool_of(arcs)
     groups: dict[str, list[int]] = {}
     for k in np.flatnonzero(carries(psi, Psi) if Psi else psi > 0):
-        groups.setdefault(arcs[int(k)].pool.lower(), []).append(int(k))
+        groups.setdefault(lowered[int(k)], []).append(int(k))
     out: dict[str, list[int]] = {}
     for pool, idx in groups.items():
         if len(idx) < 2:
+            continue
+        key = tuple(idx)
+        if cache is not None and key in cache:
+            if cache[key]:
+                out[pool] = idx
             continue
         try:
             element_of_arcs([arcs[k] for k in idx])
         except (MultiPortError, ValueError):
             out[pool] = idx
+            clashes = True
+        else:
+            clashes = False
+        if cache is not None:
+            cache[key] = clashes
     return out
 
 
@@ -258,6 +275,14 @@ def generate(
     seen: set[tuple] = set()
 
     streak: dict[str, int] = {}
+    #: Every arc's pool, lowered once.  `conflicting_pools` runs thirty-six
+    #: times a quote over arcs that do not change, and lowering an address is
+    #: not free at that count.
+    pools = _pool_of(arcs)
+    #: Whether a set of arc indices forms one element -- a property of the arcs
+    #: rather than of the solve that landed on them, so it is asked once per
+    #: set.  Above `resolve` because `resolve` reads it.
+    elements: dict[tuple, bool] = {}
 
     def exhausted(kind: str) -> bool:
         """Has this family produced only unrealisable candidates lately?"""
@@ -344,7 +369,8 @@ def generate(
                 keep_only(banned, ordered, rank, pinned)
                 undo = (before, ordered, rank)
                 continue
-            conflicts = conflicting_pools(arcs, solution.psi)
+            conflicts = conflicting_pools(arcs, solution.psi, pools=pools,
+                                          cache=elements)
             if not conflicts:
                 break
             ordered = repair_order(conflicts, solution.psi)
@@ -371,7 +397,6 @@ def generate(
     # 1. the relaxation itself
     add(base.psi, "C0 full", "base", base_certificate)
 
-    pools = _pool_of(arcs)
     base_active = np.flatnonzero(carries(base.psi, Psi))
     # Warm-start from the *circulation-free* support.  The raw optimum carries
     # flow on arcs that only exist to go round a negative-eps loop; they are
@@ -558,7 +583,8 @@ def generate(
                     "element", pinned={k1: psi1, k2: psi2})
 
     # 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
-    conflicts = conflicting_pools(arcs, base.psi, Psi)
+    conflicts = conflicting_pools(arcs, base.psi, Psi, pools=pools,
+                                  cache=elements)
     if conflicts:
         forbidden = np.zeros(g.m, bool)
         for indices in conflicts.values():
