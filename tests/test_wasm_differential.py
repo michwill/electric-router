@@ -343,7 +343,12 @@ def _spec_for_js(kind, spec):
     round it silently rather than failing.
     """
     out = {"kind": kind}
-    if kind == "stableswap":
+    if kind == "one_to_one":
+        return out
+    if kind == "vault":
+        out.update(num=str(spec["num"]), den=str(spec["den"]),
+                   cap=str(spec.get("cap", 0)))
+    elif kind == "stableswap":
         out.update(
             balances=[str(v) for v in spec["balances"]],
             rates=[str(v) for v in spec["rates"]],

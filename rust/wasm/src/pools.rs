@@ -129,6 +129,21 @@ impl Pools {
             .map_err(|e| JsError::new(&e))
     }
 
+    /// Add a linear conversion: a vault, a lending wrapper or wstETH.
+    ///
+    /// `cap` of zero means no limit.
+    #[wasm_bindgen(js_name = addVault)]
+    pub fn add_vault(&mut self, num: &str, den: &str, cap: &str)
+        -> Result<usize, JsError> {
+        self.inner.add_vault(num, den, cap).map_err(|e| JsError::new(&e))
+    }
+
+    /// Add a 1:1 wrapper. It holds nothing, so one entry serves every leg.
+    #[wasm_bindgen(js_name = addOneToOne)]
+    pub fn add_one_to_one(&mut self) -> usize {
+        self.inner.add_one_to_one()
+    }
+
     /// The best two-way split of `dx` across two output coins, or `undefined`
     /// where this family has no search and the caller must run its own.
     #[wasm_bindgen(js_name = elementSplit)]

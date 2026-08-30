@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import pytest
 
+from erouter.chain.exact_probe import ONE_TO_ONE
 from erouter.core.stableswap import StableSwap
 from erouter.core.tricrypto import Tricrypto
 from erouter.core.twocrypto import Twocrypto
+from erouter.core.vault import Vault, VaultError
 
 erouter_solve = pytest.importorskip("erouter_solve")
 
@@ -82,6 +84,21 @@ def _tricrypto():
         yield {**TRICRYPTO, **over}
 
 
+#: Ratios a real vault carries, plus the two edges the reference treats
+#: specially.  `scrvUSD` and `sDOLA` sized from mainnet; the offset pair is
+#: OpenZeppelin's `(S + 1) / (A + 1)`, which is what makes a wei of difference
+#: at the small end; the capped one is a vault with a deposit throttle.
+VAULTS = (
+    {"num": 10**18, "den": 10**18},
+    {"num": 1128374651908273645, "den": 10**18},
+    {"num": 10**18, "den": 1128374651908273645},
+    {"num": 928374651908273645123456, "den": 1029384756102938475610293},
+    {"num": 928374651908273645123457, "den": 1029384756102938475610294},
+    {"num": 10**18, "den": 10**18, "cap": 10**21},
+    {"num": 3, "den": 7},
+)
+
+
 def _s(v):
     return str(int(v))
 
@@ -96,6 +113,11 @@ def _add(pools, kind, spec):
             _s(spec.get("a_precision", 100)), spec.get("fee_on_xp", True),
             spec.get("subtract_one", True),
             _s(spec["admin_fee"]) if spec.get("admin_fee", -1) >= 0 else None)
+    if kind == "vault":
+        return pools.add_vault(_s(spec["num"]), _s(spec["den"]),
+                               _s(spec.get("cap", 0)))
+    if kind == "one_to_one":
+        return pools.add_one_to_one()
     if kind == "twocrypto":
         return pools.add_twocrypto(
             [_s(b) for b in spec["balances"]],
@@ -122,9 +144,15 @@ def _python_price(model, i, j, dx, fast):
     `None` -- so one is translated into the other here rather than the test
     pretending either is wrong.  `ArithmeticError` is the common base of all
     three families' errors.
+
+    `fast` is resolved the way `exact_probe._price` resolves it -- by asking
+    whether the model has a float path at all.  A vault and a 1:1 wrapper have
+    none, and want none: a ratio is one multiply and a divide, so both arms run
+    the same arithmetic and must give the same answer.
     """
+    quick = getattr(model, "get_dy_fast", None) if fast else None
     try:
-        got = model.get_dy_fast(i, j, dx) if fast else model.get_dy(i, j, dx)
+        got = quick(i, j, dx) if quick is not None else model.get_dy(i, j, dx)
     except (ArithmeticError, ValueError):
         return None
     return int(got) if got is not None else None
@@ -135,7 +163,11 @@ def _model(kind, spec):
         return StableSwap(**spec)
     if kind == "twocrypto":
         return Twocrypto(**spec)
-    return Tricrypto(**spec)
+    if kind == "tricrypto":
+        return Tricrypto(**spec)
+    if kind == "vault":
+        return Vault(**spec)
+    return ONE_TO_ONE
 
 
 #: Sizes over five decades, so a rounding convention that only shows at one end
@@ -159,6 +191,15 @@ def vectors():
                         dx = int(balances[i] * share)
                         if dx > 0:
                             yield kind, n, spec, i, j, dx
+
+    # A ratio has no balances to scale against, so these are absolute -- and
+    # they straddle the cap in `VAULTS`, which is the one size where the
+    # reference stops answering the ratio and starts answering zero.
+    for n, spec in enumerate(VAULTS):
+        for dx in (1, 999, 10**18, 10**21, 10**21 + 1, 10**24):
+            yield "vault", n, spec, 0, 1, dx
+    for dx in (1, 10**18, 10**30):
+        yield "one_to_one", 0, {}, 0, 1, dx
 
 
 CASES = list(vectors())
@@ -269,3 +310,37 @@ def test_a_family_without_a_search_declines():
     pools = erouter_solve.Pools()
     _add(pools, "twocrypto", YB_WETH)
     assert pools.element_split(0, 0, 1, 1, 10**18) is None
+
+
+def test_a_vault_tells_a_refusal_apart_from_a_zero():
+    """The two mean different things downstream, so the port must not merge
+    them.
+
+    `None` sends the leg to the chain; a zero is priced as `REVERTED` and the
+    route is dropped without a request.  An empty vault is the first -- the
+    reference raises `VaultError`, and a ratio nobody could read is not
+    something to answer.  A size over the vault's own cap is the second: the
+    preview call would happily quote it, and we already know it cannot pass.
+    """
+    pools = erouter_solve.Pools()
+    empty = pools.add_vault("0", "1000", "0")
+    capped = pools.add_vault("1000", "1000", str(10**21))
+
+    with pytest.raises(VaultError):
+        Vault(num=0, den=1000).convert(10**18)
+    assert pools.price([empty], [0], [1], [10**18], False) == [None]
+
+    assert Vault(num=1000, den=1000, cap=10**21).convert(10**21 + 1) == 0
+    assert pools.price([capped], [0], [1], [10**21 + 1], False) == [0]
+
+
+def test_a_one_to_one_wrapper_is_the_identity_at_every_size():
+    """It holds nothing, so there is no state to get wrong -- only the
+    marshalling, which is what a `u128` at full width is here to catch."""
+    pools = erouter_solve.Pools()
+    idx = pools.add_one_to_one()
+    sizes = [1, 10**18, 10**30, (1 << 128) - 1]
+    got = pools.price([idx] * len(sizes), [0] * len(sizes), [1] * len(sizes),
+                      sizes, True)
+    assert got == sizes
+    assert [ONE_TO_ONE.get_dy(0, 1, v) for v in sizes] == got

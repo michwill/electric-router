@@ -139,10 +139,14 @@ class _Native:
 
     A crossing is 1 to 2 us and the arithmetic it carries is 0.08 to 0.84, so
     the models are handed over once -- at the first probe that names them --
-    and a batch afterwards names them by index. Anything else the client can
-    price (vaults, LP tokens, the 1:1 wrappers) is left to Python: those are a
-    handful of operations, not an iteration, and porting them would buy
-    nothing.
+    and a batch afterwards names them by index.
+
+    Vaults and the 1:1 wrappers are here too, and not because they are slow:
+    each is one multiply and a divide. They are here because a probe the batch
+    cannot serve is a probe the Python loop below has to price anyway, so a
+    mixed route pays for both paths -- and because a router that runs with no
+    Python at all cannot leave a leg kind behind. LP tokens are the remaining
+    hole, and they are a different shape rather than a missing transcription.
 
     `keep` holds a reference to every model handed over, because the index is
     keyed on `id()` and a collected object would let a later one reuse the
@@ -198,6 +202,14 @@ class _Native:
                 str(model.d), str(model.amp), str(model.gamma),
                 str(model.mid_fee), str(model.out_fee), str(model.fee_gamma),
                 bool(model.legacy), str(model.a_multiplier))
+        if name == "Vault":
+            # A vault, a lending wrapper and wstETH are one shape: `dx * num
+            # // den`. The rounding convention is already resolved into the
+            # ratio by whoever admitted it, so there is nothing to pass on.
+            return self.pools.add_vault(str(model.num), str(model.den),
+                                        str(model.cap))
+        if name == "_OneToOne":
+            return self.pools.add_one_to_one()
         return None
 
     #: What an amount may be and still cross as a `u128`: 3.4e38, a token

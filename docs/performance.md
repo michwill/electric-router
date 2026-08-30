@@ -538,3 +538,37 @@ answer is a bug report.
     python (master)             60.04    62.28
     speed-up                     1.23x
     saved                       11.28 ms
+
+### The ratios, and what porting them was worth
+
+Vaults, lending wrappers, wstETH and the 1:1 wrappers are now in the registry
+too. They are one shape between them -- `dx * num / den`, with a cap -- because
+the rounding convention is already resolved into the ratio by whoever admitted
+it, so `Vault` and `_OneToOne` are two arms of the same three lines.
+
+**On the quote path this bought nothing measurable, and that was the
+expectation.** Counted on a warm quote:
+
+| pair | vaults | 1:1 | probes computed | delegated |
+|---|---|---|---|---|
+| USDC>WETH | 1 | 1 | 1,741 of 1,743 | 2 |
+| crvUSD>sDOLA | 4 | 0 | 1,793 of 1,805 | 6 |
+
+Identical with the ratios on the Rust side and with them left in Python. They
+were never holes -- Python priced them without a request -- so this moves a
+handful of multiplies across a boundary, not a route off the chain. The arms
+agree: 1.22x, against 1.25x and 1.23x measured before it, which is the same
+number three times at three blocks.
+
+It is worth doing anyway, for the reason the port now exists: a leg kind left
+in Python is a leg kind the browser cannot price at all, and correctness at the
+boundary is not a performance question. What it removes is a dependency, and
+the measurement above is here so nobody later reads the change as a speed-up
+that failed to show.
+
+**What is left in Python on the probe path** is the LP tokens -- `_Withdraw`
+over `StableSwapLP` and the crypto LP, and `_Deposit` over the deposit model.
+Those are a genuinely different shape rather than a missing transcription: they
+move the invariant and the token supply together, and the deposit direction is
+admitted on its own evidence because a pool whose withdrawal does not reproduce
+may still deposit exactly.

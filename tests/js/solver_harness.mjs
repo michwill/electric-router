@@ -108,6 +108,10 @@ if (job.op === "solve") {
       pools.addStableswap(m.balances, m.rates, m.amp, m.fee,
         m.offpeg_fee_multiplier, m.a_precision, m.fee_on_xp, m.subtract_one,
         m.admin_fee ?? undefined);
+    } else if (m.kind === "vault") {
+      pools.addVault(m.num, m.den, m.cap);
+    } else if (m.kind === "one_to_one") {
+      pools.addOneToOne();
     } else if (m.kind === "twocrypto") {
       pools.addTwocrypto(m.balances, m.precisions, m.price_scale, m.d, m.amp,
         m.gamma, m.mid_fee, m.out_fee, m.fee_gamma, m.stable, m.v21,

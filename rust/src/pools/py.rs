@@ -70,6 +70,19 @@ impl Pools {
                                  a_multiplier).map_err(err)
     }
 
+    /// Add a linear conversion: a vault, a lending wrapper or wstETH.
+    ///
+    /// `cap` of zero means no limit. Crosses as decimal strings like every
+    /// other parameter -- a vault's `totalAssets` does not fit a `u64`.
+    fn add_vault(&mut self, num: &str, den: &str, cap: &str) -> PyResult<usize> {
+        self.inner.add_vault(num, den, cap).map_err(err)
+    }
+
+    /// Add a 1:1 wrapper. It holds nothing, so one entry serves every leg.
+    fn add_one_to_one(&mut self) -> usize {
+        self.inner.add_one_to_one()
+    }
+
     /// The best two-way split of `dx` across two output coins.
     ///
     /// One call rather than a batch: the caller asks once per element, and

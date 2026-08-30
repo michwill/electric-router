@@ -22,6 +22,15 @@ enum Model {
     Stable(Box<stableswap::Pool>, Box<stableswap::fast::Pool>),
     Two(Box<twocrypto::Pool>),
     Tri(Box<tricrypto::Pool>),
+    /// An ERC4626 vault, a lending wrapper or wstETH: `dx * num / den`, one
+    /// ratio for the whole range. The rounding convention -- whether the vault
+    /// carries OpenZeppelin's virtual offset -- is already resolved into `num`
+    /// and `den` by the time one of these is built, so there is nothing to
+    /// choose here.
+    Vault { num: U256, den: U256, cap: U256 },
+    /// A wrapped native, or a stake that mints one for one. `RouteQuoter.vy`
+    /// answers `dx` for these with no call at all.
+    OneToOne,
 }
 
 fn big(s: &str) -> Result<U256, String> {
@@ -165,6 +174,27 @@ impl Registry {
         Ok(self.models.len() - 1)
     }
 
+    /// Add a linear conversion. `cap` of zero means the vault takes any size.
+    ///
+    /// `cap` is what the vault will actually accept; the preview call does not
+    /// apply it, which is why a route can be quoted through a throttle it
+    /// cannot pass. Over it the answer is zero rather than a refusal -- a
+    /// refusal sends the leg to the chain, and this one is known to fail.
+    pub fn add_vault(&mut self, num: &str, den: &str, cap: &str) -> Result<usize, String> {
+        self.models.push(Model::Vault {
+            num: big(num)?,
+            den: big(den)?,
+            cap: big(cap)?,
+        });
+        Ok(self.models.len() - 1)
+    }
+
+    /// Add a 1:1 wrapper. It holds nothing, so one entry serves every leg.
+    pub fn add_one_to_one(&mut self) -> usize {
+        self.models.push(Model::OneToOne);
+        self.models.len() - 1
+    }
+
     /// The best two-way split of `dx` across two output coins.
     ///
     /// Stableswap only: the other families have no `best_split`, and a caller
@@ -205,6 +235,24 @@ impl Registry {
             Model::Tri(pool) => {
                 if fast { pool.get_dy_fast(a, b, amount) } else { pool.get_dy(a, b, amount) }
             }
+            // No float form: a ratio is one multiply and one divide, and there
+            // is no invariant to iterate, so `fast` has nothing to select.
+            // The coin indices carry no meaning -- these have one pair.
+            Model::Vault { num, den, cap } => {
+                if den.is_zero() || num.is_zero() {
+                    // An empty vault is a refusal, not a zero: the reference
+                    // raises here, and the leg belongs on the chain.
+                    return None;
+                }
+                if amount.is_zero() || (!cap.is_zero() && amount > *cap) {
+                    return Some(0);
+                }
+                // `dx * num` reaches 3.4e68 for the widest inputs either side
+                // admits, which U256 holds -- but a vault reporting a nonsense
+                // ratio should go to the chain rather than wrap silently.
+                amount.checked_mul(*num).map(|v| v / *den)
+            }
+            Model::OneToOne => Some(amount),
         };
         got.and_then(|v| u128::try_from(v).ok())
     }
