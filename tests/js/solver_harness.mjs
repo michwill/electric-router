@@ -357,6 +357,60 @@ if (job.op === "solve") {
   route.free();
   arcs.free();
   map.free();
+} else if (job.op === "ballot") {
+  // Generation and ranking as the browser runs them.  Paths and conflicts
+  // cross flat with spans, and the quotes come in as decimal strings.
+  const map = new glue.NodeMap();
+  for (const t of job.tokens) map.addToken(t.address, t.symbol, t.decimals);
+  const g = glue.Graph.build(
+    BigInt64Array.from(job.tau.map(BigInt)), BigInt64Array.from(job.sig.map(BigInt)),
+    Float64Array.from(job.a), Float64Array.from(job.B), Float64Array.from(job.nu),
+    job.Psi, undefined, undefined, undefined, job.n_nodes,
+    undefined, undefined, false, undefined);
+  const arcs = new glue.Arcs();
+  for (const a of job.arcs) {
+    arcs.add(a.id, a.pool, a.kind, a.i, a.j, a.n_coins, a.token_in, a.token_out,
+             a.tau, a.sigma, a.a, a.B, a.cap === null ? Infinity : a.cap,
+             a.G, a.eps, a.reserve_in, a.decimals_in, a.tvl_usd,
+             a.gamma_live === null ? NaN : a.gamma_live, a.note);
+  }
+  const ballot = glue.Ballot.generate(g, arcs, job.src, job.dst, job.Psi,
+    Float64Array.from(job.base_psi));
+  const out0 = {
+    labels: ballot.labels(),
+    kinds: ballot.kinds(),
+    nArcs: Array.from(ballot.nArcs()),
+    modelledLoss: hex(ballot.modelledLoss()),
+    solves: ballot.solves, pivots: ballot.pivots,
+    skipped: ballot.skipped, skippedWide: ballot.skippedWide,
+    psi: Array.from({ length: ballot.length() }, (_, k) => hex(ballot.psi(k))),
+    // The helpers, so a mismatch above says which one moved.
+    spread: Array.from(glue.Ballot.spread(Uint32Array.from(job.top_k), job.budget)),
+    paths: Array.from(glue.Ballot.kShortestPaths(g, job.src, job.dst, job.k)),
+    pathSpans: Array.from(glue.Ballot.kShortestPathSpans(g, job.src, job.dst, job.k)),
+    carries: Array.from(glue.Ballot.carries(Float64Array.from(job.base_psi), job.Psi)),
+  };
+  ballot.realizeCandidates(arcs, Float64Array.from(job.nu), map, job.src_token,
+                           job.dst_token, job.amount_in);
+  out0.statuses = ballot.statuses();
+  out0.ready = Array.from(ballot.ready());
+  if (job.quotes) {
+    ballot.verify(Uint32Array.from(out0.ready), job.quotes, undefined,
+                  job.gas_price_wei, job.dst_wei_per_eth);
+    // Re-read after verify: `realizeCandidates` leaves them "ready" and
+    // verify moves them to "ok" or "reverted".
+    out0.statuses = ballot.statuses();
+    out0.ranks = Array.from(ballot.ranks());
+    out0.gas = Array.from(ballot.gas());
+    out0.verifiedOut = ballot.verifiedOut();
+    const winner = ballot.best();
+    out0.best = winner === undefined ? null : winner;
+  }
+  Object.assign(out, out0);
+  ballot.free();
+  arcs.free();
+  g.free();
+  map.free();
 } else {
   throw new Error(`unknown op: ${job.op}`);
 }

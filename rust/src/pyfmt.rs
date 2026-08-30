@@ -35,6 +35,50 @@ pub fn float(x: f64) -> String {
     }
 }
 
+/// `f"{x:g}"`: six significant digits, trailing zeros stripped, and no
+/// decimal point on a whole number. `PIN_LADDER` prints through this, so a
+/// candidate's label is `x0.125` and `x1` rather than `x0.125` and `x1.0`.
+pub fn general(x: f64) -> String {
+    if x.is_nan() {
+        return "nan".to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    if x == 0.0 {
+        return "0".to_string();
+    }
+    let exponent = x.abs().log10().floor() as i32;
+    // CPython's `%g` switches to exponent form outside [-4, precision).
+    if exponent < -4 || exponent >= 6 {
+        let raw = format!("{:.*e}", 5, x);
+        let (mantissa, rest) = raw.split_once('e').unwrap();
+        return pad_exponent(&format!("{}e{}", strip(mantissa), rest));
+    }
+    strip(&format!("{:.*}", (5 - exponent).max(0) as usize, x))
+}
+
+/// Trailing zeros after a decimal point, and the point itself if nothing is
+/// left after it.
+fn strip(text: &str) -> String {
+    if !text.contains('.') {
+        return text.to_string();
+    }
+    text.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// `f"{x:.Nf}"`. Rust agrees with Python on this one -- both round ties to
+/// even -- but `inf` prints as `inf` on both sides only because this says so.
+pub fn fixed(x: f64, places: usize) -> String {
+    if x.is_nan() {
+        return "nan".to_string();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    format!("{:.*}", places, x)
+}
+
 fn pad_exponent(raw: &str) -> String {
     match raw.split_once('e') {
         Some((mantissa, exponent)) => {
@@ -57,6 +101,18 @@ mod tests {
         assert_eq!(sci(1e12, 0), "1e+12");
         assert_eq!(sci(1.2345e15, 3), "1.234e+15");
         assert_eq!(sci(5e-3, 3), "5.000e-03");
+    }
+
+    #[test]
+    fn general_strips_what_g_strips() {
+        assert_eq!(general(0.0), "0");
+        assert_eq!(general(1.0), "1");
+        assert_eq!(general(0.125), "0.125");
+        assert_eq!(general(0.5), "0.5");
+        assert_eq!(general(4.0), "4");
+        assert_eq!(general(1.0 / 3.0), "0.333333");
+        assert_eq!(general(1e-5), "1e-05");
+        assert_eq!(general(1234567.0), "1.23457e+06");
     }
 
     #[test]

@@ -1179,6 +1179,7 @@ version = "0.1.0"
 dependencies = [
  "erouter-evm",
  "erouter-solve",
+ "js-sys",
  "wasm-bindgen",
 ]
 

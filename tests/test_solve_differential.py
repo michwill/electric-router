@@ -139,3 +139,80 @@ def test_the_flow_matches_where_the_optimum_is_unique(name):
     assert np.allclose(ours.psi, theirs, atol=1e-6 * Psi), (
         f"{name}: flows differ by {np.max(np.abs(ours.psi - theirs)) / Psi:.3e} of Psi"
     )
+
+
+def test_a_restricted_resolve_from_a_narrow_warm_start_still_diverges():
+    """A known divergence in the ported solver, recorded rather than hidden.
+
+    Found while differing `candidates`: a candidate is a *restricted* re-solve
+    warm-started from the base optimum's acyclic support, and when that support
+    is almost entirely forbidden the two solvers take different pivot
+    sequences.  The reference converges in four pivots; the port cycles and
+    returns PARTIAL on a single arc.
+
+    Two of sixty-three restricted re-solves over ten generated universes, so it
+    is rare -- but it is not noise: it changes which candidates reach the
+    ballot, and a candidate that is never generated is a route the user never
+    sees.
+
+    Half of it is already fixed.  The reference perturbs a cycling basis
+    (`PERTURB_ROUNDS`) and the port had no such step at all -- it relied on the
+    rounding its rank-1 Cholesky update happens to leave in `u`, which
+    `core/solve.py` says in as many words is luck rather than a mechanism.  The
+    port now perturbs deliberately, which moved this case from six pivots to
+    fourteen without settling it, so the remaining difference is upstream of
+    the anti-cycling and in the pivot rule itself.
+
+    Marked `xfail` rather than deleted: it is the reproducer, and it is what
+    will say when the pivot rules are brought back together.
+    """
+    import numpy as np
+    import pytest as _pytest
+
+    from erouter.core.realize import cancel_cycles
+    from erouter.core.solve import active_set_solve
+
+    rng = np.random.default_rng(4)
+    n = 5
+    tau, sig, a, B = [], [], [], []
+    for tail in range(n):
+        for head in range(n):
+            if tail == head:
+                continue
+            for _ in range(1 + int(rng.integers(0, 2))):
+                tau.append(tail)
+                sig.append(head)
+                a.append(float(np.exp(rng.normal(0.0, 0.05))))
+                B.append(float(np.exp(rng.uniform(np.log(1e-8), np.log(1e-4)))))
+                rng.uniform(1e6, 1e8)  # the TVL draw, so the stream lines up
+    tau.append(1)
+    sig.append(0)
+    a.append(0.999)
+    B.append(2e-6)
+    g = graph.build(np.array(tau, np.int64), np.array(sig, np.int64),
+                    np.array(a, float), np.array(B, float), np.ones(n), 1.0,
+                    n_nodes=n, merge_duplicates=False)
+
+    base = active_set_solve(g, 0, 4, 1.0)
+    acyclic, _ = cancel_cycles(g.tau, g.sig, base.psi)
+    forbidden = np.ones(g.m, bool)
+    for arc in (2, 3, 5, 10, 15):
+        forbidden[arc] = False
+
+    ours = active_set_solve(g, 0, 4, 1.0, A0=np.flatnonzero(acyclic > 0),
+                            forbidden=forbidden, min_flow=1e-4,
+                            maxit=60, partial_ok=True)
+    import erouter_solve
+
+    problem = erouter_solve.Problem(
+        [int(v) for v in g.tau], [int(v) for v in g.sig],
+        [float(v) for v in g.G], [float(v) for v in g.eps],
+        [float(v) for v in g.cap], g.n_nodes)
+    got = problem.solve(0, 4, 1.0, a0=[bool(v) for v in (acyclic > 0)],
+                        forbidden=[bool(v) for v in forbidden],
+                        min_flow=1e-4, maxit=60, partial_ok=True)
+    theirs = np.frombuffer(got["psi"], dtype=np.float64)
+    if not np.allclose(ours.psi, theirs, atol=1e-6):
+        _pytest.xfail("known: the port cycles to PARTIAL where the reference "
+                      "converges; see this test's docstring")
+    assert np.allclose(ours.psi, theirs, atol=1e-6)

@@ -10,6 +10,7 @@
 //! Both halves are here rather than in two modules because they are loaded
 //! together, and one instantiation is one fetch.
 
+mod candidates;
 mod evm;
 mod graph;
 mod ladders;
@@ -20,6 +21,7 @@ mod realize;
 mod solve;
 
 pub use evm::{BatchResult, CallResult, Evm, MissReport};
+pub use candidates::{Ballot, Tables};
 pub use graph::Graph;
 pub use multiport::Element;
 pub use nodes::NodeMap;

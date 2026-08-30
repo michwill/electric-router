@@ -65,6 +65,7 @@ CASES = [
     ("nodes", [RUST / "nodes_py.rs"], [WASM / "nodes.rs"]),
     ("multiport", [RUST / "multiport_py.rs"], [WASM / "multiport.rs"]),
     ("realize", [RUST / "realize_py.rs"], [WASM / "realize.rs"]),
+    ("candidates", [RUST / "candidates_py.rs"], [WASM / "candidates.rs"]),
 ]
 
 
@@ -96,7 +97,8 @@ def test_every_pyo3_binding_file_has_a_wasm_counterpart():
     # `wasm/src/solve.rs` rather than a same-named file.
     known = {"py.rs": "solve.rs", "ladders_py.rs": "ladders.rs",
              "graph_py.rs": "graph.rs", "nodes_py.rs": "nodes.rs",
-             "multiport_py.rs": "multiport.rs", "realize_py.rs": "realize.rs"}
+             "multiport_py.rs": "multiport.rs", "realize_py.rs": "realize.rs",
+             "candidates_py.rs": "candidates.rs"}
     for got in sorted(py_bindings):
         twin = known.get(got)
         assert twin is not None, (

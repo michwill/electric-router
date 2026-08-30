@@ -889,3 +889,97 @@ def test_the_browser_realises_the_same_route():
     assert got["poolsUsed"] == want.pools_used()
     assert floats(got["maxTheta"])[0] == want.max_theta()
     assert floats(got["routeConductance"])[0] == want.route_conductance()
+
+
+# ------------------------------------------------------------ the ballot
+#
+# The last stage a browser needs to choose a route by itself: generate the
+# candidates, realise them, fold quotes back in and rank. Compared against the
+# extension rather than against Python, because what is being tested here is
+# the marshalling -- the flat-plus-spans shape the paths and conflicts cross
+# in, and the decimal strings the quotes do.
+
+
+def test_the_browser_builds_and_ranks_the_same_ballot():
+    import erouter_solve
+
+    from erouter.core.solve import active_set_solve
+    from test_candidates_differential import (
+        SEEDS,
+        TOKENS,
+        ported_arcs,
+        ported_graph,
+        universe,
+    )
+
+    seed = SEEDS[0]
+    g, arcs, _, ported_nodes, nu, Psi = universe(seed)
+    src, dst = 0, len(TOKENS) - 1
+    base = active_set_solve(g, src, dst, Psi)
+    base_psi = [float(v) for v in base.psi]
+
+    want = erouter_solve.Ballot.generate(
+        ported_graph(g), ported_arcs(arcs), src, dst, Psi, base_psi)
+    want.realize_candidates(ported_arcs(arcs), [float(v) for v in nu], ported_nodes,
+                            TOKENS[0][0], TOKENS[-1][0], str(10**18))
+    ready = want.ready()
+    quotes = [int(1e21 + k) for k in range(len(ready))]
+    want.verify(list(zip(ready, quotes, strict=True)),
+                gas_price_wei=45_000_000, dst_wei_per_eth=3e14)
+
+    got = run({
+        "op": "ballot",
+        "tokens": [{"address": a, "symbol": s, "decimals": d} for a, s, d in TOKENS],
+        "tau": [int(v) for v in g.tau], "sig": [int(v) for v in g.sig],
+        "a": [float(v) for v in g.a], "B": [float(v) for v in g.B],
+        "nu": [float(v) for v in nu], "Psi": Psi, "n_nodes": int(g.n_nodes),
+        "arcs": [
+            {"id": x.id, "pool": x.pool, "kind": int(x.kind), "i": x.i, "j": x.j,
+             "n_coins": x.n_coins, "token_in": x.token_in, "token_out": x.token_out,
+             "tau": x.tau, "sigma": x.sigma, "a": x.a, "B": x.B,
+             "cap": None if not np.isfinite(x.cap) else x.cap,
+             "G": x.G, "eps": x.eps, "reserve_in": str(x.reserve_in),
+             "decimals_in": x.decimals_in, "tvl_usd": x.tvl_usd,
+             "gamma_live": None if np.isnan(x.gamma_live) else x.gamma_live,
+             "note": x.note}
+            for x in arcs
+        ],
+        "src": src, "dst": dst, "base_psi": base_psi,
+        "src_token": TOKENS[0][0], "dst_token": TOKENS[-1][0],
+        "amount_in": str(10**18),
+        "top_k": [1, 2, 3, 4, 6, 8, 12], "budget": 4, "k": 12,
+        "quotes": [str(v) for v in quotes],
+        "gas_price_wei": 45_000_000, "dst_wei_per_eth": 3e14,
+    })
+
+    assert got["labels"] == want.labels()
+    assert got["kinds"] == want.kinds()
+    assert got["nArcs"] == want.n_arcs()
+    assert floats(got["modelledLoss"]).tolist() == want.modelled_loss()
+    assert got["solves"] == want.solves
+    assert got["pivots"] == want.pivots
+    assert got["skipped"] == want.skipped
+    assert got["skippedWide"] == want.skipped_wide
+    for k in range(len(want)):
+        assert floats(got["psi"][k]).tolist() == want.psi(k), k
+
+    assert got["statuses"] == want.statuses()
+    assert got["ready"] == ready
+    assert got["ranks"] == want.ranks()
+    assert got["gas"] == want.gas()
+    assert got["verifiedOut"] == want.verified_out()
+    assert got["best"] == want.best()
+
+    # And the pieces, so a mismatch above says which one moved.
+    from erouter.core.candidates import TOP_K
+
+    assert got["spread"] == erouter_solve.Ballot.spread(list(TOP_K), 4)
+    flat = erouter_solve.Ballot.k_shortest_paths(ported_graph(g), src, dst, 12)
+    assert got["paths"] == [a for path in flat for a in path]
+    spans, total = [0], 0
+    for path in flat:
+        total += len(path)
+        spans.append(total)
+    assert got["pathSpans"] == spans
+    assert got["carries"] == [
+        int(v) for v in erouter_solve.Ballot.carries(base_psi, Psi)]

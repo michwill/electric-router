@@ -21,7 +21,7 @@ fn flags(raw: Option<Vec<u8>>) -> Option<Vec<bool>> {
 /// Solver input, assembled and owned on the Rust side.
 #[wasm_bindgen]
 pub struct Graph {
-    inner: ArcArrays,
+    pub(crate) inner: ArcArrays,
 }
 
 #[wasm_bindgen]

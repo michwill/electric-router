@@ -396,6 +396,8 @@ fn calibrate_many<'py>(
 
 #[pymodule]
 fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<crate::candidates_py::Ballot>()?;
+    m.add_class::<crate::candidates_py::Tables>()?;
     m.add_class::<crate::graph_py::Graph>()?;
     m.add_class::<crate::ladders_py::Ladders>()?;
     m.add_class::<crate::multiport_py::Element>()?;

@@ -77,7 +77,7 @@ impl Arcs {
 /// A solved flow, realised into legs.
 #[wasm_bindgen]
 pub struct Route {
-    inner: RealizedRoute,
+    pub(crate) inner: RealizedRoute,
 }
 
 #[wasm_bindgen]

@@ -950,7 +950,8 @@ merges and fits without the ladders crossing, and now `Graph` and `NodeMap`.
 
 ### What is ported, and what it cost to get right
 
-`types`, `graph`, `nodes`, `multiport` and `realize` are done. They went in
+`types`, `graph`, `nodes`, `multiport`, `realize`, `gas`, `risk`, `candidates`
+and `verify` are done, and `seed` gained Yen's `k_shortest_paths`. They went in
 that order because it is the dependency order: everything above takes an
 `ArcArrays`, a rate, or a `PoolArc`.
 
@@ -1005,26 +1006,57 @@ system; the reference uses numpy's LAPACK and the port uses `lu.rs`. Same
 algorithm, different implementation, so that one comparison carries a relative
 tolerance. Everything else in these suites is exact.
 
+### The solver drifted from its reference, and the ballot found it
+
+Differing `candidates` surfaced a bug in the *already-ported* solver, not in
+the new code: `core/solve.py` perturbs a cycling basis (`PERTURB_ROUNDS`,
+`PERTURB_SCALE`) and `rust/src/solve.rs` had no such step. Its own comment says
+why the gap went unnoticed -- the port got the same effect *by accident*, from
+the rounding its rank-1 Cholesky update leaves in `u`. Luck is not a mechanism.
+The perturbation is now ported and deliberate.
+
+That closed half of it. A residual divergence remains: on a restricted
+re-solve warm-started from a nearly-disjoint active set, the two take different
+pivot sequences, and it goes both ways -- the port cycles to PARTIAL where the
+reference converges in four pivots, and elsewhere the reference gives up at 58
+where the port converges at 54. Two of sixty-three restricted re-solves on the
+first generated universes. It is reproduced and `xfail`ed in
+`test_solve_differential`, not absorbed as a tolerance, because it changes
+*which candidates reach the ballot* and a candidate that is never generated is
+a route the user never sees.
+
+The candidate universes are chosen to be well conditioned -- `a < 1` so every
+`eps` is positive and no arbitrage cycles exist, with a real spread between
+parallel arcs so no ties are left for a pivot rule to break arbitrarily -- so
+that test measures the generator rather than re-measuring the solver.
+
+### What `verify` is, now that the chain is not in it
+
+`verify.py` holds a `QuoterClient` and puts every candidate out in one
+`quote_routes` at the pinned block. The port takes the quotes as an argument:
+`ready()` says which candidates need pricing and `verify()` folds back what
+came back. Chain I/O is the host's -- a browser has its own RPC. Everything
+that decides *which* candidate wins is ported, including the two rules that are
+not "largest wins": the tie inside one leg's gas goes to the shorter route, and
+a direct candidate is a hard floor.
+
 **What a quote still needs that has no Rust form:**
 
 | module | lines | what it is |
 |---|---|---|
 | `pipeline` | 2,381 | the stage orchestrator |
-| `candidates` | 620 | the ballot, around a native solver |
-| `verify` | 349 | realisation and its gates |
-| `gas`, `risk`, `slippage`, `refit`, `curves` | ~1,000 | the tables a route is priced against |
+| `slippage`, `refit`, `curves`, `prices` | ~800 | the rest of the pricing tables |
 
-Roughly 4,350 lines. `routecall`, `quoter`, `codec`, `transport`, `evm` and the
+Roughly 3,200 lines. `routecall`, `quoter`, `codec`, `transport`, `evm` and the
 renderers are not on this list: calldata and chain I/O are the browser's own to
 do, and the renderers are the CLI's.
 
-**The order that follows from what depends on what:** `verify` and
-`candidates` next, which are loops over what `realize` now produces; `pipeline`
-last, and only once the stages beneath it no longer need to come back for
-anything.
+`pipeline` is what is left, and it is the one that has to come last -- it is
+the stage orchestrator, and until the stages beneath it stopped needing to come
+back for anything there was nothing to orchestrate. They have.
 
-None of it will show in the arms. `candidates` is 92% a native solver,
-`realize` is 2.4 ms, and `graph` and `nodes` were smaller again -- the Python
-pipeline still calls Python `realize`, and nothing here changed the hot path.
-This is the portability half of the goal, and the measurements in this document
-are the reason to say so plainly rather than let a 1.4x figure imply otherwise.
+None of it shows in the arms. `candidates` is 92% a native solver, `realize` is
+2.4 ms, and the Python pipeline still calls Python at every stage -- nothing in
+this work changed the hot path. This is the portability half of the goal, and
+the measurements in this document are the reason to say so plainly rather than
+let a 1.4x figure imply otherwise.

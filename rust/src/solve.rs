@@ -27,6 +27,28 @@ pub const CYCLE_PATIENCE: u32 = 3;
 pub const RECONNECT_HOPS: usize = 8;
 
 /// Why a solve stopped, in the same words the Python uses.
+/// How many times a cycling basis is perturbed before the patience above
+/// applies.
+///
+/// Degeneracy is what makes the basis repeat: several arcs tie on the quantity
+/// the pivot rule ranks, so which one moves is arbitrary and the sequence can
+/// return to where it was. The textbook remedy is to break every tie in
+/// advance by shifting each arc's cost by a distinct vanishing amount.
+///
+/// This solver used to get that *by accident* -- the rank-1 Cholesky update
+/// leaves a different rounding in `u` than a fresh factorisation, and that
+/// noise is usually enough to fall out of a cycle. Usually is not a mechanism:
+/// measured on a restricted re-solve warm-started from a nearly-disjoint
+/// active set, it cycled out to PARTIAL on one arc while the reference found
+/// the three-way optimum in four pivots. So do deliberately what it did by
+/// luck. Deterministic, so two runs at one block still agree to the wei.
+pub const PERTURB_ROUNDS: usize = 4;
+/// The first shift, relative to the largest `eps` in the graph. Far below
+/// `TOL` and further below a basis point, so the perturbed problem is the same
+/// problem; each round multiplies by ten in case the first was inside the
+/// noise it meant to clear.
+pub const PERTURB_SCALE: f64 = 1e-11;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stop {
     Optimal,
@@ -267,6 +289,11 @@ pub fn active_set_solve(
         Some(f) => f.to_vec(),
         None => vec![false; m],
     };
+
+    // `eps` the pivot rule actually sees. Identical to the graph's until a
+    // cycle forces a perturbation, and rebound to a shifted copy after.
+    let mut eps: Vec<f64> = arcs.eps.to_vec();
+    let mut perturbed = 0usize;
 
     let mut s_hat = vec![0.0; n];
     s_hat[src] += psi_total;
@@ -574,7 +601,7 @@ pub fn active_set_solve(
         for p in 0..m {
             if active[p] {
                 psi[p] = arcs.g[p]
-                    * (u[arcs.tau[p] as usize] - u[arcs.sig[p] as usize] - arcs.eps[p]);
+                    * (u[arcs.tau[p] as usize] - u[arcs.sig[p] as usize] - eps[p]);
             }
         }
         // §9.4: nodes outside `dst`'s component carry no flow by construction.
@@ -584,7 +611,7 @@ pub fn active_set_solve(
             }
         }
         for p in 0..m {
-            rho[p] = u[arcs.tau[p] as usize] - u[arcs.sig[p] as usize] - arcs.eps[p];
+            rho[p] = u[arcs.tau[p] as usize] - u[arcs.sig[p] as usize] - eps[p];
         }
 
         mark.lap(&mut timings[4]);
@@ -598,6 +625,22 @@ pub fn active_set_solve(
             }
         }
         if seen.contains(&signature) {
+            if use_bland && perturbed < PERTURB_ROUNDS {
+                // Break the ties that let the basis return here. A distinct
+                // shift per arc, monotone in index so it is reproducible, and
+                // small enough that the perturbed optimum is the real one to
+                // far more digits than any quote can carry.
+                perturbed += 1;
+                let scale = PERTURB_SCALE * 10f64.powi(perturbed as i32 - 1);
+                let spread = arcs.eps.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+                let width = m as f64;
+                for p in 0..m {
+                    eps[p] = arcs.eps[p]
+                        + scale * spread.max(1.0) * ((p + 1) as f64 / width);
+                }
+                seen.clear();
+                continue;
+            }
             if use_bland {
                 cycles += 1;
                 if cycles >= CYCLE_PATIENCE {

@@ -12,6 +12,10 @@ crate-type = ["cdylib", "rlib"]
 # Pinned exactly: the CLI that post-processes the module refuses a version it
 # does not match, so a floating version here breaks the build the day it moves.
 wasm-bindgen = "=0.2.127"
+# Only for the one place a caller hands a function in: the element pricer,
+# which needs a pool model this crate does not hold.  Already in the lock file
+# as a wasm-bindgen dependency, so this pins nothing new.
+js-sys = "0.3"
 # `default-features = false` on both so no pyo3 is pulled into a wasm build.
 erouter-solve = { path = "..", default-features = false }
 erouter-evm = { path = "../evm", default-features = false }

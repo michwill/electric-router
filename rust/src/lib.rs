@@ -22,18 +22,24 @@
 // difference between a `Singular` error and a factorisation full of NaN.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
 
+pub mod candidates;
 pub mod chol;
+pub mod gas;
 pub mod graph;
 pub mod multiport;
 pub mod nodes;
 pub mod pyfmt;
+pub mod risk;
 pub mod realize;
 pub mod types;
+pub mod verify;
 pub mod ladders;
 pub mod pools;
 pub mod lu;
 pub mod solve;
 
+#[cfg(feature = "python")]
+mod candidates_py;
 #[cfg(feature = "python")]
 mod graph_py;
 #[cfg(feature = "python")]

@@ -17,7 +17,7 @@ fn err(e: graph::GraphError) -> PyErr {
 /// Solver input, assembled and owned on the Rust side.
 #[pyclass]
 pub struct Graph {
-    inner: ArcArrays,
+    pub(crate) inner: ArcArrays,
 }
 
 #[pymethods]
