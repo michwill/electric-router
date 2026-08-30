@@ -263,3 +263,28 @@ def split_ascend(plan, start, free, *, min_weight, iters, sweeps, window,
         float(plan["amount_in"]), start, free, float(min_weight), int(iters),
         int(sweeps), float(window), float(sweep_tol),
     )
+
+
+def ladders_from(ladders):
+    """Hand the coarse ladders over once, for the refine stage to keep.
+
+    This is the only time they cross.  Every quote forks them on the far side,
+    and `plan_sized`, the merge and the fit all read them in place -- so the
+    cost here is paid at the warm, against a stage that used to rebuild every
+    list on every quote.
+
+    `None` when the extension is absent, which leaves the caller on the Python
+    path it already has.
+    """
+    if _rust is None:
+        return None
+    made = getattr(_rust, "Ladders", None)
+    if made is None:
+        return None
+    out = made()
+    for lad in ladders:
+        arc = lad.arc
+        out.add(int(arc.decimals_in), int(arc.decimals_out),
+                int(max(0, arc.reserve_in)), [int(d) for d in lad.deltas],
+                [int(q) for q in lad.quotes], int(lad.attempted))
+    return out

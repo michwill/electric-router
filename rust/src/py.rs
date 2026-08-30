@@ -396,6 +396,7 @@ fn calibrate_many<'py>(
 
 #[pymodule]
 fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<crate::ladders_py::Ladders>()?;
     m.add_function(wrap_pyfunction!(solve, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate, m)?)?;
     m.add_function(wrap_pyfunction!(calibrate_many, m)?)?;

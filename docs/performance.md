@@ -683,3 +683,61 @@ That also says where to start, and it is not the biggest number. `refine` is
 probes, 478 arcs, every float as an exact bit pattern -- so a port has an
 acceptance test waiting. `candidates` is half the quote but three quarters of
 it is the solver, so moving the stage buys the 9 ms around it, not the 39.
+
+## Moving `refine`, moved
+
+The ladders now live on the Rust side for the whole stage. They are handed
+over once at the warm and forked per quote; `plan_sized`, `collect`, `merge`
+and the fit all read them where they are. `Ladder.as_float` does not get
+faster, it stops being called -- and so does the conversion behind it, because
+`calibrate_many` was rebuilding every list as `float` after `as_float` had
+already divided it.
+
+Identity stayed in Python. A `Probe` is addressed by a pool, a kind and two
+coin indices, none of which is arithmetic, so the Rust side holds slots and
+the caller maps them back to arcs. Three crossings a quote: what is missing,
+what the chain answered, the fits.
+
+**It is worth 3.15 ms, not the ten this document estimated.** Interleaved,
+resident against Python, same session and same block:
+
+    arm                         refine ms   quote ms
+    resident (rust)                  9.30      76.15
+    python                          12.45      79.13
+    refine saved                     3.15
+    quote saved                                 2.99
+
+Both arms return the same `verified_out` to the wei, and all 478 arc fits come
+back identical -- `a`, `B` and `cap` alike.
+
+The estimate predates `calibrate_many`, which had already taken the largest
+piece: 452 crossings became one, so what was left to win was the marshalling
+around the fit rather than the marshalling *and* the fit.
+
+But the honest reason is narrower, and it is visible in the parts. **The
+ladder bookkeeping moved; the per-probe Python loops did not.**
+
+| before | ms | after | ms | saved |
+|---|---|---|---|---|
+| `plan_sized` | 2.41 | `resident.plan` | 2.12 | 0.29 |
+| `collect` + `merge` | 2.20 | `resident.absorb` | 0.81 | 1.39 |
+| `_recalibrate` | 2.59 | `_recalibrate_resident` | 1.11 | 1.48 |
+| | | | | **3.16** |
+
+Which is the 3.15 the arms measured, from the other side. `plan` barely moved
+because what it costs is not the planning -- Rust does that now -- but building
+1,380 `Probe` dataclasses to describe the answer. `absorb` still walks 1,380
+result objects to read a status and a value off each, and
+`_recalibrate_resident` still walks 478 arcs to write nine fields onto each.
+
+*(An earlier draft of this section blamed the gap on measurement overhead from
+wrapping the parts. That was checked and is wrong: 942 wrapped calls a quote
+cost nothing measurable -- interleaved, wrapped against not, the difference was
+-2.5 ms, which is noise. The parts were telling the truth; they were simply not
+all that was there.)*
+
+So refine's remaining 9.3 ms is: `seed_subgraph` 3.92 and `_assemble` 2.68,
+which are graph operations shared with the coarse pass and not refine's to
+move, and 4.04 of Python loops over probes and arcs. The probes are the larger
+half and the more portable: 1,380 objects built to carry six fields each,
+crossing into a client whose arithmetic is already native.

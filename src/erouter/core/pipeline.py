@@ -488,6 +488,7 @@ def prepare(
 
     return Prepared(
         arcs=arcs, ladders=ladders, nu=nu, src_node=src_node, dst_node=dst_node,
+        resident=_Resident.build(ladders) if _ACCEL_ON else None,
         pool_names={a.pool.lower(): a.note for a in arcs},
         counters=dict(scratch.counters), warnings=list(scratch.warnings),
         block=_client_block(client),
@@ -541,6 +542,10 @@ class Prepared:
     nu: np.ndarray
     src_node: int
     dst_node: int
+    #: The same ladders, held on the Rust side.  Built once here because the
+    #: handover is the only crossing they make; `None` without the extension,
+    #: which leaves refine on the Python path beside it.
+    resident: object | None = None
     pool_names: dict[str, str] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
@@ -643,6 +648,10 @@ def route(
         clone = copy.copy(ladder)
         clone.failures = dict(ladder.failures)
         ladders.append(clone)
+    # And the resident copy, which forks rather than being rebuilt: the same
+    # statement as above, on the side that holds the numbers.
+    resident = (prepared.resident.fork()
+                if _ACCEL_ON and prepared.resident is not None else None)
     nu = prepared.nu
     result.arcs = arcs
     result.nu = nu
@@ -660,7 +669,7 @@ def route(
         measure_impact=measure_impact, impact_fraction=impact_fraction,
         gas_table=gas_table, risk_table=risk_table,
                         revert_cost_bp=revert_cost_bp, leg_cost_bp=leg_cost_bp,
-        optimise_split=optimise_split,
+        optimise_split=optimise_split, resident=resident,
     )
 
 
@@ -686,6 +695,7 @@ def _quote(
     gas_price_wei: int,
     refit_rounds: int,
     prepared: Prepared | None,
+    resident: object | None = None,
     optimise_split: bool = True,
     max_legs: int = DEFAULT_MAX_LEGS,
     gas_table: GasTable | None = None,
@@ -739,16 +749,25 @@ def _quote(
             if not math.isfinite(whole) or whole <= 0:
                 continue
             sizes[arc.id] = [int(whole * f) for f in TRADE_GRID]
-        extra = plan_sized(ladders, sizes)
-        result.counters["probes_refined"] = len(extra)
-        if extra.probes:
-            merge(ladders, collect(extra, client.probe(extra.probes)))
-            refined = _recalibrate(arcs, ladders, nodes)
+        if resident is not None:
+            probes, planned = resident.plan(sizes)
+            result.counters["probes_refined"] = len(probes)
+            refined = 0
+            if probes:
+                resident.absorb(planned, client.probe(probes))
+                refined = _recalibrate_resident(arcs, resident, nodes)
+        else:
+            extra = plan_sized(ladders, sizes)
+            result.counters["probes_refined"] = len(extra)
+            refined = 0
+            if extra.probes:
+                merge(ladders, collect(extra, client.probe(extra.probes)))
+                refined = _recalibrate(arcs, ladders, nodes)
+        if refined:
             result.counters["arcs_refined"] = refined
-            if refined:
-                arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result)
-                g, Psi_scaled = scale(g, Psi)
-                seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
+            arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result)
+            g, Psi_scaled = scale(g, Psi)
+            seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
     result.arcs = arcs
     result.graph = g
 
@@ -1980,6 +1999,107 @@ class _Fitted(NamedTuple):
         return FlagReason(self.flag)
 
 
+class _Resident:
+    """The refine stage's ladders, held on the Rust side for its whole run.
+
+    The reference does the same work in Python and rebuilds every list to do
+    it: `plan_sized` reads the deltas, `collect` and `merge` rewrite them, and
+    the fit converts them twice -- once in `Ladder.as_float` and again in
+    `calibrate_many`.  Here they are handed over at the warm and never move.
+    Three crossings a quote: what is missing, what the chain said, the fits.
+
+    Identity stays in Python.  A `Probe` is addressed by a pool, a kind and two
+    coin indices, none of which is arithmetic, so this holds slots and the
+    caller maps them back to arcs.
+    """
+
+    __slots__ = ("pool", "refs", "slot")
+
+    def __init__(self, pool, refs):
+        self.pool = pool
+        self.refs = refs
+        self.slot = {ref.id: k for k, ref in enumerate(refs)}
+
+    @classmethod
+    def build(cls, ladders):
+        """The warm copy, or None where the extension cannot hold it."""
+        pool = _accel.ladders_from(ladders)
+        return None if pool is None else cls(pool, [lad.arc for lad in ladders])
+
+    def fork(self):
+        return _Resident(self.pool.fork(), self.refs)
+
+    def plan(self, sizes: dict) -> tuple[list, list]:
+        """`plan_sized`, as `(probes, slots)` in the order they were asked."""
+        slots, want, spans = [], [], [0]
+        for arc_id, wanted in sizes.items():
+            k = self.slot.get(arc_id)
+            if k is None or not wanted:
+                continue
+            slots.append(k)
+            want.extend(int(v) for v in wanted)
+            spans.append(len(want))
+        if not slots:
+            return [], []
+        at, deltas = self.pool.plan_sized(slots, want, spans)
+        probes = [Probe(self.refs[k].pool, self.refs[k].kind, self.refs[k].i,
+                        self.refs[k].j, self.refs[k].n_coins, d)
+                  for k, d in zip(at, deltas, strict=True)]
+        return probes, (at, deltas)
+
+    def absorb(self, planned, results) -> None:
+        """Fold the answers back in, counting refusals rather than recording
+        them as zero -- `a = 0` reads as a valid quote and NaNs the fit."""
+        at, deltas = planned
+        names: list[str] = []
+        values, status = [], []
+        for got in results:
+            state = getattr(got, "status", None)
+            value = int(getattr(got, "value", 0) or 0)
+            if state is not None and state.name != "VALUE":
+                if state.name not in names:
+                    names.append(state.name)
+                status.append(names.index(state.name) + 1)
+                values.append(0)
+                continue
+            status.append(0)
+            values.append(max(0, value))
+        self.pool.absorb(at, deltas, values, status, names)
+
+    def fits(self, arcs, drift_tol: float):
+        """`(arc, fit)` for every arc whose ladder can carry one."""
+        at = [self.slot[arc.id] for arc in arcs if arc.id in self.slot]
+        owners = [arc for arc in arcs if arc.id in self.slot]
+        got = self.pool.recalibrate(at, drift_tol)
+        return zip(owners, got, strict=True)
+
+
+def _recalibrate_resident(arcs, resident, nodes: NodeMap) -> int:
+    """`_recalibrate`, reading the ladders where they already are."""
+    changed = 0
+    for arc, got in resident.fits(arcs, DRIFT_TOL):
+        if got is None:
+            continue
+        fit = _Fitted(*got)
+        changed += _apply_fit(arc, fit, nodes)
+    return changed
+
+
+def _apply_fit(arc: PoolArc, fit, nodes: NodeMap) -> int:
+    """Write one fit onto its arc, in the units the graph is built in."""
+    a, B = rescale(fit.a, fit.B, nodes.rate(arc.token_in), nodes.rate(arc.token_out))
+    arc.a, arc.B = a, B
+    # **A cap only ever tightens.**  A fit can discover a wall the ladder
+    # walked into; it cannot know about a capacity the curve does not show.
+    fitted = (fit.cap * nodes.rate(arc.token_in)
+              if math.isfinite(fit.cap) else math.inf)
+    arc.cap = min(arc.cap, fitted)
+    arc.clamped, arc.convex_flag = fit.clamped, fit.convex_flag
+    arc.flag_reason, arc.drift, arc.eta = fit.flag_reason, fit.drift, fit.eta
+    arc.calib_delta = fit.calib_delta
+    return 1
+
+
 def _recalibrate(arcs: list[PoolArc], ladders, nodes: NodeMap) -> int:
     """Re-fit the arcs whose ladders just gained points."""
     by_id = {lad.arc.id: lad for lad in ladders}
@@ -2009,23 +2129,12 @@ def _recalibrate(arcs: list[PoolArc], ladders, nodes: NodeMap) -> int:
                                 quantum=_quantum(ladder.arc.decimals_out))
             except CalibrationError:
                 continue
-        a, B = rescale(fit.a, fit.B, nodes.rate(arc.token_in), nodes.rate(arc.token_out))
-        arc.a, arc.B = a, B
-        # **A cap only ever tightens.**  A fit can discover a wall the ladder
-        # walked into; it cannot know about a capacity the curve does not show.
-        # `maxDeposit` is exactly that: USD3 answers `previewDeposit` linearly
-        # at every probe size and refuses the deposit past 1,085 USDC, so the
-        # ladder sees no wall, `fit.cap` comes back infinite, and assigning it
-        # here erased the limit `wrappers.py` had read off the chain.  The route
-        # then sent 9,985 USDC into it and reverted.  Same rule as the depth
-        # clamp below, which has always used `min`.
-        fitted = (fit.cap * nodes.rate(arc.token_in)
-                  if math.isfinite(fit.cap) else math.inf)
-        arc.cap = min(arc.cap, fitted)
-        arc.clamped, arc.convex_flag = fit.clamped, fit.convex_flag
-        arc.flag_reason, arc.drift, arc.eta = fit.flag_reason, fit.drift, fit.eta
-        arc.calib_delta = fit.calib_delta
-        changed += 1
+        # `maxDeposit` is why the cap only tightens: USD3 answers
+        # `previewDeposit` linearly at every probe size and refuses the deposit
+        # past 1,085 USDC, so the ladder sees no wall, `fit.cap` comes back
+        # infinite, and assigning it erased the limit `wrappers.py` had read off
+        # the chain.  The route then sent 9,985 USDC into it and reverted.
+        changed += _apply_fit(arc, fit, nodes)
     return changed
 
 
