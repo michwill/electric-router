@@ -750,11 +750,11 @@ def _quote(
                 continue
             sizes[arc.id] = [int(whole * f) for f in TRADE_GRID]
         if resident is not None:
-            probes, planned = resident.plan(sizes)
-            result.counters["probes_refined"] = len(probes)
+            at, deltas = resident.plan(sizes)
+            result.counters["probes_refined"] = len(deltas)
             refined = 0
-            if probes:
-                resident.absorb(planned, client.probe(probes))
+            if deltas:
+                resident.ask(client, at, deltas)
                 refined = _recalibrate_resident(arcs, resident, nodes)
         else:
             extra = plan_sized(ladders, sizes)
@@ -1999,6 +1999,22 @@ class _Fitted(NamedTuple):
         return FlagReason(self.flag)
 
 
+def _columns_of(quotes):
+    """Quote objects in the shape `probe_columns` answers in."""
+    values, status, names = [], [], []
+    for quote in quotes:
+        state = getattr(quote, "status", None)
+        value = int(getattr(quote, "value", 0) or 0)
+        values.append(max(0, value))
+        if state is not None and state.name != "VALUE":
+            if state.name not in names:
+                names.append(state.name)
+            status.append(names.index(state.name) + 1)
+        else:
+            status.append(0)
+    return values, status, names
+
+
 class _Resident:
     """The refine stage's ladders, held on the Rust side for its whole run.
 
@@ -2029,8 +2045,8 @@ class _Resident:
     def fork(self):
         return _Resident(self.pool.fork(), self.refs)
 
-    def plan(self, sizes: dict) -> tuple[list, list]:
-        """`plan_sized`, as `(probes, slots)` in the order they were asked."""
+    def plan(self, sizes: dict):
+        """`plan_sized`, as the slots and sizes still to ask for."""
         slots, want, spans = [], [], [0]
         for arc_id, wanted in sizes.items():
             k = self.slot.get(arc_id)
@@ -2041,29 +2057,32 @@ class _Resident:
             spans.append(len(want))
         if not slots:
             return [], []
-        at, deltas = self.pool.plan_sized(slots, want, spans)
-        probes = [Probe(self.refs[k].pool, self.refs[k].kind, self.refs[k].i,
-                        self.refs[k].j, self.refs[k].n_coins, d)
-                  for k, d in zip(at, deltas, strict=True)]
-        return probes, (at, deltas)
+        return self.pool.plan_sized(slots, want, spans)
 
-    def absorb(self, planned, results) -> None:
-        """Fold the answers back in, counting refusals rather than recording
-        them as zero -- `a = 0` reads as a valid quote and NaNs the fit."""
-        at, deltas = planned
-        names: list[str] = []
-        values, status = [], []
-        for got in results:
-            state = getattr(got, "status", None)
-            value = int(getattr(got, "value", 0) or 0)
-            if state is not None and state.name != "VALUE":
-                if state.name not in names:
-                    names.append(state.name)
-                status.append(names.index(state.name) + 1)
-                values.append(0)
-                continue
-            status.append(0)
-            values.append(max(0, value))
+    def ask(self, client, at, deltas) -> None:
+        """Put the plan to the client and fold the answers back in.
+
+        Columns where the client speaks them. A `Probe` is six fields and a
+        validating `__post_init__` -- 885 ns against 42 for the tuple under it
+        -- and this builds one per probe, 1,380 of them on a warm mainnet
+        quote, only to take a `Quote` object back for each. Neither carries
+        anything the ladders do not already hold in columns.
+        """
+        refs = self.refs
+        columns = getattr(client, "probe_columns", None)
+        if columns is not None:
+            values, status, names = columns(
+                [refs[k].pool for k in at], [refs[k].kind for k in at],
+                [refs[k].i for k in at], [refs[k].j for k in at],
+                [refs[k].n_coins for k in at], deltas)
+        else:
+            got = client.probe(
+                [Probe(refs[k].pool, refs[k].kind, refs[k].i, refs[k].j,
+                       refs[k].n_coins, d)
+                 for k, d in zip(at, deltas, strict=True)])
+            values, status, names = _columns_of(got)
+        # A refusal is counted, never recorded as a quote of zero: `a = 0`
+        # reads as a valid answer and NaNs the fit that follows.
         self.pool.absorb(at, deltas, values, status, names)
 
     def fits(self, arcs, drift_tol: float):

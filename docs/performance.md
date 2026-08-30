@@ -741,3 +741,40 @@ which are graph operations shared with the coarse pass and not refine's to
 move, and 4.04 of Python loops over probes and arcs. The probes are the larger
 half and the more portable: 1,380 objects built to carry six fields each,
 crossing into a client whose arithmetic is already native.
+
+### The probes, without the objects
+
+The half of refine's remaining Python that was refine's to move was the loop
+building `Probe` objects. Measured on its own: **885 ns to build one, against
+42 for the plain tuple underneath it** -- a dataclass with `slots`, `frozen`
+and a validating `__post_init__` -- and refine builds 1,380 a quote, then takes
+a `Quote` object back for each.
+
+So `ExactQuoterClient` grew a columnar twin. `probe_columns` takes six lists
+and answers three: values, a status code per probe, and the names those codes
+index. Zero means a value, so the common case carries no name at all. Objects
+are still built for the holes, because the inner client speaks `Probe` and a
+hole is two of 1,380 on a warm mainnet quote.
+
+Interleaved, columns against objects, both on the resident path:
+
+    arm                         refine ms   quote ms
+    columns                          4.47      58.67
+    Probe objects                    5.97      60.60
+    refine saved                     1.50
+    quote saved                                 1.94
+
+Same answer to the wei. The two spellings have to agree on all three paths at
+once -- the batch Rust serves, the Python fallback for a model the batch
+declines, and the delegation for a pool with no model -- and
+`test_probe_columns.py` reaches all three, with a test that asserts the vectors
+reach them rather than trusting that they do.
+
+**Refine, end to end: 12.45 ms to 4.47.** The ladders stopped moving, and then
+the probes stopped being objects. What is left in it is `seed_subgraph` and
+`_assemble`, which belong to the graph rather than to refine, and the fit's
+walk over 478 arcs to write nine fields onto each -- which cannot go while the
+arcs are Python objects.
+
+The whole-quote arms, for the record: **1.25x**, from 1.22 before this stage
+moved.

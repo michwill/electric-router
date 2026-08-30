@@ -32,7 +32,7 @@ from ..core.stableswap import StableSwapError, StableSwapLP
 from ..core.transport import Status
 from ..core.tricrypto import TricryptoError
 from ..core.twocrypto import TwocryptoError
-from ..core.types import ArcKind
+from ..core.types import ArcKind, Probe
 from ..core.vault import VaultError
 from ..core.walk import LegUnquotable, walk_route
 
@@ -269,6 +269,16 @@ class _Native:
         return self.pools.element_split(idx, i, j1, j2, dx)
 
 
+def _code(names: list[str], name: str) -> int:
+    """This status's index in `names`, appending it the first time.
+
+    One-based, so zero can mean "a value" without a name for the common case.
+    """
+    if name not in names:
+        names.append(name)
+    return names.index(name) + 1
+
+
 def _price(model, i: int, j: int, dx: int) -> int:
     """`get_dy`, through the model's float path when it has one.
 
@@ -387,6 +397,106 @@ class ExactQuoterClient:
         return getattr(self.client, name)
 
     # -- the one method that changes ---------------------------------------
+
+    def probe_columns(self, pools, kinds, ii, jj, nn, dx):
+        """`probe`, without the objects on either side of it.
+
+        A `Probe` is six fields and a validating `__post_init__`, and the
+        refine stage builds 1,380 of them a quote at 885 ns each -- against 42
+        for the tuple underneath. The answers cost the same again as `Quote`s.
+        Neither carries information the batch does not already have in columns,
+        so this takes and returns columns: `status` is 0 for a value and
+        otherwise an index into the names it returns.
+
+        Objects are still built for the holes, because the inner client speaks
+        `Probe` and a hole is rare -- two of 1,380 on a warm mainnet quote.
+
+        The reference is `probe` above and this must answer exactly what it
+        answers; `test_probe_columns_agrees` is what says so.
+        """
+        n = len(pools)
+        if not self.enabled or not self.exact:
+            probes = [Probe(pools[k], kinds[k], ii[k], jj[k], nn[k], dx[k])
+                      for k in range(n)]
+            return self._as_columns(self.probe(probes))
+
+        values: list[int] = [0] * n
+        status: list[int] = [0] * n
+        names: list[str] = []
+        holes: list[int] = []
+
+        models = [self._model(pools[k], kinds[k], ii[k], jj[k]) for k in range(n)]
+        native = self._native()
+        done: set[int] = set()
+        if native is not None:
+            which, bi, bj, bd, at = [], [], [], [], []
+            for k in range(n):
+                model = models[k]
+                if model is None:
+                    continue
+                idx = native.index_of(model)
+                if idx is None or dx[k] > native.MAX_AMOUNT:
+                    continue
+                which.append(idx)
+                bi.append(ii[k])
+                bj.append(jj[k])
+                bd.append(dx[k])
+                at.append(k)
+            if which:
+                for k, value in zip(at, native.price(which, bi, bj, bd),
+                                    strict=True):
+                    if value is None:
+                        continue
+                    values[k] = value
+                    status[k] = 0 if value > 0 else _code(names, "REVERTED")
+                    done.add(k)
+                self.stats.computed += len(done)
+
+        for k in range(n):
+            if k in done:
+                continue
+            model = models[k]
+            if model is None:
+                holes.append(k)
+                continue
+            try:
+                value = _price(model, ii[k], jj[k], dx[k])
+            except (StableSwapError, TwocryptoError, TricryptoError,
+                    VaultError, ZeroDivisionError, ValueError):
+                # A size the invariant cannot serve is a real answer -- the
+                # pool would revert too -- but a failure to converge is not
+                # something to guess at, so both go to the wire.
+                self.stats.failed += 1
+                holes.append(k)
+                continue
+            self.stats.computed += 1
+            values[k] = value
+            status[k] = 0 if value > 0 else _code(names, "REVERTED")
+
+        if holes:
+            self.stats.delegated += len(holes)
+            served = self.client.probe(
+                [Probe(pools[k], kinds[k], ii[k], jj[k], nn[k], dx[k])
+                 for k in holes])
+            for k, quote in zip(holes, served, strict=True):
+                state = getattr(quote, "status", None)
+                value = int(getattr(quote, "value", 0) or 0)
+                values[k] = max(0, value)
+                status[k] = (0 if state is None or state.name == "VALUE"
+                             else _code(names, state.name))
+        return values, status, names
+
+    @staticmethod
+    def _as_columns(quotes):
+        """A delegated answer, in the shape `probe_columns` returns."""
+        values, status, names = [], [], []
+        for quote in quotes:
+            state = getattr(quote, "status", None)
+            value = int(getattr(quote, "value", 0) or 0)
+            values.append(max(0, value))
+            status.append(0 if state is None or state.name == "VALUE"
+                          else _code(names, state.name))
+        return values, status, names
 
     def probe(self, probes):
         """Compute the stableswap probes; send the rest.
