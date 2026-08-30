@@ -1017,13 +1017,69 @@ why the gap went unnoticed -- the port got the same effect *by accident*, from
 the rounding its rank-1 Cholesky update leaves in `u`. Luck is not a mechanism.
 The perturbation is now ported and deliberate.
 
-That closed half of it. A residual divergence remains: on a restricted
-re-solve warm-started from a nearly-disjoint active set, the two take different
-pivot sequences, and it goes both ways -- the port cycles to PARTIAL where the
-reference converges in four pivots, and elsewhere the reference gives up at 58
-where the port converges at 54. Two of sixty-three restricted re-solves on the
-first generated universes. It is reproduced and `xfail`ed in
-`test_solve_differential`, not absorbed as a tolerance, because it changes
+That closed half of it, and the other half turned out not to be a porting
+error at all.
+
+### Backward stability is not enough when a threshold reads the answer
+
+The remaining divergence was on a restricted re-solve warm-started from a
+nearly-disjoint active set: the two took different pivot sequences, both ways
+-- the port cycling to PARTIAL where the reference converged in four, the
+reference giving up at 58 where the port converged at 54.
+
+Traced pivot by pivot, the fork is one number. Both admit arc 15, then arc 10;
+at `A = {5, 10, 15}` the reference reads `psi[10] = -4.11e-11` and the port
+reads `-1.4986e-9`, against `TOL = 1e-9`. So the reference keeps the arc and
+admits arc 3; the port drops it. Everything after that is two solvers solving
+different problems.
+
+Solved in exact rationals, the truth is `psi[10] = +1.03e-10` -- *positive*,
+and neither of them got the sign right. `cond(L)` is 1.6e4, which is nothing.
+The mechanism is the multiplication, not the conditioning: `psi = G (u_tau -
+u_sig - eps)` is a small difference of larger numbers times a conductance
+running to 1e8, so a residual of `9.3e-10` in `u` -- exactly what backward
+stability promises and no more -- arrives in `psi` at about `TOL`, the very
+threshold the drop rule reads. numpy happened to leave zero there. The rank-1
+Cholesky chain happened to leave 9.3e-10. Neither is wrong; the algorithm was
+asking a backward-stable solve for a forward-accurate answer.
+
+**Fix: iterative refinement** (`REFINE_STEPS = 3`), in both implementations.
+Correct the solve against its own residual, stop as soon as a step fails to
+shrink it. Restricted re-solves that disagree went **2 of 63 to 0 of 120**, and
+it is *faster* -- 5.4 to ~4.8 us/solve, because an accurate `u` wastes fewer
+pivots than the refinement costs. The old `xfail` is now a passing regression
+test.
+
+Two notes on where it sits and what it costs:
+
+* It runs **after** the rank-1 drift guard, not before. Refining first would
+  mend the answer and leave the factor drifting, so `REFACTOR_RESIDUAL` would
+  never fire and the drift would compound. The guard prices the raw solve; the
+  refinement then cleans up whatever the guard let stand.
+* Mirroring it into `core/linalg.py` changes no measured result -- numpy's
+  residual on these systems is already exactly zero, so `refine` returns on its
+  first iteration. It is there because the two implementations must describe
+  one algorithm, not because the reference needed it.
+
+One visible consequence: on seed 3 the port now reaches the same ballot in 37
+pivots where the reference spends 39, having skipped a drop-and-re-admit pair
+the reference still pays for. `test_candidates_differential` keeps `solves`,
+`skipped` and `skipped_wide` exact and bounds `pivots`, because `pivots` counts
+steps of the numerical path and the two kernels are different by design.
+
+### What is left: over-constrained pins
+
+One divergence survives, and it is not the same animal. Pin a route at 2x or 4x
+its unconstrained optimum -- outside the sweep of §6.3 -- and the two take
+different pivot paths through a degenerate program. Refinement moves this by
+exactly nothing, which is the evidence that it is not an accuracy problem.
+
+Measured across 112 pinned re-solves: at `maxit = 60`, 27-28 differ, but 18-19
+of those are both-PARTIAL -- the two ran out of *budget* in different places,
+which is not disagreement. Raise it to `maxit = 600` and 10 differ; the
+reference converges on all ten, the port on two, and 4 of the ten are the
+rank-1 chain. It is reproduced and `xfail`ed in `test_solve_differential` (6
+pins across seeds 3, 8 and 11), not absorbed as a tolerance, because it changes
 *which candidates reach the ballot* and a candidate that is never generated is
 a route the user never sees.
 

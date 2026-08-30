@@ -141,33 +141,34 @@ def test_the_flow_matches_where_the_optimum_is_unique(name):
     )
 
 
-def test_a_restricted_resolve_from_a_narrow_warm_start_still_diverges():
-    """A known divergence in the ported solver, recorded rather than hidden.
+def test_a_restricted_resolve_from_a_narrow_warm_start_agrees():
+    """A regression test for a divergence that used to be xfailed here.
 
-    Found while differing `candidates`: a candidate is a *restricted* re-solve
-    warm-started from the base optimum's acyclic support, and when that support
-    is almost entirely forbidden the two solvers take different pivot
-    sequences.  The reference converges in four pivots; the port cycles and
-    returns PARTIAL on a single arc.
+    A candidate is a *restricted* re-solve warm-started from the base optimum's
+    acyclic support.  When that support is almost entirely forbidden, the two
+    solvers used to take different pivot sequences: the reference converged in
+    four pivots and the port cycled out to PARTIAL on a single arc.
 
-    Two of sixty-three restricted re-solves over ten generated universes, so it
-    is rare -- but it is not noise: it changes which candidates reach the
-    ballot, and a candidate that is never generated is a route the user never
-    sees.
+    The cause was not the pivot rule.  `psi = G (u_tau - u_sig - eps)` is a
+    small difference of larger numbers times a conductance running to 1e8, so a
+    residual of `||L|| ||u|| eps` -- all backward stability promises -- lands in
+    `psi` at about `TOL`.  Measured on this very system: `cond(L)` is only
+    1.6e4, numpy's LU left a residual of exactly zero and the port's factored
+    solve left 9.3e-10, which put a degenerate arc's flow at -1.5e-9 here
+    against -4.1e-11 there.  One side of `TOL` each, and from there the pivot
+    sequences part.  Solved by rational arithmetic on the same floats, the true
+    flow is +1.0e-10: the arc carries nothing, positively.
 
-    Half of it is already fixed.  The reference perturbs a cycling basis
-    (`PERTURB_ROUNDS`) and the port had no such step at all -- it relied on the
-    rounding its rank-1 Cholesky update happens to leave in `u`, which
-    `core/solve.py` says in as many words is luck rather than a mechanism.  The
-    port now perturbs deliberately, which moved this case from six pivots to
-    fourteen without settling it, so the remaining difference is upstream of
-    the anti-cycling and in the pivot rule itself.
+    The port now runs iterative refinement on every solve, which costs a matvec
+    and a triangular solve against a factor already in hand -- and *saves* time
+    overall, because an accurate `u` wastes fewer pivots.  Over the ten
+    generated universes, restricted re-solves went from two disagreements in
+    sixty-three to none in a hundred and twenty.
 
-    Marked `xfail` rather than deleted: it is the reproducer, and it is what
-    will say when the pivot rules are brought back together.
+    `rust/src/solve.rs` pins the same system as a unit test, at the level of
+    the decision it used to get wrong.
     """
     import numpy as np
-    import pytest as _pytest
 
     from erouter.core.realize import cancel_cycles
     from erouter.core.solve import active_set_solve
@@ -212,7 +213,104 @@ def test_a_restricted_resolve_from_a_narrow_warm_start_still_diverges():
                         forbidden=[bool(v) for v in forbidden],
                         min_flow=1e-4, maxit=60, partial_ok=True)
     theirs = np.frombuffer(got["psi"], dtype=np.float64)
-    if not np.allclose(ours.psi, theirs, atol=1e-6):
-        _pytest.xfail("known: the port cycles to PARTIAL where the reference "
-                      "converges; see this test's docstring")
-    assert np.allclose(ours.psi, theirs, atol=1e-6)
+
+    assert ours.reason == "" and got["reason"] == "", (ours.reason, got["reason"])
+    assert ours.pivots == got["pivots"] == 4
+    assert np.allclose(ours.psi, theirs, atol=1e-6), (ours.psi, theirs)
+
+
+def test_an_over_constrained_pin_still_diverges():
+    """What is left of the solver divergence, recorded rather than hidden.
+
+    §6.3's pin sweep deliberately over-constrains: it forces an arc to carry
+    `{0, 1/8, 1/4, 1/2, 1, 2, 4}` times what the relaxation gave it, because
+    the model's *allocation* is the thing not to be trusted.  The 2x and 4x
+    pins put the program in a degenerate region where the pivot sequence runs
+    forty to sixty steps, and there the two solvers part.
+
+    Measured over ten generated universes, 112 pinned re-solves:
+
+    * at `CANDIDATE_PIVOTS` (60), 27 disagree -- but 19 of those are *both*
+      sides returning PARTIAL, which is the pivot budget stopping them in
+      different places rather than a disagreement about the answer.  That
+      distinction was missing when this was first written down, and it is most
+      of the number;
+    * with the budget lifted to 600, 10 disagree.  The reference converges on
+      all ten; the port converges on two and returns PARTIAL or refuses on the
+      rest;
+    * four of those ten are the rank-1 Cholesky chain: with `rank1` off the
+      count is five.
+
+    This is *not* the accuracy problem that
+    `test_a_restricted_resolve_from_a_narrow_warm_start_agrees` documents.
+    Iterative refinement fixed that one completely and moves this one by
+    nothing at all.  It is a pivot-path divergence in a degenerate program,
+    where a difference far below any tolerance is amplified over dozens of
+    pivots.
+
+    Swept over seeds rather than pinned to one, because it is a class: on this
+    generator, three universes in twelve carry at least one.
+
+    Marked `xfail` because it is the reproducer, and it matters -- a pinned
+    candidate the port cannot solve never reaches the ballot, and the pin sweep
+    exists precisely to find the splits the model would otherwise get wrong.
+    """
+    import erouter_solve
+    import numpy as np
+    import pytest as _pytest
+
+    from erouter.core.realize import cancel_cycles
+    from erouter.core.solve import active_set_solve
+
+    def universe(seed):
+        rng = np.random.default_rng(seed)
+        n = 5
+        tau, sig, a, B = [], [], [], []
+        for tail in range(n):
+            for head in range(n):
+                if tail == head:
+                    continue
+                for _ in range(1 + int(rng.integers(0, 2))):
+                    tau.append(tail)
+                    sig.append(head)
+                    a.append(float(rng.uniform(0.980, 0.999)))
+                    B.append(float(np.exp(rng.uniform(np.log(1e-7), np.log(1e-5)))))
+                    rng.uniform(1e20, 1e24)  # the reserve draw, so the stream
+                    rng.uniform(1e6, 1e8)    # and the TVL draw, line up
+        return graph.build(np.array(tau, np.int64), np.array(sig, np.int64),
+                           np.array(a, float), np.array(B, float), np.ones(n),
+                           1.0, n_nodes=n, merge_duplicates=False)
+
+    disagreed = []
+    for seed in range(12):
+        g = universe(seed)
+        base = active_set_solve(g, 0, 4, 1.0)
+        acyclic, _ = cancel_cycles(g.tau, g.sig, base.psi)
+        problem = erouter_solve.Problem(
+            [int(v) for v in g.tau], [int(v) for v in g.sig],
+            [float(v) for v in g.G], [float(v) for v in g.eps],
+            [float(v) for v in g.cap], g.n_nodes)
+        for idx in [k for k in range(g.m) if base.psi[k] > 0][:6]:
+            for step in (2.0, 4.0):
+                pin = min(base.psi[idx] * step, g.cap[idx])
+                if pin <= 0:
+                    continue
+                ours = active_set_solve(
+                    g, 0, 4, 1.0, A0=np.flatnonzero(acyclic > 0),
+                    forbidden=np.zeros(g.m, bool), forced_upper={idx: pin},
+                    min_flow=1e-4, maxit=600, partial_ok=True)
+                got = problem.solve(
+                    0, 4, 1.0, a0=[bool(v) for v in (acyclic > 0)],
+                    forbidden=[False] * g.m, pinned=[(idx, pin)],
+                    min_flow=1e-4, maxit=600, partial_ok=True)
+                theirs = np.frombuffer(got["psi"], dtype=np.float64)
+                if not np.allclose(ours.psi, theirs, atol=1e-6):
+                    disagreed.append((seed, idx, step, ours.reason or "OK",
+                                      str(got["reason"]) or "OK"))
+
+    if disagreed:
+        _pytest.xfail(
+            f"known: {len(disagreed)} over-constrained pin(s) diverge across "
+            f"{len({d[0] for d in disagreed})} universes, e.g. {disagreed[0]}; "
+            f"see this test's docstring")
+    assert not disagreed

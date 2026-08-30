@@ -175,9 +175,8 @@ fn assemble(arcs: &Arcs, active: &[bool], index: &[usize], k: usize) -> Vec<f64>
 
 /// `max|b - A x| / max|b|`, with `A x` taken straight off the arcs so no copy
 /// of the matrix has to be kept alive to check the solve.
-fn residual_ratio(
-    arcs: &Arcs, active: &[bool], index: &[usize], b: &[f64], x: &[f64],
-) -> f64 {
+/// `b - L x`, over the arc list rather than an assembled matrix.
+fn residual(arcs: &Arcs, active: &[bool], index: &[usize], b: &[f64], x: &[f64]) -> Vec<f64> {
     let mut r = b.to_vec();
     for p in 0..arcs.m() {
         if !active[p] {
@@ -194,9 +193,66 @@ fn residual_ratio(
             r[c] += f;
         }
     }
+    r
+}
+
+fn residual_ratio(
+    arcs: &Arcs, active: &[bool], index: &[usize], b: &[f64], x: &[f64],
+) -> f64 {
+    let r = residual(arcs, active, index, b, x);
     let num = r.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let den = b.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     if den > 0.0 { num / den } else { num }
+}
+
+/// One step of iterative refinement: solve, measure what is left over, solve
+/// for the correction, add it.
+///
+/// **Why this is not optional here.** `psi = G (u_tau - u_sig - eps)` is a
+/// small difference of larger numbers multiplied by a conductance that runs to
+/// 1e8, so a backward-stable `u` -- residual `~ ||L|| ||u|| eps` -- still
+/// leaves noise of order 1e-9 in `psi`. That is exactly `TOL`, the threshold
+/// the drop rule compares `psi` against, so on a degenerate arc the *rounding*
+/// decides whether an arc leaves the basis.
+///
+/// Measured on the case this was written for: a well-conditioned system
+/// (`cond = 1.6e4`) where the factored solve left a residual of 9.3e-10 and
+/// numpy's LU left zero, which put `psi` for a degenerate arc at -1.5e-9 here
+/// against -4.1e-11 there -- one side of `TOL` each, and from there the two
+/// solvers took different pivots and different answers.
+///
+/// Each step squares the residual's relative size, so one is usually enough --
+/// but the factor a rank-1 chain hands over is a *drifted* one, and refining
+/// against it converges rather than corrects in a single stroke. So it
+/// iterates, and stops as soon as the residual stops shrinking: there is no
+/// point chasing below the working precision, and a step that does not help is
+/// the signal that it has been reached.
+///
+/// Each step costs a matvec over the arc list and one triangular solve against
+/// a factor already in hand, against the `O(k^3/6)` of a factorisation.
+const REFINE_STEPS: usize = 3;
+
+fn refine(
+    arcs: &Arcs, active: &[bool], index: &[usize], factor: &[f64], k: usize,
+    b: &[f64], x: &mut [f64],
+) {
+    let norm = |v: &[f64]| v.iter().fold(0.0f64, |m, e| m.max(e.abs()));
+    let mut best = f64::INFINITY;
+    for _ in 0..REFINE_STEPS {
+        let mut correction = residual(arcs, active, index, b, x);
+        let size = norm(&correction);
+        if size == 0.0 || !(size < best) {
+            return;
+        }
+        best = size;
+        chol::solve_factored(factor, &mut correction, k);
+        if correction.iter().any(|v| !v.is_finite()) {
+            return;
+        }
+        for (value, delta) in x.iter_mut().zip(correction.iter()) {
+            *value += delta;
+        }
+    }
 }
 
 /// Section timers for the pivot loop, compiled only under `--features bench`.
@@ -542,6 +598,12 @@ pub fn active_set_solve(
                 // real graph where refactorising gave 6.7e-9.  So the answer
                 // is priced, not trusted -- the residual is O(m), a rebuild is
                 // O(k^3/6), and only a solve that has actually gone off pays.
+                //
+                // Priced *before* refinement, deliberately. Refining first
+                // would mend the answer and leave the factor drifting, so the
+                // guard would stop firing and the next update would compound
+                // on a factor nothing had rebuilt. The residual is the drift
+                // detector; refinement is what happens after it has spoken.
                 if updated
                     && residual_ratio(arcs, &active, &index, &b0, &vec_b)
                         > REFACTOR_RESIDUAL
@@ -555,6 +617,9 @@ pub fn active_set_solve(
                     } else {
                         factor_l.clear();
                     }
+                }
+                if !factor_l.is_empty() {
+                    refine(arcs, &active, &index, &factor_l, k, &b0, &mut vec_b);
                 }
             }
             // A let-chain would collapse these, at the cost of putting a
@@ -775,6 +840,87 @@ mod tests {
         n: usize,
     ) -> Arcs<'a> {
         Arcs { tau, sig, g, eps, cap, n_nodes: n }
+    }
+
+    #[test]
+    fn refinement_recovers_what_a_backward_stable_solve_leaves_behind() {
+        // The system this was written for, lifted whole out of the graph that
+        // exposed it -- three arcs of a five-node universe, mid-solve.
+        //
+        // `psi = G (u_tau - u_sig - eps)` is a small difference of larger
+        // numbers times a conductance running to 7.5e7, so a residual of
+        // `||L|| ||u|| eps` -- which is all backward stability promises --
+        // arrives in `psi` at about `TOL`. That is the threshold the drop rule
+        // reads, so without refinement the *rounding* decides whether an arc
+        // leaves the basis: here it put a degenerate arc's flow at -1.5e-9
+        // against the reference's -4.1e-11, one side of `TOL` each, and the
+        // two solvers took different pivots from there on.
+        //
+        // The exact answer, by rational arithmetic on these same floats, is
+        // psi = [0.9999999999041133, +1.03e-10, 0.0]: the middle arc carries
+        // nothing, and it carries nothing *positively*.
+        let k = 3usize;
+        let (tau, sig) = (vec![0i64, 1, 2], vec![4i64, 4, 1]);
+        let g = vec![20566243.822230134, 19265.573051925378, 75304206.93453227];
+        let eps = vec![
+            -0.05663580565635273, -0.008975713747493064, -0.10838690922843708,
+        ];
+        let cap = vec![f64::INFINITY; 3];
+        let arcs = Arcs { tau: &tau, sig: &sig, g: &g, eps: &eps, cap: &cap, n_nodes: 5 };
+        let active = vec![true; 3];
+        let index = vec![0usize, 1, 2, usize::MAX, usize::MAX];
+        let b = vec![-1164784.788196991, 8161817.319263696, -8161990.241532591];
+
+        let mut factor = assemble(&arcs, &active, &index, k);
+        assert!(chol::factor(&mut factor, k));
+        let mut plain = b.clone();
+        chol::solve_factored(&factor, &mut plain, k);
+        let mut refined = plain.clone();
+        refine(&arcs, &active, &index, &factor, k, &b, &mut refined);
+
+        // What each answer says about the degenerate arc, which is the whole
+        // question: `TOL` is 1e-9 and the drop rule reads `psi < -TOL`.
+        let flow = |u: &[f64], p: usize| {
+            let at = |node: i64| {
+                let slot = index[node as usize];
+                if slot == usize::MAX { 0.0 } else { u[slot] }
+            };
+            g[p] * (at(tau[p]) - at(sig[p]) - eps[p])
+        };
+        assert!(flow(&plain, 1) < -TOL, "the fixture is supposed to trip it");
+        assert!(
+            flow(&refined, 1) > -TOL,
+            "still tripping at {:e}", flow(&refined, 1)
+        );
+        // And it is not merely inside the tolerance but the right sign.
+        assert!(flow(&refined, 1) > 0.0, "{:e}", flow(&refined, 1));
+    }
+
+    #[test]
+    fn refinement_stops_when_it_stops_helping() {
+        // Powers of two throughout, so the factorisation and both triangular
+        // solves are exact and there is genuinely nothing to correct. The loop
+        // has to notice rather than spend its budget adding zeros -- and it
+        // must not wander off a correct answer.
+        let k = 2usize;
+        let (tau, sig) = (vec![0i64, 1], vec![2i64, 2]);
+        let g = vec![4.0, 16.0];
+        let eps = vec![0.0; 2];
+        let cap = vec![f64::INFINITY; 2];
+        let arcs = Arcs { tau: &tau, sig: &sig, g: &g, eps: &eps, cap: &cap, n_nodes: 3 };
+        let active = vec![true; 2];
+        let index = vec![0usize, 1, usize::MAX];
+        let mut factor = assemble(&arcs, &active, &index, k);
+        assert!(chol::factor(&mut factor, k));
+
+        let b = vec![4.0, 16.0];
+        let mut x = b.clone();
+        chol::solve_factored(&factor, &mut x, k);
+        assert_eq!(x, vec![1.0, 1.0], "the fixture is supposed to solve exactly");
+        assert_eq!(residual_ratio(&arcs, &active, &index, &b, &x), 0.0);
+
+        refine(&arcs, &active, &index, &factor, k, &b, &mut x);
+        assert_eq!(x, vec![1.0, 1.0], "an exact solve must be left alone");
     }
 
     #[test]

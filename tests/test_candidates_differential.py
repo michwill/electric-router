@@ -326,13 +326,32 @@ def test_the_same_candidates_are_generated_in_the_same_order(seed):
 
 @pytest.mark.parametrize("seed", SEEDS)
 def test_the_generator_took_the_same_path_not_just_the_same_place(seed):
+    """How the ballot was reached, not just what it is.
+
+    `solves`, `skipped` and `skipped_wide` are exact: they count decisions the
+    generator made, and every one of those is structural.
+
+    `pivots` is not, and the equality this was first written with was too
+    strong a claim.  It counts steps of the *numerical* path, so it depends on
+    the linear algebra underneath -- and the two kernels are deliberately
+    different (`rust/README.md` rules out BLAS; numpy's OpenBLAS is
+    `DYNAMIC_ARCH` and threaded).  Measured over these ten universes the counts
+    agree on nine and differ by two out of thirty-nine on the tenth, where the
+    port's iterative refinement saves it a drop-and-re-admit pair the reference
+    still spends: numpy's residual there is already exactly zero, so refinement
+    has nothing left to correct and cannot follow.
+
+    Same ballot, same flows, same solves -- two fewer steps to reach them.  So
+    the bound is a small absolute one, which still catches a generator that has
+    started wandering while admitting a kernel difference that is there by
+    design.
+    """
     skip_where_the_solver_diverges(seed)
-    """`solves` and `pivots` say how the ballot was reached, not what it is."""
     *_, want, got = both_ballots(seed)
     assert got.solves == want.solves
-    assert got.pivots == want.pivots
     assert got.skipped == want.skipped
     assert got.skipped_wide == want.skipped_wide
+    assert abs(got.pivots - want.pivots) <= 4, (got.pivots, want.pivots)
 
 
 @pytest.mark.parametrize("budget", [1, 3, 6, 12, 20])
@@ -428,8 +447,8 @@ def test_the_same_candidates_are_put_up_for_quoting(seed):
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("gas_price", [0, 45_000_000, 5_000_000_000])
 def test_ranking_agrees(seed, gas_price):
-    skip_where_the_solver_diverges(seed)
     """Hand-set quotes, so this isolates the ranking from the chain."""
+    skip_where_the_solver_diverges(seed)
     import erouter_solve
 
     want, got = realized(seed)
@@ -463,8 +482,8 @@ def test_ranking_agrees(seed, gas_price):
 
 @pytest.mark.parametrize("seed", SEEDS[:5])
 def test_ranking_agrees_with_a_risk_table(seed):
-    skip_where_the_solver_diverges(seed)
     """The survival term, which multiplies rather than subtracts."""
+    skip_where_the_solver_diverges(seed)
     import erouter_solve
 
     want, got = realized(seed)
