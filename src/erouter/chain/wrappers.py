@@ -609,7 +609,7 @@ def build_transmuter_arcs(
 
 
 def build_stake_arcs(
-    nodes: NodeMap, chain: Chain, client: QuoterClient
+    nodes: NodeMap, chain: Chain, client: QuoterClient, facts=None
 ) -> list[PoolArc]:
     """One-way instant conversions, as capped linear arcs.
 
@@ -646,6 +646,14 @@ def build_stake_arcs(
         {v.lower() for v in chain.oneway_vaults if nodes.has(v.lower())}
         | set(mintable_vaults(nodes, client, chain.chain_id))
     )
+    # `maxDeposit` is a view and a whitelist is not in it: srRoyUSDC answers
+    # 2**256-1 and then refuses the router in a deposit hook.  Only executing
+    # finds that, which `facts` has already done -- `build_lending_arcs` gates
+    # on the same verdict.  `None` is untested, not refused, and stays.
+    refused = {address.lower()
+               for address, entry in (getattr(facts, "wrappers", None) or {}).items()
+               if entry.get("mint") is False}
+    vaults = [v for v in vaults if v not in refused]
     for vault in vaults:
         unit = 10 ** nodes.decimals(vault)
         calls.extend([

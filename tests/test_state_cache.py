@@ -7,12 +7,16 @@ and a pool whose layout is a function of state must be able to opt out.
 
 from __future__ import annotations
 
-import gzip
-import json
-
+import msgpack
 import pytest
 
+import erouter.chain.statecache as sc
 from erouter.chain.statecache import VERSION, StateCache
+
+
+def _decoded(path):
+    """The saved file as it sits on disk: msgpack under zstd, bytes not hex."""
+    return msgpack.unpackb(sc._zstd_decompress(path.read_bytes()), raw=False)
 
 POOL = "0x" + "a1" * 20
 OTHER = "0x" + "b2" * 20
@@ -64,8 +68,7 @@ def test_no_slot_values_are_ever_written(tmp_path):
     """The file is committed; a stored value would be wrong one block later."""
     cache = build(tmp_path)
     cache.save()
-    with gzip.open(cache.path, "rt", encoding="utf-8") as handle:
-        raw = json.load(handle)
+    raw = _decoded(cache.path)
     # `arc_needs` is slot *addresses* an arc reads outside its own pool -- the
     # same kind of thing as `wrapper_needs`, and equally not a value.
     assert set(raw) == {"version", "chain_id", "accounts", "code_of", "code",
@@ -73,10 +76,11 @@ def test_no_slot_values_are_ever_written(tmp_path):
                         "wrapper_sig", "arc_needs"}
     assert raw["version"] == VERSION
     # `accounts` maps to slot *keys* only.
-    assert all(isinstance(k, int) for keys in raw["accounts"].values() for k in keys)
+    assert all(isinstance(k, bytes) and len(k) == 32
+               for keys in raw["accounts"].values() for k in keys)
     # `wrapper_needs` is the same shape: which slots those stages read, never
     # what is in them.  `wrapper_sig` is a digest of the arcs they produced.
-    assert all(isinstance(k, int)
+    assert all(isinstance(k, bytes) and len(k) == 32
                for keys in raw["wrapper_needs"].values() for k in keys)
     assert isinstance(raw["wrapper_sig"], str)
 
@@ -95,11 +99,9 @@ def test_saving_twice_produces_an_identical_file(tmp_path):
 def test_a_format_change_re_learns_rather_than_guessing(tmp_path):
     cache = build(tmp_path)
     cache.save()
-    with gzip.open(cache.path, "rt", encoding="utf-8") as handle:
-        raw = json.load(handle)
+    raw = _decoded(cache.path)
     raw["version"] = VERSION + 1
-    with gzip.GzipFile(cache.path, "wb", mtime=0) as handle:
-        handle.write(json.dumps(raw).encode())
+    cache.path.write_bytes(sc._zstd_compress(msgpack.packb(raw, use_bin_type=True)))
     assert StateCache.load(1, "test", tmp_path).accounts == {}
 
 

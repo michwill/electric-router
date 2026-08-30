@@ -1,5 +1,8 @@
 """Electric Router -- optimal Curve routing as a linear resistor network with diodes.
 
+Copyright (C) 2026 Curve Finance.  Licensed under the GNU Affero General
+Public License, version 3 or later.  See LICENSE.
+
 `erouter.core`  pure Python + numpy, portable to Pyodide
 `erouter.dev`   CPython-only: RPC, boa, Curve API, CLI
 """

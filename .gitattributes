@@ -2,3 +2,4 @@
 # pack -- converting them would rewrite every commit hash, and the point here
 # is to stop the growth, not to reclaim what is already spent.
 *.gz filter=lfs diff=lfs merge=lfs -text
+*.msgpack filter=lfs diff=lfs merge=lfs -text

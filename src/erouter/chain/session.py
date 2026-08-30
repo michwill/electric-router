@@ -26,6 +26,7 @@ tracer: what neither can do is let a missing slot read as a plausible zero.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import time
 from dataclasses import dataclass, field
@@ -54,7 +55,10 @@ from .universe import (
 
 #: Where a `DataSource` is asked for each committed file.  Directory names
 #: match `data/` so one implementation can serve a checkout and a web root.
-STATE_FILE = "evm-state/{name}.json.gz"
+STATE_FILE = "evm-state/{name}.msgpack"
+#: Still read, so a checkout that predates the format change warms rather
+#: than starting cold.
+LEGACY_STATE_FILE = "evm-state/{name}.json.gz"
 EXACT_FILE = "exact/{name}.json"
 FACTS_FILE = "facts/{name}.json"
 QUOTER_FILE = "quoter/RouteQuoter.runtime.hex"
@@ -285,8 +289,10 @@ class RouterSession:
 
         say("caches", 0.0)
         name = self.chain.name.lower()
-        self.state = StateCache.from_bytes(
-            self.chain.chain_id, await self.data.load(STATE_FILE.format(name=name)))
+        blob = await self.data.load(STATE_FILE.format(name=name))
+        if blob is None:
+            blob = await self.data.load(LEGACY_STATE_FILE.format(name=name))
+        self.state = StateCache.from_bytes(self.chain.chain_id, blob)
         self.verdicts = ExactCache.from_bytes(
             self.chain.chain_id, await self.data.load(EXACT_FILE.format(name=name)))
         self.facts = FactsCache.from_bytes(
@@ -359,6 +365,20 @@ class RouterSession:
                 await self._settle(lambda: self._rebuild_models(
                     block, cache=ExactCache.from_bytes(self.chain.chain_id, None)))
             refresh_at(block)
+        # Gas moves with the block, and it is not a decoration: it sets the
+        # tie tolerance in `verify.score`, whose bucket 0 is sorted by fewest
+        # legs -- so the price decides how many legs a route may spend.  Read
+        # once at the warm and never again, a tab open since a quiet hour went
+        # on choosing routes sized for gas that had stopped applying: measured
+        # on ETH -> DOLA, 0.05 gwei buys ten legs where 0.2 buys five.
+        #
+        # Guarded, because this is the cheap half of a sweep that has already
+        # done the expensive part.  An endpoint that will not answer for the
+        # gas price should not cost the caller the state it did answer for;
+        # the old figure is stale but it is not wrong the way losing the
+        # re-read would be.
+        with contextlib.suppress(Exception):
+            self.gas_price_wei = await self._gas_price() or self.gas_price_wei
         # A preparation is a function of (universe, block); the pair has to be
         # re-prepared before the next quote is comparable to the last.
         self.prepared = None
@@ -466,11 +486,21 @@ class RouterSession:
 
         await self.evm.fill(self.rpc, price, block=hex(block), code_for=self._code_for)
         # An end-to-end bound *as well as* the per-leg ones, when the caller
-        # asks for one.  Taken off the route's own modelled figure, as the CLI
-        # does: `guaranteed_out` already discounts every leg's tolerance, so
-        # deriving it from that would compound the two.
-        min_out = (int(result.route.modelled_out * (1 - min_out_bp / 1e4))
-                   if min_out_bp else 0)
+        # asks for one.  Off `verified_out`, which is what the chain says the
+        # route pays and what the caller was shown -- a promise about the
+        # number on screen has to be measured from that number.
+        #
+        # It used to come off the route's modelled figure, and the model is
+        # not the chain: measured on ETH -> DOLA at block 25,846,510, the
+        # model stood 50.55 bp above what the route really paid, mostly on one
+        # volatile leg.  A 50 bp bound taken off it landed 0.30 bp *above* the
+        # output, so the call reverted on `min_out` at the dry run -- a
+        # promise nothing could keep, from a caller who had asked for 50 bp of
+        # room and been given none.  `guaranteed_out` is still the wrong
+        # reference for the opposite reason: it already discounts every leg's
+        # tolerance, so deriving from it would compound the two.
+        promised = result.verified_out or result.route.modelled_out
+        min_out = int(promised * (1 - min_out_bp / 1e4)) if min_out_bp else 0
         approvals = await self._needs_approvals(result.route, block)
         call = encode_route(
             result.route,
@@ -981,7 +1011,7 @@ class RouterSession:
         def stages():
             nodes, wrappers = build_node_map(
                 self.pools, self.chain, client, facts=self.facts, token_client=client)
-            stake = build_stake_arcs(nodes, self.chain, client)
+            stake = build_stake_arcs(nodes, self.chain, client, self.facts)
             stake = stake + build_transmuter_arcs(nodes, self.chain, client)
             stake = stake + build_lending_arcs(nodes, self.chain, client, self.facts)
             return nodes, wrappers, stake
@@ -1040,9 +1070,24 @@ class RouterSession:
         from .tricrypto_params import build_exact_tricrypto
         from .twocrypto_params import build_exact_twocrypto
         from .vault_params import build_exact_vaults
-        from .wrapper_params import build_exact_wrappers
+        from .wrapper_params import build_exact_lending, build_exact_wrappers
 
         measured = self.client
+
+        def _rate_wrappers(client):
+            """Every rate wrapper, in one table keyed by (token, direction).
+
+            wstETH and the cTokens are the same shape -- a ratio, gated by
+            reproducing what the chain answers -- and differ only in which
+            call establishes the ratio, so they share a table rather than
+            each having one.
+            """
+            got = build_exact_wrappers(self.chain.wsteth_pairs, client)
+            lending = build_exact_lending(self.stake_arcs, client)
+            got.by_key.update(lending.by_key)
+            got.checked += lending.checked
+            got.rejected.extend(lending.rejected)
+            return got
 
         def build(block: int = 0, cache=None):
             cache = self.verdicts if cache is None else cache
@@ -1070,7 +1115,7 @@ class RouterSession:
                 build_exact_vaults(vault_arcs, measured),
                 build_exact_lp(carrying, stable, measured),
                 build_exact_crypto_lp(carrying, crypto, measured),
-                build_exact_wrappers(self.chain.wsteth_pairs, measured),
+                _rate_wrappers(measured),
             )
 
         # The gate refuses a pool that will not reproduce its own quote, and

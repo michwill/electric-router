@@ -590,7 +590,7 @@ def _build_wrappers(load, chain, reader, facts, token_client=None):
 
     nodes, wrappers = build_node_map(load.pools, chain, reader, facts=facts,
                                      token_client=token_client)
-    stake = build_stake_arcs(nodes, chain, reader)
+    stake = build_stake_arcs(nodes, chain, reader, facts)
     stake = stake + build_transmuter_arcs(nodes, chain, reader)
     stake = stake + build_lending_arcs(nodes, chain, reader, facts)
     return nodes, wrappers, stake
@@ -1108,6 +1108,8 @@ def cmd_route(args: argparse.Namespace) -> int:
     # these match; a run whose fingerprint moved was handed a different market.
     print(f"  universe {load.fingerprint} · {len(load.pools)} pools · "
           f"{load.source} {load.age:.0f}s old")
+    print(f"  gas {gas_price_wei / 1e9:.4f} gwei"
+          f"{'' if args.gas_price is not None else ' (live)'}")
     if getattr(args, "timings", False):
         print(_boot_line(started))
     if not nodes.has(src) or not nodes.has(dst):
@@ -1471,7 +1473,10 @@ def _report_calldata(result, args, chain, nodes, dst, pools):
         return None
     min_out = 0
     if args.min_out_bp is not None:
-        min_out = int(result.route.modelled_out * (1 - args.min_out_bp / 1e4))
+        # Off what the chain says the route pays, not off the model: see
+        # `RouterSession.plan_call`, where the two stood 50 bp apart.
+        promised = result.verified_out or result.route.modelled_out
+        min_out = int(promised * (1 - args.min_out_bp / 1e4))
     try:
         call = encode_route(
             result.route, receiver=args.receiver,
@@ -1684,9 +1689,9 @@ def cmd_bench(args: argparse.Namespace) -> int:
     uncached = CachedQuoterClient(raw, chain.chain_id, rpc.block, enabled=False)
     resolve_dialects(load.pools, cached, chain)
     read_balances(load.pools, cached)
-    nodes, _ = build_node_map(load.pools, chain, cached,
-                              facts=FactsCache.load(chain.chain_id, chain.name.lower()))
-    stake = build_stake_arcs(nodes, chain, cached)
+    known = FactsCache.load(chain.chain_id, chain.name.lower())
+    nodes, _ = build_node_map(load.pools, chain, cached, facts=known)
+    stake = build_stake_arcs(nodes, chain, cached, known)
     # Leaving a lending wrapper, where `data/facts` says the protocol still
     # allows it.  Rides with the stake arcs: same shape, same treatment.
     stake = stake + build_lending_arcs(
@@ -1884,9 +1889,9 @@ def cmd_gascal(args: argparse.Namespace) -> int:
     setup = CachedQuoterClient(quoter_client(rpc, chain), chain.chain_id, rpc.block)
     resolve_dialects(load.pools, setup, chain)
     read_balances(load.pools, setup)
-    nodes, _ = build_node_map(load.pools, chain, setup,
-                              facts=FactsCache.load(chain.chain_id, chain.name.lower()))
-    stake = build_stake_arcs(nodes, chain, setup)
+    known = FactsCache.load(chain.chain_id, chain.name.lower())
+    nodes, _ = build_node_map(load.pools, chain, setup, facts=known)
+    stake = build_stake_arcs(nodes, chain, setup, known)
     # Leaving a lending wrapper, where `data/facts` says the protocol still
     # allows it.  Rides with the stake arcs: same shape, same treatment.
     stake = stake + build_lending_arcs(
@@ -2366,9 +2371,9 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     setup = quoter_client(recorder, chain)
     resolve_dialects(load.pools, setup, chain)
     read_balances(load.pools, setup)
-    nodes, _ = build_node_map(load.pools, chain, setup,
-                              facts=FactsCache.load(chain.chain_id, chain.name.lower()))
-    stake = build_stake_arcs(nodes, chain, setup)
+    known = FactsCache.load(chain.chain_id, chain.name.lower())
+    nodes, _ = build_node_map(load.pools, chain, setup, facts=known)
+    stake = build_stake_arcs(nodes, chain, setup, known)
     # Leaving a lending wrapper, where `data/facts` says the protocol still
     # allows it.  Rides with the stake arcs: same shape, same treatment.
     stake = stake + build_lending_arcs(

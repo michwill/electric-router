@@ -468,6 +468,10 @@ class ExactQuoterClient:
             return ONE_TO_ONE
         if kind in (ArcKind.ERC4626_DEPOSIT, ArcKind.ERC4626_REDEEM):
             return self.vaults.get(pool, kind) if self.vaults is not None else None
+        if kind in (ArcKind.LEND_MINT, ArcKind.LEND_REDEEM):
+            # A ratio too: the quoter computes `dx * rate / 1e18` from
+            # `exchangeRateStored`, so a model of it is exact by construction.
+            return self.wrappers.get(pool, kind) if self.wrappers is not None else None
         if kind in (ArcKind.WSTETH_WRAP, ArcKind.WSTETH_UNWRAP):
             # A ratio, in the same shape a vault answers in. Without one the
             # whole route carrying this leg goes to the EVM.

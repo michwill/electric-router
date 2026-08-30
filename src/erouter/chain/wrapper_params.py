@@ -22,9 +22,12 @@ the arithmetic we think it is.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 from ..core.codec import encode_call
+from ..core.probe import Probe
+from ..core.quoter import Status
 from ..core.transport import Call
 from ..core.types import ArcKind
 from ..core.vault import Vault
@@ -131,4 +134,82 @@ def build_exact_wrappers(pairs, client, *, quiet: bool = True) -> ExactWrappers:
                     for name, num, den in candidates[:1]
                     for x, w in list(zip(CHECK_SIZES, want, strict=True))[:1])
                 out.rejected.append((token, f"{kind.name}: no convention fits ({gap})"))
+    return out
+
+
+LEND_MINT = ArcKind.LEND_MINT
+LEND_REDEEM = ArcKind.LEND_REDEEM
+
+
+def build_exact_lending(arcs, client, *, quiet: bool = True) -> ExactWrappers:
+    """Model every lending direction that reproduces its own quote.
+
+    A cToken is a rate wrapper wearing yet another spelling. `wrappers.py`
+    already reads `exchangeRateStored()` -- it needs it for the arc's `a`, the
+    number the solver *chooses* on -- and the rate stopped there, so pricing a
+    leg on one of these arcs fell to the EVM exactly as wstETH did.
+
+    The gate here is stronger than the vaults' and the wstETH one, because
+    there is nothing to compare against but the quoter itself. Compound has no
+    `previewRedeem`; `RouteQuoter` computes the answer from the rate:
+
+        LEND_REDEEM   dx * rate // 1e18
+        LEND_MINT     dx * 1e18 // rate
+
+    So the probe *is* the quoter, and a model that matches it matches what a
+    route will be priced at. Which also answers the question this raised: the
+    rate is `exchangeRateStored`, not the accrued one `lending_params` builds
+    for the pool rates, so a model on the stored rate is right rather than
+    stale. The *router* executes `mint`/`redeem`, which accrue on chain -- but
+    that gap is between the quoter and execution and predates this.
+
+    The cap is attached rather than gated. `getCash()` is what the market can
+    pay a redemption out of, and the quoter does not apply it -- the same
+    reason `vault_params` carries `maxDeposit` a `previewDeposit` ignores: the
+    model is allowed to know something the preview does not.
+    """
+    out = ExactWrappers()
+    wanted = [(a.pool.lower(), a.kind, a.cap, a.decimals_in) for a in arcs
+              if a.kind in (LEND_MINT, LEND_REDEEM)]
+    if not wanted:
+        return out
+
+    seen = sorted({address for address, _k, _c, _d in wanted})
+    rates = client.raw([Call(a, encode_call("exchangeRateStored()")) for a in seen])
+    by_address = {}
+    for address, answer in zip(seen, rates, strict=True):
+        if answer.ok and answer.uint() > 0:
+            by_address[address] = answer.uint()
+
+    unit = 10**18
+    for address, kind, cap, decimals_in in wanted:
+        out.checked += 1
+        rate = by_address.get(address)
+        if rate is None:
+            out.rejected.append((address, f"{kind.name}: no exchangeRateStored"))
+            continue
+        num, den = (rate, unit) if kind is LEND_REDEEM else (unit, rate)
+
+        # Sizes in the *input* token's own units, so a 6-decimal underlying is
+        # not asked about amounts it cannot express.
+        scale = 10 ** max(0, decimals_in - 18)
+        sizes = [max(1, x * scale) for x in CHECK_SIZES] if scale > 1 else CHECK_SIZES
+        served = client.probe([Probe(address, kind, 0, 0, 0, x) for x in sizes])
+        if any(q.status is not Status.VALUE for q in served):
+            out.rejected.append((address, f"{kind.name}: the quoter would not answer"))
+            continue
+
+        model = Vault(num=num, den=den)
+        if all(model.convert(x) == q.value for x, q in zip(sizes, served, strict=True)):
+            room = 0 if not math.isfinite(cap) else int(cap * 10**decimals_in)
+            out.by_key[(address, kind)] = Vault(num=num, den=den, cap=max(0, room))
+            if not quiet:
+                print(f"  {address} {kind.name}: {num}/{den} cap {room}")
+        else:
+            first = next((x, q.value, model.convert(x))
+                         for x, q in zip(sizes, served, strict=True)
+                         if model.convert(x) != q.value)
+            out.rejected.append(
+                (address, f"{kind.name}: {first[0]} -> quoter {first[1]}, "
+                          f"model {first[2]}"))
     return out

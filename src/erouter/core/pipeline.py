@@ -583,6 +583,10 @@ def route(
         nodes=nodes,
     )
     clock = _Clock(result.timings)
+    # Gas is the other input `--block` does not pin, and it picks the route:
+    # a cheaper block buys more legs.  Recorded so two runs that disagree can
+    # be told apart.
+    result.counters["gas_price_wei"] = int(gas_price_wei)
 
     if not nodes.has(src_token) or not nodes.has(dst_token):
         raise RoutingError("source or destination token is not in the universe")

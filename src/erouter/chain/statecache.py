@@ -23,11 +23,115 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 VERSION = 1
+#: Magic bytes, because the name does not decide the format: a checkout may hold
+#: either while the app is still pinned to an older commit.
+GZIP_MAGIC = b"\x1f\x8b"
+ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
+#: -19 rather than --ultra -22: 2.6% larger, and this is rewritten every time a
+#: session learns a slot.
+ZSTD_LEVEL = 19
+SUFFIX = ".msgpack"
+LEGACY_SUFFIX = ".json.gz"
+
+
+def _zstd_compress(data: bytes) -> bytes:
+    """stdlib on 3.14 and in Pyodide, the wheel elsewhere.
+
+    `compression.zstd` is 3.14+, and Pyodide compiles libzstd into the runtime,
+    so the browser pays nothing for it.  The desktop venv here is 3.13.
+    """
+    try:
+        from compression import zstd
+        return zstd.compress(data, level=ZSTD_LEVEL)
+    except ImportError:
+        import zstandard
+        return zstandard.ZstdCompressor(level=ZSTD_LEVEL).compress(data)
+
+
+def _zstd_decompress(blob: bytes) -> bytes:
+    try:
+        from compression import zstd
+        return zstd.decompress(blob)
+    except ImportError:
+        import zstandard
+        return zstandard.ZstdDecompressor().stream_reader(io.BytesIO(blob)).read()
+
+
+def _hex(raw: bytes) -> str:
+    return "0x" + raw.hex()
+
+
+def _bin(text: str) -> bytes:
+    return bytes.fromhex(text[2:] if text.startswith("0x") else text)
+
+
+def _target(path: Path) -> Path:
+    """Read either format, always write the new one."""
+    return path.with_name(path.name.split(".")[0] + SUFFIX)
+
+
+def _to_binary(payload: dict) -> dict:
+    """Hex and integers out, bytes in.  A slot key is a 32-byte word, and
+    saying so costs nothing after zstd -- fixed and minimal width land within
+    900 bytes of each other, so the simpler one wins."""
+    def slots(values):
+        return [int(i).to_bytes(32, "big") for i in values]
+    return {
+        "version": payload["version"],
+        "chain_id": payload["chain_id"],
+        "accounts": {_bin(a): slots(s) for a, s in payload["accounts"].items()},
+        "code_of": {_bin(a): _bin(v) for a, v in payload["code_of"].items()},
+        "code": {_bin(k): bytes.fromhex(v) for k, v in payload["code"].items()},
+        "funded": [_bin(a) for a in payload["funded"]],
+        "pools": [_bin(a) for a in payload["pools"]],
+        "volatile": [_bin(a) for a in payload["volatile"]],
+        "wrapper_needs": {_bin(a): slots(v) for a, v in payload["wrapper_needs"].items()},
+        "wrapper_sig": payload["wrapper_sig"],
+        "arc_needs": {_bin(a): slots(v) for a, v in payload["arc_needs"].items()},
+    }
+
+
+def _from_binary(raw: dict) -> dict:
+    """Back to the shape the rest of the file already speaks."""
+    def slots(values):
+        return [int.from_bytes(x, "big") for x in values]
+    return {
+        "version": raw.get("version"),
+        "chain_id": raw.get("chain_id"),
+        "accounts": {_hex(a): slots(s) for a, s in raw.get("accounts", {}).items()},
+        "code_of": {_hex(a): _hex(v) for a, v in raw.get("code_of", {}).items()},
+        "code": {_hex(k): v.hex() for k, v in raw.get("code", {}).items()},
+        "funded": [_hex(a) for a in raw.get("funded", [])],
+        "pools": [_hex(a) for a in raw.get("pools", [])],
+        "volatile": [_hex(a) for a in raw.get("volatile", [])],
+        "wrapper_needs": {_hex(a): slots(v) for a, v in raw.get("wrapper_needs", {}).items()},
+        "wrapper_sig": raw.get("wrapper_sig", ""),
+        "arc_needs": {_hex(a): slots(v) for a, v in raw.get("arc_needs", {}).items()},
+    }
+
+
+def _decode(blob: bytes) -> dict | None:
+    """Whichever format the bytes are in, or `None` if they are neither.
+
+    Sniffed rather than named: `absorb` used to call `gzip.decompress`
+    unconditionally, so a payload in the other format raised `BadGzipFile` out
+    of the warm instead of degrading to the slow one `from_bytes` promises.
+    """
+    try:
+        if blob[:4] == ZSTD_MAGIC:
+            import msgpack
+            return _from_binary(msgpack.unpackb(_zstd_decompress(blob), raw=False))
+        if blob[:2] == GZIP_MAGIC:
+            return json.loads(gzip.decompress(blob).decode("utf-8"))
+    except Exception:
+        return None
+    return None
 # Committed, so it has to be small and it has to diff: slots are integers and
 # code is deduplicated by hash, which keeps a universe-wide file in the hundreds
 # of kilobytes.
@@ -86,11 +190,13 @@ class StateCache:
 
     @classmethod
     def load(cls, chain_id: int, name: str, directory: Path | None = None) -> StateCache:
-        path = (directory or DEFAULT_DIR) / f"{name}.json.gz"
+        base = directory or DEFAULT_DIR
+        path = base / f"{name}{SUFFIX}"
         cache = cls(chain_id=chain_id, path=path)
-        if not path.exists():
-            return cache
-        return cache.absorb(path.read_bytes())
+        for candidate in (path, base / f"{name}{LEGACY_SUFFIX}"):
+            if candidate.exists():
+                return cache.absorb(candidate.read_bytes())
+        return cache
 
     @classmethod
     def from_bytes(cls, chain_id: int, blob: bytes | None,
@@ -102,12 +208,14 @@ class StateCache:
         file is not there, or the fetch failed -- gives an empty cache, which
         is a slow warm rather than a failed one.
         """
-        cache = cls(chain_id=chain_id, path=path or (DEFAULT_DIR / "unnamed.json.gz"))
+        cache = cls(chain_id=chain_id, path=path or (DEFAULT_DIR / f"unnamed{SUFFIX}"))
         return cache.absorb(blob) if blob else cache
 
     def absorb(self, blob: bytes) -> StateCache:
-        """Fill from one `.json.gz` payload.  Returns self, for chaining."""
-        raw = json.loads(gzip.decompress(blob).decode("utf-8"))
+        """Fill from one payload in either format.  Returns self, for chaining."""
+        raw = _decode(blob)
+        if raw is None:
+            return self  # not a payload we know; a slow warm, not a failed one
         if raw.get("version") != VERSION or raw.get("chain_id") != self.chain_id:
             return self  # a stale format is not worth migrating; re-learn it
         self.accounts = {a: set(s) for a, s in raw.get("accounts", {}).items()}
@@ -195,11 +303,15 @@ class StateCache:
             "arc_needs": {a: sorted(v)
                           for a, v in sorted(self.arc_needs.items())},
         }
+        import msgpack
+
+        self.path = _target(self.path)
         tmp = self.path.with_suffix(".tmp")
-        # `mtime=0` so an unchanged cache produces a byte-identical file: this
-        # is committed, and a gzip header timestamp would make every save a diff.
-        with gzip.GzipFile(tmp, "wb", mtime=0) as raw:
-            raw.write(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
+        # Deterministic, so an unchanged cache is a byte-identical file and does
+        # not show up as a diff: the keys are sorted above and zstd at a fixed
+        # level is reproducible.
+        tmp.write_bytes(_zstd_compress(
+            msgpack.packb(_to_binary(payload), use_bin_type=True)))
         tmp.replace(self.path)
         self.dirty = False
 
