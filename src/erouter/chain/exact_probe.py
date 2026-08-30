@@ -759,7 +759,31 @@ class ExactQuoterClient:
         model = self._model(leg.target, leg.kind, leg.i, leg.j)
         if model is None:
             raise LegUnquotable(leg.target)
-        return _price(model, leg.i, leg.j, dx)
+        return self._price_one(model, leg.i, leg.j, dx)
+
+    def _price_one(self, model, i: int, j: int, dx: int) -> int:
+        """`_price`, through the resident models where they hold this one.
+
+        `walk_route` is sequential -- each leg's size is the last leg's answer
+        -- so this cannot batch, and a batch of one pays the whole 1.07 us
+        crossing for a single evaluation. It is still the cheaper side of the
+        trade wherever the arithmetic is dearer than that, which on the
+        measured universe is every family that iterates: tricrypto is 10.55 us
+        in Python against about 4 native, stableswap 4.40 against 1.13.
+
+        Not a second opinion: where the batch declines the model this falls
+        through to `_price`, which is the same function the probe path uses,
+        so a leg is never priced by arithmetic the rest of the quote does not
+        also use.
+        """
+        native = self._native()
+        if native is not None and dx <= native.MAX_AMOUNT:
+            idx = native.index_of(model)
+            if idx is not None:
+                got = native.price([idx], [i], [j], [dx])
+                if got and got[0] is not None:
+                    return got[0]
+        return _price(model, i, j, dx)
 
     # -- routes that touch one pool twice ----------------------------------
 
@@ -915,7 +939,7 @@ class ExactQuoterClient:
             if remaining[key] <= 0:
                 # Nothing follows on this pool, so there is no state to keep
                 # and the float path is enough.
-                return _price(model, leg.i, leg.j, dx)
+                return self._price_one(model, leg.i, leg.j, dx)
             if leg.kind is ArcKind.SWAP_STABLE:
                 base = pool_now if pool_now is not None else model
                 dy, after = base.exchange(leg.i, leg.j, dx)

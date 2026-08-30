@@ -826,3 +826,60 @@ the same answer computed again, and a port would have carried the repetition
 across the boundary with it.
 
 The whole-quote arms: **1.27x**, from 1.22 before refine moved.
+
+## `realize_candidates` and `k_shortest_paths`, and the thing behind them
+
+Neither was what it looked like, and looking is what found the real one.
+
+**`k_shortest_paths` is not worth porting.** Its 1.35 ms is 124 `spfa` calls,
+and the crossing to reach them is 0.12 ms of that -- the other 1.02 is the
+search itself, at 8.2 us over 477 arcs, already native. `weights` is never
+passed on this pair, so the array copy the wrapper would make never happens.
+Moving Yen's loop into Rust would save the crossings and leave the searches,
+which is the same shape of mistake as porting a stage to chase its cheap half.
+
+**`realize_candidates` is 2.66 ms and 2.39 of it is `realize`** -- but ranking
+what runs inside it turned up something that is not in `realize` at all:
+
+    tricrypto.newton_y_fast   2,688 calls
+    nodes.rate               16,266 calls
+
+`newton_y_fast` is the Python tricrypto invariant. It should not be running: the
+models were ported. It runs because `walk_route` prices legs one at a time
+through `_price`, and `_price` goes to the Python model -- the batch never sees
+them, because a walk is sequential and each leg's size is the last leg's answer.
+
+    model                     calls       ms   us each
+    Tricrypto                   450     4.75     10.55
+    StableSwap                  345     1.52      4.40
+    Vault                       109     0.09      0.83
+    _OneToOne                   109     0.04      0.41
+    Twocrypto                     3     0.04     11.74
+    _price total               1016     6.43     10.7%
+
+**Ten and a half per cent of a quote, in Python arithmetic that had a native
+form all along.** A batch of one still pays the whole 1.07 us crossing, and it
+is still the cheaper side wherever the arithmetic is dearer than that -- which
+is every family that iterates. Interleaved:
+
+    arm                           min ms    median
+    resident models                49.93     51.18
+    python models                  54.99     55.63
+    saved                           5.06 ms
+
+`_price` now runs zero times on a warm mainnet quote. It stays as the fallback
+for a model the batch declines, which is what keeps it the reference.
+
+### The arms had to give up exact equality, and why that is not a retreat
+
+The two arms now run *different float arithmetic* on the leg-pricing path, so
+they are held to the float path's budget -- 5.4e-4 bp -- instead of to the wei.
+Measured where the drift appears at all it is **1.2e-11 bp**, and the route,
+the legs and the bps are identical; at most blocks the arms still agree
+exactly. The budget is seven orders above the drift, so what it catches is a
+regression and not round-off.
+
+That is the same contract the models have always had, arriving one path later:
+integers admit a pool, floats rank a route.
+
+**The quote: 1.41x, from 1.27x.**
