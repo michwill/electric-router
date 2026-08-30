@@ -92,6 +92,12 @@ pub struct Candidate {
 }
 
 impl Candidate {
+    /// A model-free candidate: no certificate, no modelled loss, `kind`
+    /// "direct" because nothing solved for it.  What `naive.rs` builds.
+    pub fn naive(label: String, psi: Vec<f64>, reason: &str, n_arcs: usize) -> Self {
+        Self::new(label, psi, false, reason, "direct", n_arcs, 0.0)
+    }
+
     fn new(label: String, psi: Vec<f64>, certificate: bool, reason: &str,
            kind: &str, n_arcs: usize, modelled_loss: f64) -> Self {
         Self {

@@ -263,6 +263,59 @@ if (job.op === "solve") {
     rescale: hex(Float64Array.from(glue.NodeMap.rescale(...job.rescale))),
   });
   map.free();
+} else if (job.op === "naive") {
+  // The model-free floor.  Three calls with the caller's quoting between
+  // them, which is the whole reason it is split that way: in a browser the
+  // chain is always on this side of the boundary, not the solver's.
+  const facts = new glue.PoolFacts();
+  for (const p of job.pools) {
+    facts.add(p.address, p.name, p.kind ?? undefined, p.coins, Uint32Array.from(p.decimals),
+              p.balances, p.tvl_usd);
+  }
+  const map = new glue.NodeMap();
+  for (const t of job.tokens) map.addToken(t.address, t.symbol, t.decimals);
+  for (const m of job.merges) {
+    map.merge(m.kind, m.token, m.canonical, m.rate_num, m.rate_den, m.target);
+  }
+  const nu = Float64Array.from(job.nu);
+
+  const [directCands, directArcs] =
+    glue.directCandidates(facts, map, nu, job.src, job.dst);
+  out.direct = directCands;
+  out.directArcs = Array.from({ length: directArcs.length() }, (_, k) => directArcs.row(k));
+  directArcs.free();
+
+  // `job.quotes` answers probes by `pool|i|j|dx`, so the two sides can be fed
+  // the same fake chain without depending on the order they ask in.
+  const answer = (row) => {
+    const key = `${row[0].toLowerCase()}|${row[2]}|${row[3]}|${row[5]}`;
+    return key in job.quotes ? job.quotes[key] : null;
+  };
+
+  const planA = glue.twoStepPlanFirst(facts, map, job.src, job.dst, job.amount_in);
+  out.probesA = planA.probes();
+  out.hopsA = planA.hops();
+  out.twoStep = [];
+  out.twoStepArcs = [];
+  out.probesB = [];
+  if (planA.length() > 0) {
+    const planB = glue.twoStepRank(
+      facts, map, nu, planA, out.probesA.map(answer), job.dst, job.limit);
+    out.probesB = planB.probes();
+    out.hopsB = planB.hops();
+    out.bestFirst = planB.bestFirst();
+    if (planB.length() > 0) {
+      const [cands, chains] = glue.twoStepBuild(
+        facts, map, nu, planB, out.probesB.map(answer), job.src, job.dst, job.limit);
+      out.twoStep = cands;
+      out.twoStepArcs = chains.map(
+        (c) => Array.from({ length: c.length() }, (_, k) => c.row(k)));
+    }
+    planB.free();
+  }
+  planA.free();
+  facts.free();
+  map.free();
 } else if (job.op === "element") {
   // The shape rules and the arithmetic, as the browser gets them.  Ports
   // cross as parallel coin and share arrays; a pair has no typed form.

@@ -404,6 +404,9 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::routecall_py::RouteCall>()?;
     m.add_class::<crate::ladders_py::Ladders>()?;
     m.add_class::<crate::multiport_py::Element>()?;
+    m.add_class::<crate::naive_py::PoolFacts>()?;
+    m.add_class::<crate::naive_py::PlanA>()?;
+    m.add_class::<crate::naive_py::PlanB>()?;
     m.add_class::<crate::nodes_py::NodeMap>()?;
     m.add_class::<crate::pipeline_py::Stages>()?;
     m.add_class::<crate::realize_py::Arcs>()?;
@@ -424,6 +427,10 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(crate::pipeline_py::split_groups, m)?,
         wrap_pyfunction!(crate::pipeline_py::pricing_layers, m)?,
         wrap_pyfunction!(crate::pipeline_py::quantum, m)?,
+        wrap_pyfunction!(crate::naive_py::direct_candidates, m)?,
+        wrap_pyfunction!(crate::naive_py::two_step_plan_first, m)?,
+        wrap_pyfunction!(crate::naive_py::two_step_rank, m)?,
+        wrap_pyfunction!(crate::naive_py::two_step_build, m)?,
         wrap_pyfunction!(crate::prices_py::price_fit_weights, m)?,
         wrap_pyfunction!(crate::prices_py::reference_prices, m)?,
         wrap_pyfunction!(crate::prices_py::dislocations, m)?,

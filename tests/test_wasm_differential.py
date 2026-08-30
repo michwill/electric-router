@@ -27,6 +27,9 @@ from erouter.core.accel import available
 from erouter.core.calibrate import DRIFT_TOL
 from erouter.core.solve import TOL
 
+DAI_ = "0x6b175474e89094c44da98b954eedeac495271d0f"
+USDC_ = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
+
 ROOT = Path(__file__).resolve().parents[1]
 HARNESS = ROOT / "tests" / "js" / "solver_harness.mjs"
 PKG = ROOT / "rust" / "wasm" / "pkg"
@@ -1077,3 +1080,112 @@ def test_the_browser_runs_the_same_stages():
     assert floats(got["gasCost"])[0] == \
         erouter_solve.gas_cost(ported_nodes, nu, TOKENS[3][0], 45_000_000, 7.6e7)
     assert floats(got["quantum"])[0] == erouter_solve.quantum(18)
+
+
+# ------------------------------------------------------- the model-free floor
+
+
+def _naive_job(pools, nodes, nu, src, dst, quotes, limit=6, amount=10 ** 18):
+    return {
+        "op": "naive",
+        "pools": [
+            {
+                "address": p.address, "name": p.name,
+                "kind": None if p.swap_kind is None else p.swap_kind.value,
+                "coins": [c.address.lower() for c in p.coins],
+                "decimals": [c.decimals for c in p.coins],
+                "balances": [str(b) for b in p.balances],
+                "tvl_usd": p.tvl_usd,
+            }
+            for p in pools
+        ],
+        "tokens": [
+            {"address": c.address, "symbol": c.symbol, "decimals": c.decimals}
+            for p in pools for c in p.coins
+        ],
+        "merges": [],
+        "nu": [float(v) for v in nu],
+        "src": src, "dst": dst, "amount_in": str(amount), "limit": limit,
+        "quotes": quotes,
+    }
+
+
+def test_the_model_free_floor_agrees_in_the_browser():
+    """The floor is what answers when the model has nothing to say, so it is
+    the last thing that may differ between the two targets.
+
+    The fake chain is keyed by the probe rather than by call order, because
+    the whole reason the port is split into three stages is that the *caller*
+    quotes -- and a harness answering positionally would not notice if the two
+    targets asked in a different order.  Round B's amounts are round A's
+    outputs, so the map is built from the native run and then handed to the
+    browser one whole.
+    """
+    import erouter_solve
+    from tests.test_naive_differential import (
+        TWO_STEP_CASES,
+        FakeQuoter,
+        facts_of,
+        nodes_for,
+        rust_nodes,
+    )
+
+    pools = TWO_STEP_CASES["two middles compete"]
+    nodes = nodes_for(pools)
+    nu = np.ones(nodes.n_nodes)
+    quoter = FakeQuoter()
+    facts, rnodes = facts_of(pools), rust_nodes(nodes, pools)
+
+    quotes: dict[str, str | None] = {}
+
+    def answer(rows):
+        out = []
+        for pool, _kind, i, j, _n, dx in rows:
+            value = quoter.answer(pool, i, j, int(dx))
+            text = None if value is None else str(value)
+            quotes[f"{pool.lower()}|{i}|{j}|{dx}"] = text
+            out.append(text)
+        return out
+
+    native_c, native_arcs = erouter_solve.direct_candidates(
+        facts, rnodes, list(nu), DAI_, USDC_
+    )
+    plan_a = erouter_solve.two_step_plan_first(facts, rnodes, DAI_, USDC_, str(10 ** 18))
+    plan_b = erouter_solve.two_step_rank(
+        facts, rnodes, list(nu), plan_a, answer(plan_a.probes()), USDC_, 6
+    )
+    native_two, native_chains = erouter_solve.two_step_build(
+        facts, rnodes, list(nu), plan_b, answer(plan_b.probes()), DAI_, USDC_, 6
+    )
+    assert native_two, "the fixture is meant to produce chains"
+
+    got = run(_naive_job(pools, nodes, nu, DAI_, USDC_, quotes))
+
+    # 1. the one-leg floor
+    assert [c[0] for c in got["direct"]] == [c["label"] for c in native_c]
+    assert len(got["directArcs"]) == len(native_arcs)
+    for k, row in enumerate(got["directArcs"]):
+        native = native_arcs.row(k)
+        assert row[0] == native["id"] and row[1] == native["pool"]
+        assert row[6] == native["token_in"] and row[7] == native["token_out"]
+        assert row[10] == native["a"]
+
+    # 2. the same questions to the chain, in the same order, both rounds
+    assert [list(r) for r in got["probesA"]] == [list(r) for r in plan_a.probes()]
+    assert [list(r) for r in got["probesB"]] == [list(r) for r in plan_b.probes()]
+    assert [list(r) for r in got["hopsA"]] == [list(r) for r in plan_a.hops()]
+    assert [list(r) for r in got["bestFirst"]] == [
+        list(r) for r in plan_b.best_first()
+    ]
+
+    # 3. and the same chains out of them
+    assert [c[0] for c in got["twoStep"]] == [c["label"] for c in native_two]
+    assert len(got["twoStepArcs"]) == len(native_chains)
+    for chain, native in zip(got["twoStepArcs"], native_chains, strict=True):
+        assert len(chain) == len(native) == 2
+        for k, row in enumerate(chain):
+            want = native.row(k)
+            assert row[0] == want["id"]
+            assert (row[3], row[4]) == (want["i"], want["j"])
+            assert (row[8], row[9]) == (want["tau"], want["sigma"])
+            assert row[10] == want["a"]

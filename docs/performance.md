@@ -1238,11 +1238,41 @@ uses `int128` for coin indices and nothing wider.
 |---|---|---|
 | `pipeline`'s I/O half | ~1,400 | `prepare`, `route`, the probe and quote loops |
 | `probe`, `quoter`, `transport`, `evm` | — | the chain itself |
-| the model-free candidate families | ~200 | `direct_candidates`, `two_step_candidates`, wound into the probe loop |
 
-Everything that decides is ported, and now so is everything that *encodes*.
-What is left is fetching, and the two generators that build their candidates
-while fetching. The renderers stay the CLI's.
+Everything that decides is ported, everything that *encodes* is ported, and so
+now is the model-free floor. What is left is fetching. The renderers stay the
+CLI's.
+
+### The floor, and what porting a function that quotes looks like
+
+`direct_candidates` is pure and crossed as one call. `two_step_candidates` did
+not, and it is the first thing ported here that *calls the chain from inside
+itself* -- two batched probe rounds, with ranking between them.
+
+Wrapping that would have meant a callback across the boundary twice per quote.
+Instead it splits at the rounds into three stateless stages -- plan the first
+round, rank it and plan the second, build the chains -- and the caller does the
+quoting. That is the shape a browser needs anyway, where the chain is always on
+the far side of the boundary, and it makes the intermediate state inspectable
+rather than trapped in a closure.
+
+Two things came out of the porting rather than the design:
+
+* **A repeated coin has to keep its first position and its last index.** The
+  reference builds `{coin.address: k}` and iterates it, so a pool listing the
+  same token twice yields one entry, positioned where it first appeared and
+  numbered where it last did. A `HashMap` gets both halves wrong.
+* **An unknown token is an error, not an empty floor.** `nodes.node` raises in
+  the reference. The port returned an empty list at first, which is worse than
+  it sounds: the floor exists precisely to be the answer when everything else
+  came back empty, so "no route" is the one thing it must never say by
+  accident. Both sides now refuse.
+
+30 differential tests, including one that drives both targets from one fake
+chain keyed by the probe rather than by call order -- a harness answering
+positionally could not tell whether the two asked the same questions in the
+same sequence, which after a split into stages is the only thing worth
+checking.
 
 **Four approximations, each documented where it is.** `route_conductance`,
 `achievable_kcl` and the reference-price fit each solve a small dense system

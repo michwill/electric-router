@@ -116,6 +116,7 @@ def test_every_pyo3_binding_file_has_a_wasm_counterpart():
     known = {"py.rs": "solve.rs", "ladders_py.rs": "ladders.rs",
              "graph_py.rs": "graph.rs", "nodes_py.rs": "nodes.rs",
              "multiport_py.rs": "multiport.rs", "realize_py.rs": "realize.rs",
+                 "naive_py.rs": "naive.rs",
              "candidates_py.rs": "candidates.rs", "pipeline_py.rs": "pipeline.rs",
              "curves_py.rs": "curves.rs", "prices_py.rs": "prices.rs",
              "slippage_py.rs": "slippage.rs", "refit_py.rs": "refit.rs",

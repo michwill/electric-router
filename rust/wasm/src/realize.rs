@@ -24,11 +24,47 @@ pub struct Arcs {
     pub(crate) inner: Vec<PoolArc>,
 }
 
+impl Arcs {
+    /// Wrap a list built elsewhere in the crate; not on the JS surface.
+    pub(crate) fn from_parts(inner: Vec<PoolArc>) -> Self {
+        Self { inner }
+    }
+}
+
 #[wasm_bindgen]
 impl Arcs {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// One arc's fields, for a caller handed this list rather than having
+    /// built it -- `naive.rs` returns arcs nobody wrote in.  Same order and
+    /// same types as `Arcs.row` on the PyO3 side.
+    pub fn row(&self, k: usize) -> Result<js_sys::Array, JsValue> {
+        let arc = self
+            .inner
+            .get(k)
+            .ok_or_else(|| JsValue::from(JsError::new(&format!("no arc {k}"))))?;
+        let out = js_sys::Array::new();
+        out.push(&JsValue::from_str(&arc.id));
+        out.push(&JsValue::from_str(&arc.pool));
+        out.push(&JsValue::from_f64(arc.kind.code() as f64));
+        out.push(&JsValue::from_f64(arc.i as f64));
+        out.push(&JsValue::from_f64(arc.j as f64));
+        out.push(&JsValue::from_f64(arc.n_coins as f64));
+        out.push(&JsValue::from_str(&arc.token_in));
+        out.push(&JsValue::from_str(&arc.token_out));
+        out.push(&JsValue::from_f64(arc.tau as f64));
+        out.push(&JsValue::from_f64(arc.sigma as f64));
+        out.push(&JsValue::from_f64(arc.a));
+        out.push(&JsValue::from_f64(arc.b));
+        out.push(&JsValue::from_str(&arc.reserve_in.to_string()));
+        out.push(&JsValue::from_f64(arc.decimals_in as f64));
+        out.push(&JsValue::from_f64(arc.decimals_out as f64));
+        out.push(&JsValue::from_f64(arc.tvl_usd));
+        out.push(&JsValue::from_str(&arc.note));
+        Ok(out)
     }
 
     #[wasm_bindgen(js_name = length)]

@@ -29,6 +29,7 @@ pub mod curves;
 pub mod gas;
 pub mod graph;
 pub mod multiport;
+pub mod naive;
 pub mod nodes;
 pub mod prices;
 pub mod pyfmt;
@@ -58,6 +59,8 @@ mod graph_py;
 mod ladders_py;
 #[cfg(feature = "python")]
 mod multiport_py;
+#[cfg(feature = "python")]
+mod naive_py;
 #[cfg(feature = "python")]
 mod nodes_py;
 #[cfg(feature = "python")]

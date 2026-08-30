@@ -10,6 +10,7 @@ use crate::nodes_py::NodeMap;
 use crate::realize::{self, RealizedRoute};
 use crate::types::{ArcKind, PoolArc};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 fn err(e: realize::RealizationError) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(e.0)
@@ -36,6 +37,33 @@ impl Arcs {
 
     fn __len__(&self) -> usize {
         self.inner.len()
+    }
+
+    /// One arc's fields, for a caller that was handed this list rather than
+    /// having built it -- `naive.rs` returns arcs nobody wrote in.
+    fn row<'py>(&self, py: Python<'py>, k: usize) -> PyResult<Bound<'py, PyDict>> {
+        let arc = self.inner.get(k).ok_or_else(|| {
+            pyo3::exceptions::PyIndexError::new_err(format!("no arc {k}"))
+        })?;
+        let d = PyDict::new(py);
+        d.set_item("id", &arc.id)?;
+        d.set_item("pool", &arc.pool)?;
+        d.set_item("kind", arc.kind.code())?;
+        d.set_item("i", arc.i)?;
+        d.set_item("j", arc.j)?;
+        d.set_item("n_coins", arc.n_coins)?;
+        d.set_item("token_in", &arc.token_in)?;
+        d.set_item("token_out", &arc.token_out)?;
+        d.set_item("tau", arc.tau)?;
+        d.set_item("sigma", arc.sigma)?;
+        d.set_item("a", arc.a)?;
+        d.set_item("b", arc.b)?;
+        d.set_item("reserve_in", arc.reserve_in.to_string())?;
+        d.set_item("decimals_in", arc.decimals_in)?;
+        d.set_item("decimals_out", arc.decimals_out)?;
+        d.set_item("tvl_usd", arc.tvl_usd)?;
+        d.set_item("note", &arc.note)?;
+        Ok(d)
     }
 
     /// One arc, with the fields realisation actually reads. Returns its index.
