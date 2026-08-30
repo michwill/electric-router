@@ -250,6 +250,40 @@ impl Route {
         self.inner.legs.iter().map(|rl| u8::from(rl.is_merge())).collect()
     }
 
+
+    /// What a chained walk measured for one leg -- see the PyO3 twin.
+    #[wasm_bindgen(js_name = setVerified)]
+    pub fn set_verified(
+        &mut self, at: usize, verified_in: &str, verified_out: &str,
+        fee_floor: f64, fee_frac: f64,
+    ) -> Result<(), JsValue> {
+        let bad = |s: &str| JsError::new(&format!("not a u256: {s}"));
+        let leg = self
+            .inner
+            .legs
+            .get_mut(at)
+            .ok_or_else(|| JsError::new(&format!("no leg {at}")))?;
+        leg.verified_in = verified_in.parse().map_err(|_| bad(verified_in))?;
+        leg.verified_out = verified_out.parse().map_err(|_| bad(verified_out))?;
+        leg.fee_floor = fee_floor;
+        leg.fee_frac = fee_frac;
+        Ok(())
+    }
+
+    /// `verified_in` then `verified_out` per leg, interleaved.
+    pub fn verified(&self) -> Vec<String> {
+        self.inner
+            .legs
+            .iter()
+            .flat_map(|rl| [rl.verified_in.to_string(), rl.verified_out.to_string()])
+            .collect()
+    }
+
+    /// `fee_floor, fee_frac` per leg, flat. NaN where nothing measured them.
+    pub fn fees(&self) -> Vec<f64> {
+        self.inner.legs.iter().flat_map(|rl| [rl.fee_floor, rl.fee_frac]).collect()
+    }
+
     // -- the route ---------------------------------------------------------
 
     #[wasm_bindgen(getter, js_name = dstSlot)]

@@ -82,6 +82,8 @@ CASES = [
     ("prices", [RUST / "prices_py.rs"], [WASM / "prices.rs"]),
     ("slippage", [RUST / "slippage_py.rs"], [WASM / "slippage.rs"]),
     ("refit", [RUST / "refit_py.rs"], [WASM / "refit.rs"]),
+    ("codec", [RUST / "codec_py.rs"], [WASM / "codec.rs"]),
+    ("routecall", [RUST / "routecall_py.rs"], [WASM / "routecall.rs"]),
 ]
 
 
@@ -116,7 +118,8 @@ def test_every_pyo3_binding_file_has_a_wasm_counterpart():
              "multiport_py.rs": "multiport.rs", "realize_py.rs": "realize.rs",
              "candidates_py.rs": "candidates.rs", "pipeline_py.rs": "pipeline.rs",
              "curves_py.rs": "curves.rs", "prices_py.rs": "prices.rs",
-             "slippage_py.rs": "slippage.rs", "refit_py.rs": "refit.rs"}
+             "slippage_py.rs": "slippage.rs", "refit_py.rs": "refit.rs",
+             "codec_py.rs": "codec.rs", "routecall_py.rs": "routecall.rs"}
     for got in sorted(py_bindings):
         twin = known.get(got)
         assert twin is not None, (

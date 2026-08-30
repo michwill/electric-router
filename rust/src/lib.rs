@@ -24,6 +24,7 @@
 
 pub mod candidates;
 pub mod chol;
+pub mod codec;
 pub mod curves;
 pub mod gas;
 pub mod graph;
@@ -33,9 +34,11 @@ pub mod prices;
 pub mod pyfmt;
 pub mod refit;
 pub mod risk;
+pub mod routecall;
 pub mod realize;
 pub mod types;
 pub mod verify;
+pub mod keccak;
 pub mod ladders;
 pub mod pipeline;
 pub mod pools;
@@ -45,6 +48,8 @@ pub mod solve;
 
 #[cfg(feature = "python")]
 mod candidates_py;
+#[cfg(feature = "python")]
+mod codec_py;
 #[cfg(feature = "python")]
 mod curves_py;
 #[cfg(feature = "python")]
@@ -63,6 +68,8 @@ mod pipeline_py;
 mod prices_py;
 #[cfg(feature = "python")]
 mod refit_py;
+#[cfg(feature = "python")]
+mod routecall_py;
 #[cfg(feature = "python")]
 mod slippage_py;
 #[cfg(feature = "python")]

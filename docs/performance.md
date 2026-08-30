@@ -951,9 +951,9 @@ merges and fits without the ladders crossing, and now `Graph` and `NodeMap`.
 ### What is ported, and what it cost to get right
 
 `types`, `graph`, `nodes`, `multiport`, `realize`, `gas`, `risk`, `candidates`,
-`verify`, `pipeline`'s stage logic, `curves`, `prices`, `slippage` and `refit`
-are done; `seed` gained Yen's `k_shortest_paths` and `split` its
-`split_groups`. They went in
+`verify`, `pipeline`'s stage logic, `curves`, `prices`, `slippage`, `refit`,
+`keccak`, `codec` and `routecall` are done; `seed` gained Yen's
+`k_shortest_paths` and `split` its `split_groups`. They went in
 that order because it is the dependency order: everything above takes an
 `ArcArrays`, a rate, or a `PoolArc`.
 
@@ -1100,68 +1100,69 @@ ladder's *shape* -- node count, strictly increasing, exact at the top -- stays
 exact. Chasing it further would be chasing an implementation detail of numpy's
 SIMD loop, which is not stable across its own releases.
 
+### Calldata, which was on the wrong list
+
+`codec` and `routecall` were filed under "the chain" and should not have been.
+Neither touches a network: one is ABI encoding, the other turns a realised
+route into the bytes `ElectricRouter.execute` takes. A browser that can pick a
+route but not build a transaction has not got what it needs, so they are
+ported, with `keccak` under them.
+
+Nothing in that suite carries a tolerance, and it should not: a word one bit
+out is a different pool, a different coin, or a minimum rate that reverts an
+honest trade or admits a sandwich. What is compared is the packing (nine fields
+in one word, against a layout `ElectricRouter.vy` also knows), the fractions
+(`Leg.bps` is a share of what a node *held*; the contract wants a share of what
+is standing there now), the minimum rates under both the fee rule and a
+caller-named budget, and the calldata bytes themselves. The reference's codec
+is itself held to `eth_abi`, so matching it matches the real encoder
+transitively; keccak is checked against published vectors instead, because both
+sides could be wrong the same way -- Ethereum uses original Keccak padding
+(`0x01`), and `sha3_256` would produce plausible selectors no contract answers
+to.
+
+**A gap in `Route`, found by porting `routecall`.** The realised route had no
+way to carry `verified_in`, `verified_out`, `fee_floor` or `fee_frac` across a
+binding, and `min_rates` reads all four. A route encoded without them is
+bounded off the *model* rather than off what the chain said -- tens of basis
+points out on a cryptoswap leg, and bounding on what the leg pays rather than
+on the least the pool can charge is what hands a sandwich the gap. Both
+bindings carry them now, and the suite runs every route case twice, modelled
+and chain-priced.
+
+**One narrowing, stated rather than silent.** The port holds signed ABI
+integers in `i128`, so `int144` and wider are refused at parse time. Python
+integers are unbounded, so the reference carries `int256` for free; Curve's ABI
+uses `int128` for coin indices and nothing wider.
+
 **What has no Rust form:**
 
 | module | lines | what it is |
 |---|---|---|
 | `pipeline`'s I/O half | ~1,400 | `prepare`, `route`, the probe and quote loops |
-| `probe`, `quoter`, `transport`, `evm`, `routecall`, `codec` | — | the chain itself |
+| `probe`, `quoter`, `transport`, `evm` | — | the chain itself |
 | the model-free candidate families | ~200 | `direct_candidates`, `two_step_candidates`, wound into the probe loop |
 
-Everything that decides is ported. What is left is fetching, and the two
-generators that build their candidates *while* fetching. The renderers stay the
-CLI's.
+Everything that decides is ported, and now so is everything that *encodes*.
+What is left is fetching, and the two generators that build their candidates
+while fetching. The renderers stay the CLI's.
 
-**Three approximations, each documented where it is.** `route_conductance`,
-`achievable_kcl` and the reference-price fit each solve a small dense system,
-and the two sides solve it differently: `lu.rs` and a cyclic Jacobi here
-against numpy's LU and SVD there.
+**Four approximations, each documented where it is.** `route_conductance`,
+`achievable_kcl` and the reference-price fit each solve a small dense system
+and the two sides solve it differently -- `lu.rs` and a cyclic Jacobi here
+against numpy's LU and SVD there. Not because LAPACK is out of reach: it binds
+from Rust, and `faer` and `nalgebra` are pure-Rust and would cross to wasm.
+`rust/README.md` rules it out on its own terms, and it would not buy exactness
+anyway -- numpy here is linked against OpenBLAS 0.3.34 built `DYNAMIC_ARCH`
+with `MAX_THREADS=64`, so `np.linalg.solve` is not one fixed sequence of
+operations even between two machines. The tolerance is the price of the
+determinism rule, and the *reference* is the less reproducible of the two.
+Plus the `geomspace` ULP in `curves::sizes`. Everything else is exact.
 
-Not because LAPACK is out of reach -- it binds from Rust, and `faer` and
-`nalgebra` are pure-Rust and would cross to wasm. `rust/README.md` rules it
-out on its own terms: at `n ~ 50`, the measured median, a forty-line LU beats
-the cost of binding a Fortran library with no wasm build.
-
-And it would not buy exactness anyway. numpy here is linked against OpenBLAS
-0.3.34 built `DYNAMIC_ARCH` with `MAX_THREADS=64` -- the kernel is chosen from
-the CPU at runtime and the work is threaded, so `np.linalg.solve` is not one
-fixed sequence of operations even between two runs on different machines.
-Matching it exactly would mean matching one build's dispatch, which is the
-opposite of the README's determinism rule. The tolerance is the price of that
-rule, and the *reference* is the less reproducible of the two.
-
-Plus the `geomspace` ULP above. Everything else in these suites is exact.
-
-**The Jacobi eigensolver, measured rather than assumed.** `achievable_kcl`
-needs a condition number and the port computes it with a cyclic Jacobi, which
-is a bigger piece of numerical code than the rest of the port's linear algebra
-put together. Two questions, both answered:
-
-*Cost.* 1.07 ms at `n = 50` against numpy's 0.096 -- 11x slower. It does not
-matter, because `_achievable_kcl` is called **only on the path about to fail**
-the KCL check (`pipeline.py` says so in as many words: "`cond` is computed only
-here, on the path about to fail"). A working quote never pays it. That 11x
-would matter if the call ever moved, which is why it is written down.
-
-*Accuracy*, against `np.linalg.cond` over 172 matrices with `k` from 1 to
-1e16:
-
-| `k` | worst relative error |
-|---|---|
-| up to 1e12 | 2.4e-5 |
-| 1e12 - 1e14 | 3.3e-3 |
-| 1e14 - 1e16 | 29% |
-
-`MAX_CONDITION` is 1e12, so the whole range the graph admits agrees to 2.4e-5.
-Past 1e14 the small eigenvalues sit at the double-precision noise floor and
-neither implementation is authoritative; against a safety factor of 100, a 29%
-error is noise. The sweep cap never bound -- worst 21 sweeps, ordinary case
-five to nine.
-
-Verdict: keep it. A cheaper estimator (power plus inverse-power, or LAPACK's
-own `pocon`, which is an estimate too) would buy time on a path that does not
-need it and give up the unconditional convergence that makes this safe to run
-where a quote is already going wrong.
+The Jacobi in `achievable_kcl` was measured rather than assumed: 1.07 ms at
+`n = 50` against numpy's 0.096, on a path that runs *only* when a quote is
+already failing; and 2.4e-5 relative over the whole range the graph admits,
+against a safety factor of 100. It stays.
 
 None of this shows in the arms. `candidates` is 92% a native solver, `realize`
 is 2.4 ms, and the Python pipeline still calls Python at every stage -- nothing

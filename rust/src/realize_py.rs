@@ -221,6 +221,46 @@ impl Route {
         self.inner.legs.iter().map(|rl| rl.is_merge()).collect()
     }
 
+
+    /// What a chained walk measured for one leg.
+    ///
+    /// These four are the difference between a route as modelled and a route
+    /// as priced: `leg_out` prefers `verified_out`, `leg_in` prefers
+    /// `verified_in`, and the minimum rate is set from `fee_floor` -- the
+    /// least the pool can charge -- rather than from what this leg pays. A
+    /// route encoded without them is bounded off the model, which is the
+    /// wrong number by tens of basis points on a cryptoswap leg.
+    fn set_verified(
+        &mut self, at: usize, verified_in: &str, verified_out: &str,
+        fee_floor: f64, fee_frac: f64,
+    ) -> PyResult<()> {
+        let bad = |s: &str| {
+            pyo3::exceptions::PyValueError::new_err(format!("not a u256: {s}"))
+        };
+        let leg = self.inner.legs.get_mut(at).ok_or_else(|| {
+            pyo3::exceptions::PyIndexError::new_err(format!("no leg {at}"))
+        })?;
+        leg.verified_in = verified_in.parse().map_err(|_| bad(verified_in))?;
+        leg.verified_out = verified_out.parse().map_err(|_| bad(verified_out))?;
+        leg.fee_floor = fee_floor;
+        leg.fee_frac = fee_frac;
+        Ok(())
+    }
+
+    /// `verified_in, verified_out` per leg, as decimal strings.
+    fn verified(&self) -> Vec<(String, String)> {
+        self.inner
+            .legs
+            .iter()
+            .map(|rl| (rl.verified_in.to_string(), rl.verified_out.to_string()))
+            .collect()
+    }
+
+    /// `fee_floor, fee_frac` per leg, flat. NaN where nothing measured them.
+    fn fees(&self) -> Vec<f64> {
+        self.inner.legs.iter().flat_map(|rl| [rl.fee_floor, rl.fee_frac]).collect()
+    }
+
     // -- the route ---------------------------------------------------------
 
     #[getter]

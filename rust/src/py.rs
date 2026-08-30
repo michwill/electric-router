@@ -401,6 +401,7 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<crate::curves_py::Curve>()?;
     m.add_class::<crate::graph_py::Graph>()?;
     m.add_class::<crate::refit_py::Refit>()?;
+    m.add_class::<crate::routecall_py::RouteCall>()?;
     m.add_class::<crate::ladders_py::Ladders>()?;
     m.add_class::<crate::multiport_py::Element>()?;
     m.add_class::<crate::nodes_py::NodeMap>()?;
@@ -436,6 +437,22 @@ fn erouter_solve(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(crate::slippage_py::widen, m)?,
         wrap_pyfunction!(crate::refit_py::round_stats, m)?,
         wrap_pyfunction!(crate::refit_py::b_change, m)?,
+        wrap_pyfunction!(crate::codec_py::keccak256, m)?,
+        wrap_pyfunction!(crate::codec_py::selector, m)?,
+        wrap_pyfunction!(crate::codec_py::signature_types, m)?,
+        wrap_pyfunction!(crate::codec_py::is_dynamic, m)?,
+        wrap_pyfunction!(crate::codec_py::head_size, m)?,
+        wrap_pyfunction!(crate::codec_py::abi_encode, m)?,
+        wrap_pyfunction!(crate::codec_py::abi_decode, m)?,
+        wrap_pyfunction!(crate::codec_py::encode_call, m)?,
+        wrap_pyfunction!(crate::codec_py::decode_uint, m)?,
+        wrap_pyfunction!(crate::routecall_py::fractions, m)?,
+        wrap_pyfunction!(crate::routecall_py::min_rates, m)?,
+        wrap_pyfunction!(crate::routecall_py::tolerances, m)?,
+        wrap_pyfunction!(crate::routecall_py::movement_floors, m)?,
+        wrap_pyfunction!(crate::routecall_py::walk_bounds, m)?,
+        wrap_pyfunction!(crate::routecall_py::pack_step, m)?,
+        wrap_pyfunction!(crate::routecall_py::unpack_step, m)?,
     ] {
         m.add_function(f)?;
     }
