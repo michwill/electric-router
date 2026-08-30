@@ -247,11 +247,11 @@ pub mod fast {
     /// because a wei is a wei; in `f64` at 1e30 an ULP is about 1e14, so the
     /// same test is either never true or trivially true and the iteration runs
     /// its cap and returns whatever it reached. Matches Python's `_FAST_TOL`.
-    const FAST_TOL: f64 = 1e-14;
+    pub const FAST_TOL: f64 = 1e-14;
     /// Newton doubles its digits a step, so a solve that has not converged in
     /// forty is not going to: measured over 2,240 solves on 268 mainnet pools,
     /// the worst took 12 and none reached the 255 the contract allows.
-    const GIVE_UP: usize = 40;
+    pub const GIVE_UP: usize = 40;
     /// What to fall back to when it does not. A tolerance that cannot be met
     /// is a statement about the pool's conditioning, not a reason to fail a
     /// quote that only needed less precision.
@@ -263,31 +263,48 @@ pub mod fast {
         }
 
         fn d_within(&self, tol: f64) -> Option<f64> {
-            let n = self.xp.len() as f64;
-            let s: f64 = self.xp.iter().sum();
+            d_raw_within(&self.xp, self.amp, self.a_precision, tol)
+        }
+    }
+
+    /// `D` over balances that are not the pool's own, which is what a deposit
+    /// and a withdrawal both need: the invariant is asked three times against
+    /// three different sets, and only one of them is the pool as it stands.
+    pub fn d_raw(xp: &[f64], amp: f64, a_precision: f64) -> Option<f64> {
+        d_raw_within(xp, amp, a_precision, FAST_TOL)
+            .or_else(|| d_raw_within(xp, amp, a_precision, LOOSE_TOL))
+    }
+
+    fn d_raw_within(xp: &[f64], amp: f64, a_precision: f64, tol: f64)
+        -> Option<f64> {
+        {
+            let n = xp.len() as f64;
+            let s: f64 = xp.iter().sum();
             if s == 0.0 {
                 return Some(0.0);
             }
-            let ann = self.amp * n;
+            let ann = amp * n;
             let mut d = s;
             for _ in 0..GIVE_UP {
                 let mut d_p = d;
-                for x in &self.xp {
+                for x in xp {
                     if *x <= 0.0 {
                         return None;
                     }
                     d_p = d_p * d / (*x * n);
                 }
                 let prev = d;
-                d = (ann * s / self.a_precision + d_p * n) * d
-                    / ((ann - self.a_precision) * d / self.a_precision + (n + 1.0) * d_p);
+                d = (ann * s / a_precision + d_p * n) * d
+                    / ((ann - a_precision) * d / a_precision + (n + 1.0) * d_p);
                 if (d - prev).abs() <= tol * d {
                     return Some(d);
                 }
             }
             None
         }
+    }
 
+    impl Pool {
         pub fn solve_y(&self, d: f64, i: usize, j: usize, x: f64) -> Option<f64> {
             self.y_within(d, i, j, x, FAST_TOL)
                 .or_else(|| self.y_within(d, i, j, x, LOOSE_TOL))
@@ -395,6 +412,95 @@ pub fn solve_y_raw_fast(amp: f64, a_precision: f64, xp: &[f64], d: f64,
         subtract_one: false,
     };
     pool.solve_y(d, i, j, x)
+}
+
+/// `get_y_D`: balance `i` when `D` is reduced to `d`, the others held.
+///
+/// A different question from `solve_y`, which asks what `i` becomes when
+/// another balance changes at constant `D`. Here `D` itself moves, which is
+/// what a single-sided deposit or withdrawal does, and the same quadratic is
+/// iterated with `c` and `b` built from the *target* `D`.
+///
+/// Generalised over `A_PRECISION`: the pools that predate it have
+/// `a_precision == 1`, which makes every scaling term vanish.
+pub fn solve_y_d(amp: U256, a_precision: U256, xp: &[U256], d: U256, i: usize,
+                 n: usize) -> Option<U256> {
+    let nn = U256::from(n as u64);
+    let ann = amp * nn;
+    if ann.is_zero() {
+        return None;
+    }
+    let mut c = d;
+    let mut s = U256::ZERO;
+    for (k, x) in xp.iter().enumerate().take(n) {
+        if k == i {
+            continue;
+        }
+        if x.is_zero() {
+            return None;
+        }
+        s += *x;
+        c = c.checked_mul(d)? / (*x * nn);
+    }
+    c = c.checked_mul(d)?.checked_mul(a_precision)? / (ann * nn);
+    let b = s + d * a_precision / ann;
+    let mut y = d;
+    for _ in 0..255 {
+        let prev = y;
+        let denom = y + y + b;
+        if denom <= d {
+            return None;
+        }
+        y = (y.checked_mul(y)? + c) / (denom - d);
+        let gap = if y > prev { y - prev } else { prev - y };
+        if gap <= U256::from(1u64) {
+            return Some(y);
+        }
+    }
+    None
+}
+
+/// `get_y_D`, in floating point.
+///
+/// Same quadratic, same `c` and `b` built from the target `D`; balances and
+/// `D` are dollars, so the `a_precision` scalings ride along unchanged.
+pub fn solve_y_d_fast(amp: f64, a_precision: f64, xp: &[f64], d: f64, i: usize,
+                      n: usize) -> Option<f64> {
+    let nn = n as f64;
+    let ann = amp * nn;
+    if ann == 0.0 {
+        return None;
+    }
+    let mut c = d;
+    let mut s = 0.0;
+    for (k, x) in xp.iter().enumerate().take(n) {
+        if k == i {
+            continue;
+        }
+        if *x <= 0.0 {
+            return None;
+        }
+        s += *x;
+        c = c * d / (*x * nn);
+    }
+    c = c * d * a_precision / (ann * nn);
+    let b = s + d * a_precision / ann;
+    let mut y = d;
+    // The same forty-step give-up the float invariant uses, and for the same
+    // reason: Newton doubles its digits a step, so one that has not converged
+    // by then is not going to.
+    for _ in 0..fast::GIVE_UP {
+        let prev = y;
+        let denom = 2.0 * y + b - d;
+        if denom == 0.0 {
+            return None;
+        }
+        y = (y * y + c) / denom;
+        if (y - prev).abs() <= fast::FAST_TOL * y {
+            return Some(y);
+        }
+    }
+    None
 }
 
 /// A float back to the integer space, truncating as Python's `int()` does.

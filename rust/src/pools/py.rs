@@ -83,6 +83,37 @@ impl Pools {
         self.inner.add_one_to_one()
     }
 
+    /// Add a stableswap LP, in one direction: `deposit` picks which.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (balances, rates, amp, fee, offpeg_fee_multiplier,
+                        a_precision, fee_on_xp, subtract_one, total_supply,
+                        deposit, admin_fee=None))]
+    fn add_stable_lp(&mut self, balances: Vec<String>, rates: Vec<String>,
+                     amp: &str, fee: &str, offpeg_fee_multiplier: &str,
+                     a_precision: &str, fee_on_xp: bool, subtract_one: bool,
+                     total_supply: &str, deposit: bool,
+                     admin_fee: Option<&str>) -> PyResult<usize> {
+        self.inner.add_stable_lp(&balances, &rates, amp, fee,
+                                 offpeg_fee_multiplier, a_precision, fee_on_xp,
+                                 subtract_one, admin_fee, total_supply,
+                                 deposit).map_err(err)
+    }
+
+    /// Add a tricrypto LP's withdrawal arc. Deposits are exact through the
+    /// pool's own getter, so there is no direction to choose.
+    #[allow(clippy::too_many_arguments)]
+    fn add_tricrypto_lp(&mut self, balances: Vec<String>,
+                        precisions: Vec<String>, price_scale: Vec<String>,
+                        d: &str, amp: &str, gamma: &str, mid_fee: &str,
+                        out_fee: &str, fee_gamma: &str, legacy: bool,
+                        a_multiplier: &str, total_supply: &str)
+        -> PyResult<usize> {
+        self.inner.add_tricrypto_lp(&balances, &precisions, &price_scale, d,
+                                    amp, gamma, mid_fee, out_fee, fee_gamma,
+                                    legacy, a_multiplier, total_supply)
+            .map_err(err)
+    }
+
     /// The best two-way split of `dx` across two output coins.
     ///
     /// One call rather than a batch: the caller asks once per element, and

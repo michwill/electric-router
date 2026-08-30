@@ -572,3 +572,49 @@ Those are a genuinely different shape rather than a missing transcription: they
 move the invariant and the token supply together, and the deposit direction is
 admitted on its own evidence because a pool whose withdrawal does not reproduce
 may still deposit exactly.
+
+### The LP arcs, and a bug found by porting them
+
+These are the one family that is a different shape rather than a
+transcription. A swap holds `D` and asks what one balance becomes; a deposit
+and a withdrawal *move* `D`, so they need `get_y_D` -- balance `i` when `D` is
+reduced to a target -- which the Rust side did not have at all. That, plus `D`
+over balances that are not the pool's own, is most of what the port is.
+
+Both directions are separate registry entries rather than one model with a
+flag, because a pool may reproduce one and not the other: a withdrawal that
+does not match the chain does not condemn the deposit beside it.
+
+**Porting them turned up a live bug in the reference.** `_Withdraw.get_dy_fast`
+called `calc_withdraw_one_coin_fast`, which `StableSwapLP` has and
+`TricryptoLP` does not -- so a `WITHDRAW_CRYPTO` probe raised `AttributeError`,
+which `probe` does not catch and a quote does not survive. It is on master too,
+not something the port introduced; the port is simply what made someone run
+that path. Fixed by answering in integers where an LP has no float form, which
+is the rule `_price` already applies to a model with no fast path at all.
+
+**And again it bought nothing measurable, for a reason worth writing down.**
+LP arcs are 1.7% of a quote's probes:
+
+| kind | probes | share |
+|---|---|---|
+| SWAP_STABLE | 1,146 | 65.2% |
+| SWAP_CRYPTO | 531 | 30.2% |
+| WSTETH_UNWRAP | 50 | 2.8% |
+| DEPOSIT_FIXED | 15 | 0.9% |
+| WITHDRAW_STABLE | 15 | 0.9% |
+| WRAP_NATIVE | 2 | 0.1% |
+
+Pool arithmetic is ~43% of a quote, so 1.7% of it is under a percent of the
+whole -- below what the interleaved arms can resolve, and the arms agree: 1.22x,
+the same figure measured before the ratios and before these.
+
+**What it does finish is the probe path.** Every kind in that table now has a
+Rust model, so a probe no longer needs Python for any leg the router generates.
+The two probes still delegated are pools whose *swap* model was never admitted
+-- no port would help them, because there is nothing to port.
+
+The vector count is the other half of that claim: 411, from 6 stableswaps, 6
+twocryptos, 2 tricryptos, 7 ratios, 12 stableswap LP directions and 2 tricrypto
+LPs, each at several sizes in every direction. Exact against Python and exact
+against the extension, in both arithmetics.

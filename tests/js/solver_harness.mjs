@@ -108,6 +108,14 @@ if (job.op === "solve") {
       pools.addStableswap(m.balances, m.rates, m.amp, m.fee,
         m.offpeg_fee_multiplier, m.a_precision, m.fee_on_xp, m.subtract_one,
         m.admin_fee ?? undefined);
+    } else if (m.kind === "lp_withdraw" || m.kind === "lp_deposit") {
+      pools.addStableLp(m.balances, m.rates, m.amp, m.fee,
+        m.offpeg_fee_multiplier, m.a_precision, m.fee_on_xp, m.subtract_one,
+        m.total_supply, m.kind === "lp_deposit", m.admin_fee ?? undefined);
+    } else if (m.kind === "tri_lp") {
+      pools.addTricryptoLp(m.balances, m.precisions, m.price_scale, m.d, m.amp,
+        m.gamma, m.mid_fee, m.out_fee, m.fee_gamma, m.legacy, m.a_multiplier,
+        m.total_supply);
     } else if (m.kind === "vault") {
       pools.addVault(m.num, m.den, m.cap);
     } else if (m.kind === "one_to_one") {

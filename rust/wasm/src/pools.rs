@@ -144,6 +144,39 @@ impl Pools {
         self.inner.add_one_to_one()
     }
 
+    /// Add a stableswap LP, in one direction: `deposit` picks which.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = addStableLp)]
+    pub fn add_stable_lp(
+        &mut self, balances: Vec<String>, rates: Vec<String>, amp: &str,
+        fee: &str, offpeg_fee_multiplier: &str, a_precision: &str,
+        fee_on_xp: bool, subtract_one: bool, total_supply: &str, deposit: bool,
+        admin_fee: Option<String>,
+    ) -> Result<usize, JsError> {
+        self.inner
+            .add_stable_lp(&balances, &rates, amp, fee, offpeg_fee_multiplier,
+                           a_precision, fee_on_xp, subtract_one,
+                           admin_fee.as_deref(), total_supply, deposit)
+            .map_err(|e| JsError::new(&e))
+    }
+
+    /// Add a tricrypto LP's withdrawal arc. Deposits are exact through the
+    /// pool's own getter, so there is no direction to choose.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = addTricryptoLp)]
+    pub fn add_tricrypto_lp(
+        &mut self, balances: Vec<String>, precisions: Vec<String>,
+        price_scale: Vec<String>, d: &str, amp: &str, gamma: &str,
+        mid_fee: &str, out_fee: &str, fee_gamma: &str, legacy: bool,
+        a_multiplier: &str, total_supply: &str,
+    ) -> Result<usize, JsError> {
+        self.inner
+            .add_tricrypto_lp(&balances, &precisions, &price_scale, d, amp,
+                              gamma, mid_fee, out_fee, fee_gamma, legacy,
+                              a_multiplier, total_supply)
+            .map_err(|e| JsError::new(&e))
+    }
+
     /// The best two-way split of `dx` across two output coins, or `undefined`
     /// where this family has no search and the caller must run its own.
     #[wasm_bindgen(js_name = elementSplit)]

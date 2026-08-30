@@ -11,6 +11,7 @@
 //! round-tripping one through an `f64` would defeat the exact path; the
 //! formatting is paid once per pool at the warm, where it costs nothing.
 
+use crate::pools::lp::{StableLp, TriLp};
 use crate::pools::{stableswap, tricrypto, twocrypto};
 use ruint::aliases::U256;
 
@@ -31,6 +32,14 @@ enum Model {
     /// A wrapped native, or a stake that mints one for one. `RouteQuoter.vy`
     /// answers `dx` for these with no call at all.
     OneToOne,
+    /// An LP burn: `dx` is the LP amount and `j` the coin to receive, which is
+    /// what `calc_withdraw_one_coin` takes.
+    StableWithdraw(Box<StableLp>),
+    /// A single-sided deposit: `i` is the coin paid in, `dx` the amount.
+    StableDeposit(Box<StableLp>),
+    /// A tricrypto LP burn. Withdrawal only -- its deposits are already exact
+    /// through the pool's own getter.
+    TriWithdraw(Box<TriLp>),
 }
 
 fn big(s: &str) -> Result<U256, String> {
@@ -71,12 +80,18 @@ impl Registry {
         self.models.is_empty()
     }
 
+    /// The two arithmetics of one stableswap, built together.
+    ///
+    /// Shared with the LP arcs, which need the same pool: `xp` and the inverse
+    /// rates are constants of a pool frozen at a block, so they are taken once
+    /// here rather than per call, and a second construction would have to
+    /// agree with this one exactly.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_stableswap(
-        &mut self, balances: &[String], rates: &[String], amp: &str, fee: &str,
+    fn stableswap_pair(
+        &self, balances: &[String], rates: &[String], amp: &str, fee: &str,
         offpeg_fee_multiplier: &str, a_precision: &str, fee_on_xp: bool,
         subtract_one: bool, admin_fee: Option<&str>,
-    ) -> Result<usize, String> {
+    ) -> Result<(stableswap::Pool, stableswap::fast::Pool), String> {
         let exact = stableswap::Pool {
             balances: bigs(balances)?,
             rates: bigs(rates)?,
@@ -93,8 +108,6 @@ impl Registry {
                 None => None,
             },
         };
-        // `xp` and the inverse rates are constants of a pool frozen at a block,
-        // so they are taken once here rather than per call.
         let xp: Vec<f64> = exact.xp().iter().map(|v| f64::from(*v)).collect();
         let rates_f: Vec<f64> = exact.rates.iter().map(|r| f64::from(*r)).collect();
         let inv: Vec<f64> = rates_f
@@ -112,6 +125,18 @@ impl Registry {
             fee_on_xp,
             subtract_one,
         };
+        Ok((exact, fast))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_stableswap(
+        &mut self, balances: &[String], rates: &[String], amp: &str, fee: &str,
+        offpeg_fee_multiplier: &str, a_precision: &str, fee_on_xp: bool,
+        subtract_one: bool, admin_fee: Option<&str>,
+    ) -> Result<usize, String> {
+        let (exact, fast) = self.stableswap_pair(
+            balances, rates, amp, fee, offpeg_fee_multiplier, a_precision,
+            fee_on_xp, subtract_one, admin_fee)?;
         self.models.push(Model::Stable(Box::new(exact), Box::new(fast)));
         Ok(self.models.len() - 1)
     }
@@ -146,19 +171,20 @@ impl Registry {
         Ok(self.models.len() - 1)
     }
 
+    /// One tricrypto pool, shared with its LP arc.
     #[allow(clippy::too_many_arguments)]
-    pub fn add_tricrypto(
-        &mut self, balances: &[String], precisions: &[String],
+    fn tricrypto_pool(
+        &self, balances: &[String], precisions: &[String],
         price_scale: &[String], d: &str, amp: &str, gamma: &str, mid_fee: &str,
         out_fee: &str, fee_gamma: &str, legacy: bool, a_multiplier: &str,
-    ) -> Result<usize, String> {
+    ) -> Result<tricrypto::Pool, String> {
         let b = bigs(balances)?;
         let p = bigs(precisions)?;
         let s = bigs(price_scale)?;
         at(&b, 3, "balances")?;
         at(&p, 3, "precisions")?;
         at(&s, 2, "price_scale")?;
-        self.models.push(Model::Tri(Box::new(tricrypto::Pool {
+        Ok(tricrypto::Pool {
             balances: [b[0], b[1], b[2]],
             precisions: [p[0], p[1], p[2]],
             price_scale: [s[0], s[1]],
@@ -170,7 +196,19 @@ impl Registry {
             fee_gamma: big(fee_gamma)?,
             legacy,
             a_multiplier: big(a_multiplier)?,
-        })));
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_tricrypto(
+        &mut self, balances: &[String], precisions: &[String],
+        price_scale: &[String], d: &str, amp: &str, gamma: &str, mid_fee: &str,
+        out_fee: &str, fee_gamma: &str, legacy: bool, a_multiplier: &str,
+    ) -> Result<usize, String> {
+        let pool = self.tricrypto_pool(
+            balances, precisions, price_scale, d, amp, gamma, mid_fee, out_fee,
+            fee_gamma, legacy, a_multiplier)?;
+        self.models.push(Model::Tri(Box::new(pool)));
         Ok(self.models.len() - 1)
     }
 
@@ -193,6 +231,49 @@ impl Registry {
     pub fn add_one_to_one(&mut self) -> usize {
         self.models.push(Model::OneToOne);
         self.models.len() - 1
+    }
+
+    /// Add a stableswap LP, in one direction.
+    ///
+    /// The two directions are separate entries rather than one model with a
+    /// flag, because the caller already resolves them to separate arcs and a
+    /// pool may reproduce one and not the other: a withdrawal that does not
+    /// match the chain does not condemn the deposit beside it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_stable_lp(
+        &mut self, balances: &[String], rates: &[String], amp: &str, fee: &str,
+        offpeg_fee_multiplier: &str, a_precision: &str, fee_on_xp: bool,
+        subtract_one: bool, admin_fee: Option<&str>, total_supply: &str,
+        deposit: bool,
+    ) -> Result<usize, String> {
+        let (exact, fast) = self.stableswap_pair(
+            balances, rates, amp, fee, offpeg_fee_multiplier, a_precision,
+            fee_on_xp, subtract_one, admin_fee)?;
+        let lp = Box::new(StableLp { pool: exact, fast, total_supply: big(total_supply)? });
+        self.models.push(if deposit {
+            Model::StableDeposit(lp)
+        } else {
+            Model::StableWithdraw(lp)
+        });
+        Ok(self.models.len() - 1)
+    }
+
+    /// Add a tricrypto LP's withdrawal arc.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_tricrypto_lp(
+        &mut self, balances: &[String], precisions: &[String],
+        price_scale: &[String], d: &str, amp: &str, gamma: &str, mid_fee: &str,
+        out_fee: &str, fee_gamma: &str, legacy: bool, a_multiplier: &str,
+        total_supply: &str,
+    ) -> Result<usize, String> {
+        let pool = self.tricrypto_pool(
+            balances, precisions, price_scale, d, amp, gamma, mid_fee, out_fee,
+            fee_gamma, legacy, a_multiplier)?;
+        self.models.push(Model::TriWithdraw(Box::new(TriLp {
+            pool,
+            total_supply: big(total_supply)?,
+        })));
+        Ok(self.models.len() - 1)
     }
 
     /// The best two-way split of `dx` across two output coins.
@@ -253,6 +334,36 @@ impl Registry {
                 amount.checked_mul(*num).map(|v| v / *den)
             }
             Model::OneToOne => Some(amount),
+            // `j` is the coin to receive and `amount` the LP burned, which is
+            // the order `calc_withdraw_one_coin` takes them in.
+            Model::StableWithdraw(lp) => {
+                if fast {
+                    lp.calc_withdraw_one_coin_fast(amount, b)
+                        .and_then(stableswap::to_u256)
+                } else {
+                    lp.calc_withdraw_one_coin(amount, b)
+                }
+            }
+            // `i` is the coin paid in. The deposit is priced by what
+            // `add_liquidity` mints, not by `calc_token_amount`: the getter is
+            // fee-free on the legacy pools by its own admission, so quoting a
+            // deposit with it promises a mint the deposit does not pay.
+            Model::StableDeposit(lp) => {
+                if a >= lp.n() {
+                    return None;
+                }
+                let mut amounts = vec![U256::ZERO; lp.n()];
+                amounts[a] = amount;
+                if fast {
+                    lp.calc_token_amount_charged_fast(&amounts)
+                        .and_then(stableswap::to_u256)
+                } else {
+                    lp.calc_token_amount_charged(&amounts)
+                }
+            }
+            // No float form: only the stableswap LP has one, and the reference
+            // answers in integers where a model has none.
+            Model::TriWithdraw(lp) => lp.calc_withdraw_one_coin(amount, b),
         };
         got.and_then(|v| u128::try_from(v).ok())
     }

@@ -198,7 +198,7 @@ pub struct Pool {
 }
 
 impl Pool {
-    fn fee(&self, xp: &[U256; 3]) -> Option<U256> {
+    pub fn fee_of(&self, xp: &[U256; 3]) -> Option<U256> {
         let p = e(18);
         let f = reduction_coefficient(xp, self.fee_gamma)?;
         Some((self.mid_fee * f + self.out_fee * (p - f)) / p)
@@ -277,7 +277,7 @@ impl Pool {
         }
         dy /= self.precisions[j];
 
-        let fee = self.fee(&xp)?;
+        let fee = self.fee_of(&xp)?;
         Some(dy - fee * dy / e(10))
     }
 }

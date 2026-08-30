@@ -348,6 +348,31 @@ def _spec_for_js(kind, spec):
     if kind == "vault":
         out.update(num=str(spec["num"]), den=str(spec["den"]),
                    cap=str(spec.get("cap", 0)))
+    elif kind in ("lp_withdraw", "lp_deposit"):
+        from test_pools_differential import STABLE_SUPPLY
+        out.update(
+            balances=[str(v) for v in spec["balances"]],
+            rates=[str(v) for v in spec["rates"]],
+            amp=str(spec["amp"]), fee=str(spec["fee"]),
+            offpeg_fee_multiplier=str(spec.get("offpeg_fee_multiplier", 0)),
+            a_precision=str(spec.get("a_precision", 100)),
+            fee_on_xp=spec.get("fee_on_xp", True),
+            subtract_one=spec.get("subtract_one", True),
+            total_supply=str(STABLE_SUPPLY),
+            admin_fee=(str(spec["admin_fee"])
+                       if spec.get("admin_fee", -1) >= 0 else None))
+    elif kind == "tri_lp":
+        from test_pools_differential import TRI_SUPPLY
+        out.update(
+            balances=[str(v) for v in spec["balances"]],
+            precisions=[str(v) for v in spec["precisions"]],
+            price_scale=[str(v) for v in spec["price_scale"]],
+            d=str(spec["d"]), amp=str(spec["amp"]), gamma=str(spec["gamma"]),
+            mid_fee=str(spec["mid_fee"]), out_fee=str(spec["out_fee"]),
+            fee_gamma=str(spec["fee_gamma"]),
+            legacy=spec.get("legacy", False),
+            a_multiplier=str(spec.get("a_multiplier", 10000)),
+            total_supply=str(TRI_SUPPLY))
     elif kind == "stableswap":
         out.update(
             balances=[str(v) for v in spec["balances"]],

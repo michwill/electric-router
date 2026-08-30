@@ -67,7 +67,15 @@ class _Withdraw:
         return self.lp.calc_withdraw_one_coin(dx, j)
 
     def get_dy_fast(self, i: int, j: int, dx: int) -> int:
-        return self.lp.calc_withdraw_one_coin_fast(dx, j)
+        # The crypto LP has no float form -- only the stableswap one does --
+        # and `_price` cannot see that from out here, because the wrapper is
+        # what it asks and the wrapper serves both. So answer in integers, the
+        # same rule `_price` applies to a model with no fast path at all.
+        # Without this a WITHDRAW_CRYPTO probe raises `AttributeError`, which
+        # `probe` does not catch and a quote does not survive.
+        quick = getattr(self.lp, "calc_withdraw_one_coin_fast", None)
+        return (quick(dx, j) if quick is not None
+                else self.lp.calc_withdraw_one_coin(dx, j))
 
 
 class _Deposit:
@@ -145,8 +153,10 @@ class _Native:
     each is one multiply and a divide. They are here because a probe the batch
     cannot serve is a probe the Python loop below has to price anyway, so a
     mixed route pays for both paths -- and because a router that runs with no
-    Python at all cannot leave a leg kind behind. LP tokens are the remaining
-    hole, and they are a different shape rather than a missing transcription.
+    Python at all cannot leave a leg kind behind. The LP arcs are here for the
+    same reason, and they are the one family that is a different shape rather
+    than a transcription: `D` moves, so they need `get_y_D` where a swap needs
+    `get_y`.
 
     `keep` holds a reference to every model handed over, because the index is
     keyed on `id()` and a collected object would let a later one reuse the
@@ -210,6 +220,36 @@ class _Native:
                                         str(model.cap))
         if name == "_OneToOne":
             return self.pools.add_one_to_one()
+        if name in ("_Withdraw", "_Deposit"):
+            return self._add_lp(model.lp, deposit=name == "_Deposit")
+        return None
+
+    def _add_lp(self, lp, *, deposit: bool):
+        """One LP arc, in the direction the wrapper named.
+
+        The two directions are separate entries because they are separate arcs
+        and a pool may reproduce one and not the other. Tricrypto has only the
+        one: its deposits are already exact through the pool's own getter.
+        """
+        pool = getattr(lp, "pool", None)
+        family = type(pool).__name__ if pool is not None else ""
+        if family == "StableSwap":
+            return self.pools.add_stable_lp(
+                [str(b) for b in pool.balances], [str(r) for r in pool.rates],
+                str(pool.amp), str(pool.fee),
+                str(pool.offpeg_fee_multiplier), str(pool.a_precision),
+                bool(pool.fee_on_xp), bool(pool.subtract_one),
+                str(lp.total_supply), deposit,
+                str(pool.admin_fee) if pool.admin_fee >= 0 else None)
+        if family == "Tricrypto" and not deposit:
+            return self.pools.add_tricrypto_lp(
+                [str(b) for b in pool.balances],
+                [str(v) for v in pool.precisions],
+                [str(v) for v in pool.price_scale],
+                str(pool.d), str(pool.amp), str(pool.gamma),
+                str(pool.mid_fee), str(pool.out_fee), str(pool.fee_gamma),
+                bool(pool.legacy), str(pool.a_multiplier),
+                str(lp.total_supply))
         return None
 
     #: What an amount may be and still cross as a `u128`: 3.4e38, a token

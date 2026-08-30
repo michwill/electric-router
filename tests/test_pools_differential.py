@@ -19,9 +19,9 @@ from __future__ import annotations
 
 import pytest
 
-from erouter.chain.exact_probe import ONE_TO_ONE
-from erouter.core.stableswap import StableSwap
-from erouter.core.tricrypto import Tricrypto
+from erouter.chain.exact_probe import ONE_TO_ONE, _Deposit, _Withdraw
+from erouter.core.stableswap import StableSwap, StableSwapLP
+from erouter.core.tricrypto import Tricrypto, TricryptoLP
 from erouter.core.twocrypto import Twocrypto
 from erouter.core.vault import Vault, VaultError
 
@@ -99,6 +99,13 @@ VAULTS = (
 )
 
 
+#: An LP's supply against the pool it belongs to.  Roughly D, which is what a
+#: real pool's supply is near, so a burn of a given share moves the invariant
+#: by about that share rather than by something degenerate.
+STABLE_SUPPLY = 542_000 * 10**18
+TRI_SUPPLY = 3_986_769_329_916 * 10**6
+
+
 def _s(v):
     return str(int(v))
 
@@ -113,6 +120,24 @@ def _add(pools, kind, spec):
             _s(spec.get("a_precision", 100)), spec.get("fee_on_xp", True),
             spec.get("subtract_one", True),
             _s(spec["admin_fee"]) if spec.get("admin_fee", -1) >= 0 else None)
+    if kind in ("lp_withdraw", "lp_deposit"):
+        return pools.add_stable_lp(
+            [_s(b) for b in spec["balances"]], [_s(r) for r in spec["rates"]],
+            _s(spec["amp"]), _s(spec["fee"]),
+            _s(spec.get("offpeg_fee_multiplier", 0)),
+            _s(spec.get("a_precision", 100)), spec.get("fee_on_xp", True),
+            spec.get("subtract_one", True), _s(STABLE_SUPPLY),
+            kind == "lp_deposit",
+            _s(spec["admin_fee"]) if spec.get("admin_fee", -1) >= 0 else None)
+    if kind == "tri_lp":
+        return pools.add_tricrypto_lp(
+            [_s(b) for b in spec["balances"]],
+            [_s(p) for p in spec["precisions"]],
+            [_s(p) for p in spec["price_scale"]], _s(spec["d"]),
+            _s(spec["amp"]), _s(spec["gamma"]), _s(spec["mid_fee"]),
+            _s(spec["out_fee"]), _s(spec["fee_gamma"]),
+            spec.get("legacy", False), _s(spec.get("a_multiplier", 10000)),
+            _s(TRI_SUPPLY))
     if kind == "vault":
         return pools.add_vault(_s(spec["num"]), _s(spec["den"]),
                                _s(spec.get("cap", 0)))
@@ -167,6 +192,12 @@ def _model(kind, spec):
         return Tricrypto(**spec)
     if kind == "vault":
         return Vault(**spec)
+    if kind in ("lp_withdraw", "lp_deposit"):
+        lp = StableSwapLP(pool=StableSwap(**spec), total_supply=STABLE_SUPPLY)
+        return _Deposit(lp) if kind == "lp_deposit" else _Withdraw(lp)
+    if kind == "tri_lp":
+        return _Withdraw(TricryptoLP(pool=Tricrypto(**spec),
+                                     total_supply=TRI_SUPPLY))
     return ONE_TO_ONE
 
 
@@ -200,6 +231,21 @@ def vectors():
             yield "vault", n, spec, 0, 1, dx
     for dx in (1, 10**18, 10**30):
         yield "one_to_one", 0, {}, 0, 1, dx
+
+    # A withdrawal takes the LP amount as `dx` and the coin to receive as `j`;
+    # a deposit takes the coin paid in as `i`.  Sized against the supply and
+    # the balances respectively, so both stay in the range a route reaches.
+    for n, spec in enumerate(_stableswap()):
+        for j in range(len(spec["balances"])):
+            for share in (10**-6, 10**-4, 10**-2):
+                yield "lp_withdraw", n, spec, 0, j, int(STABLE_SUPPLY * share)
+        for i in range(len(spec["balances"])):
+            for share in (10**-6, 10**-4, 10**-2):
+                yield "lp_deposit", n, spec, i, 0, int(spec["balances"][i] * share)
+    for n, spec in enumerate(_tricrypto()):
+        for j in range(3):
+            for share in (10**-6, 10**-4, 10**-2):
+                yield "tri_lp", n, spec, 0, j, int(TRI_SUPPLY * share)
 
 
 CASES = list(vectors())
