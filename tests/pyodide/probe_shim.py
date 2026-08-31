@@ -98,4 +98,136 @@ def split():
         1e-6, 10, 2, 0.3, 1e-9)
 step("split_ascend", split)
 
+# --- what the browser reaches after the probe path grew ----------------
+#
+# `Graph`, `Arcs`, `Ballot` and `Pools` were added to the package without
+# being added here, and the browser raised `AttributeError` on the first
+# quote while every CPython test stayed green.  That is the failure class
+# this whole file exists for, so each one is exercised, not merely bound.
+
+def pools_price():
+    pools = _solve.Pools()
+    try:
+        which = pools.add_stableswap(
+            ["1000000000000000000000", "1000000000000000000000"],
+            ["1000000000000000000", "1000000000000000000"],
+            "200", "1000000", "0", "100", False, True)
+        got = pools.price([which, which], [0, 1], [1, 0],
+                          [10 ** 18, 10 ** 30], False)
+        # The second amount is past `u64`, which is the point: `u128` crosses
+        # as a lo/hi pair and a shim that forgot the hi word would answer it
+        # with the wrong number rather than fail.
+        return [None if v is None else v for v in got], len(pools)
+    finally:
+        pools.close()
+step("Pools.price", pools_price)
+
+def pools_vault_and_split():
+    pools = _solve.Pools()
+    try:
+        vault = pools.add_vault("1050000000000000000", "10" + "0" * 17, "0")
+        one = pools.add_one_to_one()
+        priced = pools.price([vault, one], [0, 0], [1, 1],
+                             [10 ** 18, 10 ** 18], False)
+        # A `u64` scalar parameter, which Pyodide sends as a JS Number unless
+        # it is made a BigInt -- the conversion this shim has to do by hand.
+        split = pools.element_split(vault, 0, 1, 1, 10 ** 18)
+        return priced, split
+    finally:
+        pools.close()
+step("Pools.element_split", pools_vault_and_split)
+
+def ballot_once():
+    """A whole generation: `Graph`, `Arcs` and `Ballot` in the order `accel`
+    uses them."""
+    tau, sig = [0, 0, 1], [1, 2, 2]
+    g, eps = [2.0, 1.0, 3.0], [1e-4, 3e-4, 1e-4]
+    cap = [float("inf")] * 3
+    graph = _solve.Graph.from_arrays(tau, sig, g, eps, cap, [False] * 3, 3)
+    arcs = _solve.Arcs()
+    try:
+        for k in range(3):
+            arcs.add(f"a{k}", "0x" + f"{k:02x}" * 20, 0, 0, 1, 2,
+                     "0x" + "11" * 20, "0x" + "22" * 20, tau[k], sig[k],
+                     1.0, 0.0, cap[k], g[k], eps[k], 10 ** 21, 18, 1e6, 0.0)
+        base = _solve.solve(tau, sig, g, eps, cap, 3, 0, 2, 1.0)
+        psi = np.frombuffer(base["psi"], dtype=np.float64)
+        ballot = _solve.Ballot.generate(
+            graph, arcs, 0, 2, 1.0, psi.tolist(), max_candidates=6)
+        try:
+            return {
+                "n": len(ballot),
+                "labels": ballot.labels()[:3],
+                "kinds": ballot.kinds()[:3],
+                "certificates": ballot.certificates()[:3],
+                "n_arcs": ballot.n_arcs()[:3],
+                "loss": [round(v, 9) for v in ballot.modelled_loss()[:2]],
+                "psi0": [round(v, 9) for v in ballot.psi(0)],
+                "solves": ballot.solves, "pivots": ballot.pivots,
+                "skipped": ballot.skipped, "skipped_wide": ballot.skipped_wide,
+            }
+        finally:
+            ballot.close()
+    finally:
+        arcs.close()
+        graph.close()
+step("Ballot.generate", ballot_once)
+
+def ballot_with_pricer():
+    """The element pricer crosses as a JS function and answers with a JS
+    array; a Python tuple arrives as a proxy with no `length` and is refused
+    for the wrong reason."""
+    tau, sig = [0, 0, 1], [1, 2, 2]
+    g, eps = [2.0, 1.0, 3.0], [1e-4, 3e-4, 1e-4]
+    cap = [float("inf")] * 3
+    seen = []
+
+    def pricer(k1, k2, psi1, psi2):
+        seen.append((k1, k2))
+        return (psi1 * 0.5, psi2 * 0.5)
+
+    # Arcs 0 and 1 share a pool and a `tau`, which is what proposes an
+    # element pair.  With three distinct pools the family never runs and the
+    # callback is never called -- the probe passed that way and proved only
+    # that the argument crossed.
+    pools = ["0x" + "aa" * 20, "0x" + "aa" * 20, "0x" + "bb" * 20]
+    graph = _solve.Graph.from_arrays(tau, sig, g, eps, cap, [False] * 3, 3)
+    arcs = _solve.Arcs()
+    try:
+        for k in range(3):
+            arcs.add(f"a{k}", pools[k], 0, 0, k + 1, 3,
+                     "0x" + "11" * 20, "0x" + f"{k + 2:02x}" * 20,
+                     tau[k], sig[k],
+                     1.0, 0.0, cap[k], g[k], eps[k], 10 ** 21, 18, 1e6, 0.0)
+        base = _solve.solve(tau, sig, g, eps, cap, 3, 0, 2, 1.0)
+        psi = np.frombuffer(base["psi"], dtype=np.float64)
+        # The element family runs *after* the pin sweep and breaks as soon as
+        # the budget is full, so a small `max_candidates` never reaches it --
+        # which is how this probe first passed while calling nothing.
+        ballot = _solve.Ballot.generate(
+            graph, arcs, 0, 2, 1.0, psi.tolist(), max_candidates=30,
+            element_split=pricer)
+        try:
+            assert seen, "the element pricer was never called"
+            return len(ballot), len(seen), seen[0]
+        finally:
+            ballot.close()
+    finally:
+        arcs.close()
+        graph.close()
+step("Ballot element_split", ballot_with_pricer)
+
+def arcs_row():
+    arcs = _solve.Arcs()
+    try:
+        arcs.add("a0", "0x" + "ab" * 20, 0, 0, 1, 2, "0x" + "11" * 20,
+                 "0x" + "22" * 20, 0, 1, 1.5, 0.0, 9.0, 2.0, 1e-4,
+                 10 ** 30, 6, 1e6, 0.0, "note")
+        row = arcs.row(0)
+        return {k: row[k] for k in ("id", "i", "j", "reserve_in",
+                                    "decimals_in", "note")}
+    finally:
+        arcs.close()
+step("Arcs.row", arcs_row)
+
 "\n".join(report)

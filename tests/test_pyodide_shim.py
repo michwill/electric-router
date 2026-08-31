@@ -62,4 +62,10 @@ def test_every_entry_point_answers_under_pyodide():
     assert named >= {
         "version", "Problem.solve", "cancel_cycles", "find_cycle", "calibrate",
         "shortest_path", "Evm.call", "Evm.call_many + misses", "split_ascend",
+        # Added after `Graph`, `Arcs`, `Ballot` and `Pools` reached the package
+        # unbound and every browser quote raised `AttributeError`.  Naming them
+        # here is what stops the next port reopening the hole: the probe can
+        # grow a case and still pass if nothing insists the case exists.
+        "Pools.price", "Pools.element_split", "Ballot.generate",
+        "Ballot element_split", "Arcs.row",
     }, named

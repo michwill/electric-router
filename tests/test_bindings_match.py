@@ -1,10 +1,14 @@
-"""Whatever PyO3 exposes, wasm must expose too.
+"""Whatever PyO3 exposes, wasm must expose too -- and the browser shim must
+expose whatever the package asks for.
 
-The port has now grown the same hole twice.  `pools` compiled to wasm32 for
+The port has now grown the same hole three times.  `pools` compiled to wasm32 for
 months while nothing under `rust/wasm/src/` referenced it, so the linker
 stripped it and a browser could not price a pool; `ladders` was added with a
-PyO3 binding only and repeated it within the same session.  Both were found by
-reading, which is not a method.
+PyO3 binding only and repeated it within the same session.  Then `Graph`,
+`Arcs`, `Ballot` and `Pools` reached `core` and `chain` while
+`erouter/wasm/_solve.py` stayed as it was, and every browser quote raised
+`AttributeError` -- the Rust and the wheel were both fine.  All three were
+found by reading, which is not a method.
 
 So this reads the two binding files and compares what they name.  It is a
 structural test, not a behavioural one -- `test_wasm_differential` covers
@@ -127,3 +131,52 @@ def test_every_pyo3_binding_file_has_a_wasm_counterpart():
             f"{got} is a PyO3 binding with no recorded wasm counterpart. "
             f"Add one under rust/wasm/src/ and name it in `known`.")
         assert (WASM / twin).exists(), f"{got} names {twin}, which is missing"
+
+
+# ------------------------------------------------- the package and its shim
+
+
+def test_the_browser_shim_answers_everything_the_package_asks_for():
+    """`erouter.wasm._solve` stands in for the extension, so it has to have
+    what the extension is asked for.
+
+    Static, and deliberately: `test_pyodide_shim` runs the real thing but
+    needs node and a Pyodide distribution, so it skips on most machines and
+    skipped on the one where this hole was opened.  This needs neither.
+
+    It reads attribute access rather than importing, because importing the
+    shim outside Pyodide gets an unbound module and importing the package
+    would need the extension present.
+    """
+    import ast
+
+    package = ROOT / "src" / "erouter"
+    wanted: dict[str, str] = {}
+    for path in sorted(package.rglob("*.py")):
+        if "wasm" in path.parts:
+            continue
+        tree = ast.parse(path.read_text())
+        # `import erouter_solve as x` is bound per module, and `accel` calls it
+        # `_rust`; both are the extension under another name.
+        aliases = {"erouter_solve", "_rust"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases |= {a.asname or a.name for a in node.names
+                            if a.name == "erouter_solve"}
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id in aliases):
+                wanted.setdefault(node.attr,
+                                  f"{path.relative_to(ROOT)}:{node.lineno}")
+
+    shim = (package / "wasm" / "_solve.py").read_text()
+    defined = set(re.findall(r"^(?:class|def)\s+(\w+)", shim, re.M))
+    defined |= set(re.findall(r"^(\w+)\s*=", shim, re.M))
+
+    missing = {name: where for name, where in wanted.items()
+               if name not in defined}
+    assert not missing, (
+        "the package asks the extension for names the browser shim does not "
+        "bind, so every quote in a browser raises AttributeError while every "
+        f"CPython test stays green: {missing}")
