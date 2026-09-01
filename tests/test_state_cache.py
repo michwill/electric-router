@@ -73,7 +73,7 @@ def test_no_slot_values_are_ever_written(tmp_path):
     # same kind of thing as `wrapper_needs`, and equally not a value.
     assert set(raw) == {"version", "chain_id", "accounts", "code_of", "code",
                         "funded", "pools", "volatile", "wrapper_needs",
-                        "wrapper_sig", "arc_needs"}
+                        "wrapper_sig", "session_sig", "arc_needs"}
     assert raw["version"] == VERSION
     # `accounts` maps to slot *keys* only.
     assert all(isinstance(k, bytes) and len(k) == 32
@@ -83,6 +83,11 @@ def test_no_slot_values_are_ever_written(tmp_path):
     assert all(isinstance(k, bytes) and len(k) == 32
                for keys in raw["wrapper_needs"].values() for k in keys)
     assert isinstance(raw["wrapper_sig"], str)
+    # `session_sig` is the same kind of thing for the session's own warm: a
+    # digest of what it *built*, so a bank made for one arrangement of pools
+    # and models is not mistaken for evidence about another.  A digest, not a
+    # value -- which is why it may be committed.
+    assert isinstance(raw["session_sig"], str)
 
 
 def test_saving_twice_produces_an_identical_file(tmp_path):
@@ -202,3 +207,31 @@ def test_learning_the_same_needs_twice_does_not_dirty_the_cache(tmp_path):
     assert not cache.dirty
     cache.learn_arc_needs({"0x" + "cd" * 20: {4}})
     assert not cache.dirty, "a subset is already covered"
+
+
+# ------------------------------------------- what the session's own warm needs
+
+
+def test_the_session_signature_survives_a_round_trip(tmp_path):
+    """It is what says a bank was made for *this* arrangement of the universe.
+
+    `wrapper_sig` has a counterpart in the CLI that re-reads from the chain
+    when it disagrees; this one only warns, because the session's slots are a
+    performance matter and its arcs are not -- but it has to persist either
+    way, or every run reports the bank as freshly stale.
+    """
+    cache = build(tmp_path)
+    cache.learn_session_sig("cafebabe12345678")
+    cache.save()
+    again = StateCache.load(cache.chain_id, "test", directory=tmp_path)
+    assert again.session_sig == "cafebabe12345678"
+
+
+def test_an_empty_session_signature_never_overwrites_a_real_one(tmp_path):
+    """A run that could not compute one must not erase what a run that could
+    left behind -- otherwise a single failed session pass silently disarms the
+    staleness warning for every run after it."""
+    cache = build(tmp_path)
+    cache.learn_session_sig("cafebabe12345678")
+    cache.learn_session_sig("")
+    assert cache.session_sig == "cafebabe12345678"

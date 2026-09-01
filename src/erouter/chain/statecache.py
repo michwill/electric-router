@@ -93,6 +93,7 @@ def _to_binary(payload: dict) -> dict:
         "volatile": [_bin(a) for a in payload["volatile"]],
         "wrapper_needs": {_bin(a): slots(v) for a, v in payload["wrapper_needs"].items()},
         "wrapper_sig": payload["wrapper_sig"],
+        "session_sig": payload.get("session_sig", ""),
         "arc_needs": {_bin(a): slots(v) for a, v in payload["arc_needs"].items()},
     }
 
@@ -112,6 +113,7 @@ def _from_binary(raw: dict) -> dict:
         "volatile": [_hex(a) for a in raw.get("volatile", [])],
         "wrapper_needs": {_hex(a): slots(v) for a, v in raw.get("wrapper_needs", {}).items()},
         "wrapper_sig": raw.get("wrapper_sig", ""),
+        "session_sig": raw.get("session_sig", ""),
         "arc_needs": {_hex(a): slots(v) for a, v in raw.get("arc_needs", {}).items()},
     }
 
@@ -184,6 +186,14 @@ class StateCache:
     #: work.  Same shape as `wrapper_needs` and for the same reason: account
     #: presence is not the test, because these accounts are cached anyway.
     arc_needs: dict[str, set[int]] = field(default_factory=dict)
+    #: What a `RouterSession.warm` produced when its slots were last banked.
+    #:
+    #: The same idea as `wrapper_sig` and for the same reason: coverage says
+    #: the state should be there, this says the session still builds the same
+    #: universe out of it.  A slot set banked for one arrangement of pools,
+    #: arcs and exact models is not evidence about another, and the failure is
+    #: silent -- a slot nobody fetched reads as zero.
+    session_sig: str = ""
     dirty: bool = False
 
     # ------------------------------------------------------------- load/save
@@ -226,6 +236,7 @@ class StateCache:
         self.volatile = set(raw.get("volatile", []))
         self.wrapper_needs = {a: set(v) for a, v in raw.get("wrapper_needs", {}).items()}
         self.wrapper_sig = str(raw.get("wrapper_sig", "") or "")
+        self.session_sig = str(raw.get("session_sig", "") or "")
         self.arc_needs = {a: set(v) for a, v in raw.get("arc_needs", {}).items()}
         return self
 
@@ -242,6 +253,12 @@ class StateCache:
             self.wrapper_sig = signature
             changed = True
         self.dirty = self.dirty or changed
+
+    def learn_session_sig(self, signature: str) -> None:
+        """Record what the session built when its slots were banked."""
+        if signature and signature != self.session_sig:
+            self.session_sig = signature
+            self.dirty = True
 
     def learn_arc_needs(self, needs: dict) -> None:
         """Record the slots arc probes read, keeping what was already known."""
@@ -300,6 +317,7 @@ class StateCache:
             "wrapper_needs": {a: sorted(v)
                               for a, v in sorted(self.wrapper_needs.items())},
             "wrapper_sig": self.wrapper_sig,
+            "session_sig": self.session_sig,
             "arc_needs": {a: sorted(v)
                           for a, v in sorted(self.arc_needs.items())},
         }

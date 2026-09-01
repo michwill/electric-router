@@ -88,6 +88,16 @@ class LocalEvm:
         self._gas = gas
         self._injected: set[str] = set()
         self.stats = WarmStats()
+        #: What the miss loop had to go to the wire for, at slot granularity.
+        #:
+        #: Recorded rather than merely counted, because it is exactly what the
+        #: committed cache is missing: a session that fetches nothing here
+        #: starts warm.  `erouter warmcache` banks it.  Nothing in a quote
+        #: reads this -- it costs a set insert per fetched slot and it is the
+        #: only way the cache can learn what *this* code path needs, as
+        #: against what the CLI's stand-ins happen to read.
+        self.learned: dict[str, set[int]] = {}
+        self.learned_code: set[str] = set()
         # The caller has to exist before anything asks about it, or every call
         # reports it as a missing account and the loop fetches an empty one.
         backend.set_balance(CALLER, CALLER_BALANCE)
@@ -257,7 +267,13 @@ class LocalEvm:
                     code=blob or None,
                 )
                 self.stats.fetched += 1
+        for address in wanted_code:
+            self.learned_code.add(str(address).lower())
         if missed["slots"]:
+            for address, slot in missed["slots"]:
+                text = str(slot)
+                self.learned.setdefault(str(address).lower(), set()).add(
+                    int(text, 16) if text.startswith("0x") else int(text))
             payloads = [("eth_getStorageAt", [a, _slot(s), block])
                         for a, s in missed["slots"]]
             values = await self._batched(rpc, payloads)

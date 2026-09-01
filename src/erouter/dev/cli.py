@@ -563,6 +563,82 @@ class _VaultsOverWire:
         return getattr(self._inner, name)
 
 
+def _bank_session_needs(chain, rpc, cache, universe, min_tvl: float,
+                        block: int) -> tuple[int, int, str]:
+    """Bank what a real `RouterSession.warm` has to fetch, and say what it made.
+
+    The rest of this command records the CLI's own stand-ins --
+    `resolve_dialects`, `read_balances`, `build_node_map` -- and they read
+    *different slots of the same contracts* than the session's `_resolve_pools`
+    and `_build_models` do.  Measured 2026-09-01: 165 slots that no committed
+    cache has ever held, in any of sixty-two revisions since 2026-08-13, costing
+    ten sequential miss rounds off every warm.  The demand arrived with the
+    session on 2026-08-22 and nothing has recorded for it since, because nothing
+    runs it.
+
+    So run it.  The session already knows what it missed -- `LocalEvm.learned`
+    is the fetch loop's own record -- which makes this the shortest path to a
+    bank that is *by construction* what a warm needs, rather than what something
+    shaped like a warm happens to read.
+
+    Returns `(accounts, slots, signature)`.  The signature is what the warm
+    produced, not what it read: coverage says the state should be there, this
+    says the session still built the same thing out of it.
+    """
+    import asyncio
+    import hashlib
+    import json as _json
+    import pathlib
+
+    import erouter_evm
+
+    from ..chain.session import RouterSession
+
+    class _AsyncRpc:
+        """`AsyncRpc` over this command's synchronous transport."""
+
+        batch_size = 100
+
+        def __init__(self, transport):
+            self._transport = transport
+            self.chain_id = transport.chain_id
+
+        async def batch(self, requests):
+            return self._transport.fetch_multi(list(requests), concurrent=True)
+
+        async def call(self, method, params):
+            got = self._transport.fetch_multi([(method, params)])[0]
+            if isinstance(got, Exception):
+                raise got
+            return got
+
+    class _Files:
+        """`DataSource` over the checkout's own `data/`."""
+
+        def __init__(self, root):
+            self._root = root
+
+        async def load(self, name):
+            path = self._root / "data" / name
+            return path.read_bytes() if path.exists() else None
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    session = RouterSession(
+        chain, _AsyncRpc(rpc), erouter_evm.Evm("Osaka", chain.chain_id),
+        _Files(root), _json.loads(_json.dumps(universe)), min_tvl=min_tvl)
+    report = asyncio.run(session.warm(block=block))
+    evm = session.evm
+    learned = {a: set(v) for a, v in evm.learned.items() if v}
+    cache.learn_slots(learned)
+    for address in evm.learned_code:
+        blob = session.state.bytecode(address) if session.state else None
+        if blob:
+            cache.learn_code(address, blob)
+    signature = hashlib.sha256(
+        f"{report.pools}|{report.arcs}|{report.exact}".encode()).hexdigest()[:16]
+    return (len(learned), sum(len(v) for v in learned.values()), signature)
+
+
 def _wrapper_signature(nodes, wrappers, stake_arcs) -> str:
     """What the wrapper stages produced, in one comparable string.
 
@@ -2424,7 +2500,12 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     print(f"  universe: {len(load.pools)} pools, {len(fresh)} to learn "
           f"({len(volatile)} volatile)")
     if not fresh and quoter_known:
-        print(f"  {OK} nothing to do")
+        # Not "nothing to do": the universe is known, which is a different
+        # question from whether the *session's* warm has anything to fetch.
+        # Returning here is what let 165 slots go unbanked through thirteen
+        # re-banks -- every one of them reported nothing to do and was right
+        # about the only thing it looked at.
+        _session_pass(chain, rpc, cache, load, args, before)
         return 0
 
     started = _time.perf_counter()
@@ -2482,7 +2563,41 @@ def cmd_warmcache(args: argparse.Namespace) -> int:
     print(f"  {OK} wrote {cache.path} ({size / 1024:,.0f} KiB)")
     for line in stats.errors[:5]:
         print(f"  {WARN} {line}")
+    # Last, so it starts from the fullest cache this run can offer and banks
+    # only what is genuinely left over.
+    _session_pass(chain, rpc, cache, load, args, before)
     return 0
+
+
+def _session_pass(chain, rpc, cache, load, args, before) -> None:
+    """Run a real session warm and bank what it had to fetch."""
+    from ..chain.cache import UniverseCache
+
+    universe = UniverseCache().get(chain.chain_id, args.min_tvl, allow_stale=True)
+    if universe is None:
+        print(f"  {WARN} no cached universe; skipping the session pass")
+        return
+    was = cache.stats().slots
+    try:
+        accounts, slots, signature = _bank_session_needs(
+            chain, rpc, cache, universe, args.min_tvl, rpc.block)
+    except Exception as exc:
+        # Never fail the command on it: what came before is still worth
+        # writing, and a session that cannot warm is its own bug report.
+        print(f"  {WARN} session pass failed ({type(exc).__name__}: "
+              f"{str(exc)[:60]}); the universe cache is still written")
+        return
+    stale = cache.session_sig and cache.session_sig != signature
+    cache.learn_session_sig(signature)
+    cache.save()
+    gained = cache.stats().slots - was
+    print(f"  session: {slots} slot(s) over {accounts} account(s) fetched, "
+          f"{gained} new to the cache")
+    if stale:
+        print(f"  {WARN} the session now builds a different universe than the "
+              f"bank was made from; the slot set may have moved with it")
+    if not slots:
+        print(f"  {OK} a session warm fetches nothing -- the cache covers it")
 
 
 def build_parser() -> argparse.ArgumentParser:
