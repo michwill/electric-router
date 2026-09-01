@@ -510,8 +510,8 @@ pub fn active_set_solve(
         // does not associate.  A node that is `tau` of one arc and `sig` of
         // another accumulates in a different order if the two are interleaved,
         // and the difference -- a few ulp in `rhs` -- reaches `psi` multiplied
-        // by a conductance and decides a pivot.  Measured: interleaving cost
-        // six of the pinned re-solves in §6.3's sweep.
+        // by a conductance and decides a pivot.  It moved none of §6.3's
+        // measured divergences: this is the mirror being right, not the fix.
         let mut rhs = s_hat.clone();
         for p in 0..m {
             if active[p] {
