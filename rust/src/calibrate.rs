@@ -270,7 +270,9 @@ pub fn calibrate(
             f_at_cap = Some(y[y.len() - 1]);
             note = "CAP_FROM_LADDER";
         }
-        let cap_value = cap.unwrap();
+        let Some(cap_value) = cap else {
+            return Err(CalibrationError("a clamped arc needs a cap".into()));
+        };
         let f_cap = match f_at_cap {
             Some(v) => v,
             None => interp(cap_value, &x, &y),

@@ -9,6 +9,15 @@
 
 use ruint::aliases::U256;
 
+/// `U256::MAX / 1e36` -- the contract's own threshold, and the largest input
+/// that can still be scaled by `1e36` without wrapping.
+///
+/// As limbs rather than `"...".parse().unwrap()`: parsing forty-two digits ran
+/// on the exact path at every call, and it was a panic site for a constant
+/// that cannot fail to be one.
+const SCALE_LIMIT: U256 =
+    U256::from_limbs([14562287877669245909, 5208750325433214395, 340, 0]);
+
 /// A signed 256-bit value as sign and magnitude.
 ///
 /// `ruint` has no signed type and I would rather not depend on one
@@ -97,9 +106,9 @@ pub fn log2(x: U256) -> u32 {
 pub fn cbrt(x: U256) -> Option<U256> {
     let e18 = U256::from(10u64).pow(U256::from(18u64));
     let e36 = e18 * e18;
-    // The two thresholds are the contract's, and they decide how far the
-    // input is scaled up before the iteration sees it.
-    let big: U256 = "115792089237316195423570985008687907853269".parse().unwrap();
+    // The two thresholds decide how far the input is scaled up before the
+    // iteration sees it.
+    let big = SCALE_LIMIT;
     let xx = if x >= big * e18 {
         x
     } else if x >= big {
@@ -157,7 +166,7 @@ pub fn isqrt(x: U256) -> U256 {
 pub fn cbrt_trace(x: U256) {
     let e18 = U256::from(10u64).pow(U256::from(18u64));
     let e36 = e18 * e18;
-    let big: U256 = "115792089237316195423570985008687907853269".parse().unwrap();
+    let big = SCALE_LIMIT;
     let (branch, xx) = if x >= big * e18 {
         ("x", x)
     } else if x >= big {

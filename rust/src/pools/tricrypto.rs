@@ -412,7 +412,9 @@ pub fn newton_y_fast(a: f64, gamma: f64, x: &[f64; 3], d: f64, i: usize,
 
     let mut others: Vec<f64> = x.iter().enumerate()
         .filter(|(k, _)| *k != i).map(|(_, v)| *v).collect();
-    others.sort_by(|p, q| q.partial_cmp(p).unwrap());
+    // `total_cmp`: descending, and it orders a NaN instead of unwrapping a
+    // `None` on it.  Python's `sorted` does not raise here either.
+    others.sort_by(|p, q| q.total_cmp(p));
     if others[others.len() - 1] <= 0.0 || d <= 0.0 || a <= 0.0 || gamma <= 0.0 {
         return None;
     }

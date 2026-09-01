@@ -41,6 +41,13 @@ fn close(a: U256, b: U256) -> bool {
 }
 
 impl Pool {
+    /// Whether the pool has these coins. The mirror of `_coins`, which the
+    /// reference raises from; here it is a refusal, and without it `xp[i]` was
+    /// an index off the end of a `Vec`.
+    fn coins(&self, which: [usize; 2]) -> bool {
+        which.iter().all(|&k| k < self.balances.len())
+    }
+
     pub fn xp(&self) -> Vec<U256> {
         let p = precision();
         self.balances.iter().zip(self.rates.iter())
@@ -85,6 +92,12 @@ impl Pool {
     /// The `j` balance restoring the invariant when `i` holds `x`.
     pub fn solve_y(&self, xp: &[U256], d: U256, i: usize, j: usize, x: U256)
         -> Option<U256> {
+        // Against `xp`, which is what this indexes -- not against `balances`.
+        // `solve_y_raw` calls it on a `Pool` that has none, which is how the
+        // FX Swap backend borrows the iteration.
+        if i >= xp.len() || j >= xp.len() {
+            return None;
+        }
         let len = xp.len();
         let n = U256::from(len as u64);
         let ann = self.amp * n;
@@ -146,6 +159,9 @@ impl Pool {
     /// fee while losing the DAO's. Skipping `dy_admin_fee` would leave the
     /// pool richer than it is.
     pub fn exchange(&self, i: usize, j: usize, dx: U256) -> Option<(U256, Pool)> {
+        if !self.coins([i, j]) {
+            return None;
+        }
         let admin_fee = self.admin_fee?;
         if dx.is_zero() {
             return Some((U256::ZERO, self.clone()));
@@ -183,6 +199,9 @@ impl Pool {
 
     /// Exactly what `get_dy(i, j, dx)` returns on chain.
     pub fn get_dy(&self, i: usize, j: usize, dx: U256) -> Option<U256> {
+        if !self.coins([i, j]) {
+            return None;
+        }
         if dx.is_zero() {
             return Some(U256::ZERO);
         }
@@ -307,6 +326,9 @@ pub mod fast {
 
     impl Pool {
         pub fn solve_y(&self, d: f64, i: usize, j: usize, x: f64) -> Option<f64> {
+            if i >= self.xp.len() || j >= self.xp.len() {
+                return None;
+            }
             self.y_within(d, i, j, x, FAST_TOL)
                 .or_else(|| self.y_within(d, i, j, x, LOOSE_TOL))
         }
@@ -354,6 +376,9 @@ pub mod fast {
         }
 
         pub fn get_dy(&self, i: usize, j: usize, dx: f64) -> Option<f64> {
+            if i >= self.xp.len() || j >= self.xp.len() {
+                return None;
+            }
             if dx <= 0.0 {
                 return Some(0.0);
             }

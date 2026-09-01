@@ -447,10 +447,8 @@ pub fn active_set_solve(
             // or the drop rule stripped negatives until the last one across
             // the cut pointed backwards.  Admit a directed path instead.
             // Mirrors `core/solve.py` pivot for pivot.
-            if adjacency.is_none() {
-                adjacency = Some(crate::seed::build_adjacency(arcs.tau, n));
-            }
-            let adj = adjacency.as_ref().unwrap();
+            let adj = adjacency
+                .get_or_insert_with(|| crate::seed::build_adjacency(arcs.tau, n));
             let free_nodes = vec![false; n];
             // Undropped arcs first; a dropped one gets a single turn back.
             let mut found = None;

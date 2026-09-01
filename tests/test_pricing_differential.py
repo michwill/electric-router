@@ -345,6 +345,35 @@ def test_widen_moves_the_same_legs(hops, dst):
         list(slippage.widen(want, resistance, 0.01, spend, 0.05))
 
 
+def test_a_value_per_leg_is_the_contract_on_both_sides():
+    """The reference zips `strict=True`; Rust's `zip` stops at the shorter one.
+
+    So a short list was an answer for every leg computed from a prefix of the
+    network -- a wrong number where Python raises.  Both refuse it now.
+    """
+    want, got = slippage_route([(0, 1), (1, 2)], 2)
+    for short in ([1.0], [1.0, 1.0, 1.0]):
+        with pytest.raises(ValueError):
+            slippage.drops(want, short, 0.01)
+        with pytest.raises(ValueError):
+            native().drops(got, short, 0.01)
+        with pytest.raises(ValueError):
+            slippage.longest(want, short)
+        with pytest.raises(ValueError):
+            native().longest(got, short)
+        with pytest.raises(ValueError):
+            slippage.divide(want, short, 0.01)
+        with pytest.raises(ValueError):
+            native().divide(got, short, 0.01)
+    # `backstops` indexes `floor[k]` rather than zipping, so the reference
+    # refuses with the class indexing raises.  Both refuse; only the spelling
+    # differs, and it is the caller's bug either way.
+    with pytest.raises(IndexError):
+        slippage.backstops([1.0, -2.0], [0.0])
+    with pytest.raises(ValueError):
+        native().backstops([1.0, -2.0], [0.0])
+
+
 # ------------------------------------------------------------- the refit
 
 

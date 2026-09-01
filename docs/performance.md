@@ -1468,3 +1468,64 @@ is 2.4 ms, and the Python pipeline still calls Python at every stage -- nothing
 in this work changed the hot path. This is the portability half of the goal,
 and the measurements in this document are the reason to say so plainly rather
 than let a 1.4x figure imply otherwise.
+
+
+### A refusal that was a SIGABRT, and what unwinding it costs
+
+Python signals "this pool will not do that trade" by raising out of an
+`ArithmeticError`; the port signals it by returning `None`. Neither is a crash,
+and the router is built on that -- an arc that refuses is an arc the route does
+not take.
+
+`[profile.release]` said `panic = "abort"`, carried in from the first commit of
+the port and never revisited. That turns every panic in 16,000 lines of Rust
+into `SIGABRT`: not an exception, not a failed quote, the whole CPython process
+gone with no traceback. PyO3 converts a panic into `PanicException` at each
+binding, but only one it is allowed to catch, and `abort` never lets it.
+
+The exposure is not the `unwrap()`s, which are countable -- 24 outside the
+tests, and all 24 are gone. It is that `ruint` panics on a subtraction that
+borrows and on a product that wraps, **regardless of `overflow-checks`**, and
+the pool models are ~550 arithmetic sites of exactly that kind on state read
+off a chain. Proving each one total is not a thing that stays proved.
+
+Two reachable ones, found rather than reasoned about:
+
+* **`Curve.at(NaN)`.** `v <= 0.0` admits a NaN, `v >= x[-1]` rejects it, so it
+  reached a bisection that cannot order it. In the reference that is an
+  `IndexError`; here it was the abort. Both now spell the tail test
+  `not v < x[-1]`, which sends a NaN down the branch where it falls out as zero
+  and is the same comparison for every number that compares.
+* **A coin the pool does not have.** Twocrypto, tricrypto and both LP models
+  have always refused an index out of range. Stableswap did not -- it indexed
+  `xp` straight, which is an `IndexError` in the reference and an index off the
+  end of a `Vec` in the port. Found by fuzzing the registry over 4,000 hostile
+  states; it is the sort of index a stale pool record produces.
+
+So both halves: the models refuse where they can, and `Registry::price_one`
+catches an unwind and returns `None` where they cannot, which is the same
+refusal the caller already handles. The default panic hook still prints, so a
+model that reaches the net is a bug report rather than a silence -- and
+`test_bad_input_never_aborts` asserts on an empty stderr, not merely on
+survival.
+
+**What it costs**, both arms built from the same source and interleaved so the
+governor cannot pick a winner (§ the min-not-median rule above):
+
+| | `abort` | `unwind` |
+|---|---|---|
+| 72 pinned solves, 3,576 pivots | 3.632 ms | 3.835 ms (+5.6%) |
+| 1,680 prices, float invariant | 1.205 ms | 1.203 ms |
+| 1,680 prices, exact invariant | 3.399 ms | 3.399 ms |
+| extension | 2,014,376 B | 2,252,096 B (+11.8%) |
+| wasm module | 2,302,052 B | 2,302,052 B |
+
+Landing pads cost in the pivot loop and nowhere else that was measured -- the
+pool models, `catch_unwind` seam included, do not move at all. The solve is
+~23% of a warm quote, so the end-to-end price is under 2%.
+
+**The browser has no such net.** `wasm32-unknown-unknown` cannot unwind, so the
+profile is ignored there -- the module comes out the same size and
+`catch_unwind` never catches. A panic traps the instance and poisons it. That
+is the argument for the guards being in the models rather than only at the
+boundary: they are the only half of this that crosses.

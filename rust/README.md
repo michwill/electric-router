@@ -29,6 +29,14 @@ Consequences for how it is written, all of them load-bearing:
   mainnet) and at that size a hand-written LU with partial pivoting beats the
   cost of binding a Fortran library that has no wasm build.  It is ~40 lines
   and it is in `lu.rs`.
+* **A panic must stay a panic.**  `[profile.release]` sets `panic = "unwind"`,
+  which is what lets PyO3 hand CPython an exception instead of `SIGABRT`: with
+  `abort`, one `U256` subtraction that borrows takes the whole process down.
+  It costs 5.6% of the pivot loop and nothing on the pool models.  **wasm32
+  cannot unwind**, so the browser build has no net at all and a panic poisons
+  the module -- which is why the refusals live inside the models, where they
+  cross, rather than only at the bindings.  `docs/performance.md` has the
+  numbers and `tests/test_bad_input_never_aborts.py` holds the line.
 * **Deterministic.**  No parallelism and no floating-point reassociation, so a
   quote is reproducible across the three targets.  The Python implementation
   stays the reference; `tests/test_accel_differential.py` differs them, and
@@ -100,7 +108,7 @@ Python, so `core/accel.py` never learns which one answered.
 
     ./scripts/build_wasm.sh          # -> rust/wasm/pkg/
 
-1.43 MB, 467 kB gzipped, carrying the solver *and* the EVM (see `evm/`).
+2.30 MB, 806 kB gzipped, carrying the solver *and* the EVM (see `evm/`).
 `tests/test_wasm_differential.py` differs it against the native extension and
 requires **byte equality** -- same crate, same compiler (`rust-toolchain.toml`
 pins 1.96.1), and `sqrt` is the only non-trivially-rounded operation in the

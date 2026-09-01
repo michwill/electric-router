@@ -272,7 +272,9 @@ fn rank(candidates: &mut CandidateSet, opts: &VerifyOptions<'_>) {
         let value = score(&mut candidates.candidates[k], opts);
         scores.push((k, value));
     }
-    let at = |k: usize| scores.iter().find(|(i, _)| *i == k).map(|(_, v)| *v).unwrap();
+    let at = |k: usize| {
+        scores.iter().find(|(i, _)| *i == k).map_or(f64::NEG_INFINITY, |&(_, v)| v)
+    };
     let best_score = scores.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
 
     // What one more leg has to earn to be worth taking. Both of its costs are

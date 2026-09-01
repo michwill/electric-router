@@ -325,9 +325,10 @@ pub fn two_step_plan_first(
                 if !reaching.contains(&middle) {
                     continue;
                 }
+                let Some(kind) = pool.kind else { continue };
                 probes.push(Probe::new(
                     pool.address.clone(),
-                    pool.kind.expect("tradeable"),
+                    kind,
                     i as i32,
                     j as i32,
                     pool.n_coins(),
@@ -443,9 +444,10 @@ pub fn two_step_rank(
                     if i == j {
                         continue;
                     }
+                    let Some(kind) = pool.kind else { continue };
                     probes.push(Probe::new(
                         pool.address.clone(),
-                        pool.kind.expect("tradeable"),
+                        kind,
                         i as i32,
                         j as i32,
                         pool.n_coins(),

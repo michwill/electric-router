@@ -215,9 +215,22 @@ class StableSwap:
                 return d
         raise StableSwapError("D did not converge")
 
+    def _coins(self, *which: int) -> None:
+        """Refuse a coin this pool does not have.
+
+        The LP paths below have always checked this and the other two families
+        check it in `_quote`; the swap itself indexed `xp` straight and raised
+        `IndexError`, which is the same refusal in a family the caller cannot
+        catch with the others.  In the port it was an index off the end.
+        """
+        for k in which:
+            if not 0 <= k < self.n:
+                raise StableSwapError("coin index out of range")
+
     def y(self, i: int, j: int, x: int, xp: list[int] | None = None,
           d: int | None = None) -> int:
         """The `j` balance that restores the invariant when `i` holds `x`."""
+        self._coins(i, j)
         if i == j:
             raise StableSwapError("i and j must differ")
         xp = self.xp() if xp is None else xp
@@ -246,6 +259,7 @@ class StableSwap:
 
     def get_dy(self, i: int, j: int, dx: int) -> int:
         """Exactly what `get_dy(i, j, dx)` returns on chain."""
+        self._coins(i, j)
         if dx <= 0:
             return 0
         xp = self.xp()
@@ -280,6 +294,7 @@ class StableSwap:
         `dy_admin_fee` would leave the pool richer than it is and quote the next
         leg through it too well.
         """
+        self._coins(i, j)
         if self.admin_fee < 0:
             raise StableSwapError("admin_fee unknown; cannot advance state")
         if dx <= 0:
@@ -317,6 +332,7 @@ class StableSwap:
         Same algebra, same fee, same rates -- only the invariant iterations move
         to `f64`.  See the note above `d_fast`.
         """
+        self._coins(i, j)
         if dx <= 0:
             return 0
         xp = self.xp_float()

@@ -43,4 +43,11 @@ optional = true
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+# `unwind`, deliberately.  With `abort` a panic anywhere in here -- a `None`
+# unwrapped, an index off the end, a `U256` subtraction that borrows -- is
+# SIGABRT, and the whole CPython process goes with it: PyO3 cannot turn a
+# panic into an exception it never gets to see.  Unwinding costs 6% of the
+# pivot loop and nothing measurable on the pool models (docs/performance.md),
+# which is what a router that stays up is worth.  wasm32 cannot unwind at all,
+# so the browser build has no such net -- see `rust/README.md`.
+panic = "unwind"

@@ -42,6 +42,14 @@ fn slots(route: &RealizedRoute) -> Vec<i32> {
 /// Dirichlet at the two terminals and Kirchhoff everywhere else, which is the
 /// same Laplacian as the solver on a graph of three or four nodes.
 pub fn drops(route: &RealizedRoute, resistance: &[f64], total: f64) -> Option<Vec<f64>> {
+    // The reference zips `strict=True`, so a resistance per leg is the contract
+    // rather than a convenience.  Rust's `zip` would stop at the shorter one
+    // and build the Laplacian out of a prefix, then answer for every leg -- a
+    // wrong number where Python raises.  Refusing is the mirror of raising that
+    // this return type can spell; the bindings raise.
+    if resistance.len() != route.legs.len() {
+        return None;
+    }
     let slots = slots(route);
     let index = |slot: i32| slots.iter().position(|&s| s == slot);
     let (source, sink) = (index(SOURCE)?, index(route.dst_slot as i32)?);
@@ -76,13 +84,15 @@ pub fn drops(route: &RealizedRoute, resistance: &[f64], total: f64) -> Option<Ve
             potential[slot] = rhs[k];
         }
     }
+    // `slots` is built from every leg's two ends, so both lookups hit; the
+    // fallback is there so a future change to `slots` cannot make this fatal.
     Some(
         route
             .legs
             .iter()
             .map(|realized| {
-                potential[index(realized.leg.src_slot).unwrap()]
-                    - potential[index(realized.leg.dst_slot).unwrap()]
+                let at = |slot| index(slot).map_or(0.0, |k| potential[k]);
+                at(realized.leg.src_slot) - at(realized.leg.dst_slot)
             })
             .collect(),
     )
@@ -120,7 +130,10 @@ pub fn backstops(raw: &[f64], floor: Option<&[f64]>) -> Vec<f64> {
         .enumerate()
         .map(|(k, &value)| {
             if value < 0.0 {
-                (-value).max(floor.map_or(0.0, |f| f[k]))
+                // `get`, not `[k]`: a short `floor` is the caller's error and
+                // the bindings refuse it, but reading past the end here would
+                // be a panic rather than an answer.
+                (-value).max(floor.and_then(|f| f.get(k)).copied().unwrap_or(0.0))
             } else {
                 0.0
             }

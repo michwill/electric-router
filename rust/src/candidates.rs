@@ -594,7 +594,7 @@ impl Generator<'_> {
         if !settled {
             return false;
         }
-        let solution = solution.expect("a settled repair has a solution");
+        let Some(solution) = solution else { return false };
         // Two ways to be unrealisable, and both are known before realising:
         // more distinct tokens than the quoter has slots, or more arcs than
         // the caller will accept legs (each arc is at least one leg).
@@ -871,10 +871,12 @@ pub fn generate(
     if !conflicts.is_empty() {
         let mut forbidden = vec![false; g.m()];
         for (_, indices) in &conflicts {
-            let keep_index = *indices
+            let Some(&keep_index) = indices
                 .iter()
                 .reduce(|a, b| if base.psi[*b] > base.psi[*a] { b } else { a })
-                .unwrap();
+            else {
+                continue;
+            };
             for &k in indices {
                 if k != keep_index {
                     forbidden[k] = true;
@@ -887,24 +889,27 @@ pub fn generate(
         // There is no "re-enter this pool anyway" candidate any more, and none
         // is needed: `conflicting_pools` only reports a pool whose arcs are
         // not an admissible element, so a legal element was never a conflict.
-        let worst = conflicts
+        // `conflicts` is non-empty here, so `reduce` answers; the `if let`
+        // keeps step 5 running if it ever stops being.
+        if let Some(worst) = conflicts
             .iter()
             .reduce(|a, b| if b.1.len() > a.1.len() { b } else { a })
-            .unwrap()
-            .clone();
-        let mut by_flow = worst.1.clone();
-        by_flow.sort_by(|&a, &b| {
-            base.psi[b].partial_cmp(&base.psi[a]).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for &keep_index in by_flow.iter().skip(1).take(1) {
-            let mut alt = vec![false; g.m()];
-            for &k in &worst.1 {
-                if k != keep_index {
-                    alt[k] = true;
+            .cloned()
+        {
+            let mut by_flow = worst.1.clone();
+            by_flow.sort_by(|&a, &b| {
+                base.psi[b].partial_cmp(&base.psi[a]).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for &keep_index in by_flow.iter().skip(1).take(1) {
+                let mut alt = vec![false; g.m()];
+                for &k in &worst.1 {
+                    if k != keep_index {
+                        alt[k] = true;
+                    }
                 }
+                let label = format!("repair alt {}", truncate(&arcs[keep_index].note, 18));
+                ballot.resolve(alt, label, "repair", &[]);
             }
-            let label = format!("repair alt {}", truncate(&arcs[keep_index].note, 18));
-            ballot.resolve(alt, label, "repair", &[]);
         }
     }
 

@@ -123,10 +123,9 @@ impl Problem {
         weights: Option<Vec<f64>>,
         max_hops: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
-        if self.adj.is_none() {
-            self.adj = Some(crate::seed::build_adjacency(&self.tau, self.n_nodes));
-        }
-        let adj = self.adj.as_ref().unwrap();
+        let adj = self
+            .adj
+            .get_or_insert_with(|| crate::seed::build_adjacency(&self.tau, self.n_nodes));
         let m = self.tau.len();
         let mut arc_mask = vec![false; m];
         for p in banned_arcs.unwrap_or_default() {

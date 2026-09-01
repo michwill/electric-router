@@ -26,11 +26,11 @@ pub fn split_groups(legs: &[crate::types::Leg]) -> Vec<Vec<usize>> {
     }
     let mut runs: Vec<Vec<usize>> = vec![vec![0]];
     for k in 1..legs.len() {
-        let last = *runs.last().unwrap().last().unwrap();
-        if legs[k].src_slot == legs[last].src_slot {
-            runs.last_mut().unwrap().push(k);
-        } else {
-            runs.push(vec![k]);
+        // Seeded with one run and never popped, so there is always one open.
+        let last = runs.last().and_then(|run| run.last()).copied().unwrap_or(k);
+        match runs.last_mut() {
+            Some(run) if legs[k].src_slot == legs[last].src_slot => run.push(k),
+            _ => runs.push(vec![k]),
         }
     }
     runs.into_iter().filter(|run| run.len() > 1).collect()

@@ -16,6 +16,37 @@ use crate::multiport::{self, MultiPort, MultiPortError, Port};
 use crate::pools::{stableswap, tricrypto, twocrypto};
 use ruint::aliases::U256;
 
+/// Price a model, treating a panic inside it as the refusal it stands for.
+///
+/// The families are hundreds of lines of `U256` arithmetic, and `ruint` panics
+/// on a subtraction that borrows or a product that wraps -- always, not only
+/// in debug.  On chain that same state *is* a revert, and a reverting pool is
+/// one the route does not take.  So the mirror of a revert is `None`, which is
+/// already how this returns "the pool will not do that trade"; the alternative
+/// is an unwind out through the binding, and the reference answers a route
+/// there rather than an error.
+///
+/// The guards inside the models catch the cases that are known.  This catches
+/// the one that is not, and the default panic hook still prints it, so a model
+/// that lands here is a bug report rather than a silence.
+///
+/// Nothing to catch on wasm32, which cannot unwind: see `rust/README.md`.
+fn refusing<T>(f: impl FnOnce() -> Option<T>) -> Option<T> {
+    // `AssertUnwindSafe` because the closure only reads the registry: a caught
+    // panic leaves no half-written model behind to observe.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or(None)
+}
+
+/// The same for the element paths, whose refusal is an `Err` with a reason.
+fn refusing_err<T>(
+    what: &str, f: impl FnOnce() -> Result<T, MultiPortError>,
+) -> Result<T, MultiPortError> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(got) => got,
+        Err(_) => Err(MultiPortError(format!("{what} panicked on this state"))),
+    }
+}
+
 /// One pool, in whichever family it belongs to.
 ///
 /// Stableswap carries both arithmetics because it is the only family whose
@@ -293,12 +324,12 @@ impl Registry {
     pub fn element_split(
         &self, which: usize, i: u8, j1: u8, j2: u8, dx: u128,
     ) -> Option<(u16, u16)> {
-        match self.models.get(which) {
+        refusing(|| match self.models.get(which) {
             Some(Model::Stable(exact, _)) => stableswap::best_split(
                 exact, i as usize, j1 as usize, j2 as usize, U256::from(dx),
             ),
             _ => None,
-        }
+        })
     }
 
     /// The stableswap pool at `which`, and the LP model at `lp` if asked for.
@@ -336,7 +367,9 @@ impl Registry {
     ) -> Result<Vec<U256>, MultiPortError> {
         let (pool, model) = self.element_models(which, lp)?;
         let element = MultiPort::new("", n_coins, ports(inputs), ports(outputs))?;
-        Ok(multiport::evaluate(&element, pool, model, amount_in)?.outputs)
+        refusing_err("the element", || {
+            Ok(multiport::evaluate(&element, pool, model, amount_in)?.outputs)
+        })
     }
 
     /// The best two-way split of `amount_in` across two output ports.
@@ -360,8 +393,9 @@ impl Registry {
             // converts once, and `float(a) * float(w)` is a different number.
             f64::from(amount * weights[k]) / 1e18
         };
-        let (tuned, payout) =
-            multiport::best_split(&element, pool, model, amount_in, value, 25)?;
+        let (tuned, payout) = refusing_err("the element split", || {
+            multiport::best_split(&element, pool, model, amount_in, value, 25)
+        })?;
         Ok((tuned.outputs[0].bps, tuned.outputs[1].bps, payout))
     }
 
@@ -403,6 +437,10 @@ impl Registry {
     /// `fast` picks the float invariant, which is what a quote wants; the exact
     /// one is for the admission gate.
     pub fn price_one(&self, which: usize, i: u8, j: u8, dx: u128, fast: bool) -> Option<u128> {
+        refusing(|| self.priced(which, i, j, dx, fast))
+    }
+
+    fn priced(&self, which: usize, i: u8, j: u8, dx: u128, fast: bool) -> Option<u128> {
         let model = self.models.get(which)?;
         let amount = U256::from(dx);
         let (a, b) = (i as usize, j as usize);

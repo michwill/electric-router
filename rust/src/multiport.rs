@@ -229,14 +229,13 @@ pub fn evaluate(
             return refuse("a port was allocated nothing");
         }
         if port.coin == LP {
-            if lp.is_none() || source.coin == LP {
+            let Some(model) = lp.as_ref().filter(|_| source.coin != LP) else {
                 return refuse("no LP model for an LP port");
-            }
+            };
             let mut amounts = vec![U256::ZERO; element.n_coins.max(0) as usize];
+            // In range: `MultiPort::new` refuses a coin outside `0..n_coins`.
             amounts[source.coin as usize] = share;
-            let (minted, after) = lp
-                .as_ref()
-                .unwrap()
+            let (minted, after) = model
                 .add_liquidity(&amounts)
                 .ok_or_else(|| MultiPortError("the deposit does not price".into()))?;
             pool = after.pool.clone();

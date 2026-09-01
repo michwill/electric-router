@@ -514,9 +514,18 @@ pub fn realize(
         .collect();
     touched.sort_unstable();
     touched.dedup();
-    let index = |node: usize| touched.iter().position(|&v| v == node).unwrap() as i64;
-    let local_tau: Vec<i64> = tau.iter().map(|&t| index(t as usize)).collect();
-    let local_sig: Vec<i64> = sig.iter().map(|&s| index(s as usize)).collect();
+    // `touched` is the sorted set of the values this is called with, so both
+    // maps hit.  Refusing rather than substituting: an index the sort cannot
+    // use is a panic one function further in, where the cause is invisible.
+    let index = |node: usize| {
+        touched.iter().position(|&v| v == node).map(|k| k as i64).ok_or_else(|| {
+            RealizationError(format!("arc node {node} is not in the flow"))
+        })
+    };
+    let local_tau: Vec<i64> =
+        tau.iter().map(|&t| index(t as usize)).collect::<Result<_>>()?;
+    let local_sig: Vec<i64> =
+        sig.iter().map(|&s| index(s as usize)).collect::<Result<_>>()?;
     let order = topological_nodes(&local_tau, &local_sig, touched.len())?;
     let node_order: Vec<usize> = order.iter().map(|&k| touched[k]).collect();
 
@@ -1198,7 +1207,8 @@ fn walk(
         }
         return;
     }
-    for &k in legs.unwrap() {
+    let Some(legs) = legs else { return };
+    for &k in legs {
         if paths.len() >= MAX_DISPLAY_PATHS {
             return;
         }
@@ -1312,7 +1322,9 @@ pub fn route_conductance(route: &RealizedRoute) -> f64 {
         }
         let mut at = x;
         loop {
-            let up = parent.iter().find(|(k, _)| *k == at).map(|(_, v)| *v).unwrap();
+            // Both lookups follow a push of the key they read, so both hit;
+            // `unwrap_or(at)` makes a miss a root rather than a panic.
+            let up = parent.iter().find(|(k, _)| *k == at).map_or(at, |&(_, v)| v);
             if up == at {
                 return at;
             }
@@ -1320,7 +1332,7 @@ pub fn route_conductance(route: &RealizedRoute) -> f64 {
                 if !parent.iter().any(|(k, _)| *k == up) {
                     parent.push((up, up));
                 }
-                parent.iter().find(|(k, _)| *k == up).map(|(_, v)| *v).unwrap()
+                parent.iter().find(|(k, _)| *k == up).map_or(up, |&(_, v)| v)
             };
             if let Some(entry) = parent.iter_mut().find(|(k, _)| *k == at) {
                 entry.1 = grand;
@@ -1354,15 +1366,22 @@ pub fn route_conductance(route: &RealizedRoute) -> f64 {
     let mut nodes: Vec<i32> = slots.iter().map(|&s| find(&mut parent, s)).collect();
     nodes.sort_unstable();
     nodes.dedup();
-    let position = |node: i32, nodes: &[i32]| nodes.iter().position(|&v| v == node).unwrap();
+    // Every argument below is `find` of a slot already in `nodes`, so each
+    // lookup hits.  `Option` rather than a substitute index: folding an
+    // unknown node onto 0 would answer a conductance for a different network.
+    let position = |node: i32, nodes: &[i32]| nodes.iter().position(|&v| v == node);
     let n = nodes.len();
     let mut laplacian = vec![0.0f64; n * n];
     for realized in &route.legs {
         if realized.is_conversion() || realized.tvl_usd <= 0.0 {
             continue;
         }
-        let a = position(find(&mut parent, realized.leg.src_slot), &nodes);
-        let b = position(find(&mut parent, realized.leg.dst_slot), &nodes);
+        let (Some(a), Some(b)) = (
+            position(find(&mut parent, realized.leg.src_slot), &nodes),
+            position(find(&mut parent, realized.leg.dst_slot), &nodes),
+        ) else {
+            continue;
+        };
         if a == b {
             continue;
         }
@@ -1374,12 +1393,17 @@ pub fn route_conductance(route: &RealizedRoute) -> f64 {
 
     // Ground the destination and inject a unit current at the source: the
     // potential left at the source *is* the effective resistance.
-    let grounded = position(dst, &nodes);
+    let (Some(grounded), Some(source)) = (position(dst, &nodes), position(src, &nodes))
+    else {
+        return 0.0; // a terminal outside its own network conducts nothing
+    };
     let keep: Vec<usize> = (0..n).filter(|&k| k != grounded).collect();
     if keep.is_empty() {
         return 0.0;
     }
-    let at_src = keep.iter().position(|&k| k == position(src, &nodes)).unwrap();
+    let Some(at_src) = keep.iter().position(|&k| k == source) else {
+        return f64::INFINITY; // the source was grounded, so nothing separates them
+    };
     let mut matrix = vec![0.0f64; keep.len() * keep.len()];
     for (r, &row) in keep.iter().enumerate() {
         for (c, &col) in keep.iter().enumerate() {

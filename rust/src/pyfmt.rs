@@ -52,7 +52,8 @@ pub fn general(x: f64) -> String {
     // CPython's `%g` switches to exponent form outside [-4, precision).
     if exponent < -4 || exponent >= 6 {
         let raw = format!("{:.*e}", 5, x);
-        let (mantissa, rest) = raw.split_once('e').unwrap();
+        // `{:.*e}` always writes one, and nan/inf/zero left above.
+        let Some((mantissa, rest)) = raw.split_once('e') else { return raw };
         return pad_exponent(&format!("{}e{}", strip(mantissa), rest));
     }
     strip(&format!("{:.*}", (5 - exponent).max(0) as usize, x))

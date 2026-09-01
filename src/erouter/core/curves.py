@@ -83,7 +83,10 @@ class Curve:
         x = self.x
         if v <= x[0]:
             return v * self.rate0
-        if v >= x[-1]:
+        # `not v < x[-1]`, not `v >= x[-1]`: the negation sends a NaN size down
+        # the tail branch, where it falls out as 0.0 rather than off the end of
+        # `bisect_right`.  Identical for every number that compares.
+        if not v < x[-1]:
             inverse = self.u[-1] + (v - x[-1]) * self.tail
         else:
             k = bisect_right(x, v) - 1
@@ -107,8 +110,8 @@ class Curve:
         x, slope, u = self.x, self.slope, self.u
         if v <= x[0]:
             return 0.0
-        if v >= x[-1] or len(slope) < 2:
-            return float("inf")  # extrapolating, or too few nodes to tell
+        if not v < x[-1] or len(slope) < 2:
+            return float("inf")  # extrapolating, NaN, or too few nodes to tell
         k = bisect_right(x, v) - 1
         mid = min(max(k, 1), len(slope) - 1)
         second = 2.0 * (slope[mid] - slope[mid - 1]) / (x[mid + 1] - x[mid - 1])

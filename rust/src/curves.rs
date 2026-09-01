@@ -52,12 +52,18 @@ impl Curve {
         if v <= x[0] {
             return v * self.rate0;
         }
-        let inverse = if v >= x[x.len() - 1] {
+        // `!(v < last)`, not `v >= last`: the negation sends a NaN size down the
+        // tail branch, where it falls out as 0.0 rather than into a search that
+        // cannot order it.  Identical for every number that compares.
+        let inverse = if !(v < x[x.len() - 1]) {
             self.u[self.u.len() - 1] + (v - x[x.len() - 1]) * self.tail
         } else {
             // `bisect_right(x, v) - 1`, and the branch above has ruled out
-            // both ends, so the index is in range.
-            let k = match x.binary_search_by(|p| p.partial_cmp(&v).unwrap()) {
+            // both ends, so the index is in range.  `total_cmp` rather than
+            // `partial_cmp().unwrap()`: `fit` refuses a non-finite probe, so
+            // the two agree on every curve that exists, and this one cannot
+            // panic if that ever stops being true.
+            let k = match x.binary_search_by(|p| p.total_cmp(&v)) {
                 // An exact hit: `bisect_right` returns the slot *after* the
                 // last equal element, so walk forward over any duplicates.
                 Ok(mut hit) => {
@@ -94,8 +100,8 @@ impl Curve {
         if v <= x[0] {
             return 0.0;
         }
-        if v >= x[x.len() - 1] || slope.len() < 2 {
-            return f64::INFINITY; // extrapolating, or too few nodes to tell
+        if !(v < x[x.len() - 1]) || slope.len() < 2 {
+            return f64::INFINITY; // extrapolating, NaN, or too few nodes to tell
         }
         let k = bisect_right(x, v) - 1;
         let mid = k.clamp(1, slope.len() - 1);
