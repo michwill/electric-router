@@ -1622,15 +1622,16 @@ the digit, at every size:
 | median `G` at 1e-6 USDT | 3.66e+06 | 7.23e+06 |
 | most negative `eps` at 0.001 USDT | -75.5 bp | -75.6 bp |
 | most negative `eps` at 1e-6 USDT | -309 bp | -75.6 bp |
-| largest \|psi\| in the flow, 0.001 USDT | 2.6e+04 | 4.2e+03 |
-| largest \|psi\| in the flow, 10 USDT | 4.2e+03 | 4.2e+03 |
+| peak flow before cancellation, 0.001 USDT | 2.6e+04 | 4.2e+03 |
+| peak flow before cancellation, 10 USDT | 4.2e+03 | 4.2e+03 |
 
 The last pair is the mechanism. A negative-`eps` cycle is sized by `|eps| G`,
-which has nothing to do with the trade, so the flow the solve is conditioned on
-is an absolute quantity while §12.4's residual is normalised by `Psi` -- 4.2e+03
-of circulation at every size, against a demand of 0.001. Cut the conductances
-by three and the circulation grows sixfold; divide that by the trade and the
-gate refuses a quote whose arithmetic was fine.
+which has nothing to do with the trade, so the flow the solve carries before
+`cancel_cycles` takes the circulation back out is an absolute quantity, while
+§12.4's residual is normalised by `Psi` -- 4.2e+03 at every size, against a
+demand of 0.001. Cut the conductances by three and it grows sixfold; the error
+of cancelling that against the trade is what fails a gate nothing was actually
+wrong with.
 
 The floor is now the smallest size the ladder has already answered at, which is
 the resolution `a` is already standing on. `plan_refine` gained the
@@ -1662,12 +1663,30 @@ refine probes the floor lifts decays exactly as that says it should -- all
 1,413 at 1e-4 USDT, 441 at 1,000, 11 at 100,000, none at 1,000,000 -- and so
 does the lift: 2.1e+05 at 0.001 USDT, 226 at 1, 4.4 at 1,000, 1.8 at 100,000.
 
-What is left below 1e-5 USDT is not the probes. The measured `eps` is then the
-same to the digit as with the refine pass switched off entirely, and the
-residual still grows as `1/Psi` because `_achievable_kcl` bounds the solve's
-error relative to `Psi` while the flow it actually solved for is `|eps| G`.
-Scaling that bound by `||psi||_inf / Psi` would be the correct statement of
-what a backward-stable solve can deliver here, and it would also stop the gate
-from seeing conjured flow at exactly the sizes where circulation dwarfs the
-trade. Left alone: refusing a trade of one hundredth of a cent is the right
-answer, and this is the message saying so, badly.
+What is left below 1e-5 USDT is not the probes, and the refine pass is not even
+running there: with the floor in, `probes_refined` is **0** at every size from
+0.1 USDT down, and the quote is byte-identical to forcing the pass off. The
+`eps` it fits is the coarse pass's, which is the best information the ladders
+hold.
+
+What the gate is comparing, measured at the same block:
+
+| | 1e-5 USDT | 1e-3 | 1e-1 | 1 |
+|---|---|---|---|---|
+| peak flow at the gate, over `Psi` | 1.00 | 1.00 | 1.00 | 1.00 |
+| residual, relative to `Psi` | 1.7e-03 | 1.4e-05 | 1.9e-07 | 2.2e-08 |
+| residual, absolute | 1.7e-08 | 1.4e-08 | 1.9e-08 | 2.2e-08 |
+
+The first row says the circulation does not reach the gate -- `cancel_cycles`
+removes it, and the flow §12.4 checks is the trade. The third says the error is
+an **absolute** quantity, 1e-8 of a value unit and flat across seven decades of
+trade size, against a flow that before cancellation is `|eps| G` ~ 4.2e+03 and
+equally flat. So the relative residual is `1/Psi` by construction, and it
+crosses the tolerance -- itself pinned at 1e-3 by `MIN_SCALED_PSI` -- somewhere
+around 1e-5 USDT.
+
+Which step of the peel contributes that 1e-8 is not established here: it is
+four orders above one ulp of the pre-cancellation flow and four orders below
+what the active set's conditioning permits at that magnitude, so it is neither
+of the two obvious candidates. Left alone. Refusing a trade of a hundredth of a
+cent is the right answer; this is only the wrong message for it.
