@@ -217,7 +217,10 @@ def plan_refine(
         if arc.id not in keep:
             continue
         have = set(ladder.deltas)
-        wanted = [d for d in plan_deltas(arc.reserve_in, arc.decimals_in, grid) if d not in have]
+        # `arc.reserve_out` for the same reason `plan_grid` passes it: this
+        # re-asks sizes on the same arc, so it owes the same output floor.
+        planned = plan_deltas(arc.reserve_in, arc.decimals_in, grid, arc.reserve_out)
+        wanted = [d for d in planned if d not in have]
         if not wanted:
             continue
         start = len(plan.probes)
@@ -235,6 +238,17 @@ def plan_sized(ladders: list[Ladder], sizes: dict[str, list[int]]) -> ProbePlan:
     `sizes` maps arc id to wei amounts of that arc's *input* token.  The caller
     owns the sizing because only it knows the trade: `plan_deltas` can see a
     reserve and nothing else.
+
+    It does not own the *resolution*.  A node below the smallest the ladder has
+    already answered at buys fewer units of the output token than the fit is
+    standing on, and `a = y0/x0` is read off exactly that node -- so it lands in
+    `eps = 1 - a nu_sig/nu_tau`, where a part in ten thousand of `a` is a basis
+    point of fee that is not there.  Measured on USDT -> trUSD at 0.001 USDT,
+    where sizing off the trade asked for probes five orders below the ladder's
+    own floor: median conductance fell 3.1x, the negative-eps circulation the
+    solve answered with rose to 2.6e7 times the trade, and §12.4 refused a quote
+    whose arithmetic was fine.  From a tenth of a dollar up the answer is
+    unchanged to the wei (docs/performance.md).
     """
     plan = ProbePlan()
     for ladder in ladders:
@@ -244,6 +258,8 @@ def plan_sized(ladders: list[Ladder], sizes: dict[str, list[int]]) -> ProbePlan:
             continue
         have = set(ladder.deltas)
         floor = max(1, 10 ** max(0, arc.decimals_in - 6))
+        if ladder.deltas:  # sorted, so [0] is the smallest already measured
+            floor = max(floor, ladder.deltas[0])
         fresh: list[int] = []
         for delta in sorted({max(int(d), floor) for d in want}):
             if delta not in have and delta not in fresh:
@@ -260,18 +276,24 @@ def plan_sized(ladders: list[Ladder], sizes: dict[str, list[int]]) -> ProbePlan:
 
 
 def merge(ladders: list[Ladder], extra: list[Ladder]) -> list[Ladder]:
-    """Fold refinement results into the coarse ladders, keeping sizes sorted."""
+    """Fold refinement results into the coarse ladders, keeping sizes sorted.
+
+    A pass where every probe failed still happened: the attempt and the reason
+    are folded in whether or not anything came back, which is what §12.1's
+    "dropped for want of a usable probe" is counted from.
+    """
     by_id = {lad.arc.id: lad for lad in ladders}
     for more in extra:
         base = by_id.get(more.arc.id)
-        if base is None or not more.deltas:
+        if base is None:
             continue
-        pairs = sorted(
-            {**dict(zip(base.deltas, base.quotes, strict=True)),
-             **dict(zip(more.deltas, more.quotes, strict=True))}.items()
-        )
-        base.deltas = [d for d, _ in pairs]
-        base.quotes = [q for _, q in pairs]
+        if more.deltas:
+            pairs = sorted(
+                {**dict(zip(base.deltas, base.quotes, strict=True)),
+                 **dict(zip(more.deltas, more.quotes, strict=True))}.items()
+            )
+            base.deltas = [d for d, _ in pairs]
+            base.quotes = [q for _, q in pairs]
         base.attempted += more.attempted
         for key, count in more.failures.items():
             base.failures[key] = base.failures.get(key, 0) + count

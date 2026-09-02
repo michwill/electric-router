@@ -1594,3 +1594,80 @@ Standing at 662,400 calls over sixteen seeds with the pipelined fixtures, plus
 no abort, no trap. The suite carries a bounded version, and asserts the fixture
 set still holds all five pipelined classes -- a constructor that changes shape
 would drop one silently and take its methods back out of the sweep.
+
+## A trade smaller than the ladder, and the fee that was not there
+
+`USDT -> trUSD` at 0.001 USDT did not return a bad route. It returned no route:
+
+    flow conservation is violated by 2.496e-03 of the routed value at frxUSD
+    (1 arc(s) in, 3 out) (achievable at this conditioning: 2.229e-04)
+
+Which reads as a solver failure and is not one. The refine pass sizes its
+probes off the trade -- `TRADE_GRID` is 5%, 10% and 20% of it -- and
+`plan_sized` floored those only at one millionth of a unit of the *input*
+token. So a trade of 0.001 USDT asked its pools for probes 2.1e+05 below the
+smallest node their coarse ladder already held -- five orders at the median,
+eight at the worst -- and `a = y0/x0` is read off exactly that node. An answer
+of `n` units of the output token carries a rounding error of `1/n`;
+`eps = 1 - a nu_sig/nu_tau` inherits it whole, and a part in ten thousand of
+`a` is a basis point of fee that is not there.
+
+Measured at block 25,891,322, over the arcs the graph is assembled from. The
+"after" column is what the refine pass switched off entirely also produces, to
+the digit, at every size:
+
+| | before | after |
+|---|---|---|
+| median `G` at 0.001 USDT, value units | 2.30e+06 | 7.23e+06 |
+| median `G` at 1e-6 USDT | 3.66e+06 | 7.23e+06 |
+| most negative `eps` at 0.001 USDT | -75.5 bp | -75.6 bp |
+| most negative `eps` at 1e-6 USDT | -309 bp | -75.6 bp |
+| largest \|psi\| in the flow, 0.001 USDT | 2.6e+04 | 4.2e+03 |
+| largest \|psi\| in the flow, 10 USDT | 4.2e+03 | 4.2e+03 |
+
+The last pair is the mechanism. A negative-`eps` cycle is sized by `|eps| G`,
+which has nothing to do with the trade, so the flow the solve is conditioned on
+is an absolute quantity while §12.4's residual is normalised by `Psi` -- 4.2e+03
+of circulation at every size, against a demand of 0.001. Cut the conductances
+by three and the circulation grows sixfold; divide that by the trade and the
+gate refuses a quote whose arithmetic was fine.
+
+The floor is now the smallest size the ladder has already answered at, which is
+the resolution `a` is already standing on. `plan_refine` gained the
+`reserve_out` argument it had been dropping, for the same reason: it re-asks
+sizes on an arc `plan_grid` had already floored.
+
+KCL residual, `USDT -> trUSD`, same block, before and after:
+
+| input | before | after |
+|---|---|---|
+| 1e-6 USDT | 6.5e+00 fail | 1.7e-02 fail |
+| 1e-5 | 3.2e+00 fail | 1.7e-03 fail |
+| 1e-4 | 7.0e-03 fail | 1.2e-04 ok |
+| 1e-3 | 2.5e-03 fail | 9.0e-06 ok |
+| 1e-2 | 7.9e-05 ok | 1.5e-06 ok |
+| 1e-1 | 4.6e-06 ok | 2.6e-07 ok |
+| 1 | 2.1e-08 ok | 2.5e-08 ok |
+| 10 | 3.8e-09 ok | 4.6e-09 ok |
+
+**It costs the trades it is not about nothing at all.** From a tenth of a
+dollar up the answer is unchanged to the wei -- where the floor still lifts a
+size it lifts it onto a node the ladder already holds, so nothing is re-asked
+and nothing is re-fitted, and above ~$1,000 the trade-sized nodes are the
+larger ones anyway, which is what the refine pass was for. Identical from 0.1
+USDT to 1,000,000 USDT on `USDT -> trUSD`, identical at
+every size that quoted before on `USDC -> WETH` and `WETH -> WBTC`, and
+`bench_quote --arms` still agrees to the wei across the boundary. The share of
+refine probes the floor lifts decays exactly as that says it should -- all
+1,413 at 1e-4 USDT, 441 at 1,000, 11 at 100,000, none at 1,000,000 -- and so
+does the lift: 2.1e+05 at 0.001 USDT, 226 at 1, 4.4 at 1,000, 1.8 at 100,000.
+
+What is left below 1e-5 USDT is not the probes. The measured `eps` is then the
+same to the digit as with the refine pass switched off entirely, and the
+residual still grows as `1/Psi` because `_achievable_kcl` bounds the solve's
+error relative to `Psi` while the flow it actually solved for is `|eps| G`.
+Scaling that bound by `||psi||_inf / Psi` would be the correct statement of
+what a backward-stable solve can deliver here, and it would also stop the gate
+from seeing conjured flow at exactly the sizes where circulation dwarfs the
+trade. Left alone: refusing a trade of one hundredth of a cent is the right
+answer, and this is the message saying so, badly.

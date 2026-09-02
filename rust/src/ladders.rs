@@ -114,7 +114,10 @@ impl Ladders {
     ///
     /// `want` is ragged: `spans[k]` bounds the sizes asked for `slots[k]`. The
     /// floor is one millionth of a unit of the input token, which is what
-    /// stops a size rounding to a probe of zero.
+    /// stops a size rounding to a probe of zero, and the smallest size the
+    /// ladder has already answered at, which is what stops the caller's
+    /// trade-sized grid from re-reading `a` off a coarser quote than the fit
+    /// already has -- see the reference's `plan_sized`.
     pub fn plan_sized(&self, slots: &[u32], want: &[u128], spans: &[u32]) -> Plan {
         let mut plan = Plan::default();
         for (k, slot) in slots.iter().enumerate() {
@@ -122,7 +125,10 @@ impl Ladders {
             let Some(have) = self.deltas.get(s) else { continue };
             let (lo, hi) = (spans[k] as usize, spans[k + 1] as usize);
             let meta = &self.meta[s];
-            let floor = 10u128.pow(meta.decimals_in.saturating_sub(6)).max(1);
+            let floor = 10u128
+                .pow(meta.decimals_in.saturating_sub(6))
+                .max(1)
+                .max(have.first().copied().unwrap_or(0));
 
             // Sorted and de-duplicated, then filtered against what the ladder
             // already holds -- the same order the reference produces, because
