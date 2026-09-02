@@ -141,6 +141,181 @@ def test_a_size_that_does_not_compare_is_zero_on_both_sides():
         assert ported.at(v) == reference.at(v)
 
 
+#: The two shapes that actually broke things, and the lengths that trigger the
+#: first: parallel sequences the caller says are parallel and are not, and an
+#: index that is not an index.
+_LENS = (0, 1, 2, 3, 5)
+_HEX = tuple("0x" + f"{k:040x}" for k in range(6))
+_INTS = (0, 1, -1, 2, 3, 10**18, 2**63 - 1, -(2**63), 2**64, 10**30)
+_STRS = ("", "0x", "zzz", *_HEX, str(2**256), "-1", "uint256", "address")
+
+
+def _seq(rng, kind, n):
+    if kind == 0:
+        return [rng.choice(_FLOATS) for _ in range(n)]
+    if kind == 1:
+        return [rng.choice(_INTS) for _ in range(n)]
+    if kind == 2:
+        return [rng.choice(_STRS) for _ in range(n)]
+    if kind == 3:
+        return [rng.random() < 0.5 for _ in range(n)]
+    if kind == 4:
+        return [rng.randrange(0, 4) for _ in range(n)]
+    return [(rng.randrange(0, 4), rng.choice(_FLOATS)) for _ in range(n)]
+
+
+_FLOATS = (0.0, 1.0, -1.0, 1e-30, 1e308, float("nan"), float("inf"),
+           float("-inf"), 0.5, 0.999, 1e-6)
+
+
+def _stateful():
+    """Objects holding real state, so a call reaches past its empty guard."""
+    made = {}
+    pools = erouter_solve.Pools()
+    pools.add_stableswap([_s(142638 * 10**18), _s(153563 * 10**6)],
+                         [_s(10**18), _s(10**30)], _s(20000), _s(3 * 10**6),
+                         _s(0), _s(100), True, True, _s(5 * 10**9))
+    pools.add_one_to_one()
+    made["Pools"] = pools
+
+    nodes = erouter_solve.NodeMap()
+    for k, address in enumerate(_HEX):
+        nodes.add_token(address, f"T{k}", 18)
+    made["NodeMap"] = nodes
+
+    arcs = erouter_solve.Arcs()
+    for k in range(4):
+        arcs.add(f"a{k}", _HEX[0], 0, 0, 1, 2, _HEX[k % 3], _HEX[(k + 1) % 3],
+                 k % 3, (k + 1) % 3, 0.999, 1e-6, 0.0, 1e6, 0.001,
+                 10**24, 18, 1e7, 0.999, "note")
+    made["Arcs"] = arcs
+    made["Tables"] = erouter_solve.Tables()
+    made["Ladders"] = erouter_solve.Ladders()
+    made["Problem"] = erouter_solve.Problem(
+        [0, 1, 2], [1, 2, 0], [1e6] * 3, [1e-3] * 3, [0.0] * 3, 3)
+    made["Curve"] = erouter_solve.Curve.fit([1.0, 10.0, 100.0], [1.0, 9.8, 96.0])
+    made["Graph"] = erouter_solve.Graph.from_arrays(
+        [0, 1], [1, 2], [1e6, 1e6], [1e-3, 1e-3], [0.0, 0.0],
+        [False, False], 3)
+    made.update(_pipelined(nodes))
+    return made
+
+
+def _pipelined(nodes):
+    """The classes that do not exist until a quote has been through them.
+
+    Without these, every method on `Route`, `Ballot`, `Stages`, `Refit` and
+    `RouteCall` is called with a receiver PyO3 rejects outright, and a third of
+    the surface is never entered -- which is how the last two defects survived
+    the first sweep.
+    """
+    made = {}
+    arcs = erouter_solve.Arcs()
+    for k, (src, dst) in enumerate(((0, 1), (1, 2), (0, 2))):
+        arcs.add(f"a{k}", "0x" + f"{k:040x}", 0, 0, 1, 2, _HEX[src], _HEX[dst],
+                 nodes.node(_HEX[src]), nodes.node(_HEX[dst]),
+                 0.999, 1e-6, 0.0, 1e6, 0.001, 10**24, 18, 1e7, 0.999, f"n{k}")
+    nu = [1.0] * nodes.n_nodes()
+    psi = [1.0, 1.0, 1.0]
+    made["Arcs"] = arcs
+    made["Route"] = erouter_solve.Route.realize(
+        arcs, psi, nu, nodes, _HEX[0], _HEX[2], str(10**18), None)
+    made["Refit"] = erouter_solve.Refit.plan(arcs, psi, nu, nodes)
+    made["RouteCall"] = erouter_solve.RouteCall.encode_route(
+        made["Route"], receiver=_HEX[0])
+    made["Graph"] = erouter_solve.Graph.build(
+        [0, 1, 0], [1, 2, 2], [0.999] * 3, [1e-6] * 3, nu, 1.0,
+        n_nodes=nodes.n_nodes())
+    made["Ballot"] = erouter_solve.Ballot.generate(
+        made["Graph"], arcs, 0, 2, 1.0, psi)
+    made["Element"] = erouter_solve.Element.from_triples(
+        "0x" + "0" * 40, 2, [0], [0], [1])
+    made["Stages"] = erouter_solve.Stages(arcs)
+    return made
+
+
+#: What the module raises when it means "no".  A panic arrives as
+#: `PanicException`, which is a `BaseException` and deliberately not here.
+_REFUSALS = (TypeError, ValueError, OverflowError, AttributeError, IndexError,
+             KeyError, MemoryError, ZeroDivisionError, NotImplementedError,
+             RuntimeError, ArithmeticError)
+
+
+@pytest.mark.parametrize("seed", (7, 8, 9))
+def test_no_argument_makes_a_binding_panic(seed):
+    """Every entry point, with arguments it has no answer for.
+
+    This is the test that found the rest of the file.  Two classes came out of
+    it and neither was an `unwrap()`: parallel arrays of different lengths, and
+    a node index the core hands straight to a `Vec`.  Both are an `IndexError`
+    or a numpy shape error in the reference, and both were a `SIGABRT` here.
+
+    Three seeds rather than one because the shapes are sparse -- the first
+    sweep needed 372,600 calls to turn up 37 of them.
+    """
+    import inspect
+
+    rng = random.Random(seed)
+    fixtures = _stateful()
+    # A constructor that changes shape would drop its class silently, and the
+    # methods on it would go back to never being entered.
+    for required in ("Route", "Ballot", "Stages", "Refit", "RouteCall",
+                     "Pools", "NodeMap", "Problem", "Graph", "Curve"):
+        assert required in fixtures, f"no {required} fixture; its methods are unfuzzed"
+    objects = list(fixtures.values())
+
+    def value():
+        k = rng.randrange(12)
+        if k < 5:
+            return _seq(rng, rng.randrange(6), rng.choice(_LENS))
+        if k == 5:
+            return rng.choice(_INTS)
+        if k == 6:
+            return rng.choice(_FLOATS)
+        if k == 7:
+            return rng.choice(_STRS)
+        if k == 8:
+            return rng.random() < 0.5
+        if k == 9:
+            return None
+        if k == 10:
+            return rng.choice(objects)
+        return rng.randrange(0, 4)
+
+    targets = []
+    for name in dir(erouter_solve):
+        if name.startswith("_"):
+            continue
+        obj = getattr(erouter_solve, name)
+        if isinstance(obj, type):
+            for meth in dir(obj):
+                if meth.startswith("_"):
+                    continue
+                static = inspect.getattr_static(obj, meth, None)
+                if (isinstance(static, property)
+                        or type(static).__name__ == "getset_descriptor"):
+                    continue
+                targets.append((f"{name}.{meth}", getattr(obj, meth), name))
+        elif callable(obj):
+            targets.append((name, obj, None))
+    assert len(targets) > 150, "the module lost most of its surface"
+
+    panicked = []
+    for label, fn, owner in targets:
+        for _ in range(60):
+            args = [value() for _ in range(rng.randrange(0, 8))]
+            if owner in fixtures and args and rng.random() < 0.75:
+                args[0] = fixtures[owner]
+            try:
+                fn(*args)
+            except _REFUSALS:
+                pass
+            except BaseException as exc:  # the whole point of the test
+                if type(exc).__name__ == "PanicException":
+                    panicked.append((label, str(exc)[:80], repr(args)[:160]))
+    assert not panicked, f"{len(panicked)} panic(s): {panicked[:3]}"
+
+
 def test_the_release_profile_can_still_unwind():
     """`panic = "abort"` would make every case above a `SIGABRT` again.
 

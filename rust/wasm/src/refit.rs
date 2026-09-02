@@ -115,13 +115,17 @@ impl Refit {
 /// How far the flow moved, and whether that is close enough to stop:
 /// `[moved, converged]`.
 #[wasm_bindgen(js_name = roundStats)]
-pub fn round_stats(before: Vec<f64>, after: Vec<f64>, psi_total: f64) -> Vec<f64> {
+pub fn round_stats(
+    before: Vec<f64>, after: Vec<f64>, psi_total: f64,
+) -> Result<Vec<f64>, JsValue> {
+    crate::guard::same_length("after", after.len(), before.len())?;
     let (moved, converged) = refit::round_stats(&before, &after, psi_total);
-    vec![moved, f64::from(u8::from(converged))]
+    Ok(vec![moved, f64::from(u8::from(converged))])
 }
 
 /// The largest relative move in `B` across a round.
 #[wasm_bindgen(js_name = bChange)]
-pub fn b_change(before: Vec<f64>, after: Vec<f64>) -> f64 {
-    refit::b_change(&before, &after)
+pub fn b_change(before: Vec<f64>, after: Vec<f64>) -> Result<f64, JsValue> {
+    crate::guard::same_length("after", after.len(), before.len())?;
+    Ok(refit::b_change(&before, &after))
 }

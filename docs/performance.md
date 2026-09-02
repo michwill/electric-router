@@ -1529,3 +1529,68 @@ profile is ignored there -- the module comes out the same size and
 `catch_unwind` never catches. A panic traps the instance and poisons it. That
 is the argument for the guards being in the models rather than only at the
 boundary: they are the only half of this that crosses.
+
+### Then fuzzing the boundary, which found a class the models did not have
+
+The models were the half that could be reasoned about. The bindings were not,
+and asking whether the job was finished is what turned up the rest: driving all
+207 entry points with arguments they have no answer for produced **37 panics in
+372,600 calls**, none of them an `unwrap()` and none in the pool arithmetic.
+
+Two shapes, and every instance is one or the other:
+
+* **Parallel arrays that are not parallel.** `check_pair_drops(eps_f, eps_r)`,
+  `round_stats(before, after)`, `b_change`, `ceiling_conductance(g, flagged)`,
+  `cancel_cycles(tau, sig, psi)`. The reference subtracts two numpy arrays or
+  zips `strict=True` and refuses a mismatch; a `Vec` either reads past the
+  shorter one or stops at it and answers for the longer, and the second is
+  worse than the panic because it is a number.
+* **An index that is not an index.** `tau`/`sig` cross as plain integers and
+  the core indexes them straight into an `n_nodes`-long vector; `Problem.solve`,
+  `Problem.shortest_path`, `NodeMap.node_symbol` and `find_cycle` all took one
+  from the caller and used it. `IndexError` in the reference.
+
+Both are now refused by three helpers at the boundary (`same_length`,
+`arc_nodes`, `node` -- `src/py.rs`, and the twins in `wasm/src/guard.rs`),
+checked **once per problem rather than once per solve**: a quote solves the
+same arcs ~45 times and the arrays do not change between them, so the cost is
+one pass over `m` at construction and nothing in the pivot loop.
+
+869,400 calls across 24 seeds now, zero panics. A bounded version of the sweep
+is in the suite; the deep one is not, because at 25 calls per target it finds
+nothing and at 200 it is not a unit test.
+
+**The wasm bindings needed the same work separately**, and that is the part
+worth remembering: the guards inside the models are shared code and crossed for
+free, but a check written in `slippage_py.rs` protects only CPython. The
+browser had none of them, on the target where a panic is unrecoverable.
+
+### Two more, from asking whether that was all of it
+
+It was not, and both of the remaining ones came from widening the sweep rather
+than from reading more code.
+
+**A third of the surface was never entered.** `Route`, `Ballot`, `Stages`,
+`Refit` and `RouteCall` do not exist until a quote has been through them, so
+the first sweep called every method on them with a receiver PyO3 rejects and
+learned nothing. Building the five properly turned up `component_of`, which
+indexes its mask by each arc's endpoint while sizing it from a separate
+`n_nodes` the caller also supplies -- reached through
+`Stages.restrict_to_component`, and fixed in the core rather than at the
+binding so `pipeline` and the browser get it too.
+
+**`unwind` does not save you from an allocation.** `n_nodes = 10**18` sizes a
+`vec![false; n]`, Rust's allocator cannot serve it, and `handle_alloc_error`
+calls `abort()` -- the same dead process as before, with the panic strategy
+making no difference at all. Two of the sixteen fuzz seeds died this way.
+`numpy` raises `MemoryError` for the same input, so once again the refusal is
+the mirror. The bindings now cap `n_nodes` at 4,194,304 and the one bound that
+squares -- `laplacian`'s `keep`, which is a dense `k x k` under a cubic LU --
+at 8,192. Both are orders past anything measured and both are cheap: one
+comparison per call, not per pivot.
+
+Standing at 662,400 calls over sixteen seeds with the pipelined fixtures, plus
+106,200 through the wasm module and 15,000 through the EVM extension: no panic,
+no abort, no trap. The suite carries a bounded version, and asserts the fixture
+set still holds all five pipelined classes -- a constructor that changes shape
+would drop one silently and take its methods back out of the sweep.

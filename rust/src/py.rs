@@ -17,6 +17,78 @@ use pyo3::types::{PyBytes, PyDict, PyTuple};
 
 use crate::solve::{active_set_solve, Arcs, Options};
 
+/// Refuse two arrays the caller says are parallel and are not.
+///
+/// The reference states this with numpy or with `zip(..., strict=True)` and
+/// raises where it does not hold.  A `Vec` here would either read past the
+/// shorter one -- a panic -- or stop at it and answer for the longer, which is
+/// a wrong number rather than a refusal.  Neither is the mirror.
+pub(crate) fn same_length(what: &str, got: usize, want: usize) -> PyResult<()> {
+    if got == want {
+        return Ok(());
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(format!(
+        "{what} has {got} value(s), expected {want}"
+    )))
+}
+
+/// Refuse an arc list whose endpoints are not nodes of the graph.
+///
+/// `tau` and `sig` cross as plain integers and the core indexes them straight
+/// into an `n_nodes`-long vector.  The reference indexes a numpy array, which
+/// raises; here it is a read past the end.  One pass over `m` at the boundary
+/// rather than a bound in the pivot loop, which runs millions of times.
+pub(crate) fn arc_nodes(tau: &[i64], sig: &[i64], n_nodes: usize) -> PyResult<()> {
+    same_length("sig", sig.len(), tau.len())?;
+    node_count(n_nodes)?;
+    let n = n_nodes as i64;
+    for (side, values) in [("tau", tau), ("sig", sig)] {
+        for (k, &v) in values.iter().enumerate() {
+            if v < 0 || v >= n {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "{side}[{k}] is node {v}, outside 0..{n_nodes}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The largest graph these bindings will size a vector for.
+///
+/// Not a limit on the router -- a universe of four million tokens is three
+/// orders past anything measured -- but on what a caller can make it allocate.
+/// `panic = "unwind"` does not help here: Rust *aborts* on an allocation it
+/// cannot serve, so `n_nodes = 10**18` took the process down exactly the way
+/// `abort` used to, and the reference raises `MemoryError` for the same input.
+pub(crate) const MAX_NODES: usize = 1 << 22;
+
+/// The largest dense system, for the one place a bound squares.
+///
+/// `lu.rs` is O(k^3) by design (`README.md` says why there is no LAPACK), and
+/// the measured median is 50, so eight thousand is already far past useful.
+pub(crate) const MAX_DENSE: usize = 1 << 13;
+
+/// Refuse a node count that would size an allocation nothing can serve.
+pub(crate) fn node_count(n_nodes: usize) -> PyResult<()> {
+    if n_nodes <= MAX_NODES {
+        return Ok(());
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(format!(
+        "n_nodes is {n_nodes}, past the {MAX_NODES} this will allocate for"
+    )))
+}
+
+/// Refuse a node index that is not a node.
+pub(crate) fn node(what: &str, at: usize, n_nodes: usize) -> PyResult<()> {
+    if at < n_nodes {
+        return Ok(());
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(format!(
+        "{what} is node {at}, outside 0..{n_nodes}"
+    )))
+}
+
 #[allow(clippy::too_many_arguments)]
 #[pyfunction]
 #[pyo3(signature = (tau, sig, g, eps, cap, n_nodes, src, dst, psi_total,
@@ -43,6 +115,12 @@ fn solve<'py>(
     partial_ok: bool,
     rank1: Option<bool>,
 ) -> PyResult<Bound<'py, PyDict>> {
+    arc_nodes(&tau, &sig, n_nodes)?;
+    for (what, len) in [("g", g.len()), ("eps", eps.len()), ("cap", cap.len())] {
+        same_length(what, len, tau.len())?;
+    }
+    node("src", src, n_nodes)?;
+    node("dst", dst, n_nodes)?;
     let arcs = Arcs { tau: &tau, sig: &sig, g: &g, eps: &eps, cap: &cap, n_nodes };
     let opt = Options {
         tol: tol.unwrap_or(crate::solve::TOL),
@@ -95,8 +173,14 @@ pub struct Problem {
 impl Problem {
     #[new]
     fn new(tau: Vec<i64>, sig: Vec<i64>, g: Vec<f64>, eps: Vec<f64>,
-           cap: Vec<f64>, n_nodes: usize) -> Self {
-        Problem { tau, sig, g, eps, cap, n_nodes, adj: None }
+           cap: Vec<f64>, n_nodes: usize) -> PyResult<Self> {
+        // Once here, not once per solve: a quote solves the same problem ~45
+        // times and the arrays do not change between them.
+        arc_nodes(&tau, &sig, n_nodes)?;
+        for (what, len) in [("g", g.len()), ("eps", eps.len()), ("cap", cap.len())] {
+            same_length(what, len, tau.len())?;
+        }
+        Ok(Problem { tau, sig, g, eps, cap, n_nodes, adj: None })
     }
 
     #[getter]
@@ -123,6 +207,8 @@ impl Problem {
         weights: Option<Vec<f64>>,
         max_hops: usize,
     ) -> PyResult<Bound<'py, PyDict>> {
+        node("src", src, self.n_nodes)?;
+        node("dst", dst, self.n_nodes)?;
         let adj = self
             .adj
             .get_or_insert_with(|| crate::seed::build_adjacency(&self.tau, self.n_nodes));
@@ -173,6 +259,8 @@ impl Problem {
         partial_ok: bool,
         rank1: Option<bool>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        node("src", src, self.n_nodes)?;
+        node("dst", dst, self.n_nodes)?;
         let arcs = Arcs {
             tau: &self.tau, sig: &self.sig, g: &self.g,
             eps: &self.eps, cap: &self.cap, n_nodes: self.n_nodes,
@@ -252,6 +340,8 @@ fn cancel_cycles<'py>(
         let hi = tau.iter().chain(sig.iter()).copied().max().unwrap_or(-1);
         (hi + 1).max(0) as usize
     });
+    arc_nodes(&tau, &sig, n)?;
+    same_length("psi", psi.len(), tau.len())?;
     Ok(py.allow_threads(|| crate::cycles::cancel_cycles(&tau, &sig, &psi, tol, n)))
 }
 
@@ -267,6 +357,7 @@ fn find_cycle(
         let hi = tau.iter().chain(sig.iter()).copied().max().unwrap_or(-1);
         (hi + 1).max(0) as usize
     });
+    arc_nodes(&tau, &sig, n)?;
     Ok(crate::cycles::find_cycle(&tau, &sig, n))
 }
 

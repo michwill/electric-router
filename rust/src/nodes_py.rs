@@ -90,8 +90,9 @@ impl NodeMap {
         self.inner.decimals(token)
     }
 
-    fn node_symbol(&self, node: usize) -> String {
-        self.inner.node_symbol(node)
+    fn node_symbol(&self, node: usize) -> PyResult<String> {
+        crate::py::node("node", node, self.inner.n_nodes())?;
+        Ok(self.inner.node_symbol(node))
     }
 
     fn n_nodes(&self) -> usize {

@@ -120,7 +120,9 @@ pub fn ceiling_conductance(g: &mut [f64], flagged: &[bool], factor: f64) {
     let mut reference = f64::NEG_INFINITY;
     let mut any = false;
     for (k, &v) in g.iter().enumerate() {
-        if v.is_finite() && !flagged[k] {
+        // `get`: the binding refuses a mismatch, and `build` passes two fields
+        // of one struct, so an unflagged default is only ever the fallback.
+        if v.is_finite() && !flagged.get(k).copied().unwrap_or(false) {
             any = true;
             if v > reference {
                 reference = v;
@@ -525,7 +527,10 @@ pub fn laplacian(tau: &[i64], sig: &[i64], g: &[f64], n: usize, keep: &[usize]) 
 /// recomputed every pivot rather than once.
 pub fn component_of(root: usize, tau: &[i64], sig: &[i64], n: usize) -> Vec<bool> {
     let mut seen = vec![false; n];
-    if n == 0 {
+    // A root that is not a node reaches nothing, which is what the empty mask
+    // says.  `pipeline::restrict_to_component` reaches this with a `dst_node`
+    // it took from a caller, so the guard belongs here and not at one binding.
+    if root >= n {
         return seen;
     }
     seen[root] = true;
@@ -533,6 +538,12 @@ pub fn component_of(root: usize, tau: &[i64], sig: &[i64], n: usize) -> Vec<bool
         let mut grew = false;
         for p in 0..tau.len() {
             let (h, t) = (tau[p] as usize, sig[p] as usize);
+            // An arc naming a node the mask does not cover joins nothing in
+            // it.  A negative `tau` wraps to a huge `usize`, which this
+            // catches too.
+            if h >= n || t >= n {
+                continue;
+            }
             if seen[h] != seen[t] {
                 seen[h] = true;
                 seen[t] = true;

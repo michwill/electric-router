@@ -46,6 +46,15 @@ impl Graph {
         merge_duplicates: bool,
         require: Option<(usize, usize)>,
     ) -> PyResult<Graph> {
+        let n = n_nodes.unwrap_or_else(|| {
+            let hi = tau.iter().chain(sig.iter()).copied().max().unwrap_or(-1);
+            (hi + 1).max(0) as usize
+        });
+        crate::py::arc_nodes(&tau, &sig, n)?;
+        for (what, len) in [("a", a.len()), ("b", b.len())] {
+            crate::py::same_length(what, len, tau.len())?;
+        }
+        crate::py::same_length("nu", nu.len(), n)?;
         let opts = BuildOptions {
             cap: cap.as_deref(),
             flagged: flagged.as_deref(),
@@ -84,6 +93,7 @@ impl Graph {
         flagged: Vec<bool>,
         n_nodes: usize,
     ) -> PyResult<Graph> {
+        crate::py::arc_nodes(&tau, &sig, n_nodes)?;
         let m = tau.len();
         if sig.len() != m || g.len() != m || eps.len() != m || cap.len() != m
             || flagged.len() != m
@@ -127,22 +137,46 @@ impl Graph {
     /// §9.7 -- clamp in G-space, never by flooring B.
     #[staticmethod]
     #[pyo3(signature = (g, flagged, factor=CEILING_FACTOR))]
-    fn ceiling_conductance(g: Vec<f64>, flagged: Vec<bool>, factor: f64) -> Vec<f64> {
+    fn ceiling_conductance(
+        g: Vec<f64>, flagged: Vec<bool>, factor: f64,
+    ) -> PyResult<Vec<f64>> {
+        crate::py::same_length("flagged", flagged.len(), g.len())?;
         let mut g = g;
         graph::ceiling_conductance(&mut g, &flagged, factor);
-        g
+        Ok(g)
     }
 
     /// L = B^T diag(G) B restricted to `keep`, row-major and flat.
     #[staticmethod]
-    fn laplacian(tau: Vec<i64>, sig: Vec<i64>, g: Vec<f64>, n: usize, keep: Vec<usize>) -> Vec<f64> {
-        graph::laplacian(&tau, &sig, &g, n, &keep)
+    fn laplacian(
+        tau: Vec<i64>, sig: Vec<i64>, g: Vec<f64>, n: usize, keep: Vec<usize>,
+    ) -> PyResult<Vec<f64>> {
+        crate::py::arc_nodes(&tau, &sig, n)?;
+        crate::py::same_length("g", g.len(), tau.len())?;
+        // `keep` squares: the matrix is `keep.len()^2` doubles, and the LU
+        // that reads it is cubic, so the bound is the dense solve's and not
+        // the graph's.
+        if keep.len() > crate::py::MAX_DENSE {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "keep has {} node(s), past the {} this will solve for",
+                keep.len(),
+                crate::py::MAX_DENSE
+            )));
+        }
+        for &k in &keep {
+            crate::py::node("keep", k, n)?;
+        }
+        Ok(graph::laplacian(&tau, &sig, &g, n, &keep))
     }
 
     /// Nodes reachable from `root` over the given (undirected) arcs.
     #[staticmethod]
-    fn component_of(root: usize, tau: Vec<i64>, sig: Vec<i64>, n: usize) -> Vec<bool> {
-        graph::component_of(root, &tau, &sig, n)
+    fn component_of(
+        root: usize, tau: Vec<i64>, sig: Vec<i64>, n: usize,
+    ) -> PyResult<Vec<bool>> {
+        crate::py::arc_nodes(&tau, &sig, n)?;
+        crate::py::node("root", root, n)?;
+        Ok(graph::component_of(root, &tau, &sig, n))
     }
 
     /// §9.1 -- normalise G by its median. Returns the scaled demand.

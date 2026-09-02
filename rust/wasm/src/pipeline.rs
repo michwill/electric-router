@@ -67,9 +67,13 @@ impl Stages {
 
     /// Keep only what `dst` can be reached from, in either direction.
     #[wasm_bindgen(js_name = restrictToComponent)]
-    pub fn restrict_to_component(&mut self, dst_node: usize, n_nodes: usize) {
+    pub fn restrict_to_component(
+        &mut self, dst_node: usize, n_nodes: usize,
+    ) -> Result<(), JsValue> {
+        crate::guard::node_count(n_nodes)?;
         self.arcs =
             pipeline::restrict_to_component(&self.arcs, dst_node, n_nodes, &mut self.report);
+        Ok(())
     }
 
     // -- 2. the graph ------------------------------------------------------

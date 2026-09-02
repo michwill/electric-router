@@ -7,21 +7,7 @@ use crate::realize_py::Route;
 use crate::slippage;
 use pyo3::prelude::*;
 
-/// What `zip(..., strict=True)` raises, in the reference's words.
-///
-/// Every one of these takes one value per leg.  The reference states that with
-/// `strict=True` and raises where it does not hold; Rust's `zip` stops at the
-/// shorter one and answers anyway, so the check has to be written out.  It
-/// belongs here rather than in the core because this is where the contract is
-/// a Python caller's to keep.
-fn same_length(what: &str, got: usize, want: usize) -> PyResult<()> {
-    if got == want {
-        return Ok(());
-    }
-    Err(pyo3::exceptions::PyValueError::new_err(format!(
-        "{what} has {got} value(s) for {want} leg(s)"
-    )))
-}
+use crate::py::same_length;
 
 /// The potential each leg drops, or `None` if the network will not solve.
 #[pyfunction]

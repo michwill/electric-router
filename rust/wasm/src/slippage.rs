@@ -17,7 +17,7 @@ fn same_length(what: &str, got: usize, want: usize) -> Result<(), JsValue> {
     if got == want {
         return Ok(());
     }
-    Err(JsError::new(&format!("{what} has {got} value(s) for {want} leg(s)")).into())
+    Err(JsError::new(&format!("{what} has {got} value(s), expected {want}")).into())
 }
 
 /// The potential each leg drops, or an empty array if the network will not

@@ -89,12 +89,16 @@ impl Refit {
 
 /// How far the flow moved, and whether that is close enough to stop.
 #[pyfunction]
-pub fn round_stats(before: Vec<f64>, after: Vec<f64>, psi_total: f64) -> (f64, bool) {
-    refit::round_stats(&before, &after, psi_total)
+pub fn round_stats(
+    before: Vec<f64>, after: Vec<f64>, psi_total: f64,
+) -> PyResult<(f64, bool)> {
+    crate::py::same_length("after", after.len(), before.len())?;
+    Ok(refit::round_stats(&before, &after, psi_total))
 }
 
 /// The largest relative move in `B` across a round.
 #[pyfunction]
-pub fn b_change(before: Vec<f64>, after: Vec<f64>) -> f64 {
-    refit::b_change(&before, &after)
+pub fn b_change(before: Vec<f64>, after: Vec<f64>) -> PyResult<f64> {
+    crate::py::same_length("after", after.len(), before.len())?;
+    Ok(refit::b_change(&before, &after))
 }

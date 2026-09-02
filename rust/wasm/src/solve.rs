@@ -111,9 +111,16 @@ impl Problem {
         if sig.len() != m || g.len() != m || eps.len() != m || cap.len() != m {
             return Err(JsError::new("tau, sig, g, eps and cap must be the same length"));
         }
+        // Once here, not once per solve: the arrays do not change between the
+        // ~45 solves a quote runs over one problem.
+        let tau: Vec<i64> = tau.iter().map(|&v| v as i64).collect();
+        let sig: Vec<i64> = sig.iter().map(|&v| v as i64).collect();
+        if let Err(e) = crate::guard::arc_nodes(&tau, &sig, n_nodes) {
+            return Err(JsError::new(&format!("{e:?}")));
+        }
         Ok(Problem {
-            tau: tau.iter().map(|&v| v as i64).collect(),
-            sig: sig.iter().map(|&v| v as i64).collect(),
+            tau,
+            sig,
             g: g.to_vec(),
             eps: eps.to_vec(),
             cap: cap.to_vec(),
@@ -138,7 +145,9 @@ impl Problem {
         banned_nodes: Option<Vec<u32>>,
         weights: Option<Vec<f64>>,
         max_hops: usize,
-    ) -> PathResult {
+    ) -> Result<PathResult, JsValue> {
+        crate::guard::node("src", src, self.n_nodes)?;
+        crate::guard::node("dst", dst, self.n_nodes)?;
         let adj = self.adj.get_or_insert_with(|| build_adjacency(&self.tau, self.n_nodes));
         let m = self.tau.len();
         let mut arc_mask = vec![false; m];
@@ -160,12 +169,12 @@ impl Problem {
             &self.tau, &self.sig, &cost, self.n_nodes, adj, src, dst,
             &arc_mask, &node_mask, max_hops,
         );
-        PathResult {
+        Ok(PathResult {
             arcs: got.arcs.iter().map(|&v| v as u32).collect(),
             length: got.length,
             found: got.found,
             negative_cycle: got.negative_cycle.iter().map(|&v| v as u32).collect(),
-        }
+        })
     }
 
     /// `a0` and `forbidden` are `Uint8Array` masks; empty means absent, which
@@ -188,6 +197,9 @@ impl Problem {
         partial_ok: bool,
         rank1: bool,
     ) -> Result<SolveResult, JsError> {
+        if src >= self.n_nodes || dst >= self.n_nodes {
+            return Err(JsError::new("src and dst must be nodes of the graph"));
+        }
         let m = self.tau.len();
         if !a0.is_empty() && a0.len() != m {
             return Err(JsError::new("a0 must be empty or one flag per arc"));
@@ -368,23 +380,30 @@ impl CycleResult {
 
 /// `n_nodes` of 0 means "work it out from the arcs", as `None` does in Python.
 #[wasm_bindgen(js_name = cancelCycles)]
-pub fn cancel_cycles(tau: &[i32], sig: &[i32], psi: &[f64], tol: f64, n_nodes: usize) -> CycleResult {
+pub fn cancel_cycles(
+    tau: &[i32], sig: &[i32], psi: &[f64], tol: f64, n_nodes: usize,
+) -> Result<CycleResult, JsValue> {
     let tau: Vec<i64> = tau.iter().map(|&v| v as i64).collect();
     let sig: Vec<i64> = sig.iter().map(|&v| v as i64).collect();
     let n = if n_nodes == 0 { node_count(&tau, &sig) } else { n_nodes };
+    crate::guard::arc_nodes(&tau, &sig, n)?;
+    crate::guard::same_length("psi", psi.len(), tau.len())?;
     let (flow, removed) = erouter_solve::cycles::cancel_cycles(&tau, &sig, psi, tol, n);
-    CycleResult { flow, removed: removed as u32 }
+    Ok(CycleResult { flow, removed: removed as u32 })
 }
 
 /// The cycle's arcs, or an empty array when there is none.
 #[wasm_bindgen(js_name = findCycle)]
-pub fn find_cycle(tau: &[i32], sig: &[i32], n_nodes: usize) -> Vec<u32> {
+pub fn find_cycle(
+    tau: &[i32], sig: &[i32], n_nodes: usize,
+) -> Result<Vec<u32>, JsValue> {
     let tau: Vec<i64> = tau.iter().map(|&v| v as i64).collect();
     let sig: Vec<i64> = sig.iter().map(|&v| v as i64).collect();
     let n = if n_nodes == 0 { node_count(&tau, &sig) } else { n_nodes };
-    erouter_solve::cycles::find_cycle(&tau, &sig, n)
+    crate::guard::arc_nodes(&tau, &sig, n)?;
+    Ok(erouter_solve::cycles::find_cycle(&tau, &sig, n)
         .map(|v| v.into_iter().map(|x| x as u32).collect())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
 fn node_count(tau: &[i64], sig: &[i64]) -> usize {

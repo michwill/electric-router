@@ -279,8 +279,12 @@ pub fn round_stats(before: &[f64], after: &[f64], psi_total: f64) -> (f64, bool)
 
 /// The largest relative move in `B` across a round.
 pub fn b_change(before: &[f64], after: &[f64]) -> f64 {
-    (0..before.len())
-        .map(|k| (after[k] - before[k]).abs() / before[k].abs().max(1e-30))
+    // Zipped, not indexed: the reference subtracts two numpy arrays and would
+    // refuse a mismatch outright, which is what the binding does.
+    before
+        .iter()
+        .zip(after.iter())
+        .map(|(b, a)| (a - b).abs() / b.abs().max(1e-30))
         .fold(0.0f64, f64::max)
 }
 

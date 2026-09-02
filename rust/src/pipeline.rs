@@ -125,9 +125,13 @@ pub fn restrict_to_component(
     let tau: Vec<i64> = arcs.iter().map(|a| a.tau as i64).collect();
     let sig: Vec<i64> = arcs.iter().map(|a| a.sigma as i64).collect();
     let reachable = graph::component_of(dst_node, &tau, &sig, n_nodes);
+    // `get`, not `[..]`: `n_nodes` is the caller's and an arc whose endpoint
+    // is past the end of the mask is not reachable -- which is what the mask
+    // would have said if it were long enough.
+    let at = |node: usize| reachable.get(node).copied().unwrap_or(false);
     let keep: Vec<PoolArc> = arcs
         .iter()
-        .filter(|a| reachable[a.tau] && reachable[a.sigma])
+        .filter(|a| at(a.tau) && at(a.sigma))
         .cloned()
         .collect();
     report.set("arcs_unreachable", (arcs.len() - keep.len()) as i64);

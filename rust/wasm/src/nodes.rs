@@ -100,8 +100,9 @@ impl NodeMap {
     }
 
     #[wasm_bindgen(js_name = nodeSymbol)]
-    pub fn node_symbol(&self, node: usize) -> String {
-        self.inner.node_symbol(node)
+    pub fn node_symbol(&self, node: usize) -> Result<String, JsValue> {
+        crate::guard::node("node", node, self.inner.n_nodes())?;
+        Ok(self.inner.node_symbol(node))
     }
 
     #[wasm_bindgen(js_name = nNodes)]

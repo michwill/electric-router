@@ -30,6 +30,10 @@ pub fn reference_prices(
     tau: Vec<i64>, sig: Vec<i64>, a: Vec<f64>, w: Vec<f64>, n_nodes: usize,
     numeraire: usize,
 ) -> PyResult<Vec<f64>> {
+    crate::py::arc_nodes(&tau, &sig, n_nodes)?;
+    crate::py::same_length("a", a.len(), tau.len())?;
+    crate::py::same_length("w", w.len(), tau.len())?;
+    crate::py::node("numeraire", numeraire, n_nodes)?;
     prices::reference_prices(&tau, &sig, &a, &w, n_nodes, numeraire).map_err(err)
 }
 
@@ -37,8 +41,11 @@ pub fn reference_prices(
 #[pyfunction]
 pub fn dislocations(
     tau: Vec<i64>, sig: Vec<i64>, a: Vec<f64>, nu: Vec<f64>,
-) -> Vec<f64> {
-    prices::dislocations(&tau, &sig, &a, &nu)
+) -> PyResult<Vec<f64>> {
+    // `nu` is per node, so its length *is* the node count here.
+    crate::py::arc_nodes(&tau, &sig, nu.len())?;
+    crate::py::same_length("a", a.len(), tau.len())?;
+    Ok(prices::dislocations(&tau, &sig, &a, &nu))
 }
 
 /// Fee-free mid price implied by the two one-sided quotes.
@@ -49,12 +56,13 @@ pub fn pool_mid(a_forward: f64, a_reverse: f64) -> f64 {
 
 /// Measured effective retention, `sqrt(a_f * a_r)` (§2.6).
 #[pyfunction]
-pub fn gamma_live(a_forward: Vec<f64>, a_reverse: Vec<f64>) -> Vec<f64> {
-    a_forward
+pub fn gamma_live(a_forward: Vec<f64>, a_reverse: Vec<f64>) -> PyResult<Vec<f64>> {
+    crate::py::same_length("a_reverse", a_reverse.len(), a_forward.len())?;
+    Ok(a_forward
         .iter()
         .zip(a_reverse.iter())
         .map(|(&f, &r)| prices::gamma_live(f, r))
-        .collect()
+        .collect())
 }
 
 /// Indices where `eps_f + eps_r <= tol` -- a spurious negative 2-cycle.
@@ -62,6 +70,7 @@ pub fn gamma_live(a_forward: Vec<f64>, a_reverse: Vec<f64>) -> Vec<f64> {
 #[pyo3(signature = (eps_forward, eps_reverse, tol=0.0))]
 pub fn check_pair_drops(
     eps_forward: Vec<f64>, eps_reverse: Vec<f64>, tol: f64,
-) -> Vec<usize> {
-    prices::check_pair_drops(&eps_forward, &eps_reverse, tol)
+) -> PyResult<Vec<usize>> {
+    crate::py::same_length("eps_reverse", eps_reverse.len(), eps_forward.len())?;
+    Ok(prices::check_pair_drops(&eps_forward, &eps_reverse, tol))
 }

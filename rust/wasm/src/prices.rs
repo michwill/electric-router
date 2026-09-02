@@ -34,14 +34,23 @@ pub fn reference_prices(
     tau: Vec<i64>, sig: Vec<i64>, a: Vec<f64>, w: Vec<f64>, n_nodes: usize,
     numeraire: usize,
 ) -> Result<Vec<f64>, JsValue> {
+    crate::guard::arc_nodes(&tau, &sig, n_nodes)?;
+    crate::guard::same_length("a", a.len(), tau.len())?;
+    crate::guard::same_length("w", w.len(), tau.len())?;
+    crate::guard::node("numeraire", numeraire, n_nodes)?;
     prices::reference_prices(&tau, &sig, &a, &w, n_nodes, numeraire)
         .map_err(|e| JsError::new(&e.0).into())
 }
 
 /// Residuals `r_p = z_sig - z_tau + log a_p`.
 #[wasm_bindgen]
-pub fn dislocations(tau: Vec<i64>, sig: Vec<i64>, a: Vec<f64>, nu: Vec<f64>) -> Vec<f64> {
-    prices::dislocations(&tau, &sig, &a, &nu)
+pub fn dislocations(
+    tau: Vec<i64>, sig: Vec<i64>, a: Vec<f64>, nu: Vec<f64>,
+) -> Result<Vec<f64>, JsValue> {
+    // `nu` is per node, so its length *is* the node count here.
+    crate::guard::arc_nodes(&tau, &sig, nu.len())?;
+    crate::guard::same_length("a", a.len(), tau.len())?;
+    Ok(prices::dislocations(&tau, &sig, &a, &nu))
 }
 
 /// Fee-free mid price implied by the two one-sided quotes.
@@ -52,21 +61,25 @@ pub fn pool_mid(a_forward: f64, a_reverse: f64) -> f64 {
 
 /// Measured effective retention, `sqrt(a_f * a_r)` (§2.6).
 #[wasm_bindgen(js_name = gammaLive)]
-pub fn gamma_live(a_forward: Vec<f64>, a_reverse: Vec<f64>) -> Vec<f64> {
-    a_forward
+pub fn gamma_live(
+    a_forward: Vec<f64>, a_reverse: Vec<f64>,
+) -> Result<Vec<f64>, JsValue> {
+    crate::guard::same_length("a_reverse", a_reverse.len(), a_forward.len())?;
+    Ok(a_forward
         .iter()
         .zip(a_reverse.iter())
         .map(|(&f, &r)| prices::gamma_live(f, r))
-        .collect()
+        .collect())
 }
 
 /// Indices where `eps_f + eps_r <= tol` -- a spurious negative 2-cycle.
 #[wasm_bindgen(js_name = checkPairDrops)]
 pub fn check_pair_drops(
     eps_forward: Vec<f64>, eps_reverse: Vec<f64>, tol: Option<f64>,
-) -> Vec<u32> {
-    prices::check_pair_drops(&eps_forward, &eps_reverse, tol.unwrap_or(0.0))
+) -> Result<Vec<u32>, JsValue> {
+    crate::guard::same_length("eps_reverse", eps_reverse.len(), eps_forward.len())?;
+    Ok(prices::check_pair_drops(&eps_forward, &eps_reverse, tol.unwrap_or(0.0))
         .into_iter()
         .map(|k| k as u32)
-        .collect()
+        .collect())
 }

@@ -149,6 +149,7 @@ impl Route {
     /// Kahn's algorithm over the active arcs. Refuses a cycle.
     #[staticmethod]
     fn topological_nodes(tau: Vec<i64>, sig: Vec<i64>, n_nodes: usize) -> PyResult<Vec<usize>> {
+        crate::py::arc_nodes(&tau, &sig, n_nodes)?;
         realize::topological_nodes(&tau, &sig, n_nodes).map_err(err)
     }
 
@@ -158,8 +159,11 @@ impl Route {
     fn prune_dust(
         tau: Vec<i64>, sig: Vec<i64>, psi: Vec<f64>, src: usize, dst: usize,
         share: f64, tol: f64,
-    ) -> (Vec<f64>, usize) {
-        realize::prune_dust(&tau, &sig, &psi, src, dst, share, tol)
+    ) -> PyResult<(Vec<f64>, usize)> {
+        let n = tau.iter().chain(sig.iter()).copied().max().unwrap_or(-1) + 1;
+        crate::py::arc_nodes(&tau, &sig, n.max(0) as usize)?;
+        crate::py::same_length("psi", psi.len(), tau.len())?;
+        Ok(realize::prune_dust(&tau, &sig, &psi, src, dst, share, tol))
     }
 
     fn __len__(&self) -> usize {

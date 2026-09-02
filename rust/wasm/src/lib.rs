@@ -15,6 +15,7 @@ mod codec;
 mod curves;
 mod evm;
 mod graph;
+mod guard;
 mod ladders;
 mod multiport;
 mod naive;

@@ -133,11 +133,14 @@ impl Graph {
 
     /// §9.7 -- clamp in G-space, never by flooring B.
     #[wasm_bindgen(js_name = ceilingConductance)]
-    pub fn ceiling_conductance(g: Vec<f64>, flagged: Vec<u8>, factor: Option<f64>) -> Vec<f64> {
+    pub fn ceiling_conductance(
+        g: Vec<f64>, flagged: Vec<u8>, factor: Option<f64>,
+    ) -> Result<Vec<f64>, JsValue> {
+        crate::guard::same_length("flagged", flagged.len(), g.len())?;
         let mut g = g;
         let flagged: Vec<bool> = flagged.into_iter().map(|b| b != 0).collect();
         graph::ceiling_conductance(&mut g, &flagged, factor.unwrap_or(CEILING_FACTOR));
-        g
+        Ok(g)
     }
 
     /// L = B^T diag(G) B restricted to `keep`, row-major and flat.
@@ -147,18 +150,36 @@ impl Graph {
         g: Vec<f64>,
         n: usize,
         keep: Vec<u32>,
-    ) -> Vec<f64> {
+    ) -> Result<Vec<f64>, JsValue> {
+        crate::guard::arc_nodes(&tau, &sig, n)?;
+        crate::guard::same_length("g", g.len(), tau.len())?;
+        // `keep` squares, so the bound is the dense solve's, not the graph's.
+        if keep.len() > crate::guard::MAX_DENSE {
+            return Err(JsError::new(&format!(
+                "keep has {} node(s), past the {} this will solve for",
+                keep.len(),
+                crate::guard::MAX_DENSE
+            ))
+            .into());
+        }
         let keep: Vec<usize> = keep.into_iter().map(|v| v as usize).collect();
-        graph::laplacian(&tau, &sig, &g, n, &keep)
+        for &k in &keep {
+            crate::guard::node("keep", k, n)?;
+        }
+        Ok(graph::laplacian(&tau, &sig, &g, n, &keep))
     }
 
     /// Nodes reachable from `root` over the given (undirected) arcs.
     #[wasm_bindgen(js_name = componentOf)]
-    pub fn component_of(root: usize, tau: Vec<i64>, sig: Vec<i64>, n: usize) -> Vec<u8> {
-        graph::component_of(root, &tau, &sig, n)
+    pub fn component_of(
+        root: usize, tau: Vec<i64>, sig: Vec<i64>, n: usize,
+    ) -> Result<Vec<u8>, JsValue> {
+        crate::guard::arc_nodes(&tau, &sig, n)?;
+        crate::guard::node("root", root, n)?;
+        Ok(graph::component_of(root, &tau, &sig, n)
             .into_iter()
             .map(u8::from)
-            .collect()
+            .collect())
     }
 
     /// §9.1 -- normalise G by its median. Returns the scaled demand.

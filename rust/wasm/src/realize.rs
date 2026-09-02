@@ -158,6 +158,7 @@ impl Route {
     pub fn topological_nodes(
         tau: Vec<i64>, sig: Vec<i64>, n_nodes: usize,
     ) -> Result<Vec<u32>, JsValue> {
+        crate::guard::arc_nodes(&tau, &sig, n_nodes)?;
         realize::topological_nodes(&tau, &sig, n_nodes)
             .map(|v| v.into_iter().map(|k| k as u32).collect())
             .map_err(err)
@@ -169,12 +170,15 @@ impl Route {
     pub fn prune_dust(
         tau: Vec<i64>, sig: Vec<i64>, psi: Vec<f64>, src: usize, dst: usize,
         share: Option<f64>, tol: Option<f64>,
-    ) -> PruneOut {
+    ) -> Result<PruneOut, JsValue> {
+        let n = tau.iter().chain(sig.iter()).copied().max().unwrap_or(-1) + 1;
+        crate::guard::arc_nodes(&tau, &sig, n.max(0) as usize)?;
+        crate::guard::same_length("psi", psi.len(), tau.len())?;
         let (flow, removed) = realize::prune_dust(
             &tau, &sig, &psi, src, dst,
             share.unwrap_or(realize::DUST_SHARE), tol.unwrap_or(1e-12),
         );
-        PruneOut { flow, removed }
+        Ok(PruneOut { flow, removed })
     }
 
     #[wasm_bindgen(js_name = length)]

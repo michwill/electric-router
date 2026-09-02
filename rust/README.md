@@ -37,6 +37,13 @@ Consequences for how it is written, all of them load-bearing:
   the module -- which is why the refusals live inside the models, where they
   cross, rather than only at the bindings.  `docs/performance.md` has the
   numbers and `tests/test_bad_input_never_aborts.py` holds the line.
+* **The bindings check what the core then indexes.**  `same_length`,
+  `arc_nodes`, `node` and `node_count` (`src/py.rs`, twinned in
+  `wasm/src/guard.rs`) refuse a mismatched pair of arrays, a node id that is
+  not a node, and a node *count* that would size an allocation -- Rust aborts
+  on an allocation it cannot serve, and no panic strategy changes that.  Once
+  per problem, never in the pivot loop: a quote solves the same arcs ~45 times
+  and they do not change between them.
 * **Deterministic.**  No parallelism and no floating-point reassociation, so a
   quote is reproducible across the three targets.  The Python implementation
   stays the reference; `tests/test_accel_differential.py` differs them, and
