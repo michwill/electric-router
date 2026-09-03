@@ -72,10 +72,28 @@ class AsyncRpc(Protocol):
     `batch` must return one entry per request, in order, and must never raise
     for a single failed request -- an `Exception` in that slot is how one says
     so, exactly as `Answer.status` does a level up.
+
+    **`batch_size` and `max_streams` are part of the contract**, not decoration.
+    `RouterSession._batched` hands over `batch_size * max_streams` requests at a
+    time and expects them to go out as `max_streams` chunks of `batch_size`; an
+    implementation that chunks at some other size gets batches its endpoint may
+    refuse, and one that omits `max_streams` gets a sweep of several thousand
+    slots issued strictly one chunk at a time.  Both were true of every
+    implementation in this repository until they came off one measured ceiling
+    in `dev/rpc.AsyncTransport` -- 6,855 slots in 1.9 s against 11.4 s.
+
+    They carry defaults because a client may not know its endpoint's ceiling.
+    100 and 1 are the safe pair: a chunk almost every node accepts, sent one at
+    a time.
     """
 
     @property
     def chain_id(self) -> int: ...
+
+    #: The largest chunk this endpoint answers.
+    batch_size: int = 100
+    #: How many of those may be in flight at once.
+    max_streams: int = 1
 
     async def batch(self, requests: list[tuple[str, list]]) -> list: ...
 

@@ -23,7 +23,7 @@ from erouter.chain.cache import UniverseCache
 from erouter.chain.session import RouterSession
 from erouter.core import candidates as _cand
 from erouter.dev import config
-from erouter.dev.rpc import JsonRpcTransport
+from erouter.dev.rpc import AsyncTransport, JsonRpcTransport
 from erouter.dev.universe import load_pools
 
 ap = argparse.ArgumentParser()
@@ -37,29 +37,6 @@ ap.add_argument("--reps", type=int, default=8)
 # block and 106 at another -- so any A/B has to pin it.
 ap.add_argument("--block", type=int, default=None)
 opts = ap.parse_args()
-
-
-class _Rpc:
-    """The `AsyncRpc` protocol over the synchronous dev transport.
-
-    Copied from `tests/forked/test_session_parity.py`, deliberately: the point
-    is to instrument the path the app takes, not a near-miss of it.
-    """
-
-    batch_size = 100
-
-    def __init__(self, transport):
-        self._transport = transport
-        self.chain_id = transport.chain_id
-
-    async def batch(self, requests):
-        return self._transport.fetch_multi(list(requests), concurrent=True)
-
-    async def call(self, method, params):
-        got = self._transport.fetch_multi([(method, params)])[0]
-        if isinstance(got, Exception):
-            raise got
-        return got
 
 
 class _Files:
@@ -80,7 +57,7 @@ universe = cache.get(chain.chain_id, opts.min_tvl, allow_stale=True)
 root = Path(__file__).resolve()
 root = Path("/home/michwill/Projects/electric-router")
 
-session = RouterSession(chain, _Rpc(rpc), erouter_evm.Evm("Osaka", chain.chain_id),
+session = RouterSession(chain, AsyncTransport(rpc), erouter_evm.Evm("Osaka", chain.chain_id),
                         _Files(root), json.loads(json.dumps(universe)),
                         min_tvl=opts.min_tvl)
 

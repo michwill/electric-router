@@ -36,30 +36,11 @@ from erouter.chain.cache import UniverseCache
 from erouter.chain.session import RouterSession
 from erouter.core import accel
 from erouter.dev import config
-from erouter.dev.rpc import JsonRpcTransport
+from erouter.dev.rpc import AsyncTransport, JsonRpcTransport
 from erouter.dev.universe import load_pools
 
 USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 WETH = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
-
-
-class _Rpc:
-    """The session's transport, over the blocking one."""
-
-    batch_size = 100
-
-    def __init__(self, transport) -> None:
-        self._t = transport
-        self.chain_id = transport.chain_id
-
-    async def batch(self, requests):
-        return self._t.fetch_multi(list(requests), concurrent=True)
-
-    async def call(self, method, params):
-        got = self._t.fetch_multi([(method, params)])[0]
-        if isinstance(got, Exception):
-            raise got
-        return got
 
 
 class _Files:
@@ -82,7 +63,7 @@ def warm(args):
         load_pools(chain, min_tvl=args.min_tvl)
     universe = cache.get(chain.chain_id, args.min_tvl, allow_stale=True)
     root = Path(__file__).resolve().parents[1]
-    session = RouterSession(chain, _Rpc(transport),
+    session = RouterSession(chain, AsyncTransport(transport),
                             erouter_evm.Evm("Osaka", chain.chain_id),
                             _Files(root), universe, min_tvl=args.min_tvl)
     asyncio.run(session.warm(block=args.block or transport.block))

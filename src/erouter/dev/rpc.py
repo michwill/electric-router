@@ -40,6 +40,9 @@ USER_AGENT = "electric-router/0.1"
 # JSON-RPC batches are chunked by both count and total calldata size; a chunk
 # that fails outright is halved and retried before falling back per call.
 DEFAULT_BATCH = 500
+# What a chunk is held to when the endpoint will not say, and the floor a
+# measured ceiling keeps.  `local_evm.BATCH_LIMIT` is this number.
+BATCH_FLOOR = 100
 # "batch limit 100 exceeded (can increase by --rpc.batch.limit)" -- Erigon, and
 # geth phrases it the same way.  Parsed so the ceiling is learned once.
 _BATCH_LIMIT = re.compile(r"batch limit (\d+) exceeded")
@@ -566,3 +569,52 @@ def _answer(result: Any) -> Answer:
     if len(raw) == 0:
         return Answer(Status.WRONG_ABI)
     return Answer(Status.VALUE, raw)
+
+
+class AsyncTransport:
+    """The `AsyncRpc` protocol over the synchronous transport above.
+
+    One implementation rather than the four near-copies there used to be, and
+    the reason is the chunking.  `RouterSession._batched` sizes its hand-off as
+    `batch_size * max_streams`, expecting the transport to split that back into
+    `max_streams` chunks of `batch_size`.  `fetch_multi` splits it at *its own*
+    `batch_size` instead, so the two numbers have to be the same number.
+
+    They were not.  The copies declared 100, the transport defaulted to 500, and
+    the only configuration that worked was the one where the session never asked
+    for concurrency: `max_streams` was undeclared, `_batched` fell to its `or 1`,
+    and the hand-off was a single under-ceiling batch.  Correct by coincidence,
+    and 70 serialised round trips.  Declaring `max_streams = 8` sent 800 at a
+    time, `fetch_multi` cut that into 500 and 300, an endpoint capped at 100
+    refused both, and all 6,855 slots came back unreadable -- a local EVM
+    holding nothing, every getter after it back on the wire, and a warm that
+    went from 16.8 s to 22.3 s while looking like a faster sweep.
+
+    So the ceiling is asked for once, up front, and both sides take it: 6,855
+    slots in 1.9 s against 11.4 s, and the same quote to the wei.
+    """
+
+    def __init__(self, transport: JsonRpcTransport, *, streams: int | None = None) -> None:
+        self._t = transport
+        self.chain_id = transport.chain_id
+        # Asked for rather than discovered by failing into it: concurrently
+        # every in-flight chunk fails together, which is the whole bug above.
+        # A storage read for the sample, because a ceiling learned from
+        # `eth_blockNumber` does not survive contact with a sweep.
+        try:
+            sample = ("eth_getStorageAt",
+                      ["0x" + "00" * 20, "0x" + "00" * 32, transport.pin.hex_block])
+            limit = max(transport.probe_batch_limit(sample), BATCH_FLOOR)
+        except Exception:  # a transport that will not say keeps the floor
+            limit = BATCH_FLOOR
+        transport.batch_size = self.batch_size = limit
+        self.max_streams = streams or transport.max_streams
+
+    async def batch(self, requests):
+        return self._t.fetch_multi(list(requests), concurrent=True)
+
+    async def call(self, method, params):
+        got = self._t.fetch_multi([(method, params)])[0]
+        if isinstance(got, Exception):
+            raise got
+        return got

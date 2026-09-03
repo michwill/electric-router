@@ -593,24 +593,7 @@ def _bank_session_needs(chain, rpc, cache, universe, min_tvl: float,
     import erouter_evm
 
     from ..chain.session import RouterSession
-
-    class _AsyncRpc:
-        """`AsyncRpc` over this command's synchronous transport."""
-
-        batch_size = 100
-
-        def __init__(self, transport):
-            self._transport = transport
-            self.chain_id = transport.chain_id
-
-        async def batch(self, requests):
-            return self._transport.fetch_multi(list(requests), concurrent=True)
-
-        async def call(self, method, params):
-            got = self._transport.fetch_multi([(method, params)])[0]
-            if isinstance(got, Exception):
-                raise got
-            return got
+    from .rpc import AsyncTransport
 
     class _Files:
         """`DataSource` over the checkout's own `data/`."""
@@ -624,7 +607,7 @@ def _bank_session_needs(chain, rpc, cache, universe, min_tvl: float,
 
     root = pathlib.Path(__file__).resolve().parents[3]
     session = RouterSession(
-        chain, _AsyncRpc(rpc), erouter_evm.Evm("Osaka", chain.chain_id),
+        chain, AsyncTransport(rpc), erouter_evm.Evm("Osaka", chain.chain_id),
         _Files(root), _json.loads(_json.dumps(universe)), min_tvl=min_tvl)
     report = asyncio.run(session.warm(block=block))
     evm = session.evm

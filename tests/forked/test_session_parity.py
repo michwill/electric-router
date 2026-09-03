@@ -39,29 +39,6 @@ GAS_GWEI = 1
 MIN_TVL = 10_000.0
 
 
-class _Rpc:
-    """The `AsyncRpc` protocol over the CLI's own synchronous transport.
-
-    Deliberately the same endpoint, so a difference cannot be one half talking
-    to a different node.
-    """
-
-    batch_size = 100
-
-    def __init__(self, transport):
-        self._transport = transport
-        self.chain_id = transport.chain_id
-
-    async def batch(self, requests):
-        return self._transport.fetch_multi(list(requests), concurrent=True)
-
-    async def call(self, method, params):
-        got = self._transport.fetch_multi([(method, params)])[0]
-        if isinstance(got, Exception):
-            raise got
-        return got
-
-
 class _Files:
     """The `DataSource` protocol over the checkout's own `data/`."""
 
@@ -111,13 +88,14 @@ def test_the_session_reproduces_the_cli(chain, rpc, universe, tmp_path):
     from pathlib import Path
 
     from erouter.chain.session import RouterSession
+    from erouter.dev.rpc import AsyncTransport
 
     erouter_evm = pytest.importorskip("erouter_evm")
     root = Path(__file__).resolve().parents[2]
     block = rpc.block
 
     session = RouterSession(
-        chain, _Rpc(rpc), erouter_evm.Evm("Osaka", chain.chain_id),
+        chain, AsyncTransport(rpc), erouter_evm.Evm("Osaka", chain.chain_id),
         _Files(root), universe, min_tvl=MIN_TVL)
     report = asyncio.run(session.warm(block=block))
     assert report.complete, (

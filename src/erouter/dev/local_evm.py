@@ -29,7 +29,7 @@ from typing import Any
 
 from ..core.transport import Answer, Call, Status
 from ..core.types import ArcKind
-from .rpc import DEFAULT_STREAMS
+from .rpc import BATCH_FLOOR, DEFAULT_STREAMS
 
 # A caller that is nobody, funded so `msg.sender` balance checks never bind.
 CALLER = "0x" + "11" * 20
@@ -43,7 +43,7 @@ DIRECT_SIGS = {
 # Erigon refuses a JSON-RPC batch larger than this by default ("batch limit 100
 # exceeded"), and it refuses the *whole* batch -- so a route's worth of proofs
 # has to be split or none of it arrives.
-BATCH_LIMIT = 100
+BATCH_LIMIT = BATCH_FLOOR
 
 def _access_list_error(answer: Any) -> str:
     """Why an `eth_createAccessList` answer is unusable, or `""` if it is fine.

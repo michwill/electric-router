@@ -1690,3 +1690,86 @@ four orders above one ulp of the pre-cancellation flow and four orders below
 what the active set's conditioning permits at that magnitude, so it is neither
 of the two obvious candidates. Left alone. Refusing a trade of a hundredth of a
 cent is the right answer; this is only the wrong message for it.
+
+## Where a cold load's seconds went, and the two numbers that had to agree
+
+Cold load is `RouterSession.warm` plus the first quote: everything that does
+not depend on the pair or the amount. Measured at a pinned block on Ethereum,
+identical work every rep -- 1,129 accounts, 6,855 slots, 393 pools, 876 arcs,
+376 exact models -- min per phase over five runs:
+
+| phase | wall ms | share | what it is |
+|---|---|---|---|
+| storage | 10,677 | 56% | the slot sweep that fills the local EVM |
+| pools | 4,150 | 22% | dialects, balances, LP tokens, deposit gates |
+| models | 2,077 | 11% | building and gating 376 exact models |
+| first quote | 775 | 4% | prepare + quote |
+| wrappers | 448 | 2% | vault and lending discovery |
+| caches | 300 | 2% | msgpack decode of the banked state |
+| code | 197 | 1% | installing 1,129 accounts' bytecode |
+| arcs | 185 | 1% | the preflight arc build |
+| block, connect, set_pair, universe | 372 | 2% | |
+| **to a first quote** | **~19,200** | | |
+
+Read the CPU column with suspicion and the wall column without: at identical
+work the CPU per phase fell monotonically across reps as the machine cooled
+(`first quote` 1,675 -> 775 ms), while `storage` sat between 10.7 and 13.5 s
+throughout, because it was not computing.
+
+**And it was not transferring either.** 6,855 slots went out as 70 sequential
+POSTs of 100. One request -- the `block` phase -- measures the link at ~125 ms,
+and 70 x 152 ms is the whole phase. `_sweep`'s docstring describes exactly this
+and says it should not be happening: "6,174 slots took 16.9 s that way and
+1.3 s from the CLI, which does not."
+
+The session sizes its hand-off as `batch_size * max_streams` and expects the
+transport to split it back into `max_streams` chunks of `batch_size`. Neither
+number was what it looked like:
+
+* No implementation of `AsyncRpc` in the repository declared `max_streams` --
+  not the CLI's, not `bench_quote`'s, not `count_roundtrips`', not the parity
+  test's. `_batched` reads it with `getattr(..., 0) or 1`, so the step was one
+  chunk and the concurrent sweep had never once run.
+* Declaring it did not help, it destroyed the run. `fetch_multi` re-chunks at
+  the **transport's** `batch_size`, which is 500 by default; `probe_batch_limit`
+  knew the endpoint's real ceiling was 100, had it remembered from an earlier
+  run, and returned it without ever assigning it. So a step of 800 became
+  batches of 500 and 300, the endpoint refused both -- whole, as Erigon does --
+  and every one of the 6,855 slots came back unreadable:
+
+      streams=8:  _read_slots: wanted 6,855  loaded 0  errors 13,710  4,482 ms
+                  slots 0   UNREADABLE 6,855
+
+  A local EVM holding nothing answers every getter with a zero and a miss, so
+  `_resolve_pools` went back to the wire for all of it: 90 requests became
+  6,007, `pools` went from 2.5 s to 19.7 s, and the warm went from 16.8 s to
+  22.3 s while looking like a sweep three times faster.
+
+The only configuration that worked was the accidental one, and it was the slow
+one.
+
+`dev/rpc.AsyncTransport` is now the single implementation, and it asks for the
+ceiling once, up front, and gives it to both sides -- which is what
+`local_evm.prime` had been doing for its own sweep since `4a69cd9`, for the
+reason its comment gives: "Discovering the node's batch ceiling by failing into
+it is fine when chunks go out one at a time. Concurrently it is not: every
+in-flight chunk fails together."
+
+Interleaved arms, pinned block, same 6,855 slots and 0 unreadable in both:
+
+| | sweep | warm | quote |
+|---|---|---|---|
+| four near-copies | 11,399 / 11,658 ms | 16,753 / 17,012 ms | 41235968081214950039 |
+| one measured ceiling | 1,956 / 1,934 ms | 6,955 / 7,464 ms | 41235968081214950039 |
+
+**5.9x on the sweep and 2.4x on the warm, to the wei.** Cold load to a first
+quote goes 19.2 s -> 9.7 s, and the shape inverts: `storage` drops to 2.0 s and
+20%, `pools` becomes the largest item at 3.8 s, and the whole thing turns
+CPU-bound (cpu/wall 0.52 against 0.15).
+
+Sixteen streams rather than eight was a wash -- 1,623 and 2,127 ms over two
+runs against 1,906 and 1,942 -- so the transport's own default stands.
+
+`batch_size` and `max_streams` are documented on the `AsyncRpc` protocol now,
+with 100 and 1 as the defaults, because the failure a frontend hits by omitting
+them is silence: a sweep that works and is seven times slower than it looks.
