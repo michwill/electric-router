@@ -1,6 +1,6 @@
 {
  "chain_id": 56,
- "fingerprint": "8105012d58ca2413",
+ "fingerprint": "2a97be3b73a2a720",
  "unquotable": {},
  "verdicts": {
   "0x5756bbddc03dab01a3900f01fb15641c3bfcc457": {
@@ -14,12 +14,14 @@
   "0x5f7e08f9d3d31ffb9ce5d36b613c501f891034d4": {
    "family": "stable",
    "fee_on_xp": true,
-   "rates": "reported"
+   "rates": "reported",
+   "subtract_one": true
   },
   "0xe6e2905f54baf7625f4943b74c50338362741cd4": {
    "family": "stable",
    "fee_on_xp": true,
-   "rates": "reported"
+   "rates": "reported",
+   "subtract_one": true
   }
  },
  "version": 1
