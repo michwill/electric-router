@@ -1773,3 +1773,55 @@ runs against 1,906 and 1,942 -- so the transport's own default stands.
 `batch_size` and `max_streams` are documented on the `AsyncRpc` protocol now,
 with 100 and 1 as the defaults, because the failure a frontend hits by omitting
 them is silence: a sweep that works and is seven times slower than it looks.
+
+### Then `pools` was the largest item, and it was doing the work eleven times
+
+With the sweep down to 2 s, `_resolve_pools` became the top of the table at
+3.8 s. It is not one pass over the pool list. `stages` -- `resolve_dialects`,
+`read_balances`, `resolve_lp_tokens`, `resolve_deposit_gates`,
+`check_reserves_are_real` -- runs under `evm.fill`, which re-runs the whole
+thing on a `deepcopy` until the local EVM stops reporting misses. That took
+**ten rounds**, so eleven passes over 394 pools:
+
+| | ms | calls | per call |
+|---|---|---|---|
+| `resolve_dialects` | 857 | 11 | 78 |
+| `read_balances` | 507 | 11 | 46 |
+| `copy.deepcopy` | 176 | 10 | 18 |
+| `resolve_lp_tokens` | 149 | 11 | 14 |
+| `resolve_deposit_gates` | 63 | 11 | 6 |
+| `check_reserves_are_real` | 11 | 11 | 1 |
+| accounted | 1,762 | | 46% |
+| phase | 3,834 | | |
+
+The unaccounted half is the fetching between rounds: 170 requests that cannot
+share a batch, because each round only learns what it needs once the previous
+one has run. Ten sequential round trips, and the concurrency fix above cannot
+touch them -- they are serial by construction, not by mis-chunking.
+
+Nothing was wrong with the loop. The committed state cache did not hold the
+slots the *session's* resolvers read, because the CLI's stand-ins touch
+different slots of the same contracts -- which is what `cli._bank_session_needs`
+was written for and says in as many words: "165 slots that no committed cache
+has ever held, in any of sixty-two revisions since 2026-08-13, costing ten
+sequential miss rounds off every warm. The demand arrived with the session on
+2026-08-22 and nothing has recorded for it since, because nothing runs it."
+
+So it was run. Interleaved arms on the private endpoint, alternating the cache
+file at a pinned block:
+
+| | miss rounds | pools | cold load | quote |
+|---|---|---|---|---|
+| cache as committed | 10 | 3,374 / 3,285 ms | 8,062 / 8,063 ms | 41235968081214950039 |
+| after `warmcache` | 2 | 588 / 594 ms | 4,762 / 5,096 ms | 41235968081214950039 |
+
+**5.6x on the phase and 1.7x on the whole cold load**, to the wei, for +15
+accounts and +67 slots in `data/evm-state` and nothing removed. Cold load to a
+first quote across this document's two findings: 19.2 s -> 8.1 s -> 4.8 s.
+
+The floor is two `stages` calls -- one round that finds nothing missing, then
+the real pass -- and it now takes three. One round still fetches 75 requests,
+worth another ~180 ms and a trip. `warmcache` says why as it writes: the
+session builds a slightly different universe than the bank was made from, and
+the slot set moves with it. Which is the standing cost of a bank: it is a
+measurement of one universe, and the pool list is on a five-minute TTL.
