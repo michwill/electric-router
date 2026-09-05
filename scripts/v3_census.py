@@ -1,25 +1,37 @@
 #!/usr/bin/env python3
-"""How much of Uniswap v3 a Curve router could actually use.
+"""How much of Uniswap v3 a router could actually use.
 
 Measured on ethereum at block 25,913,519:
 
     PoolCreated                     72,734
     liquidity() > 0                 42,645   58.6%
-    both coins already priced          327    0.8%
-    exactly one coin priced         40,858   95.8%
-    neither                          1,460    3.4%
-    distinct tokens, live pools     41,323   (the node map holds 309)
+    distinct tokens, live pools     41,323   (the Curve node map holds 309)
 
-The 0.8% is not a filter anyone chose.  `eps = 1 - a nu_sig/nu_tau` and
-`G = nu_tau a / B` are both built from reference prices, so a pool with a coin
-the frame cannot price has no arc to contribute -- and §4 prices a token by
-weighted least squares over the arcs that reach it, so the boundary moves only
-when the graph does.
+**The filter that matters is liquidity, not token membership.**  TVL is
+concentrated to the point of absurdity -- proxied as twice the quote asset each
+pool holds, priced from v3 itself:
 
-The state cost of the usable set is smaller than the pool count suggests:
-sampled at 1% of each pool's own holdings, the median quote touches 13 slots and
-p90 touches 41, so all 327 come to about 4,251 -- against 6,925 for the whole
-Curve universe today.  The tail is real though: one pool wanted 3,481.
+    floor        pools   cumulative TVL
+    $10         15,934      993,000,000
+    $1,000       2,893      991,000,000
+    $10,000      1,208      985,000,000     99.2% of all v3 liquidity
+    $100,000       384      958,000,000
+    $1,000,000      87      868,000,000
+
+So Curve's own $10k floor admits **1,208 v3 pools** and keeps 99.2% of the
+depth; dropping to $10 multiplies the pool count thirteenfold for 0.8% more.
+
+An earlier cut of this asked instead how many pools have *both* coins already in
+the node map -- 327, or 0.8% -- and that is the answer to a different question.
+It matters only if reference prices have to come from somewhere else, and they
+do not: §4 fits log-prices by weighted least squares over the arcs that reach a
+token, so any pool adjacent to the priced component prices its own far side.
+95.8% of live v3 pools have exactly one coin already priced, which makes them
+adjacent by construction.  Pricing is not the boundary; liquidity is.
+
+The state cost is smaller than the pool count suggests.  Sampled at 1% of each
+pool's own holdings, a quote touches 13 slots at the median and 41 at p90.  The
+tail is real though: one pool wanted 3,481.
 
     uv run python scripts/v3_census.py [--sample 120]
 """
