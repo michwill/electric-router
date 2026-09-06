@@ -136,13 +136,16 @@ impl Graph {
 
     /// §9.7 -- clamp in G-space, never by flooring B.
     #[staticmethod]
-    #[pyo3(signature = (g, flagged, factor=CEILING_FACTOR))]
+    #[pyo3(signature = (g, flagged, factor=CEILING_FACTOR, cap=None))]
     fn ceiling_conductance(
-        g: Vec<f64>, flagged: Vec<bool>, factor: f64,
+        g: Vec<f64>, flagged: Vec<bool>, factor: f64, cap: Option<Vec<f64>>,
     ) -> PyResult<Vec<f64>> {
         crate::py::same_length("flagged", flagged.len(), g.len())?;
+        if let Some(cap) = cap.as_deref() {
+            crate::py::same_length("cap", cap.len(), g.len())?;
+        }
         let mut g = g;
-        graph::ceiling_conductance(&mut g, &flagged, factor);
+        graph::ceiling_conductance(&mut g, &flagged, factor, cap.as_deref());
         Ok(g)
     }
 

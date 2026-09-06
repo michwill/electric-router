@@ -240,8 +240,14 @@ def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
         tau, sigma = nodes.node(token_in), nodes.node(token_out)
         if tau == sigma:                     # a node merge swallowed the pair
             continue
+        # Never the first: the price sits inside that tick, so its arc holds
+        # the remainder of the range the pool is trading in *now* and is the
+        # best-priced liquidity there is.  It is also the one most likely to be
+        # a sliver, since the sliver is exactly "the price is near this
+        # boundary".  Dropping it cost 0.94 bp on a small leg while the rest of
+        # the same route was within 0.002.
         floor = capacity(bank) * min_cap_share
-        bank = [arc for arc in bank if arc.cap > floor]
+        bank = [arc for k, arc in enumerate(bank) if k == 0 or arc.cap > floor]
         if not bank:
             continue
         i, j = (0, 1) if zero_for_one else (1, 0)

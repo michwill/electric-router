@@ -110,27 +110,72 @@ fn argmin_negative(b: &[f64]) -> Option<usize> {
     Some(best)
 }
 
-/// §2.3 rule (3) / §9.7 -- clamp in G-space, never by flooring B.
+/// The largest conductance the graph's scale should be read from.
 ///
-/// Only clamped arcs (`G = inf`) are normally affected: every finite arc is by
-/// definition at or below the maximum. Do **not** lower this ceiling to bound
-/// the condition number -- flattening real conductances makes every deep pool
-/// look identical. Bound the spread from below instead (see `build`).
-pub fn ceiling_conductance(g: &mut [f64], flagged: &[bool], factor: f64) {
-    let mut reference = f64::NEG_INFINITY;
-    let mut any = false;
-    for (k, &v) in g.iter().enumerate() {
+/// An arc's `G` says how much flow it takes per unit of potential, which is
+/// what it is worth *only while the arc is free*. An arc with a finite cap
+/// stops taking flow at its cap and leaves the active set, so past that point
+/// its `G` describes nothing -- and a `G` that describes nothing must not set
+/// the scale everything else is measured against.
+///
+/// On a Curve universe this is exactly `max(finite)`: a clamped arc there has
+/// `B = 0` and so `G = inf`, and every arc with a finite `G` is uncapped. It
+/// starts mattering when a venue supplies both at once -- a Uniswap v3 tick is
+/// nearly linear over its own range, so its `B` is tiny, its `G` is enormous,
+/// and its cap is a few tens of thousands of dollars.
+pub fn reference_conductance(g: &[f64], flagged: &[bool], cap: Option<&[f64]>) -> f64 {
+    let free = |k: usize, v: f64| {
         // `get`: the binding refuses a mismatch, and `build` passes two fields
         // of one struct, so an unflagged default is only ever the fallback.
-        if v.is_finite() && !flagged.get(k).copied().unwrap_or(false) {
-            any = true;
-            if v > reference {
-                reference = v;
+        v.is_finite() && !flagged.get(k).copied().unwrap_or(false)
+    };
+    if let Some(cap) = cap {
+        let mut best = f64::NEG_INFINITY;
+        let mut any = false;
+        for (k, &v) in g.iter().enumerate() {
+            if free(k, v) && !cap.get(k).copied().unwrap_or(f64::INFINITY).is_finite() {
+                any = true;
+                best = best.max(v);
             }
         }
+        if any {
+            return best;
+        }
     }
-    let ceiling = factor * if any { reference } else { 1.0 };
-    for v in g.iter_mut() {
+    let mut best = f64::NEG_INFINITY;
+    let mut any = false;
+    for (k, &v) in g.iter().enumerate() {
+        if free(k, v) {
+            any = true;
+            best = best.max(v);
+        }
+    }
+    if any { best } else { 1.0 }
+}
+
+/// §2.3 rule (3) / §9.7 -- clamp in G-space, never by flooring B.
+///
+/// Only clamped arcs (`G = inf`) are lifted. Do **not** lower this ceiling to
+/// bound the condition number -- flattening real conductances makes every deep
+/// pool look identical. Bound the spread from below instead (see `build`).
+///
+/// `cap` changes only where the reference is read from, never what is clamped:
+/// a capped arc must not *set* the scale, because its `G` stops describing it
+/// at its cap, but it must not be flattened to that scale either, because
+/// between deep and shallow the difference is the depth the solver splits by.
+pub fn ceiling_conductance(g: &mut [f64], flagged: &[bool], factor: f64,
+                           cap: Option<&[f64]>) {
+    let ceiling = factor * reference_conductance(g, flagged, cap);
+    for (k, v) in g.iter_mut().enumerate() {
+        // A finite capped arc keeps its own conductance: see above.
+        if v.is_finite()
+            && cap
+                .and_then(|c| c.get(k).copied())
+                .unwrap_or(f64::INFINITY)
+                .is_finite()
+        {
+            continue;
+        }
         // `np.where(isfinite(G), G, inf)` first: -inf and NaN both become inf
         // and then take the ceiling, which is not what a bare `min` would do.
         let w = if v.is_finite() { *v } else { f64::INFINITY };
@@ -286,24 +331,44 @@ pub fn build(
     let mut usable_lo = f64::INFINITY;
     let mut usable_hi = f64::NEG_INFINITY;
     let mut usable_n = 0usize;
-    for &v in &g {
+    let mut fallback_lo = f64::INFINITY;
+    let mut fallback_hi = f64::NEG_INFINITY;
+    let mut fallback_n = 0usize;
+    for (k, &v) in g.iter().enumerate() {
         if v.is_finite() {
             any_finite = true;
             if v > finite_max {
                 finite_max = v;
             }
+            // Over the arcs whose `G` has to be comparable: a capped arc's
+            // does not, since its cap is what limits it.
+            let bounded = opts
+                .cap
+                .and_then(|c| c.get(k).copied())
+                .unwrap_or(f64::INFINITY)
+                .is_finite();
             if v > 0.0 && v >= base_floor {
-                usable_n += 1;
-                usable_lo = usable_lo.min(v);
-                usable_hi = usable_hi.max(v);
+                if !bounded {
+                    usable_n += 1;
+                    usable_lo = usable_lo.min(v);
+                    usable_hi = usable_hi.max(v);
+                }
+                fallback_n += 1;
+                fallback_lo = fallback_lo.min(v);
+                fallback_hi = fallback_hi.max(v);
             }
         } else {
             // `(~np.isfinite(G)).any()` -- NaN counts, the same as an inf.
             any_infinite = true;
         }
     }
-    if usable_n > 1 {
-        let raw_spread = usable_hi / usable_lo;
+    let (spread_n, spread_lo, spread_hi) = if usable_n > 0 {
+        (usable_n, usable_lo, usable_hi)
+    } else {
+        (fallback_n, fallback_lo, fallback_hi)
+    };
+    if spread_n > 1 {
+        let raw_spread = spread_hi / spread_lo;
         if raw_spread > PATHOLOGICAL_CONDITION {
             // No real universe looks like this: the widest genuine spread
             // measured on Ethereum is ~4e10. A spread of 1e15+ means B was
@@ -320,8 +385,12 @@ pub fn build(
         // clamped arc is lifted to `ceiling_factor * max`, so budgeting
         // against the pre-ceiling maximum alone leaves the assertion tripping
         // on real data.
-        let mut top = finite_max;
-        if any_infinite {
+        let mut top = reference_conductance(&g, &flagged, opts.cap);
+        let any_capped = opts
+            .cap
+            .map(|c| c.iter().any(|v| v.is_finite()))
+            .unwrap_or(false);
+        if any_infinite || any_capped {
             top *= opts.ceiling_factor;
         }
         floor = floor.max(top / TARGET_CONDITION);
@@ -393,7 +462,8 @@ pub fn build(
     };
 
     // --- §9.7 ceiling, after the dust floor -----------------------------
-    ceiling_conductance(&mut arrays.g, &arrays.flagged, opts.ceiling_factor);
+    ceiling_conductance(&mut arrays.g, &arrays.flagged, opts.ceiling_factor,
+                        Some(&arrays.cap));
 
     // --- §12.4 invariants -----------------------------------------------
     if arrays.m() > 0 && !arrays.g.iter().all(|&v| v > 0.0) {

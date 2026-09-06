@@ -60,25 +60,64 @@ def arc_params(
     return G, eps
 
 
+def reference_conductance(
+    G: np.ndarray,
+    flagged: np.ndarray,
+    cap: np.ndarray | None = None,
+) -> float:
+    """The largest conductance the graph's scale should be read from.
+
+    An arc's `G` says how much flow it takes per unit of potential, which is
+    what it is worth *only while the arc is free*.  An arc with a finite cap
+    stops taking flow at its cap and leaves the active set, so past that point
+    its `G` describes nothing -- and a `G` that describes nothing must not set
+    the scale everything else is measured against.
+
+    On a Curve universe this is exactly `max(finite)`: a clamped arc there has
+    `B = 0` and so `G = inf`, and every arc with a finite `G` is uncapped.  It
+    starts mattering when a venue supplies both at once -- a Uniswap v3 tick is
+    nearly linear over its own range, so its `B` is tiny, its `G` is enormous,
+    and its cap is a few tens of thousands of dollars.  Letting one of those set
+    the reference raised `build`'s dust floor by eleven orders and evicted 1,342
+    Curve arcs that had done nothing wrong.
+    """
+    free = np.isfinite(G) & ~flagged
+    if cap is not None:
+        unbounded = free & ~np.isfinite(cap)
+        if unbounded.any():
+            return float(G[unbounded].max())
+    return float(G[free].max()) if free.any() else 1.0
+
+
 def ceiling_conductance(
     G: np.ndarray,
     flagged: np.ndarray,
     factor: float = CEILING_FACTOR,
+    cap: np.ndarray | None = None,
 ) -> np.ndarray:
     """§2.3 rule (3) / §9.7 -- clamp in G-space, never by flooring B.
 
     A 1e-30 floor on B becomes a 1e30 conductance and destroys the condition
     number of the whole Laplacian, which is worse than the defect it patches.
 
-    Only clamped arcs (`G = inf`) are affected: every finite arc is by definition
-    at or below the maximum.  Do **not** lower this ceiling to bound the condition
-    number -- flattening real conductances makes every deep pool look identical,
-    and the solver then splits arbitrarily among them instead of by depth.  Bound
-    the spread from below instead (see `dust_floor` in `build`).
+    Only clamped arcs (`G = inf`) are lifted.  Do **not** lower this ceiling to
+    bound the condition number -- flattening real conductances makes every deep
+    pool look identical, and the solver then splits arbitrarily among them
+    instead of by depth.  Bound the spread from below instead (see `dust_floor`
+    in `build`).
+
+    `cap` changes only where the reference is read from, never what is clamped.
+    A capped arc must not *set* the scale, because its `G` stops describing it
+    at its cap -- but it must not be flattened to that scale either, because
+    between deep and shallow the difference is exactly the depth the solver
+    splits by.  Measured on a Curve+v3 graph: flattening them cost 7.9 bp
+    against the same graph that merely stopped letting them set the floor.
     """
-    finite = np.isfinite(G) & ~flagged
-    reference = G[finite].max() if finite.any() else 1.0
-    return np.minimum(np.where(np.isfinite(G), G, np.inf), factor * reference)
+    reference = reference_conductance(G, flagged, cap)
+    lifted = np.minimum(np.where(np.isfinite(G), G, np.inf), factor * reference)
+    if cap is None:
+        return lifted
+    return np.where(np.isfinite(cap) & np.isfinite(G), G, lifted)
 
 
 @dataclass(slots=True)
@@ -188,7 +227,12 @@ def build(
     # does return 9.55x and the chain agrees to the wei.  Such an arc is about to
     # be dropped by the floor anyway, but the spread was computed first and the
     # whole quote died on an assertion about a pool no route could have used.
-    usable_G = positive_G[positive_G >= base_floor]
+    # Over the arcs whose `G` has to be comparable: a capped arc's does not,
+    # since its cap is what limits it.  See `reference_conductance`.
+    unbounded = ~np.isfinite(cap)
+    comparable = G[np.isfinite(G) & unbounded]
+    comparable = comparable[comparable >= base_floor]
+    usable_G = comparable if comparable.size else positive_G[positive_G >= base_floor]
     if usable_G.size > 1:
         raw_spread = float(usable_G.max() / usable_G.min())
         if raw_spread > max_spread:
@@ -208,10 +252,12 @@ def build(
             )
     if finite_G.size:
         # Aim at the spread that will exist *after* the ceiling runs: a clamped
-        # arc is lifted to `ceiling_factor * max`, so budgeting against the
+        # arc is lifted to `ceiling_factor * reference`, so budgeting against the
         # pre-ceiling maximum alone leaves the assertion tripping on real data.
-        top = float(finite_G.max())
-        if (~np.isfinite(G)).any():
+        # The reference is the uncapped part of the graph, for the reason
+        # `reference_conductance` gives.
+        top = reference_conductance(G, flagged, cap)
+        if (~np.isfinite(G)).any() or np.isfinite(cap).any():
             top *= ceiling_factor
         floor = max(floor, top / TARGET_CONDITION)
 
@@ -272,7 +318,8 @@ def build(
     )
 
     # --- §9.7 ceiling, after the dust floor -----------------------------
-    arrays.G = ceiling_conductance(arrays.G, arrays.flagged, ceiling_factor)
+    arrays.G = ceiling_conductance(arrays.G, arrays.flagged, ceiling_factor,
+                                   cap=arrays.cap)
 
     # --- §12.4 invariants -----------------------------------------------
     if arrays.m and not np.all(arrays.G > 0):

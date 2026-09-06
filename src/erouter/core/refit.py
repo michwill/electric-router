@@ -202,7 +202,10 @@ def rebuild(g: ArcArrays, arcs: list[PoolArc], nu: np.ndarray) -> ArcArrays:
     G, eps = arc_params(g.tau, g.sig, a, B, nu)
     flagged = np.array([arc.convex_flag for arc in arcs])
     g.a, g.B = a, B
-    g.G = ceiling_conductance(G, flagged) / g.g_scale
+    # `cap` for the same reason `build` passes it: a capped arc must not set
+    # the reference the ceiling is measured from.  Only finiteness is read,
+    # so `g.cap` being in scaled units does not matter.
+    g.G = ceiling_conductance(G, flagged, cap=g.cap) / g.g_scale
     g.eps = eps
     g.flagged = flagged
     g.clamped = np.array([arc.clamped for arc in arcs])

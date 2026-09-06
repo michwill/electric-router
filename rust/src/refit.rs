@@ -245,7 +245,11 @@ pub fn rebuild(g: &mut ArcArrays, arcs: &[PoolArc], nu: &[f64]) {
         return;
     };
     let flagged: Vec<bool> = arcs.iter().map(|arc| arc.convex_flag).collect();
-    ceiling_conductance(&mut conductance, &flagged, crate::graph::CEILING_FACTOR);
+    // `cap` for the same reason `build` passes it: a capped arc must not set
+    // the reference. Only finiteness is read, so `g.cap` being in scaled
+    // units does not matter.
+    ceiling_conductance(&mut conductance, &flagged,
+                        crate::graph::CEILING_FACTOR, Some(&g.cap));
     g.a = a;
     g.b = b;
     g.g = conductance.iter().map(|v| v / g.g_scale).collect();
