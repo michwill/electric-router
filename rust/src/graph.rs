@@ -159,21 +159,29 @@ pub fn reference_conductance(g: &[f64], flagged: &[bool], cap: Option<&[f64]>) -
 /// bound the condition number -- flattening real conductances makes every deep
 /// pool look identical. Bound the spread from below instead (see `build`).
 ///
-/// `cap` changes only where the reference is read from, never what is clamped:
-/// a capped arc must not *set* the scale, because its `G` stops describing it
-/// at its cap, but it must not be flattened to that scale either, because
-/// between deep and shallow the difference is the depth the solver splits by.
+/// A capped arc is neither, and gets `compress_conductance` instead: it must
+/// not *set* the scale, because its `G` stops describing it at its cap, and it
+/// must not be flattened to that scale either, because between deep and
+/// shallow the difference is the depth the solver splits by.
 pub fn ceiling_conductance(g: &mut [f64], flagged: &[bool], factor: f64,
                            cap: Option<&[f64]>) {
-    let ceiling = factor * reference_conductance(g, flagged, cap);
-    for (k, v) in g.iter_mut().enumerate() {
-        // A finite capped arc keeps its own conductance: see above.
-        if v.is_finite()
+    let reference = reference_conductance(g, flagged, cap);
+    let ceiling = factor * reference;
+    let bounded = |k: usize, v: f64| {
+        v.is_finite()
             && cap
                 .and_then(|c| c.get(k).copied())
                 .unwrap_or(f64::INFINITY)
                 .is_finite()
-        {
+    };
+    let alpha = compression_exponent(g, &bounded, reference, factor);
+    for (k, v) in g.iter_mut().enumerate() {
+        if bounded(k, *v) {
+            if let Some(alpha) = alpha {
+                if *v > reference {
+                    *v = reference * (*v / reference).powf(alpha);
+                }
+            }
             continue;
         }
         // `np.where(isfinite(G), G, inf)` first: -inf and NaN both become inf
@@ -181,6 +189,42 @@ pub fn ceiling_conductance(g: &mut [f64], flagged: &[bool], factor: f64,
         let w = if v.is_finite() { *v } else { f64::INFINITY };
         *v = w.min(ceiling);
     }
+}
+
+/// The exponent that squeezes capped conductances into
+/// `[reference, factor * reference]`, monotonically -- `None` when nothing
+/// reaches above the ceiling and the identity will do.
+///
+/// Both of the obvious answers were measured on a Curve+v3 graph and both are
+/// wrong. Flattening capped arcs to the ceiling cost 7.9 bp: every deep pool
+/// looks identical and the solver splits arbitrarily among them. Leaving them
+/// alone leaves a spread §12.4 cannot accept: v3 ticks reach `G = 1.4e11`
+/// beside Curve arcs at 7e-1, and once `condition` stops looking away from them
+/// `build` refuses the graph at 2.758e12 -- 6 of 21 sweep cases, every one of
+/// them carrying WBTC ticks.
+///
+/// So neither: keep the order and lose the range. Below the reference nothing
+/// moves; above it `G -> reference * (G/reference)^alpha` lands the largest
+/// exactly on the ceiling, continuous at the knee and strictly increasing
+/// either side of it.
+fn compression_exponent(
+    g: &[f64], bounded: &dyn Fn(usize, f64) -> bool, reference: f64, factor: f64,
+) -> Option<f64> {
+    if !reference.is_finite() || reference <= 0.0 || factor <= 1.0 {
+        return None;
+    }
+    let mut top = f64::NEG_INFINITY;
+    let mut any = false;
+    for (k, &v) in g.iter().enumerate() {
+        if bounded(k, v) {
+            any = true;
+            top = top.max(v);
+        }
+    }
+    if !any || top <= factor * reference {
+        return None;
+    }
+    Some(factor.ln() / (top / reference).ln())
 }
 
 /// Solver input. Index space is post-dust, post-duplicate-merge.
@@ -212,30 +256,24 @@ impl ArcArrays {
         self.tau.len()
     }
 
-    /// The conductance spread the solve has to live with.
+    /// The conductance spread the solve has to live with -- every arc of it.
     ///
-    /// Over the *uncapped* arcs, for the reason `reference_conductance` gives:
-    /// a capped arc reaches its cap and leaves the active set, so its `G` is
-    /// not part of the system being factorised for long enough to condition it.
+    /// Capped arcs were excluded here for a while, on the argument that an arc
+    /// which reaches its cap leaves the active set and so does not condition
+    /// the system for long. The factorisation disagreed: it sees the whole
+    /// matrix, and on a Curve+v3 graph the excluded part reached 2.8e12 while
+    /// this returned 7e6, so §12.4's bound was being checked against a number
+    /// that left out the entire problem. `compress_conductance` is what makes
+    /// counting them affordable again.
     pub fn condition(&self) -> f64 {
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
         let mut any = false;
-        for (k, &v) in self.g.iter().enumerate() {
-            let bounded = self.cap.get(k).copied().unwrap_or(f64::INFINITY).is_finite();
-            if v > 0.0 && !bounded {
+        for &v in &self.g {
+            if v > 0.0 {
                 any = true;
                 lo = lo.min(v);
                 hi = hi.max(v);
-            }
-        }
-        if !any {
-            for &v in &self.g {
-                if v > 0.0 {
-                    any = true;
-                    lo = lo.min(v);
-                    hi = hi.max(v);
-                }
             }
         }
         if any {

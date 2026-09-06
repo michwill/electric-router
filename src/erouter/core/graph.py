@@ -106,18 +106,57 @@ def ceiling_conductance(
     instead of by depth.  Bound the spread from below instead (see `dust_floor`
     in `build`).
 
-    `cap` changes only where the reference is read from, never what is clamped.
-    A capped arc must not *set* the scale, because its `G` stops describing it
-    at its cap -- but it must not be flattened to that scale either, because
-    between deep and shallow the difference is exactly the depth the solver
-    splits by.  Measured on a Curve+v3 graph: flattening them cost 7.9 bp
-    against the same graph that merely stopped letting them set the floor.
+    A capped arc is neither, and gets `compress_conductance` instead: it must
+    not *set* the scale, because its `G` stops describing it at its cap, and it
+    must not be flattened to that scale either, because between deep and
+    shallow the difference is exactly the depth the solver splits by.
     """
     reference = reference_conductance(G, flagged, cap)
     lifted = np.minimum(np.where(np.isfinite(G), G, np.inf), factor * reference)
     if cap is None:
         return lifted
-    return np.where(np.isfinite(cap) & np.isfinite(G), G, lifted)
+    bounded = np.isfinite(cap) & np.isfinite(G)
+    return np.where(bounded, compress_conductance(G, bounded, reference, factor),
+                    lifted)
+
+
+def compress_conductance(
+    G: np.ndarray,
+    bounded: np.ndarray,
+    reference: float,
+    factor: float = CEILING_FACTOR,
+) -> np.ndarray:
+    """Squeeze capped conductances into `[reference, factor * reference]`,
+    monotonically.
+
+    Both of the obvious answers were measured on a Curve+v3 graph and both are
+    wrong.  Flattening capped arcs to the ceiling cost 7.9 bp: every deep pool
+    looks identical and the solver splits arbitrarily among them.  Leaving them
+    alone leaves a spread §12.4 cannot accept: v3 ticks reach `G = 1.4e11`
+    beside Curve arcs at 7e-1, and once `condition` stops looking away from them
+    `build` refuses the graph at 2.758e12 -- 6 of 21 sweep cases, every one of
+    them carrying WBTC ticks.
+
+    So neither: keep the order and lose the range.  Below the reference nothing
+    moves.  Above it, `G -> reference * (G/reference)^alpha` with `alpha` set so
+    the largest lands exactly on the ceiling -- continuous at the knee, strictly
+    increasing either side of it, and `alpha < 1` precisely when there is
+    something above the ceiling to bring down.  A deeper tick stays deeper; it
+    just stops being deeper by eleven orders of magnitude.
+
+    Choosing the band to be the one the ceiling already defines is what keeps
+    `build`'s dust floor honest: it budgets against `factor * reference`, so
+    with nothing above that the post-ceiling spread really is TARGET_CONDITION.
+    """
+    if not bounded.any() or not np.isfinite(reference) or reference <= 0:
+        return G
+    top = float(G[bounded].max())
+    if top <= factor * reference or factor <= 1.0:
+        return G
+    alpha = np.log(factor) / np.log(top / reference)
+    over = bounded & (G > reference)
+    ratio = np.where(over, G / reference, 1.0)
+    return np.where(over, reference * ratio**alpha, G)
 
 
 @dataclass(slots=True)
@@ -152,18 +191,17 @@ class ArcArrays:
         return len(self.tau)
 
     def condition(self) -> float:
-        """The conductance spread the solve has to live with.
+        """The conductance spread the solve has to live with -- every arc of it.
 
-        Over the *uncapped* arcs, for the reason `reference_conductance` gives:
-        a capped arc reaches its cap and leaves the active set, so its `G` is
-        not part of the system being factorised for long enough to condition
-        it.  On a Curve universe every arc with a finite `G` is uncapped and
-        this is the plain spread; it starts mattering when a venue supplies a
-        near-linear arc with a hard capacity, whose `G` is enormous and whose
-        influence is not.
+        Capped arcs were excluded here for a while, on the argument that an arc
+        which reaches its cap leaves the active set and so does not condition
+        the system for long.  The factorisation disagreed: it sees the whole
+        matrix, and on a Curve+v3 graph the excluded part reached 2.8e12 while
+        this returned 7e6, so §12.4's bound was being checked against a number
+        that left out the entire problem.  `compress_conductance` is what makes
+        counting them affordable again.
         """
-        free = (self.G > 0) & ~np.isfinite(self.cap)
-        positive = self.G[free] if free.any() else self.G[self.G > 0]
+        positive = self.G[self.G > 0]
         return float(positive.max() / positive.min()) if positive.size else 1.0
 
 
