@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from erouter.chain import chains as chain_table
 from erouter.chain.cache import UniverseCache
 from erouter.chain.session import RouterSession
-from erouter.core import pipeline
+from erouter.core import pipeline, verify
 from erouter.core.codec import decode, encode_call
 from erouter.core.types import ArcKind
 from erouter.dev import config
@@ -327,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
 
     real_assemble = pipeline._assemble
     real_realize = pipeline.realize
+    real_verify_realize = verify.realize
     enabled = {"on": False}
 
     # `session.quote` does not take these, and the question is whether the
@@ -363,26 +364,41 @@ def main(argv: list[str] | None = None) -> int:
 
     carried = {"v3": 0, "value": 0.0}
 
+    def collapsing(live, psi, nu, nodes_, **kw):
+        """One leg per pool, not one per tick -- for candidates as well.
+
+        `verify.realize_candidates` reaches `realize` through its own module
+        import, so patching `pipeline.realize` alone left every candidate route
+        carrying a leg per tick.  `check_one_arc_per_pool` then refused them --
+        "5 pool(s) used twice" -- and the only candidates surviving verification
+        were the one-hop safety floor, realised at 32 WETH and stretched x25 to
+        the trade.  That is where the 809 bp came from.
+        """
+        if enabled["on"]:
+            live, psi = univ3.collapse(live, psi, nu, nodes_, banks)
+        return real_realize(live, psi, nu, nodes_, **kw)
+
     def realize(live, psi, nu, nodes_, **kw):
         if enabled["on"]:
             carried["v3"] = sum(1 for a, f in zip(live, psi, strict=True)
                                 if a.kind is ArcKind.SWAP_UNIV3 and f > 0)
             carried["value"] = sum(float(f) for a, f in zip(live, psi, strict=True)
                                    if a.kind is ArcKind.SWAP_UNIV3 and f > 0)
-            live, psi = univ3.collapse(live, psi, nu, nodes_, banks)
             if args.legs:
-                for a, f in zip(live, psi, strict=True):
+                shown, _ = univ3.collapse(live, psi, nu, nodes_, banks)
+                for a, f in zip(shown, _, strict=True):
                     if a.kind is ArcKind.SWAP_UNIV3 and f > 0:
                         dx = f / float(nu[a.tau]) / a.rate_in
                         print(f"           collapsed {a.pool[:12]} {a.i}>{a.j}"
                               f"  psi {f:,.2f}  dx {dx:,.4f}"
                               f"  a {a.a:.6g}  cap {a.cap:,.2f}"
                               f"  {a.token_in[:8]}->{a.token_out[:8]}")
-        return real_realize(live, psi, nu, nodes_, **kw)
+        return collapsing(live, psi, nu, nodes_, **kw)
 
     pipeline.build = build
     pipeline._assemble = assemble
     pipeline.realize = realize
+    verify.realize = collapsing
 
     def measure(on: bool, amount: int):
         """One arm, min of `--reps`.  The toggle is a single flag, so the two
@@ -465,6 +481,7 @@ def main(argv: list[str] | None = None) -> int:
 
     pipeline.build = real_build
     pipeline._assemble, pipeline.realize = real_assemble, real_realize
+    verify.realize = real_verify_realize
     return 0
 
 
