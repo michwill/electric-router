@@ -403,3 +403,45 @@ def test_the_drop_rule_cannot_strand_the_source():
         assert kcl_residual(g, report.solution, 0, 1, X) < 1e-9
         # Shut on their 20% fee, not for want of graph, so the loss is impact.
         assert report.solution.objective(g) == pytest.approx(X**2 / 1000.0)
+
+
+def test_the_gap_bound_respects_a_capacity():
+    """§5.5's bound credits an arc with what it can carry, not what it wants.
+
+    An arc held at zero with `rho > 0` would settle at `G rho` if nothing
+    stopped it.  A capped one stops at its cap, and crediting it with the
+    uncapped improvement is what put `optimality_gap_bp` at 1e14 on a graph of
+    2,369 Uniswap v3 ticks whose objective was 1e-4.
+    """
+    from erouter.core.solve import optimality_gap
+
+    # One arc carrying the trade, one held out with a large `G` and a small cap.
+    g = make([0, 0], [1, 1], [1.0, 1.0], [1.0, 1e-9], cap=[np.inf, 1e-4],
+             Psi=1.0)
+    sol = active_set_solve(g, 0, 1, 1.0,
+                           forbidden=np.array([False, True]))
+    assert sol.psi[1] <= 0, "the capped arc has to be the one held out"
+    assert sol.rho[1] > TOL, "and it has to want in, or there is no bound"
+
+    available = np.ones(g.m, bool)
+    bound = optimality_gap(sol, g, available, 1)
+    rho = float(sol.rho[1])
+    uncapped = 0.5 * float(g.G[1]) * rho**2
+    capped = rho * 1e-4 - 1e-8 / (2 * float(g.G[1]))
+
+    assert bound == pytest.approx(capped)
+    assert bound < uncapped / 1e6, "the cap is what makes the bound usable"
+
+
+def test_the_gap_bound_is_unchanged_without_a_capacity():
+    """`min(G rho, inf)` is `G rho`, so the Curve case reads exactly as before."""
+    from erouter.core.solve import optimality_gap
+
+    g = make([0, 0], [1, 1], [1.0, 1.0], [1.0, 2.0], Psi=1.0)
+    sol = active_set_solve(g, 0, 1, 1.0,
+                           forbidden=np.array([False, True]))
+    bound = optimality_gap(sol, g, np.ones(g.m, bool), 1)
+    held = (sol.psi <= 0) & (sol.rho > TOL)
+    assert bound == pytest.approx(
+        float(np.sum(0.5 * g.G[held] * sol.rho[held] ** 2))
+    )

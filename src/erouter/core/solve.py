@@ -522,11 +522,20 @@ def optimality_gap(
     """How much objective is still on the table at this point (§5.5).
 
     An arc held at zero whose reduced cost `rho` is positive wants flow.  Admit it
-    and it settles where the element law puts it, `psi = G rho`, taking the
-    objective down by `G rho^2 / 2`.  Summing that over every arc that wants in
-    bounds the total remaining improvement from above: they are priced against the
-    *current* potentials, and admitting one moves the potentials against the
-    others, so the true gain is no larger.
+    and it settles where the element law puts it, `psi = min(G rho, cap)`, taking
+    the objective down by `rho psi - psi^2 / (2 G)`.  Summing that over every arc
+    that wants in bounds the total remaining improvement from above: they are
+    priced against the *current* potentials, and admitting one moves the
+    potentials against the others, so the true gain is no larger.
+
+    The cap is not a detail.  Without it the term is `G rho^2 / 2`, which is what
+    this returns for an uncapped arc and what it returned for every arc before a
+    venue of narrow arcs arrived: a Uniswap v3 tick has a `G` of 1e9 and a
+    capacity of a few tens of thousands of dollars, so the flow it would settle
+    at is four orders past what it can carry and the bound built out of it says
+    8.8e9 where the objective is 1e-4.  Nothing was wrong with the solve -- 2,369
+    capped arcs were being credited with an improvement none of them could
+    deliver, and a certificate was refused on the strength of it.
 
     Active arcs need no term: `psi` is computed as `G rho` for them, so the
     element law holds identically and their contribution is zero by construction.
@@ -552,7 +561,10 @@ def optimality_gap(
     wants_in = available & connected & (solution.psi <= 0) & (solution.rho > tol)
     if not wants_in.any():
         return 0.0
-    return float(np.sum(0.5 * g.G[wants_in] * solution.rho[wants_in] ** 2))
+    G = g.G[wants_in]
+    rho = solution.rho[wants_in]
+    settles = np.minimum(G * rho, g.cap[wants_in])
+    return float(np.sum(rho * settles - settles**2 / (2.0 * G)))
 
 
 def price_out(
