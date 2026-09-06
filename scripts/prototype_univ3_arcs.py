@@ -125,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for zero_for_one in (True, False):
         bank = arcs(state, ticks, zero_for_one=zero_for_one,
-                    max_ticks=args.max_ticks)
+                    max_ticks=args.max_ticks, linear=args.linear)
         if not bank:
             print("no arcs in this direction")
             continue

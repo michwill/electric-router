@@ -28,7 +28,11 @@ def client(host):
 
 def test_arckind_matches_the_contract(quoter):
     """Python enum and Vyper constants are one wire format; they cannot drift."""
+    from erouter.core.types import OFF_CHAIN_KINDS
+
     for kind in ArcKind:
+        if kind in OFF_CHAIN_KINDS:      # priced by a model, never sent
+            continue
         assert getattr(quoter, kind.name)() == int(kind), kind.name
 
 

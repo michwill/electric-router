@@ -51,6 +51,9 @@ _BY_KIND: dict[ArcKind, int] = {
     # any of them.  `facts` replaces this with the real figure per token.
     ArcKind.LEND_MINT: 170_000,
     ArcKind.LEND_REDEEM: 173_000,
+    # A v3 swap that crosses nothing is ~110k; each initialized tick it crosses
+    # adds ~20k.  Routes that use one usually cross a few.
+    ArcKind.SWAP_UNIV3: 150_000,
 }
 
 # What an unrecognised leg is assumed to cost -- the swap figure, so a new arc

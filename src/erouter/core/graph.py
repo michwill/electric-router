@@ -131,6 +131,7 @@ def build(
     n_nodes: int | None = None,
     dust_floor: float = DUST_FLOOR,
     ceiling_factor: float = CEILING_FACTOR,
+    max_spread: float = PATHOLOGICAL_CONDITION,
     merge_duplicates: bool = True,
     require: tuple[int, int] | None = None,
 ) -> ArcArrays:
@@ -190,11 +191,17 @@ def build(
     usable_G = positive_G[positive_G >= base_floor]
     if usable_G.size > 1:
         raw_spread = float(usable_G.max() / usable_G.min())
-        if raw_spread > PATHOLOGICAL_CONDITION:
-            # No real universe looks like this: the widest genuine spread
+        if raw_spread > max_spread:
+            # No *Curve* universe looks like this: the widest genuine spread
             # measured on Ethereum is ~4e10.  A spread of 1e15+ means B was
             # floored instead of G being ceilinged.  Say so, rather than letting
             # the adaptive dust floor "fix" it by dropping every other arc.
+            #
+            # A venue of narrow arcs breaks the inference rather than the rule:
+            # a Uniswap v3 tick is nearly linear over its own range, so its `B`
+            # is genuinely tiny and 144 mainnet pools reach 1.9e15 between them
+            # with nothing floored anywhere.  Hence the parameter -- the bound
+            # is a property of the universe, not of the arithmetic.
             raise ValueError(
                 f"max(G)/min(G) = {raw_spread:.3e} before flooring; "
                 "something is being clamped in the wrong space (§9.7)"

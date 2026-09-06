@@ -74,6 +74,10 @@ class Arc:
         d = min(dx, self.cap)
         return self.a * d - 0.5 * self.B * d * d
 
+    @property
+    def clamped(self) -> bool:
+        return self.B <= 0
+
 
 def sqrt_price_at(tick: int) -> float:
     """`sqrt(1.0001^tick)`, as a float rather than a Q64.96.
@@ -96,6 +100,7 @@ def arcs(
     Truncating at `max_ticks` is safe by construction: the arcs carry the whole
     of the pool's capacity between them, so dropping the far ones removes
     capacity and can only lower what the model promises.
+
     """
     scale_in, scale_out = (
         (10.0**state.decimals0, 10.0**state.decimals1)
@@ -177,9 +182,134 @@ def output(bank: list[Arc], dx: float, *, rounds: int = 200) -> float:
 
 
 def _take(arc: Arc, u: float) -> float:
+    """How much this arc wants at marginal rate `u`.
+
+    A clamped arc has no curvature to trade off against, so it is all or
+    nothing: §2.3's linear leg, taken to its cap while it is the better price.
+    """
+    if arc.B <= 0:
+        return arc.cap if arc.a > u else 0.0
     return min(max((arc.a - u) / arc.B, 0.0), arc.cap)
 
 
 def capacity(bank: list[Arc]) -> float:
     """Everything the modelled ticks can absorb, in input units."""
     return sum(arc.cap for arc in bank)
+
+
+# --------------------------------------------------------------- the router
+
+#: The smallest share of a bank's own capacity worth an arc.
+#
+# A tick range the price is sitting almost exactly on holds nearly nothing, and
+# its `B = 2 a^(3/2) / L` is then enormous while its cap is ~0.  Measured over
+# 144 mainnet pools, caps ran from 9.0e+08 down to 1.7e-14 and the conductance
+# spread reached 1.4e25 -- past §9.7's 1e15, which exists to catch exactly this
+# shape and is right to.  Such an arc cannot carry anything, so it is not built.
+MIN_CAP_SHARE = 1e-6
+
+
+def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
+              token0: str, token1: str, max_ticks: int = 16,
+              tvl_usd: float = 0.0, min_cap_share: float = MIN_CAP_SHARE):
+    """Both directions of one pool, as arcs the solver can take straight.
+
+    Nothing here is probed and nothing is fitted, so these arcs skip the refine
+    and size-check stages entirely: `_recalibrate` keys on the ladder store and
+    a v3 arc has no ladder, so it is passed over rather than re-measured.  That
+    is the whole point -- the model is already exact to a hundredth of a basis
+    point, and a probe could only make it worse.
+
+    Ids carry a `#k` segment because a pool contributes many arcs between the
+    same pair of nodes.  They are a decomposition of one swap, not many swaps,
+    and `collapse` puts them back together before the route is realised.
+    """
+    from ..core.nodes import rescale
+    from ..core.types import ArcKind, PoolArc
+
+    out = []
+    for zero_for_one in (True, False):
+        token_in, token_out = ((token0, token1) if zero_for_one
+                               else (token1, token0))
+        if not (nodes.has(token_in) and nodes.has(token_out)):
+            continue
+        bank = arcs(state, ticks, zero_for_one=zero_for_one, max_ticks=max_ticks)
+        if not bank:
+            continue
+        rate_in, rate_out = nodes.rate(token_in), nodes.rate(token_out)
+        tau, sigma = nodes.node(token_in), nodes.node(token_out)
+        if tau == sigma:                     # a node merge swallowed the pair
+            continue
+        floor = capacity(bank) * min_cap_share
+        bank = [arc for arc in bank if arc.cap > floor]
+        if not bank:
+            continue
+        i, j = (0, 1) if zero_for_one else (1, 0)
+        decimals_in = state.decimals0 if zero_for_one else state.decimals1
+        decimals_out = state.decimals1 if zero_for_one else state.decimals0
+        for k, arc in enumerate(bank):
+            a, b = rescale(arc.a, arc.B, rate_in, rate_out)
+            out.append(PoolArc(
+                id=f"{pool.lower()}:{int(ArcKind.SWAP_UNIV3)}:{i}>{j}#{k}",
+                pool=pool.lower(), kind=ArcKind.SWAP_UNIV3, i=i, j=j, n_coins=2,
+                token_in=token_in, token_out=token_out, tau=tau, sigma=sigma,
+                a=a, B=b, cap=arc.cap * rate_in,
+                rate_in=rate_in, rate_out=rate_out,
+                decimals_in=decimals_in, decimals_out=decimals_out,
+                reserve_in=int(capacity(bank) * 10**decimals_in),
+                tvl_usd=tvl_usd, note=f"v3 tick {k}"))
+    return out
+
+
+def collapse(live, psi, nu, nodes, banks):
+    """Put each pool's tick-arcs back into one arc before the route is built.
+
+    A pool appears once in an executable route or its legs form one element
+    (§7 rule 1), and K tick-arcs carrying flow at once would read as K visits.
+    They are not: they are one swap the solver was allowed to describe
+    piecewise, so they are summed here and priced by the bank at the size that
+    actually landed -- `a = dy/dx` with `B = 0`, a chord exact at that point.
+
+    Returns `(arcs, psi)` with every other arc untouched and in order.
+    """
+    import copy
+
+    import numpy as np
+
+    from ..core.types import ArcKind
+
+    keep, flows, seen = [], [], {}
+    for arc, flow in zip(live, psi, strict=True):
+        if arc.kind is not ArcKind.SWAP_UNIV3:
+            keep.append(arc)
+            flows.append(float(flow))
+            continue
+        key = (arc.pool, arc.i, arc.j)
+        if key in seen:
+            flows[seen[key]] += float(flow)
+            continue
+        seen[key] = len(keep)
+        keep.append(copy.copy(arc))
+        flows.append(float(flow))
+
+    for key, at in seen.items():
+        arc = keep[at]
+        total = flows[at]
+        if total <= 0:
+            continue
+        # `psi` is value flow: canonical = psi / nu[tau], and human is that
+        # over the node-merge rate.  Getting this wrong is silent -- the arc
+        # still solves, just at the wrong price (see `nodes.rescale`).
+        price = float(nu[arc.tau])
+        if price <= 0 or arc.rate_in <= 0:
+            continue
+        dx_canonical = total / price
+        dx = dx_canonical / arc.rate_in
+        dy = output(banks[key], dx)
+        # The chord, not the first tick's tangent: exact at the size realised,
+        # and it is the only point this arc will be asked about.
+        arc.a = (dy * arc.rate_out) / dx_canonical if dx_canonical > 0 else 0.0
+        arc.B = 0.0
+        arc.cap = dx_canonical
+        arc.note = f"v3, {len(banks[key])} tick(s)"
+    return keep, np.array(flows, dtype=float)

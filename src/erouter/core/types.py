@@ -31,6 +31,11 @@ class ArcKind(IntEnum):
     # branch, and `data/facts` still records that survey under it.
     LEND_MINT = 15  # underlying -> cToken, at `exchangeRateStored`
     LEND_REDEEM = 16  # cToken -> underlying, at `exchangeRateStored`
+    # Concentrated liquidity, modelled per tick rather than probed: a pool
+    # becomes a bank of capped arcs between one pair of nodes.  Not executable
+    # by `RouteExecutor` -- there is no callback in it -- so a route carrying
+    # one quotes but does not send.
+    SWAP_UNIV3 = 17  # a v3 tick range, from `venues.univ3`
 
     @property
     def is_lending(self) -> bool:
@@ -45,7 +50,8 @@ class ArcKind(IntEnum):
 
     @property
     def is_swap(self) -> bool:
-        return self in (ArcKind.SWAP_STABLE, ArcKind.SWAP_CRYPTO)
+        return self in (ArcKind.SWAP_STABLE, ArcKind.SWAP_CRYPTO,
+                        ArcKind.SWAP_UNIV3)
 
     @property
     def is_deposit(self) -> bool:
@@ -63,6 +69,21 @@ class ArcKind(IntEnum):
     def touches_pool_state(self) -> bool:
         """Wrap/ERC4626 legs are linear and stateless from the router's view."""
         return self.is_swap or self.is_deposit or self.is_withdraw
+
+
+#: Kinds priced by a model and never sent.
+#
+# `ArcKind` is otherwise one wire format shared with `RouteQuoter.vy` and
+# `ElectricRouter.vy`, and `tests/test_kind_ids.py` holds the three lists to
+# each other number for number -- drift there is silent, a leg priced as some
+# other operation with a plausible answer coming back.
+#
+# A model-only kind is the one thing that rule cannot cover: `SWAP_UNIV3` is a
+# concentrated-liquidity tick range, computed from `venues.univ3` rather than
+# quoted, and `RouteExecutor` has no v3 callback to send it with.  A route
+# carrying one is a quote, not a plan.  Named here so the exemption is a
+# decision with a place to live rather than a hole in a test.
+OFF_CHAIN_KINDS = frozenset({ArcKind.SWAP_UNIV3})
 
 
 class Dialect(StrEnum):

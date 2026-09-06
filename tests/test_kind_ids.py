@@ -18,7 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from erouter.core.types import ArcKind
+from erouter.core.types import OFF_CHAIN_KINDS, ArcKind
+
+#: Every kind the contracts must know about.  `OFF_CHAIN_KINDS`
+#: is priced by a model and never sent, so there is nothing for
+#: them to agree with -- see `core.types`.
+ON_WIRE = [k for k in ArcKind if k not in OFF_CHAIN_KINDS]
 
 CONTRACTS = Path(__file__).resolve().parents[1] / "contracts"
 NAMES = ("RouteQuoter", "ElectricRouter")
@@ -46,7 +51,7 @@ def test_the_kind_section_is_where_the_kinds_are():
     below by finding nothing to disagree with."""
     for name in NAMES:
         found = declared(name)
-        assert len(found) == len(ArcKind), f"{name}: found {sorted(found)}"
+        assert len(found) == len(ON_WIRE), f"{name}: found {sorted(found)}"
         assert not any(k.startswith("MAX_") for k in found), f"{name}: {sorted(found)}"
 
 
@@ -63,7 +68,7 @@ def test_every_contract_kind_exists_in_core_with_the_same_number(contract):
 @pytest.mark.parametrize("contract", NAMES)
 def test_every_core_kind_is_declared(contract):
     """`WRAP_NATIVE` and friends need no call, but they still need a number."""
-    for kind in ArcKind:
+    for kind in ON_WIRE:
         assert kind.name in declared(contract), (
             f"{kind.name} is modelled and {contract} has never heard of it")
 
@@ -72,7 +77,7 @@ def test_the_encoder_knows_how_to_place_every_kind():
     """`_DERIVE` says which token each side of a leg is; a gap is a refusal."""
     from erouter.core.routecall import _DERIVE
 
-    for kind in ArcKind:
+    for kind in ON_WIRE:
         assert kind in _DERIVE, f"{kind.name} cannot be encoded for the router"
 
 
@@ -80,7 +85,7 @@ def test_the_router_executes_every_kind_it_declares():
     """A declared kind with no branch in `_run` would revert at the last moment."""
     text = (CONTRACTS / "ElectricRouter.vy").read_text(encoding="utf-8")
     body = text[text.index("def _run("):text.index("def execute(")]
-    for kind in ArcKind:
+    for kind in ON_WIRE:
         assert f"kind == {kind.name}" in body, f"{kind.name} is declared, not executed"
 
 

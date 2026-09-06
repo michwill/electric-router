@@ -31,7 +31,7 @@ from erouter.core.multiport import (
     evaluate,
 )
 from erouter.core.stableswap import StableSwap, StableSwapLP
-from erouter.core.types import ArcKind
+from erouter.core.types import OFF_CHAIN_KINDS, ArcKind
 
 pytestmark = pytest.mark.skipif(not available(), reason="erouter_solve not installed")
 
@@ -175,7 +175,8 @@ def test_element_from_agrees_refusal_for_refusal(n_coins, triples):
         assert ported.outputs == flat(made.outputs)
 
 
-@pytest.mark.parametrize("kind", list(ArcKind))
+@pytest.mark.parametrize(
+    "kind", [k for k in ArcKind if k not in OFF_CHAIN_KINDS])
 def test_ports_of_agrees_including_what_is_not_a_port(kind):
     from erouter.core.multiport import ports_of
 

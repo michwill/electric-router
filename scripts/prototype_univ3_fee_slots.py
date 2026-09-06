@@ -68,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--pool", default=DEFAULT_POOL)
     p.add_argument("--block", type=int, default=None)
     p.add_argument("--sizes", default="1000,100000,1000000,10000000")
+    p.add_argument("--words", default="1,2",
+                   help="tick-entry word offsets to zero: 0 is "
+                        "liquidityGross/Net, 1 and 2 are feeGrowthOutside, "
+                        "3 is tickCumulative/secondsOutside/initialized")
+    p.add_argument("--globals", action="store_true",
+                   help="also zero feeGrowthGlobal0/1 (pool slots 1 and 2)")
     args = p.parse_args(argv)
 
     import erouter_evm
@@ -121,13 +127,16 @@ def main(argv: list[str] | None = None) -> int:
     tick_now = decode(["uint160", "int24", "uint16", "uint16", "uint16", "uint8",
                        "bool"], onchain(args.pool, encode_call("slot0()")))[1]
     base = (tick_now // spacing) * spacing
-    fee_slots = set()
+    offsets = [int(v) for v in args.words.split(",") if v != ""]
+    candidates = set()
     for step in range(-4096, 4097):
         key = tick_key(base + step * spacing)
-        fee_slots |= {key + 1, key + 2}
-    target = sorted(pool_slots & fee_slots)
-    print(f"of {len(pool_slots):,} pool slot(s) read, {len(target):,} are "
-          f"feeGrowthOutside\n")
+        candidates |= {key + off for off in offsets}
+    if args.globals:
+        candidates |= {1, 2}
+    target = sorted(pool_slots & candidates)
+    print(f"of {len(pool_slots):,} pool slot(s) read, {len(target):,} match "
+          f"word offset(s) {offsets}{' + feeGrowthGlobal' if args.globals else ''}\n")
 
     if not target:
         print("nothing to zero: the walk crossed no initialized tick at these sizes")
@@ -136,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     evm.apply_storage([(args.pool, s, 0) for s in target])
     after = quote_all()
 
-    print(f"{'trade in':>18}{'with fee slots':>26}{'zeroed':>26}{'same':>7}")
+    print(f"{'trade in':>18}{'as fetched':>26}{'zeroed':>26}{'same':>7}")
     same = True
     for amount, before, now in zip(sizes, warm, after, strict=True):
         ok = before == now
