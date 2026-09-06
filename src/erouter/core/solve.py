@@ -57,7 +57,25 @@ CYCLE_PATIENCE = 3
 #
 # So do deliberately what it does by luck.  Deterministic, so two runs at one
 # block still agree to the wei.
-PERTURB_ROUNDS = 4
+# Eight rather than four, because four was tuned on the synthetic universes and
+# a real one needs more.  Replaying the deployed Router's own pairs at their
+# median size and two decades above it, plus the sweep's, 39 cases at one
+# block: 2 better (+9.67 bp on USDC->WBTC at $2M, +0.04 on WETH->USDC 800), 36
+# unchanged, 1 worse by 0.02 bp.  At four the reference was giving up -- exiting
+# PARTIAL where the port converged, on 98 of 208 candidate re-solves, and losing
+# 92 of those on objective.
+#
+# Not more than eight: the ladder multiplies by ten a round, so eight reaches
+# 1e-4 of the `eps` spread -- around a thousandth of a basis point, still far
+# under anything a quote can see -- and twelve would reach 1.0, which is not a
+# perturbation of the problem but a different one.
+#
+# And eight *here only*.  `rust/src/solve.rs` stays at four, because it does not
+# need the ladder in the first place and the later rounds cost it: the same
+# replay moved it 35.5 bp the wrong way on one case and nothing anywhere else.
+# The two solvers need different amounts of shaking to reach the same answer,
+# which is the whole premise of this constant existing.
+PERTURB_ROUNDS = 8
 # The first shift, relative to the largest `eps` in the graph.  Far below `TOL`
 # and further below a basis point, so the perturbed problem is the same problem;
 # each round multiplies by ten in case the first was inside the noise it meant

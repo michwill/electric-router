@@ -42,6 +42,20 @@ pub const RECONNECT_HOPS: usize = 8;
 /// active set, it cycled out to PARTIAL on one arc while the reference found
 /// the three-way optimum in four pivots. So do deliberately what it did by
 /// luck. Deterministic, so two runs at one block still agree to the wei.
+/// Four, where the reference is at eight, and the difference is the point.
+///
+/// The ladder exists to shake a basis out of a cycle. This solver already gets
+/// that for free -- its rank-1 Cholesky update leaves a different rounding in
+/// `u` than a fresh factorisation, which is enough on its own -- so it reaches
+/// the later rounds only on problems it was going to solve anyway, and there
+/// the extra shift moves it off a good answer. Replaying 39 live cases at one
+/// block, raising this to eight was 0 better, 38 unchanged, and one worse by
+/// 35.5 bp; raising the *reference* to eight was 2 better, 36 unchanged, one
+/// worse by 0.02.
+///
+/// So equal behaviour wants unequal constants here, and the differential
+/// agrees: it passes with the two as they stand. Do not "fix" the asymmetry
+/// without re-running that replay.
 pub const PERTURB_ROUNDS: usize = 4;
 /// The first shift, relative to the largest `eps` in the graph. Far below
 /// `TOL` and further below a basis point, so the perturbed problem is the same
