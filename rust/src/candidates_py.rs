@@ -105,12 +105,13 @@ impl Ballot {
     #[pyo3(signature = (graph, arcs, src, dst, psi_total, base_psi, *,
                         base_certificate=false, max_candidates=20, top_k=None,
                         gas_floor=0.0, max_legs=32, max_slots=8,
-                        element_split=None))]
+                        element_split=None, venues=None))]
     fn generate(
         graph: PyRef<'_, Graph>, arcs: PyRef<'_, Arcs>, src: usize, dst: usize,
         psi_total: f64, base_psi: Vec<f64>, base_certificate: bool,
         max_candidates: usize, top_k: Option<Vec<usize>>, gas_floor: f64,
         max_legs: usize, max_slots: usize, element_split: Option<Py<PyAny>>,
+        venues: Option<Vec<String>>,
     ) -> PyResult<Ballot> {
         let opts = GenerateOptions {
             base_certificate,
@@ -119,6 +120,7 @@ impl Ballot {
             gas_floor,
             max_legs,
             max_slots,
+            venues: venues.unwrap_or_default(),
         };
         let base = Solution { psi: base_psi, ..empty_solution() };
         let members = &arcs.inner;

@@ -305,6 +305,10 @@ pub struct PoolArc {
     /// arc per route, and a venue of parallel arcs -- a Uniswap v3 pool's
     /// ticks -- only satisfies it because they are collapsed first.
     pub parallel: bool,
+    /// Which source of liquidity this arc came from. Empty is the base
+    /// venue -- what the router had before anything was injected -- and a
+    /// universe where every arc agrees generates no venue candidates.
+    pub venue: String,
     pub flag_reason: FlagReason,
     pub drift: f64,
     pub eta: f64,
@@ -362,6 +366,7 @@ impl PoolArc {
             convex_flag: false,
             clamped: false,
             parallel: false,
+            venue: String::new(),
             flag_reason: FlagReason::None,
             drift: 0.0,
             eta: f64::NAN,

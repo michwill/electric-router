@@ -266,6 +266,9 @@ def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
                 # `collapse` sums these back into one arc before realisation,
                 # which is what lets a bank of them satisfy Decision 3.
                 parallel=True,
+                # And this is what buys the ballot a candidate without them, so
+                # that adding the venue cannot cost the answer.
+                venue="uniswap v3",
                 tvl_usd=tvl_usd, note=f"v3 tick {k}"))
     return out
 

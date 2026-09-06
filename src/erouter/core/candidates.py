@@ -354,13 +354,14 @@ def generate(
     gas_floor: float = 0.0,
     max_legs: int = MAX_LEGS,
     element_split=None,
+    venues: list[str] | None = None,
 ) -> CandidateSet:
     if _ACCEL_ON and _accel.available():
         got = _accel.ballot(
             g, arcs, src, dst, Psi, base.psi,
             base_certificate=base_certificate, max_candidates=max_candidates,
             top_k=top_k, gas_floor=gas_floor, max_legs=max_legs,
-            max_slots=MAX_SLOTS, element_split=element_split,
+            max_slots=MAX_SLOTS, element_split=element_split, venues=venues,
         )
         if got is not None:
             return _from_ballot(got)
@@ -502,6 +503,24 @@ def generate(
     warm = np.flatnonzero(acyclic > 0)
     if warm.size == 0:
         warm = base_active
+
+    # 1b. what the graph answered before each venue joined it.
+    #
+    # Every other family is a perturbation of the relaxation, so the whole
+    # ballot lives near the base solve -- and the base solve *moves* when a
+    # venue is added.  Measured on WETH->WBTC 800: the Curve-only arm finds an
+    # 11-leg route verifying at 2,378,275,958, that route is still in the graph
+    # once 2,300 Uniswap v3 arcs join it, and nothing else on the ballot came
+    # within 60 bp of it.  Adding a source of liquidity must never cost the
+    # answer, so drop each venue in turn and let the quoter say whether it was
+    # worth having.  With one venue the family is empty and nothing changes.
+    if venues is not None and len(venues) == g.m:
+        seen_venues = list(dict.fromkeys(venues))
+        if len(seen_venues) > 1:
+            groups = np.asarray(venues, dtype=object)
+            for label in seen_venues:
+                resolve(groups == label, f"without {label or 'the base venue'}",
+                        "venue")
 
     # Per-family budgets.  Ordering alone is not enough: with many flagged arcs
     # the pin sweep alone is 3 x 7 = 21 candidates, which used to consume the

@@ -451,6 +451,8 @@ pub struct GenerateOptions {
     pub gas_floor: f64,
     pub max_legs: usize,
     pub max_slots: usize,
+    /// Per-arc venue labels, or empty for a universe of one venue.
+    pub venues: Vec<String>,
 }
 
 impl Default for GenerateOptions {
@@ -463,6 +465,7 @@ impl Default for GenerateOptions {
             // The quoter's ABI capacity; the caller supplies its own.
             max_legs: 32,
             max_slots: 8,
+            venues: Vec::new(),
         }
     }
 }
@@ -700,6 +703,30 @@ pub fn generate(
         warm = base_live.clone();
     }
     ballot.warm = warm;
+
+    // 1b. what the graph answered before each venue joined it.
+    //
+    // Every other family is a perturbation of the relaxation, so the whole
+    // ballot lives near the base solve -- and the base solve *moves* when a
+    // venue is added. Adding a source of liquidity must never cost the answer,
+    // so drop each venue in turn and let the quoter say whether it was worth
+    // having. With one venue the family is empty and nothing changes.
+    if opts.venues.len() == g.m() {
+        let mut seen_venues: Vec<&String> = Vec::new();
+        for v in &opts.venues {
+            if !seen_venues.contains(&v) {
+                seen_venues.push(v);
+            }
+        }
+        if seen_venues.len() > 1 {
+            for label in seen_venues {
+                let drop: Vec<bool> =
+                    opts.venues.iter().map(|v| v == label).collect();
+                let named = if label.is_empty() { "the base venue" } else { label };
+                ballot.resolve(drop, format!("without {named}"), "venue", &[]);
+            }
+        }
+    }
 
     // Per-family budgets. Ordering alone is not enough: with many flagged arcs
     // the pin sweep alone is 3 x 7 = 21 candidates, which used to consume the

@@ -101,6 +101,10 @@ def universe(seed: int):
                     reserve_in=10**24, decimals_in=18, decimals_out=18,
                     tvl_usd=float(rng.uniform(1e6, 1e8)),
                     gamma_live=a, note=f"pool {tail}{head}{copy}",
+                    # A second source of liquidity, so the venue family has
+                    # something to drop and the two sides have to agree on
+                    # which candidates that produces.
+                    venue="second venue" if copy else "",
                 ))
     # One pool entered twice, on two different coin pairs of the same address:
     # a conflict the repair family exists for.
@@ -112,6 +116,20 @@ def universe(seed: int):
         reserve_in=10**24, decimals_in=18, decimals_out=18,
         tvl_usd=5e6, gamma_live=0.999, note="twin",
     ))
+    # A bank of parallel arcs: one pool, one port pair, three curvatures, the
+    # shape a Uniswap v3 tick bank has.  It must not read as a re-entry, and
+    # both sides have to agree that it does not.
+    bank_pool = "0x" + "bb" * 20
+    for k, curve in enumerate((1e-6, 4e-6, 1.6e-5)):
+        arcs.append(PoolArc(
+            id=f"bank#{k}", pool=bank_pool, kind=ArcKind.SWAP_STABLE,
+            i=0, j=1, n_coins=2,
+            token_in=TOKENS[0][0], token_out=TOKENS[1][0],
+            tau=0, sigma=1, a=0.997 - 0.001 * k, B=curve,
+            reserve_in=10**24, decimals_in=18, decimals_out=18,
+            tvl_usd=3e6, gamma_live=0.997, note=f"bank tick {k}",
+            parallel=True, venue="second venue",
+        ))
     # A three-coin pool paying two ports out of one coin, which is what the
     # element family is for: same address, same `tau`, two different `sigma`.
     element_pool = "0x" + "ee" * 20
@@ -165,7 +183,8 @@ def ported_arcs(arcs):
         built.add(arc.id, arc.pool, int(arc.kind), arc.i, arc.j, arc.n_coins,
                   arc.token_in, arc.token_out, arc.tau, arc.sigma,
                   arc.a, arc.B, arc.cap, arc.G, arc.eps, arc.reserve_in,
-                  arc.decimals_in, arc.tvl_usd, arc.gamma_live, arc.note)
+                  arc.decimals_in, arc.tvl_usd, arc.gamma_live, arc.note,
+                  arc.calib_delta, arc.decimals_out, arc.parallel, arc.venue)
     return built
 
 

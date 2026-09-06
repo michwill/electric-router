@@ -217,6 +217,12 @@ class PoolArc:
     #: first.  Nothing in `core` does that collapsing, so the exemption
     #: is the injector's claim to make rather than an assumption.
     parallel: bool = False
+    #: Which source of liquidity this arc came from.  Empty is the base
+    #: venue -- what the router had before anything was injected -- and a
+    #: universe where every arc agrees generates no venue candidates at
+    #: all.  Naming it is how an injector asks to be dropped in turn, so
+    #: that adding a source can never cost the answer.
+    venue: str = ""
     flag_reason: FlagReason = FlagReason.NONE
     drift: float = 0.0
     eta: float = math.nan

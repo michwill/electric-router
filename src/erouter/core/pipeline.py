@@ -971,6 +971,10 @@ def _quote(
                 max_candidates=max_candidates, gas_floor=gas_floor,
                 max_legs=max_legs,
                 element_split=element_split if splitter is not None else None,
+                # §6: one candidate per venue, dropping it.  Costs nothing on a
+                # universe of one venue, which is every universe until something
+                # declares otherwise.
+                venues=[arc.venue for arc in arcs],
             )
             for candidate in pool_set.candidates:
                 candidate.psi = candidate.psi * g.g_scale

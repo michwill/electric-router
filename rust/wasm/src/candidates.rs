@@ -106,7 +106,7 @@ impl Ballot {
         base_psi: Vec<f64>, base_certificate: Option<bool>,
         max_candidates: Option<usize>, top_k: Option<Vec<usize>>,
         gas_floor: Option<f64>, max_legs: Option<usize>, max_slots: Option<usize>,
-        element_split: Option<js_sys::Function>,
+        element_split: Option<js_sys::Function>, venues: Option<Vec<String>>,
     ) -> Ballot {
         let opts = GenerateOptions {
             base_certificate: base_certificate.unwrap_or(false),
@@ -115,6 +115,7 @@ impl Ballot {
             gas_floor: gas_floor.unwrap_or(0.0),
             max_legs: max_legs.unwrap_or(32),
             max_slots: max_slots.unwrap_or(8),
+            venues: venues.unwrap_or_default(),
         };
         let base = Solution { psi: base_psi, ..empty_solution() };
         let members = &arcs.inner;

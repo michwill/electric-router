@@ -399,3 +399,41 @@ def test_parallel_arcs_count_as_one_leg():
     # The same arcs without the claim are 18 legs and unrealisable past 17.
     plain = [arc(k, POOL[0], 0, 1, B=1.0 + k) for k in range(17)]
     assert legs_of(plain + other, psi) == 18
+
+
+def test_a_venue_is_dropped_in_turn():
+    """Adding a source of liquidity must never cost the answer.
+
+    Every other family perturbs the relaxation, so the ballot lives near a base
+    solve that *moves* when a venue joins.  On `WETH->WBTC 800` the Curve-only
+    route was still in the graph once 2,300 Uniswap v3 arcs joined it and
+    nothing on the ballot came within 60 bp of it.
+    """
+    arcs = [
+        arc(0, POOL[0], 0, 1, B=1.0),
+        arc(1, POOL[1], 0, 1, B=1.5),
+        arc(2, POOL[2], 0, 1, B=0.5),
+    ]
+    venues = ["", "", "new venue"]
+    g = build(arcs)
+    base = active_set_solve(g, 0, 1, 1.0)
+    out = generate(g, arcs, 0, 1, 1.0, base, venues=venues)
+
+    without_new = next(c for c in out.candidates
+                       if c.label == "without new venue")
+    assert without_new.psi[2] == 0, "the dropped venue may carry nothing"
+    assert without_new.psi[:2].sum() > 0, "and the rest still has to route"
+    # The other direction is on the ballot too, so neither venue is privileged.
+    assert any(c.label == "without the base venue" for c in out.candidates)
+
+
+def test_one_venue_generates_no_venue_candidates():
+    """Which is every universe until an injector says otherwise -- so master
+    pays nothing for this."""
+    arcs = [arc(0, POOL[0], 0, 1, B=1.0), arc(1, POOL[1], 0, 1, B=1.5)]
+    g = build(arcs)
+    base = active_set_solve(g, 0, 1, 1.0)
+    plain = generate(g, arcs, 0, 1, 1.0, base)
+    same = generate(g, arcs, 0, 1, 1.0, base, venues=["", ""])
+    assert [c.label for c in plain.candidates] == [c.label for c in same.candidates]
+    assert plain.solves == same.solves, "and not a solve more"
