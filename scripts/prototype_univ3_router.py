@@ -195,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ticks", type=int, default=16, help="tick-arcs a side")
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--legs", action="store_true", help="print each route's legs")
+    p.add_argument("--counters", action="store_true",
+                   help="dump the stage counters for each arm")
     p.add_argument("--arms", default="curve,curve+v3",
                    help="which arms to run, comma separated")
     p.add_argument("--sweep", action="store_true",
@@ -203,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="bp within which two arms count as tied")
     p.add_argument("--candidates", type=int, default=0,
                    help="max_candidates; 0 leaves pipeline's default of 20")
+    p.add_argument("--max-rounds", type=int, default=0,
+                   help="column-generation rounds; 0 leaves the default of 8")
     p.add_argument("--seed-k", type=int, default=0,
                    help="seed_subgraph paths; 0 leaves the default of 10")
     p.add_argument("--max-spread", type=float, default=1e18,
@@ -334,6 +338,8 @@ def main(argv: list[str] | None = None) -> int:
             kw["max_candidates"] = args.candidates
         if args.seed_k:
             kw["seed_k"] = args.seed_k
+        if args.max_rounds:
+            kw["max_rounds"] = args.max_rounds
         return real_route(*a, **kw)
 
     pipeline.route = route
@@ -410,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
             "ms": best or 0.0,
             "arcs": result.counters.get("arcs_priced_out", 0),
             "dust": result.counters.get("arcs_dropped_dust", 0),
+            "counters": dict(result.counters),
         }
 
     if args.sweep:
@@ -429,6 +436,16 @@ def main(argv: list[str] | None = None) -> int:
         delta = (out - base) / base * 1e4 if base else 0.0
         print(f"{label:<10}{out:>26,}{got['arcs']:>8,}"
               f"{len(legs):>6}{got['v3']:>9}{got['ms']:>9.0f}{delta:>+10.2f}bp")
+        if args.counters:
+            keep = ("max_theta", "arcs_size_checked", "probes_size_check",
+                    "arcs_refined", "arcs_refined_free", "probes_refined",
+                    "condition", "kcl_residual", "active_arcs", "pivots",
+                    "candidates", "candidates_quoted", "candidates_reverted",
+                    "candidate_solves", "optimality_gap_bp",
+                    "arcs_calibrated", "split_calls", "scout_predicted_bp")
+            shown = {k: got["counters"][k] for k in keep if k in got["counters"]}
+            for k, v in shown.items():
+                print(f"           {k:<22}{v}")
         gap = ((got["modelled"] - got["verified"]) / got["verified"] * 1e4
                if got["verified"] else float("nan"))
         print(f"           dust dropped {got['dust']:>5,}"
