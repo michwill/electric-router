@@ -74,6 +74,12 @@
    "rates": "meta",
    "subtract_one": true
   },
+  "0x071c661b4deefb59e2a3ddb20db036821eee8f4b": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "meta",
+   "subtract_one": true
+  },
   "0x08bfa22bb3e024cdfeb3eca53c0cb93bf59c4147": {
    "family": "stable",
    "fee_on_xp": true,
@@ -215,6 +221,12 @@
    "fee_on_xp": true,
    "rates": "plain",
    "subtract_one": false
+  },
+  "0x1c9a0b9bff066756c4586cb6711483cfa9f281ee": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported",
+   "subtract_one": true
   },
   "0x1d08e7adc263cfc70b1babe6dc5bb339c16eec52": {
    "family": "stable",
@@ -616,6 +628,12 @@
    "stable": false,
    "v21": true
   },
+  "0x453d92c7d4263201c69aacfaf589ed14202d83a4": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "plain",
+   "subtract_one": true
+  },
   "0x460638e6f7605b866736e38045c0de8294d7d87f": {
    "family": "stable",
    "fee_on_xp": true,
@@ -737,6 +755,12 @@
   },
   "0x5426178799ee0a0181a89b4f57efddfab49941ec": {
    "family": "tricrypto"
+  },
+  "0x54e4fc3bcf24610a190d68130432562df2cb6d9a": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported",
+   "subtract_one": true
   },
   "0x552827613fea5eada3871f83b2d407d50cb04116": {
    "family": "stable",
@@ -1560,6 +1584,12 @@
    "rates": "reported",
    "subtract_one": true
   },
+  "0xafec61e7a604f8f81f7cab64ec75bfa07c542630": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported",
+   "subtract_one": true
+  },
   "0xb0ef04ace97d350e24efa5139d2590d26a61a8dc": {
    "family": "stable",
    "fee_on_xp": true,
@@ -1806,6 +1836,12 @@
    "family": "stable",
    "fee_on_xp": true,
    "rates": "plain",
+   "subtract_one": true
+  },
+  "0xc57ce1ac61081c51596e55de38d35b19720d421e": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported",
    "subtract_one": true
   },
   "0xc6628f00f29cc89a87bbee7554c4725611200fd7": {
@@ -2086,6 +2122,12 @@
    "subtract_one": true
   },
   "0xe47e8ced9d94aa43c922627782e29b41a93202af": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported",
+   "subtract_one": true
+  },
+  "0xe521ba88837b2726e5343cca91ada6f19f356c45": {
    "family": "stable",
    "fee_on_xp": true,
    "rates": "reported",
