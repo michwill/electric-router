@@ -212,15 +212,30 @@ impl ArcArrays {
         self.tau.len()
     }
 
+    /// The conductance spread the solve has to live with.
+    ///
+    /// Over the *uncapped* arcs, for the reason `reference_conductance` gives:
+    /// a capped arc reaches its cap and leaves the active set, so its `G` is
+    /// not part of the system being factorised for long enough to condition it.
     pub fn condition(&self) -> f64 {
         let mut lo = f64::INFINITY;
         let mut hi = f64::NEG_INFINITY;
         let mut any = false;
-        for &v in &self.g {
-            if v > 0.0 {
+        for (k, &v) in self.g.iter().enumerate() {
+            let bounded = self.cap.get(k).copied().unwrap_or(f64::INFINITY).is_finite();
+            if v > 0.0 && !bounded {
                 any = true;
                 lo = lo.min(v);
                 hi = hi.max(v);
+            }
+        }
+        if !any {
+            for &v in &self.g {
+                if v > 0.0 {
+                    any = true;
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
             }
         }
         if any {

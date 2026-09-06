@@ -70,6 +70,118 @@ def resolve(nodes, pools, text: str) -> str:
     return best
 
 
+#: Pairs and sizes for the sanity sweep, in units of the source token.
+#
+# Chosen to span what the answer should depend on: a deep stable pair where
+# Curve ought to win outright, a stable-to-volatile pair where v3 has the depth
+# Curve does not, the reverse of it, and a volatile-to-volatile pair that has to
+# route through something.  Sizes span four decades because the interesting
+# failures are at the ends -- a trade too small to leave one tick, and one that
+# walks a pool out of its range.
+SWEEP = (
+    ("USDC", "USDT", (1_000, 100_000, 2_000_000)),
+    ("USDC", "DAI", (1_000, 100_000, 2_000_000)),
+    ("USDC", "WETH", (1_000, 100_000, 2_000_000)),
+    ("WETH", "USDC", (0.4, 40, 800)),
+    ("WBTC", "WETH", (0.01, 1, 20)),
+    ("WETH", "WBTC", (0.4, 40, 800)),
+    ("USDC", "WBTC", (1_000, 100_000, 2_000_000)),
+)
+
+
+def sweep(session, nodes, measure, args) -> int:
+    """Does adding v3 ever make the answer worse?
+
+    It must not.  More arcs is a strictly larger feasible set, so the optimum
+    can only improve -- any row where `curve+v3` loses is a defect somewhere
+    below: the dust floor evicting a Curve arc the other arm kept, a candidate
+    that failed to rank, a split the solver got wrong.  The point of the sweep
+    is to make that visible rather than to celebrate the wins.
+    """
+    import asyncio
+
+    rows, worse = [], []
+    print(f"{'pair':<14}{'size':>14}{'curve':>24}{'curve+v3':>24}"
+          f"{'delta':>10}{'v3':>4}{'ms':>14}")
+    for src_sym, dst_sym, sizes in SWEEP:
+        try:
+            src = resolve(nodes, session.pools, src_sym)
+            dst = resolve(nodes, session.pools, dst_sym)
+        except SystemExit:
+            print(f"{src_sym + '->' + dst_sym:<14}  not in the universe")
+            continue
+        asyncio.run(session.set_pair(src, dst))
+        for size in sizes:
+            amount = int(size * 10 ** nodes.decimals(src))
+            if amount <= 0:
+                continue
+            try:
+                base = measure(False, amount)
+                with_v3 = measure(True, amount)
+            except Exception as exc:
+                print(f"{src_sym + '->' + dst_sym:<14}{size:>14,.4g}"
+                      f"   refused: {str(exc)[:52]}")
+                continue
+            def pick(row):
+                return row["verified"] or row["modelled"]
+
+            delta = ((pick(with_v3) - pick(base)) / pick(base) * 1e4
+                     if pick(base) else 0.0)
+            shadow = ((with_v3["modelled"] - base["modelled"])
+                      / base["modelled"] * 1e4 if base["modelled"] else 0.0)
+            rows.append(delta)
+            if delta < -args.tolerance:
+                worse.append((src_sym, dst_sym, size, delta, base, with_v3,
+                              shadow))
+            print(f"{src_sym + '->' + dst_sym:<14}{size:>14,.4g}"
+                  f"{pick(base):>24,}{pick(with_v3):>24,}{delta:>+9.2f}bp"
+                  f"{with_v3['v3']:>4}{base['ms']:>7.0f}/{with_v3['ms']:<6.0f}")
+
+    if not rows:
+        print("\nnothing quoted")
+        return 1
+    wins = sum(1 for d in rows if d > args.tolerance)
+    ties = sum(1 for d in rows if abs(d) <= args.tolerance)
+    print(f"\n{len(rows)} case(s): {wins} better, {ties} tied, {len(worse)} worse")
+    print(f"  best {max(rows):+.2f} bp   median {sorted(rows)[len(rows) // 2]:+.2f} bp")
+    if worse:
+        print("\nadding a venue made the answer worse -- that cannot be right:")
+        for src_sym, dst_sym, size, delta, base, with_v3, shadow in worse:
+            print(f"  {src_sym}->{dst_sym} {size:,.4g}  {delta:+.2f} bp "
+                  f"(modelled {shadow:+.2f})   "
+                  f"curve {base['legs'] and len(base['legs'])} leg(s), "
+                  f"{base['arcs']:,} arcs, {base['dust']:,} dust   "
+                  f"v3 {len(with_v3['legs'])} leg(s), {with_v3['arcs']:,} arcs, "
+                  f"{with_v3['dust']:,} dust")
+    return 1 if worse else 0
+
+
+def check_v3_legs(legs, wanted, transport, block) -> None:
+    """Every v3 leg against the pool's own quoter, at the same block.
+
+    The model is the whole claim, so it is checked rather than trusted.
+    """
+    for leg in legs:
+        if leg.kind is not ArcKind.SWAP_UNIV3:
+            continue
+        t_in, t_out, fee, _d0, _d1 = wanted[leg.target.lower()]
+        if leg.leg.i == 1:
+            t_in, t_out = t_out, t_in
+        data = encode_call(
+            "quoteExactInputSingle((address,address,uint256,uint24,uint160))",
+            (t_in, t_out, leg.amount_in, fee, 0))
+        try:
+            truth = decode(["uint256", "uint160", "uint32", "uint256"],
+                           bytes.fromhex(transport.fetch("eth_call", [
+                               {"to": QUOTER_V2, "data": "0x" + data.hex()},
+                               hex(block)])[2:]))[0]
+        except Exception as exc:
+            print(f"           quoter refused: {str(exc)[:60]}")
+            continue
+        bp = (leg.amount_out - truth) / truth * 1e4 if truth else float("nan")
+        print(f"           vs QuoterV2  {truth:>26,}   modelled {bp:+.4f} bp")
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--chain", default="ethereum")
@@ -83,6 +195,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ticks", type=int, default=16, help="tick-arcs a side")
     p.add_argument("--reps", type=int, default=3)
     p.add_argument("--legs", action="store_true", help="print each route's legs")
+    p.add_argument("--arms", default="curve,curve+v3",
+                   help="which arms to run, comma separated")
+    p.add_argument("--sweep", action="store_true",
+                   help="pairs x sizes, checking v3 never makes it worse")
+    p.add_argument("--tolerance", type=float, default=0.01,
+                   help="bp within which two arms count as tied")
     p.add_argument("--max-spread", type=float, default=1e18,
                    help="§9.7 conductance-spread bound, raised for v3")
     args = p.parse_args(argv)
@@ -173,6 +291,32 @@ def main(argv: list[str] | None = None) -> int:
               for key, bank in banks.items()}
     teach(session.client, priced)
 
+    # How many candidate routes the walk declines, and why: `quote_routes`
+    # walks a route only when it can walk *every* leg, so one leg it cannot
+    # serve sends the whole route to a chain that has no v3 quoter -- which
+    # comes back zero and reads as a revert.
+    fell_through = {"walked": 0, "chain": 0, "kinds": {}}
+    real_quote_routes = session.client.quote_routes
+
+    def counted(routes, amounts_in, dst_slots):
+        if enabled["on"]:
+            from erouter.core.walk import LegUnquotable, walk_route
+            for legs in routes:
+                try:
+                    walk_route(legs, 1, 0, session.client._stateful_leg(legs))
+                    fell_through["walked"] += 1
+                except LegUnquotable:
+                    fell_through["chain"] += 1
+                    for leg in legs:
+                        name = leg.kind.name
+                        fell_through["kinds"][name] = \
+                            fell_through["kinds"].get(name, 0) + 1
+                except Exception:
+                    fell_through["walked"] += 1
+        return real_quote_routes(routes, amounts_in, dst_slots)
+
+    session.client.quote_routes = counted
+
     real_assemble = pipeline._assemble
     real_realize = pipeline.realize
     enabled = {"on": False}
@@ -217,11 +361,10 @@ def main(argv: list[str] | None = None) -> int:
     pipeline._assemble = assemble
     pipeline.realize = realize
 
-    amount = int(args.amount * 10 ** nodes.decimals(src))
-    print(f"{'arm':<10}{'out':>26}{'arcs':>8}{'legs':>6}{'v3 legs':>9}"
-          f"{'ms':>9}{'vs curve':>11}")
-    base = None
-    for label, on in (("curve", False), ("curve+v3", True)):
+    def measure(on: bool, amount: int):
+        """One arm, min of `--reps`.  The toggle is a single flag, so the two
+        arms are the same code on the same session at the same block: nothing
+        differs but whether the v3 arcs are in the graph."""
         enabled["on"] = on
         session.quote(amount)                      # warm the path
         best, result = None, None
@@ -231,51 +374,56 @@ def main(argv: list[str] | None = None) -> int:
             took = (time.perf_counter() - started) * 1e3
             if best is None or took < best:
                 best, result = took, got
-        # `modelled_out`, not `verified_out`: a route carrying a v3 leg
-        # cannot be re-quoted on chain, so the modelled figure is the
-        # only one both arms have.
-        out = result.route.modelled_out if result.route else 0
-        legs = result.route.legs if result.route else []
-        v3 = sum(1 for leg in legs
-                 if leg.kind is ArcKind.SWAP_UNIV3) if legs else 0
+        # `modelled_out`, not `verified_out`: a route carrying a v3 leg cannot
+        # be re-quoted on chain, so the modelled figure is the only one both
+        # arms have.
+        route = result.route
+        legs = route.legs if route else []
+        return {
+            # `verified_out` where there is one: since `univ3_client.teach`,
+            # `quote_routes` walks a v3 leg too, so both arms are ranked and
+            # reported by the same number the router itself chose on.  The
+            # modelled figure is kept beside it -- if the two disagree about
+            # which arm won, the disagreement is the finding.
+            "out": (route.modelled_out if route else 0),
+            "verified": int(result.verified_out or 0),
+            "modelled": route.modelled_out if route else 0,
+            "legs": legs,
+            "v3": sum(1 for leg in legs if leg.kind is ArcKind.SWAP_UNIV3),
+            "ms": best or 0.0,
+            "arcs": result.counters.get("arcs_priced_out", 0),
+            "dust": result.counters.get("arcs_dropped_dust", 0),
+        }
+
+    if args.sweep:
+        return sweep(session, nodes, measure, args)
+
+    amount = int(args.amount * 10 ** nodes.decimals(src))
+    print(f"{'arm':<10}{'out':>26}{'arcs':>8}{'legs':>6}{'v3 legs':>9}"
+          f"{'ms':>9}{'vs curve':>11}")
+    base = None
+    for label, on in (("curve", False), ("curve+v3", True)):
+        if label not in args.arms.split(","):
+            continue
+        got = measure(on, amount)
+        out, legs = got["out"], got["legs"]
         if base is None:
             base = out
         delta = (out - base) / base * 1e4 if base else 0.0
-        counters = result.counters
-        print(f"{label:<10}{out:>26,}{counters.get('arcs_priced_out', 0):>8,}"
-              f"{len(legs):>6}{v3:>9}{best:>9.0f}{delta:>+10.2f}bp")
-        print(f"           dust dropped {counters.get('arcs_dropped_dust', 0):>5,}"
-              f"   v3 arcs with flow {carried['v3'] if on else 0:>4}"
-              f"   condition {counters.get('condition', 0):.2e}")
-        for note in (result.warnings or [])[:3]:
-            if "conductance spread" in note or "dust" in note.lower():
-                print(f"           ! {note[:96]}")
+        print(f"{label:<10}{out:>26,}{got['arcs']:>8,}"
+              f"{len(legs):>6}{got['v3']:>9}{got['ms']:>9.0f}{delta:>+10.2f}bp")
+        print(f"           dust dropped {got['dust']:>5,}"
+              f"   v3 arcs with flow {carried['v3'] if on else 0:>4}")
+        if on:
+            print(f"           routes walked {fell_through['walked']:>5,}"
+                  f"   sent to chain {fell_through['chain']:>5,}"
+                  f"   kinds in those: "
+                  f"{sorted(fell_through['kinds'].items(), key=lambda kv: -kv[1])[:4]}")
         if args.legs:
             for leg in legs:
                 print(f"           {leg.kind.name:<14}{leg.pool_name[:22]:<24}"
                       f"{leg.amount_in:>26,} -> {leg.amount_out:>26,}")
-        # Every v3 leg against the pool's own quoter, at the same block: the
-        # model is the whole claim, so it is checked rather than trusted.
-        for leg in legs:
-            if leg.kind is not ArcKind.SWAP_UNIV3:
-                continue
-            t_in, t_out, fee, _d0, _d1 = wanted[leg.target.lower()]
-            if leg.leg.i == 1:
-                t_in, t_out = t_out, t_in
-            data = encode_call(
-                "quoteExactInputSingle((address,address,uint256,uint24,uint160))",
-                (t_in, t_out, leg.amount_in, fee, 0))
-            try:
-                truth = decode(["uint256", "uint160", "uint32", "uint256"],
-                               bytes.fromhex(transport.fetch("eth_call", [
-                                   {"to": QUOTER_V2, "data": "0x" + data.hex()},
-                                   hex(block)])[2:]))[0]
-            except Exception as exc:
-                print(f"           quoter refused: {str(exc)[:60]}")
-                continue
-            bp = (leg.amount_out - truth) / truth * 1e4 if truth else float("nan")
-            print(f"           vs QuoterV2  {truth:>26,}   modelled "
-                  f"{bp:+.4f} bp")
+        check_v3_legs(legs, wanted, transport, block)
 
     pipeline.build = real_build
     pipeline._assemble, pipeline.realize = real_assemble, real_realize

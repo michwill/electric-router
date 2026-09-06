@@ -152,7 +152,18 @@ class ArcArrays:
         return len(self.tau)
 
     def condition(self) -> float:
-        positive = self.G[self.G > 0]
+        """The conductance spread the solve has to live with.
+
+        Over the *uncapped* arcs, for the reason `reference_conductance` gives:
+        a capped arc reaches its cap and leaves the active set, so its `G` is
+        not part of the system being factorised for long enough to condition
+        it.  On a Curve universe every arc with a finite `G` is uncapped and
+        this is the plain spread; it starts mattering when a venue supplies a
+        near-linear arc with a hard capacity, whose `G` is enormous and whose
+        influence is not.
+        """
+        free = (self.G > 0) & ~np.isfinite(self.cap)
+        positive = self.G[free] if free.any() else self.G[self.G > 0]
         return float(positive.max() / positive.min()) if positive.size else 1.0
 
 
