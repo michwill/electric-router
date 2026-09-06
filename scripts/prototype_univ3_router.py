@@ -201,6 +201,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="pairs x sizes, checking v3 never makes it worse")
     p.add_argument("--tolerance", type=float, default=0.01,
                    help="bp within which two arms count as tied")
+    p.add_argument("--candidates", type=int, default=0,
+                   help="max_candidates; 0 leaves pipeline's default of 20")
+    p.add_argument("--seed-k", type=int, default=0,
+                   help="seed_subgraph paths; 0 leaves the default of 10")
     p.add_argument("--max-spread", type=float, default=1e18,
                    help="§9.7 conductance-spread bound, raised for v3")
     args = p.parse_args(argv)
@@ -321,6 +325,19 @@ def main(argv: list[str] | None = None) -> int:
     real_realize = pipeline.realize
     enabled = {"on": False}
 
+    # `session.quote` does not take these, and the question is whether the
+    # candidate budget is what v3 is crowding out of.
+    real_route = pipeline.route
+
+    def route(*a, **kw):
+        if args.candidates:
+            kw["max_candidates"] = args.candidates
+        if args.seed_k:
+            kw["seed_k"] = args.seed_k
+        return real_route(*a, **kw)
+
+    pipeline.route = route
+
     real_build = pipeline.build
 
     def build(*a, **kw):
@@ -412,8 +429,12 @@ def main(argv: list[str] | None = None) -> int:
         delta = (out - base) / base * 1e4 if base else 0.0
         print(f"{label:<10}{out:>26,}{got['arcs']:>8,}"
               f"{len(legs):>6}{got['v3']:>9}{got['ms']:>9.0f}{delta:>+10.2f}bp")
+        gap = ((got["modelled"] - got["verified"]) / got["verified"] * 1e4
+               if got["verified"] else float("nan"))
         print(f"           dust dropped {got['dust']:>5,}"
-              f"   v3 arcs with flow {carried['v3'] if on else 0:>4}")
+              f"   v3 arcs with flow {carried['v3'] if on else 0:>4}"
+              f"   verified {got['verified']:>24,}"
+              f"   modelled-verified {gap:+.2f} bp")
         if on:
             print(f"           routes walked {fell_through['walked']:>5,}"
                   f"   sent to chain {fell_through['chain']:>5,}"

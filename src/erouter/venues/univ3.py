@@ -316,6 +316,12 @@ def collapse(live, psi, nu, nodes, banks):
         # and it is the only point this arc will be asked about.
         arc.a = (dy * arc.rate_out) / dx_canonical if dx_canonical > 0 else 0.0
         arc.B = 0.0
-        arc.cap = dx_canonical
+        # The bank's whole capacity, *not* the amount that happened to land.
+        # `verify` refuses a candidate whose `over_capacity` is set, and
+        # `_forward_simulate` rescales leg amounts after realisation -- so a cap
+        # pinned to the realised size is a cap the very next step steps over.
+        # Measured: every v3 leg vanished from the winning candidate while the
+        # solve was still routing nineteen v3 arcs through it.
+        arc.cap = capacity(banks[key]) * arc.rate_in
         arc.note = f"v3, {len(banks[key])} tick(s)"
     return keep, np.array(flows, dtype=float)
