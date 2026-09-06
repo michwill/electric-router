@@ -23,7 +23,7 @@ can find the interior optimum.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -75,6 +75,14 @@ REPAIR_ROUNDS = 6
 # before this venue existed".  That is a fresh optimum, so it gets the solver's
 # own budget rather than the perturbation budget above.
 VENUE_PIVOTS = 600
+# The incumbent's ballot gets `max_candidates`, the same as the main one, and
+# the reason is the guarantee rather than the arithmetic: it is answering the
+# question the incumbent's own router answers, so a smaller budget means a
+# smaller search and the venue can still cost the answer.  Measured on
+# `USDC->WBTC 2e+06`, a sub-ballot of 6 recovers nothing of the 10.25 bp and 12
+# recovers it to 0.10 -- but at 12 the incumbent then out-searched it on
+# `USDC->WBTC 1,000` and won by 0.37 bp instead.  Undercutting it just moves
+# which case loses.
 
 
 def repair_order(conflicts: dict, psi: np.ndarray) -> dict:
@@ -224,6 +232,22 @@ ACTIVE_FLOOR = 1e-12
 def carries(psi: np.ndarray, Psi: float) -> np.ndarray:
     """Arcs the solve actually routed through, as a boolean mask."""
     return psi > max(ACTIVE_FLOOR * abs(Psi), 0.0)
+
+
+def restrict(g: ArcArrays, keep: np.ndarray) -> ArcArrays:
+    """`g` over the arcs `keep` selects, index space compacted.
+
+    `dropped` and `accel` are deliberately not carried: the first is keyed on
+    the original index space and the second caches a Rust problem built from
+    arrays this graph no longer has.
+    """
+    return ArcArrays(
+        tau=g.tau[keep], sig=g.sig[keep], a=g.a[keep], B=g.B[keep],
+        G=g.G[keep], eps=g.eps[keep], cap=g.cap[keep],
+        flagged=g.flagged[keep], clamped=g.clamped[keep],
+        n_nodes=g.n_nodes, g_scale=g.g_scale,
+        sources=[g.sources[int(k)] for k in np.flatnonzero(keep)],
+    )
 
 
 def legs_of(arcs: list[PoolArc], psi: np.ndarray,
@@ -781,4 +805,52 @@ def generate(
         resolve(forbidden, f"drop bank {unit[0][2:10]}", "drop")
 
     out.candidates = out.candidates[:max_candidates]
+
+    # 6. the incumbent's own ballot, once per venue.
+    #
+    # This is what `venues` is for, and a family was not enough.  Adding a venue
+    # moves the base solve, every other family is a perturbation of it, and so
+    # the whole ballot moves into a different neighbourhood -- on
+    # `USDC->WBTC 2e+06` the Curve arm's winner and the v3 arm's were 0.92 bp
+    # apart before refit and 10.25 bp apart after, because they were refining
+    # different routes.  One restricted re-solve cannot stand in for a
+    # neighbourhood the incumbent explores with a repair candidate and nine
+    # drops, so the restriction gets a ballot of its own.
+    #
+    # One level: the recursive call passes no venues, so V venues cost V
+    # sub-ballots and never V!.
+    if venues is not None and len(venues) == g.m:
+        labels = list(dict.fromkeys(venues))
+        if len(labels) > 1:
+            budget = max_candidates
+            for label in labels:
+                keep = np.array([v != label for v in venues], dtype=bool)
+                if not keep.any():
+                    continue
+                idx = np.flatnonzero(keep)
+                sub = restrict(g, keep)
+                out.solves += 1
+                sub_base = active_set_solve(sub, src, dst, Psi)
+                out.pivots += sub_base.pivots
+                if not sub_base.feasible:
+                    continue
+                inner = generate(
+                    sub, [arcs[int(k)] for k in idx], src, dst, Psi, sub_base,
+                    max_candidates=budget, top_k=top_k, gas_floor=gas_floor,
+                    max_legs=max_legs, element_split=element_split,
+                )
+                out.solves += inner.solves
+                out.pivots += inner.pivots
+                out.skipped += inner.skipped
+                named = label or "the base venue"
+                for candidate in inner.candidates:
+                    psi = np.zeros(g.m)
+                    psi[idx] = candidate.psi
+                    key = _signature(psi)
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    out.candidates.append(replace(
+                        candidate, psi=psi,
+                        label=f"without {named}: {candidate.label}"))
     return out

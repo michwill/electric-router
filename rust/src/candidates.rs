@@ -58,6 +58,9 @@ pub const CANDIDATE_PIVOTS: u32 = 60;
 /// own budget as well as the perturbation budget above -- both, because the
 /// truncated solve is also what keeps a candidate realisable.
 pub const VENUE_PIVOTS: u32 = 600;
+// The incumbent's ballot gets `max_candidates`, the same as the main one: it is
+// answering the question the incumbent's own router answers, so a smaller
+// budget means a smaller search and the venue can still cost the answer.
 /// Repair rounds per candidate. Three was enough while the repair only ever
 /// made one choice; branching to the next arc down spends a round each time it
 /// has to back out, and the deepest measured chain is three bans then two
@@ -1052,6 +1055,83 @@ pub fn generate(
     }
 
     ballot.out.candidates.truncate(opts.max_candidates);
+
+    // 6. the incumbent's own ballot, once per venue.
+    //
+    // This is what `venues` is for, and a family was not enough. Adding a venue
+    // moves the base solve, every other family is a perturbation of it, and so
+    // the whole ballot moves into a different neighbourhood. One restricted
+    // re-solve cannot stand in for a neighbourhood the incumbent explores with
+    // a repair candidate and nine drops, so the restriction gets a ballot.
+    //
+    // One level: the recursive call passes no venues, so V venues cost V
+    // sub-ballots and never V!.
+    if opts.venues.len() == g.m() {
+        let mut labels: Vec<&String> = Vec::new();
+        for v in &opts.venues {
+            if !labels.contains(&v) {
+                labels.push(v);
+            }
+        }
+        if labels.len() > 1 {
+            let budget = opts.max_candidates;
+            for label in labels {
+                let keep: Vec<bool> =
+                    opts.venues.iter().map(|v| v != label).collect();
+                if !keep.iter().any(|&v| v) {
+                    continue;
+                }
+                let idx: Vec<usize> = (0..keep.len()).filter(|&k| keep[k]).collect();
+                let sub = crate::graph::restrict(g, &keep);
+                let sub_arcs: Vec<PoolArc> =
+                    idx.iter().map(|&k| arcs[k].clone()).collect();
+                ballot.out.solves += 1;
+                let sub_view = Arcs {
+                    tau: &sub.tau, sig: &sub.sig, g: &sub.g, eps: &sub.eps,
+                    cap: &sub.cap, n_nodes: sub.n_nodes,
+                };
+                let sub_base = active_set_solve(
+                    &sub_view, src, dst, psi_total, None, None, &[],
+                    &Options::default(),
+                );
+                ballot.out.pivots += sub_base.pivots as usize;
+                if !sub_base.stop.feasible() {
+                    continue;
+                }
+                let sub_opts = GenerateOptions {
+                    base_certificate: false,
+                    max_candidates: budget,
+                    top_k: opts.top_k.clone(),
+                    gas_floor: opts.gas_floor,
+                    max_legs: opts.max_legs,
+                    max_slots: opts.max_slots,
+                    venues: Vec::new(),
+                };
+                let inner = generate(&sub, &sub_arcs, src, dst, psi_total,
+                                     &sub_base, &sub_opts, element_split);
+                ballot.out.solves += inner.solves;
+                ballot.out.pivots += inner.pivots;
+                ballot.out.skipped += inner.skipped;
+                let named = if label.is_empty() { "the base venue" } else { label };
+                for candidate in inner.candidates {
+                    let mut psi = vec![0.0; g.m()];
+                    for (slot, &k) in idx.iter().enumerate() {
+                        psi[k] = candidate.psi[slot];
+                    }
+                    let key = signature(&psi, 1e-12);
+                    if key.is_empty() || ballot.seen.contains(&key) {
+                        continue;
+                    }
+                    ballot.seen.push(key);
+                    ballot.out.candidates.push(Candidate {
+                        psi,
+                        label: format!("without {named}: {}", candidate.label),
+                        ..candidate
+                    });
+                }
+            }
+        }
+    }
     ballot.out
 }
 

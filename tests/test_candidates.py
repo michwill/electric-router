@@ -458,3 +458,43 @@ def test_one_venue_generates_no_venue_candidates():
     same = generate(g, arcs, 0, 1, 1.0, base, venues=["", ""])
     assert [c.label for c in plain.candidates] == [c.label for c in same.candidates]
     assert plain.solves == same.solves, "and not a solve more"
+
+
+def test_the_incumbent_gets_a_ballot_not_a_candidate():
+    """§6: adding a venue moves the base solve, and every family is a
+    perturbation of it -- so the restriction needs its own families.
+
+    Measured on `USDC->WBTC 2e+06`: with one restricted re-solve the arm was
+    10.25 bp behind the Curve-only arm; with a sub-ballot it is 0.10 bp.
+    """
+    arcs = [
+        arc(0, POOL[0], 0, 1, B=1.0),
+        arc(1, POOL[1], 0, 1, B=1.5),
+        arc(2, POOL[2], 0, 1, B=0.5),
+        arc(3, POOL[3], 0, 1, B=0.8),
+    ]
+    g = build(arcs)
+    base = active_set_solve(g, 0, 1, 1.0)
+    out = generate(g, arcs, 0, 1, 1.0, base,
+                   venues=["", "", "new venue", "new venue"])
+
+    labels = [c.label for c in out.candidates]
+    assert any(label.startswith("without new venue: ") for label in labels), \
+        "the incumbent's own families have to reach the ballot"
+    # Every sub-ballot candidate is expressed in the full index space and uses
+    # nothing from the venue it dropped.
+    for candidate in out.candidates:
+        if candidate.label.startswith("without new venue: "):
+            assert len(candidate.psi) == g.m
+            assert candidate.psi[2] == 0 and candidate.psi[3] == 0
+
+
+def test_the_sub_ballot_does_not_recurse():
+    """One level.  Three venues cost three sub-ballots, not six."""
+    arcs = [arc(k, POOL[k], 0, 1, B=1.0 + k) for k in range(4)]
+    g = build(arcs)
+    base = active_set_solve(g, 0, 1, 1.0)
+    out = generate(g, arcs, 0, 1, 1.0, base,
+                   venues=["", "a", "b", "b"])
+    # A recursing implementation would label something twice over.
+    assert not any(c.label.count("without ") > 1 for c in out.candidates)

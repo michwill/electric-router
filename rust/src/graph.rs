@@ -251,6 +251,38 @@ pub struct ArcArrays {
     pub dropped: Vec<(usize, Dropped)>,
 }
 
+/// `g` over the arcs `keep` selects, index space compacted.
+///
+/// `dropped` is deliberately not carried: it is keyed on the original index
+/// space and would name arcs this graph no longer has.
+pub fn restrict(g: &ArcArrays, keep: &[bool]) -> ArcArrays {
+    let pick = |k: usize| keep.get(k).copied().unwrap_or(false);
+    let take_f = |v: &[f64]| -> Vec<f64> {
+        v.iter().enumerate().filter(|(k, _)| pick(*k)).map(|(_, &x)| x).collect()
+    };
+    ArcArrays {
+        tau: g.tau.iter().enumerate().filter(|(k, _)| pick(*k))
+            .map(|(_, &x)| x).collect(),
+        sig: g.sig.iter().enumerate().filter(|(k, _)| pick(*k))
+            .map(|(_, &x)| x).collect(),
+        a: take_f(&g.a),
+        b: take_f(&g.b),
+        g: take_f(&g.g),
+        eps: take_f(&g.eps),
+        cap: take_f(&g.cap),
+        flagged: g.flagged.iter().enumerate().filter(|(k, _)| pick(*k))
+            .map(|(_, &x)| x).collect(),
+        clamped: g.clamped.iter().enumerate().filter(|(k, _)| pick(*k))
+            .map(|(_, &x)| x).collect(),
+        n_nodes: g.n_nodes,
+        g_scale: g.g_scale,
+        ill_conditioned: 0.0,
+        sources: g.sources.iter().enumerate().filter(|(k, _)| pick(*k))
+            .map(|(_, x)| x.clone()).collect(),
+        dropped: Vec::new(),
+    }
+}
+
 impl ArcArrays {
     pub fn m(&self) -> usize {
         self.tau.len()
