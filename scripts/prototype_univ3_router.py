@@ -34,14 +34,17 @@ from erouter.chain import chains as chain_table
 from erouter.chain.cache import UniverseCache
 from erouter.chain.session import RouterSession
 from erouter.core import pipeline
+from erouter.core.codec import decode, encode_call
 from erouter.core.types import ArcKind
 from erouter.dev import config
 from erouter.dev.rpc import BATCH_FLOOR, AsyncTransport, JsonRpcTransport
 from erouter.dev.universe import load_pools
 from erouter.venues import univ3
 from erouter.venues.univ3_chain import read_pools
+from erouter.venues.univ3_client import Bank, teach
 
 ROOT = Path(__file__).resolve().parents[1]
+QUOTER_V2 = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
 
 
 class _Files:
@@ -162,6 +165,14 @@ def main(argv: list[str] | None = None) -> int:
                   f"   cap {_np.percentile(cap, q):.3e}")
     print()
 
+    # `verify` re-quotes every candidate to rank it, and a v3 leg has nothing
+    # on chain to answer for it.  Teach the walk instead.
+    priced = {key: Bank(bank,
+                        wanted[key[0]][3] if key[1] == 0 else wanted[key[0]][4],
+                        wanted[key[0]][4] if key[1] == 0 else wanted[key[0]][3])
+              for key, bank in banks.items()}
+    teach(session.client, priced)
+
     real_assemble = pipeline._assemble
     real_realize = pipeline.realize
     enabled = {"on": False}
@@ -243,6 +254,28 @@ def main(argv: list[str] | None = None) -> int:
             for leg in legs:
                 print(f"           {leg.kind.name:<14}{leg.pool_name[:22]:<24}"
                       f"{leg.amount_in:>26,} -> {leg.amount_out:>26,}")
+        # Every v3 leg against the pool's own quoter, at the same block: the
+        # model is the whole claim, so it is checked rather than trusted.
+        for leg in legs:
+            if leg.kind is not ArcKind.SWAP_UNIV3:
+                continue
+            t_in, t_out, fee, _d0, _d1 = wanted[leg.target.lower()]
+            if leg.leg.i == 1:
+                t_in, t_out = t_out, t_in
+            data = encode_call(
+                "quoteExactInputSingle((address,address,uint256,uint24,uint160))",
+                (t_in, t_out, leg.amount_in, fee, 0))
+            try:
+                truth = decode(["uint256", "uint160", "uint32", "uint256"],
+                               bytes.fromhex(transport.fetch("eth_call", [
+                                   {"to": QUOTER_V2, "data": "0x" + data.hex()},
+                                   hex(block)])[2:]))[0]
+            except Exception as exc:
+                print(f"           quoter refused: {str(exc)[:60]}")
+                continue
+            bp = (leg.amount_out - truth) / truth * 1e4 if truth else float("nan")
+            print(f"           vs QuoterV2  {truth:>26,}   modelled "
+                  f"{bp:+.4f} bp")
 
     pipeline.build = real_build
     pipeline._assemble, pipeline.realize = real_assemble, real_realize
