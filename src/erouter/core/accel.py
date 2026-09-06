@@ -323,7 +323,8 @@ def ballot(g, arcs, src, dst, psi_total, base_psi, *, base_certificate,
         built.add(arc.id, arc.pool, int(arc.kind), arc.i, arc.j, arc.n_coins,
                   arc.token_in, arc.token_out, arc.tau, arc.sigma,
                   arc.a, arc.B, arc.cap, arc.G, arc.eps, arc.reserve_in,
-                  arc.decimals_in, arc.tvl_usd, arc.gamma_live, arc.note)
+                  arc.decimals_in, arc.tvl_usd, arc.gamma_live, arc.note,
+                  arc.calib_delta, arc.decimals_out, arc.parallel)
 
     # The reference's pricer takes two `PoolArc`s; the port has no such object
     # to hand back, so it names them by index into the list it was given.

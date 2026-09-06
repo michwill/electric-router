@@ -210,6 +210,13 @@ class PoolArc:
     # §2.3 / §12.2 diagnostics
     convex_flag: bool = False
     clamped: bool = False
+    #: Whether this arc's siblings on the same `(pool, kind, i, j)` are
+    #: merged into one leg before realisation.  Decision 3 gives a pool
+    #: one arc per route, and a venue of parallel arcs -- a Uniswap v3
+    #: pool's ticks -- only satisfies it because they are collapsed
+    #: first.  Nothing in `core` does that collapsing, so the exemption
+    #: is the injector's claim to make rather than an assumption.
+    parallel: bool = False
     flag_reason: FlagReason = FlagReason.NONE
     drift: float = 0.0
     eta: float = math.nan

@@ -29,7 +29,7 @@ import numpy as np
 
 from . import accel as _accel
 from .graph import ArcArrays
-from .multiport import MultiPortError, element_of_arcs
+from .multiport import MultiPortError, element_from
 from .quoter import MAX_LEGS, MAX_SLOTS
 from .realize import RealizedRoute, cancel_cycles, prune_dust
 from .seed import k_shortest_paths
@@ -221,6 +221,28 @@ def carries(psi: np.ndarray, Psi: float) -> np.ndarray:
     return psi > max(ACTIVE_FLOOR * abs(Psi), 0.0)
 
 
+def legs_of(arcs: list[PoolArc], psi: np.ndarray,
+            pools: np.ndarray | None = None) -> int:
+    """How many legs this flow realises as, without realising it.
+
+    One per `(pool, kind, i, j)` carrying flow: arcs that differ only in
+    curvature are parallel and become a single leg, so counting arcs overstates
+    the length of any route through a venue that has them.
+    """
+    lowered = pools if pools is not None else _pool_of(arcs)
+    seen: set[tuple] = set()
+    total = 0
+    for k in np.flatnonzero(psi > 0):
+        arc = arcs[int(k)]
+        if arc.parallel:
+            key = (lowered[int(k)], arc.kind, arc.i, arc.j)
+            if key in seen:
+                continue
+            seen.add(key)
+        total += 1
+    return total
+
+
 def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
                       Psi: float = 0.0, *, pools: np.ndarray | None = None,
                       cache: dict | None = None) -> dict[str, list[int]]:
@@ -231,6 +253,17 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
     2-coin pool cannot be entered twice.  Order does not exist yet at this
     stage and the rule does not need it: admissibility is a property of which
     ports are used, not of the sequence.
+
+    Of the *ports*, and so of the distinct `(kind, i, j)` rather than of the arc
+    count.  Arcs sharing all three are §9.5's parallel pair -- `element_from`
+    says so itself, in the message it raises -- and a parallel pair realises as
+    one leg, which is not a re-entry.  On a Curve universe the distinction never
+    arises, because two arcs with the same ports also have the same `a` and `B`
+    and `build` merges them before the solve.  A venue of parallel arcs at
+    *different* curvature is what separates them: 17 Uniswap v3 ticks of one
+    pool read as 17 entries, and the repair in `generate.resolve` then banned 788
+    arcs a quote, squeezing 203 feasible re-solves down to 3 distinct
+    candidates.
 
     `pools` and `cache` are the same answer asked twice.  `generate` calls this
     thirty-six times a quote against arcs that do not change, so lowering every
@@ -251,13 +284,30 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
             if cache[key]:
                 out[pool] = idx
             continue
-        try:
-            element_of_arcs([arcs[k] for k in idx])
-        except (MultiPortError, ValueError):
-            out[pool] = idx
-            clashes = True
-        else:
+        # A parallel arc stands in for its siblings, because they are one leg
+        # by the time the rule is checked; anything else is counted as it comes,
+        # so two Curve arcs on one pool are the re-entry they have always been.
+        triples, folded = [], set()
+        for k in idx:
+            arc = arcs[k]
+            key = (arc.kind, arc.i, arc.j)
+            if arc.parallel:
+                if key in folded:
+                    continue
+                folded.add(key)
+            triples.append(key)
+        if len(triples) == 1:
             clashes = False
+        else:
+            head = arcs[idx[0]]
+            try:
+                element_from(head.pool, head.n_coins, triples)
+            except (MultiPortError, ValueError):
+                clashes = True
+            else:
+                clashes = False
+        if clashes:
+            out[pool] = idx
         if cache is not None:
             cache[key] = clashes
     return out
@@ -425,9 +475,11 @@ def generate(
         else:
             return False
         # Two ways to be unrealisable, and both are known before realising:
-        # more distinct tokens than the quoter has slots, or more arcs than the
-        # caller will accept legs (each arc is at least one leg).
-        support = int(np.count_nonzero(solution.psi > 0))
+        # more distinct tokens than the quoter has slots, or more legs than the
+        # caller will accept.  Legs, not arcs: parallel arcs on one pool realise
+        # as one, for the reason `conflicting_pools` gives.  Where none exist
+        # this is the arc count it always was.
+        support = legs_of(arcs, solution.psi, pools=pools)
         if width(solution.psi) > MAX_SLOTS or support > max_legs:
             # Solved, and unrealisable.  Adding it would spend a realise and a
             # slot in the verification batch to learn what the node count

@@ -19,11 +19,13 @@ from erouter.core.verify import verify
 POOL = ["0x" + f"{k:02x}" * 20 for k in range(1, 9)]
 
 
-def arc(index, pool, tau, sigma, *, a=1.0, B=1.0, flagged=False):
+def arc(index, pool, tau, sigma, *, a=1.0, B=1.0, flagged=False,
+        parallel=False):
     return PoolArc(
         id=f"{pool}:{index}", pool=pool, kind=ArcKind.SWAP_STABLE,
         i=0, j=1, n_coins=2, token_in=f"0xin{index}", token_out=f"0xout{index}",
         tau=tau, sigma=sigma, a=a, B=B, convex_flag=flagged, note=f"pool{index}",
+        parallel=parallel,
     )
 
 
@@ -357,3 +359,43 @@ def test_repair_recovers_a_candidate_whose_greedy_choice_was_infeasible():
     banned = np.zeros(5, bool)
     keep_only(banned, ordered, 2)
     assert list(np.flatnonzero(~banned)) == [2, 3, 4]
+
+
+def test_parallel_arcs_of_one_pool_are_not_a_re_entry():
+    """The same shape as the test above, and the opposite answer.
+
+    A bank of Uniswap v3 ticks is many arcs of one pool on one port pair, and
+    `collapse` sums them into a single leg before Decision 3 is ever asked.
+    Treating them as a re-entry made the repair ban 788 arcs a quote and
+    squeezed 203 feasible re-solves down to 3 distinct candidates.
+    """
+    arcs = [
+        arc(0, POOL[0], 0, 1, parallel=True),
+        arc(1, POOL[0], 0, 1, B=2.0, parallel=True),
+        arc(2, POOL[1], 0, 1, B=3.0),
+    ]
+    assert conflicting_pools(arcs, np.array([1.0, 1.0, 1.0])) == {}
+
+
+def test_a_parallel_arc_does_not_excuse_a_real_re_entry():
+    """Only the siblings it shares ports with fold; the rest is unchanged."""
+    arcs = [
+        arc(0, POOL[0], 0, 1, parallel=True),
+        arc(1, POOL[0], 0, 1, B=2.0, parallel=True),
+        arc(2, POOL[0], 0, 1, B=3.0),          # not parallel: still a re-entry
+    ]
+    conflicts = conflicting_pools(arcs, np.array([1.0, 1.0, 1.0]))
+    assert list(conflicts) == [POOL[0].lower()]
+
+
+def test_parallel_arcs_count_as_one_leg():
+    """`resolve` rejects on the leg count, and legs are what a route executes."""
+    from erouter.core.candidates import legs_of
+
+    ticks = [arc(k, POOL[0], 0, 1, B=1.0 + k, parallel=True) for k in range(17)]
+    other = [arc(99, POOL[1], 0, 1, B=2.0)]
+    psi = np.ones(len(ticks) + 1)
+    assert legs_of(ticks + other, psi) == 2
+    # The same arcs without the claim are 18 legs and unrealisable past 17.
+    plain = [arc(k, POOL[0], 0, 1, B=1.0 + k) for k in range(17)]
+    assert legs_of(plain + other, psi) == 18

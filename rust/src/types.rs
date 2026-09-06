@@ -300,6 +300,11 @@ pub struct PoolArc {
     // §2.3 / §12.2 diagnostics
     pub convex_flag: bool,
     pub clamped: bool,
+    /// Whether this arc's siblings on the same `(pool, kind, i, j)` are
+    /// merged into one leg before realisation. Decision 3 gives a pool one
+    /// arc per route, and a venue of parallel arcs -- a Uniswap v3 pool's
+    /// ticks -- only satisfies it because they are collapsed first.
+    pub parallel: bool,
     pub flag_reason: FlagReason,
     pub drift: f64,
     pub eta: f64,
@@ -356,6 +361,7 @@ impl PoolArc {
             calib_delta: 0.0,
             convex_flag: false,
             clamped: false,
+            parallel: false,
             flag_reason: FlagReason::None,
             drift: 0.0,
             eta: f64::NAN,

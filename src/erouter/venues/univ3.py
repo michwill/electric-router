@@ -263,6 +263,9 @@ def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
                 rate_in=rate_in, rate_out=rate_out,
                 decimals_in=decimals_in, decimals_out=decimals_out,
                 reserve_in=int(capacity(bank) * 10**decimals_in),
+                # `collapse` sums these back into one arc before realisation,
+                # which is what lets a bank of them satisfy Decision 3.
+                parallel=True,
                 tvl_usd=tvl_usd, note=f"v3 tick {k}"))
     return out
 

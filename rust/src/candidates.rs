@@ -22,11 +22,11 @@
 //! drop-an-arc candidate can find the interior optimum.
 
 use crate::graph::ArcArrays;
-use crate::multiport::element_of_arcs;
+use crate::multiport::element_from;
 use crate::realize::{prune_dust, RealizedRoute, DUST_SHARE};
 use crate::seed::{build_adjacency, k_shortest_paths};
 use crate::solve::{active_set_solve, Arcs, Options, Solution};
-use crate::types::PoolArc;
+use crate::types::{ArcKind, PoolArc};
 use crate::cycles;
 
 /// Sparsification levels. The relaxation routinely activates dozens of arcs
@@ -251,6 +251,38 @@ pub fn keep_only(
 /// thirty-six times a quote against arcs that do not change, so lowering every
 /// active arc's address and re-deriving the element from the same indices is
 /// work the second call already knows the answer to.
+/// How many legs this flow realises as, without realising it.
+///
+/// One per `(pool, kind, i, j)` carrying flow: arcs that differ only in
+/// curvature are parallel and become a single leg, so counting arcs overstates
+/// the length of any route through a venue that has them.
+pub fn legs_of(arcs: &[PoolArc], psi: &[f64], pools: Option<&[String]>) -> usize {
+    let owned;
+    let lowered = match pools {
+        Some(v) => v,
+        None => {
+            owned = pool_of(arcs);
+            &owned
+        }
+    };
+    let mut seen: Vec<(&str, ArcKind, i32, i32)> = Vec::new();
+    let mut total = 0;
+    for k in 0..psi.len().min(lowered.len()).min(arcs.len()) {
+        if psi[k] <= 0.0 {
+            continue;
+        }
+        if arcs[k].parallel {
+            let key = (lowered[k].as_str(), arcs[k].kind, arcs[k].i, arcs[k].j);
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+        }
+        total += 1;
+    }
+    total
+}
+
 pub fn conflicting_pools(
     arcs: &[PoolArc],
     psi: &[f64],
@@ -299,8 +331,26 @@ pub fn conflicting_pools(
                 continue;
             }
         }
-        let members: Vec<PoolArc> = idx.iter().map(|&k| arcs[k].clone()).collect();
-        let clashes = element_of_arcs(&members).is_err();
+        // A parallel arc stands in for its siblings, because they are one leg
+        // by the time the rule is checked; anything else is counted as it comes,
+        // so two Curve arcs on one pool are the re-entry they have always been.
+        let mut triples: Vec<(ArcKind, i32, i32)> = Vec::new();
+        let mut folded: Vec<(ArcKind, i32, i32)> = Vec::new();
+        for &k in &idx {
+            let key = (arcs[k].kind, arcs[k].i, arcs[k].j);
+            if arcs[k].parallel {
+                if folded.contains(&key) {
+                    continue;
+                }
+                folded.push(key);
+            }
+            triples.push(key);
+        }
+        let clashes = if triples.len() == 1 {
+            false
+        } else {
+            element_from(&arcs[idx[0]].pool, arcs[idx[0]].n_coins, &triples).is_err()
+        };
         if clashes {
             out.push((pool, idx.clone()));
         }
@@ -596,9 +646,10 @@ impl Generator<'_> {
         }
         let Some(solution) = solution else { return false };
         // Two ways to be unrealisable, and both are known before realising:
-        // more distinct tokens than the quoter has slots, or more arcs than
-        // the caller will accept legs (each arc is at least one leg).
-        let support = solution.psi.iter().filter(|&&v| v > 0.0).count();
+        // more distinct tokens than the quoter has slots, or more legs than the
+        // caller will accept. Legs, not arcs: parallel arcs on one pool realise
+        // as one, for the reason `conflicting_pools` gives.
+        let support = legs_of(self.arcs, &solution.psi, Some(&self.pools));
         if self.width(&solution.psi) > self.opts.max_slots || support > self.opts.max_legs {
             // Solved, and unrealisable. Adding it would spend a realise and a
             // slot in the verification batch to learn what the node count
