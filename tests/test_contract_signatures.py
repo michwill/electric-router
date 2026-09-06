@@ -90,7 +90,34 @@ QUOTER = {
     "exchangeRateStored()",
 }
 
-EXPECTED = {"ElectricRouter": ROUTER, "RouteQuoter": QUOTER}
+#: What `RouteExecutor` calls.  It is the state-changing twin of the router and
+#: spells most of the same things, plus the one call no Curve pool has: a
+#: Uniswap v3 `swap`, which settles by calling back rather than by allowance.
+EXECUTOR = {
+    # ERC20, and the wrappers that wear its shape
+    "approve(address,uint256)", "balanceOf(address)",
+    "transfer(address,uint256)", "transferFrom(address,address,uint256)",
+    # swaps
+    "exchange(int128,int128,uint256,uint256)",
+    "exchange(uint256,uint256,uint256,uint256)",
+    "exchange(uint256,uint256,uint256,uint256,bool)",
+    "swap(address,bool,int256,uint160,bytes)",
+    # deposits: N is part of the signature
+    "add_liquidity(uint256[],uint256)",
+    *(f"add_liquidity(uint256[{n}],uint256)" for n in range(2, 9)),
+    # withdrawals
+    "remove_liquidity_one_coin(uint256,int128,uint256)",
+    "remove_liquidity_one_coin(uint256,uint256,uint256)",
+    # vaults, wrappers and the native pair
+    "deposit()", "deposit(uint256)", "deposit(uint256,address)",
+    "redeem(uint256)", "redeem(uint256,address,address)",
+    "mint(uint256)", "withdraw(uint256)",
+    "wrap(uint256)", "unwrap(uint256)",
+    "submit(address)",
+}
+
+EXPECTED = {"ElectricRouter": ROUTER, "RouteQuoter": QUOTER,
+            "RouteExecutor": EXECUTOR}
 
 
 def spelled(name: str) -> set[str]:

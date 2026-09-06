@@ -60,6 +60,25 @@ WSTETH_WRAP: constant(uint8) = 12
 STAKE_NATIVE: constant(uint8) = 13
 LEND_MINT: constant(uint8) = 15
 LEND_REDEEM: constant(uint8) = 16
+SWAP_UNIV3: constant(uint8) = 17
+
+# Uniswap v3's own bounds on `sqrtPriceX96`.  A swap has to name a price limit
+# and the pool refuses one at or past the boundary, so the exclusive neighbours
+# are the way to say "no limit" -- which is what a route wants, because the
+# amount is the bound and the model already knows how far the price moves.
+MIN_SQRT_RATIO: constant(uint160) = 4295128739
+MAX_SQRT_RATIO: constant(uint160) = 1461446703485210103287273052203988822378723970342
+
+
+# The pool this contract is inside a `swap` on, and empty at every other moment.
+#
+# A v3 pool does not pull with an allowance; it calls back and expects to be
+# paid, so `uniswapV3SwapCallback` has to move tokens on the word of whoever
+# called it.  Anyone may call it.  Pinning the pool for the length of the swap
+# is what makes that safe without knowing a factory address or an init-code
+# hash: outside a swap the expectation is `empty(address)` and every call fails,
+# and inside one only the pool being swapped against can pass.
+expected_v3_pool: transient(address)
 
 
 struct Leg:
@@ -245,6 +264,30 @@ def _execute(
         return self._send(
             target, concat(method_id("submit(address)"), abi_encode(empty(address))), dx
         )
+
+    if kind == SWAP_UNIV3:
+        # `i` is the pool's own coin index, so `i == 0` is token0 -> token1,
+        # which is Uniswap's `zeroForOne`.
+        zero_for_one: bool = i == 0
+        limit: uint160 = MAX_SQRT_RATIO - 1
+        if zero_for_one:
+            limit = MIN_SQRT_RATIO + 1
+        assert dx <= convert(max_value(int256), uint256), "dx overflows int256"
+        self.expected_v3_pool = target
+        # The token to pay travels in `data` and comes back untouched in the
+        # callback.  It is the pool's word for it, which is why the sender
+        # check above it is the thing doing the work.
+        paid: bool = self._send(
+            target,
+            concat(
+                method_id("swap(address,bool,int256,uint160,bytes)"),
+                abi_encode(self, zero_for_one, convert(dx, int256), limit,
+                           abi_encode(token_in)),
+            ),
+            0,
+        )
+        self.expected_v3_pool = empty(address)
+        return paid
 
     self._approve(token_in, target, dx)
 
@@ -451,6 +494,25 @@ def execute_route(
         self._transfer(tokens[k], msg.sender, self._held(tokens[k]))
     self._transfer(dst_token, msg.sender, produced)
     return produced
+
+
+@external
+def uniswapV3SwapCallback(amount0_delta: int256, amount1_delta: int256,
+                          data: Bytes[32]):
+    """Pay the pool what the swap it just performed says it is owed.
+
+    Uniswap settles after the fact: the pool sends the output first, then calls
+    this and checks its own balance rose.  The positive delta is what this
+    contract owes; the negative one is what it just received.  Both being
+    non-positive is a swap that moved nothing, and paying nothing is correct.
+    """
+    assert msg.sender == self.expected_v3_pool, "unexpected v3 callback"
+    owed: uint256 = 0
+    if amount0_delta > 0:
+        owed = convert(amount0_delta, uint256)
+    elif amount1_delta > 0:
+        owed = convert(amount1_delta, uint256)
+    self._transfer(abi_decode(data, address), msg.sender, owed)
 
 
 @external
