@@ -66,6 +66,9 @@ pub const VENUE_PIVOTS: u32 = 600;
 /// has to back out, and the deepest measured chain is three bans then two
 /// backtracks.
 pub const REPAIR_ROUNDS: usize = 6;
+/// The share two arcs must differ by before their *order* is a fact rather than
+/// a rounding. See where `order` is built in the reference.
+pub const ORDER_QUANTUM: f64 = 1e-6;
 
 /// Flow below this share of the trade is not a decision the solve made -- it
 /// is the residue of a pivot, and it differs in the last bits between one
@@ -818,10 +821,16 @@ pub fn generate(
 
     // 2b. keep only the pools the relaxation liked best, but let the solver
     //     use any arc of those pools so it can still find a connected route.
+    // Ranked at the solver's own tolerance, and by index below it: see the
+    // reference. Ordering on a difference smaller than `TOL` is ordering on
+    // whatever the pivot sequence left behind, and the two sides do not leave
+    // the same thing.
+    let quantum = if psi_total > 0.0 { ORDER_QUANTUM * psi_total } else { ORDER_QUANTUM };
+    // To nearest, not truncated: see the reference. Truncation puts a bucket
+    // edge on every round number, which is exactly where the values sit.
+    let rank = |k: usize| (base.psi[k] / quantum).round() as i64;
     let mut order = base_active.clone();
-    order.sort_by(|&a, &b| {
-        base.psi[b].partial_cmp(&base.psi[a]).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    order.sort_by(|&a, &b| rank(b).cmp(&rank(a)).then(a.cmp(&b)));
     let mut ranked_pools: Vec<String> = Vec::new();
     for &k in &order {
         if !ranked_pools.contains(&pools[k]) {

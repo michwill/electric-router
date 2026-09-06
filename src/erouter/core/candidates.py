@@ -70,6 +70,9 @@ CANDIDATE_PIVOTS = 60
 # one choice; branching to the next arc down spends a round each time it has to
 # back out, and the deepest measured chain is three bans then two backtracks.
 REPAIR_ROUNDS = 6
+#: The share two arcs must differ by before their *order* is a fact rather than
+#: a rounding.  See where `order` is built.
+ORDER_QUANTUM = 1e-6
 # The venue family solves a different question from every other candidate: not
 # "what if this arc were unavailable" but "what would the router have answered
 # before this venue existed".  That is a fresh optimum, so it gets the solver's
@@ -526,6 +529,7 @@ def generate(
     add(base.psi, "C0 full", "base", base_certificate)
 
     base_active = np.flatnonzero(carries(base.psi, Psi))
+    quantum = ORDER_QUANTUM * Psi if Psi > 0 else ORDER_QUANTUM
     # Warm-start from the *circulation-free* support.  The raw optimum carries
     # flow on arcs that only exist to go round a negative-eps loop; they are
     # cancelled before execution anyway, and leaving them in the start set makes
@@ -628,7 +632,23 @@ def generate(
 
     # 2b. keep only the pools the relaxation liked best, but let the solver use
     #     any arc of those pools so it can still find a connected route.
-    order = sorted(base_active, key=lambda k: -base.psi[k])
+    # Ranked by share to a millionth, and by index below that.  Arcs in series
+    # each carry the whole trade, so their `psi` is equal up to whatever the
+    # pivot sequence left behind -- 1.4e-12 apart on one restricted graph, with
+    # the reference above and the port below, which put a different arc first in
+    # a family that drops them in order and so generated a different candidate.
+    # Which of two indistinguishable arcs to drop first is arbitrary; letting
+    # the last picoshare decide it is what made the two sides disagree.
+    #
+    # `_signature` rounds the same quantity to 10 bp to decide whether two
+    # candidates are the same; this is the same argument four decimals finer,
+    # because ordering wants to separate arcs that dedup would not.
+    # To nearest, not truncated: the natural value here is the whole trade, and
+    # truncation puts a bucket edge exactly there -- 1.0 - 3e-12 and 1.0 + 3e-12
+    # land either side of it.  Rounding puts the edge half a quantum away from
+    # every round number, which is where no solver leaves anything.
+    order = sorted(base_active,
+                   key=lambda k: (-round(base.psi[k] / quantum), int(k)))
     ranked_pools: list[str] = []
     for k in order:
         if pools[k] not in ranked_pools:

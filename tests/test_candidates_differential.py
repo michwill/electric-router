@@ -314,6 +314,10 @@ def both_ballots(seed, **kw):
     g, arcs, nodes, ported_nodes, nu, Psi = universe(seed)
     src, dst = 0, len(TOKENS) - 1
     base = active_set_solve(g, src, dst, Psi)
+    # Venues by default, not as a special case: the sub-ballot recurses into a
+    # restricted graph, which is the most involved thing either side does, and
+    # leaving it to one opt-in test would cover it once instead of ten times.
+    kw.setdefault("venues", [arc.venue for arc in arcs])
     want = generate(g, arcs, src, dst, Psi, base, **kw)
     got = erouter_solve.Ballot.generate(
         ported_graph(g), ported_arcs(arcs), src, dst, Psi,
@@ -371,7 +375,10 @@ def test_a_truncated_budget_keeps_the_same_families(budget):
     """Ordering is the answer when the budget bites."""
     *_, want, got = both_ballots(3, max_candidates=budget)
     assert got.labels() == [c.label for c in want.candidates]
-    assert len(got) <= budget
+    # The cap is per neighbourhood: the main ballot honours it and each venue's
+    # sub-ballot honours it again, because discounting the sub-ballot only moves
+    # which case the venue costs the answer on.
+    assert len(got) <= budget * 2
 
 
 @pytest.mark.parametrize("seed", SEEDS[:5])
