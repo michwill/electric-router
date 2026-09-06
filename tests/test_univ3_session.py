@@ -113,3 +113,34 @@ def test_realize_without_a_collapse_is_the_realize_it_was():
 
     from erouter.core.realize import realize
     assert inspect.signature(realize).parameters["collapse"].default is None
+
+
+def test_the_session_actually_holds_the_venue_it_was_given():
+    """It took `univ3=` and ignored it for one commit, which is worse than not
+    taking it: the flag worked, the arcs never arrived, and the quote looked
+    fine.  Cheap to assert, and it would have caught that."""
+    import inspect
+
+    from erouter.chain.session import RouterSession
+
+    assert "univ3" in inspect.signature(RouterSession.__init__).parameters
+    source = inspect.getsource(RouterSession)
+    assert "self.univ3 = univ3" in source, "taken and dropped on the floor"
+    assert "self.univ3.refresh(" in source, "held and never read"
+    assert "late_arcs" in source, "read and not handed to the router"
+
+
+def test_route_keeps_the_frame_and_the_graph_apart():
+    """`extra_arcs` joins before the reference prices and `late_arcs` after.
+
+    Measured on `crvUSD -> sDOLA` at $2M: through `extra_arcs` a v3 universe
+    cost 9.50 bp and used no v3 leg, because 146 pools' worth of tick-arcs
+    outvoted every Curve pool in the §4 fit.
+    """
+    import inspect
+
+    from erouter.core.pipeline import route
+
+    params = inspect.signature(route).parameters
+    assert params["late_arcs"].default is None
+    assert params["extra_arcs"].default is None

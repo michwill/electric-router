@@ -372,11 +372,11 @@ def main(argv: list[str] | None = None) -> int:
             kw.setdefault("max_spread", args.max_spread)
         return real_build(*a, **kw)
 
-    def assemble(arcs, nu, Psi, nodes_, src_node, dst_node, result):
+    def assemble(arcs, nu, Psi, nodes_, src_node, dst_node, result, **kw):
         if enabled["on"] and extra:
             have = {a.id for a in arcs}
             arcs = list(arcs) + [a for a in extra if a.id not in have]
-        return real_assemble(arcs, nu, Psi, nodes_, src_node, dst_node, result)
+        return real_assemble(arcs, nu, Psi, nodes_, src_node, dst_node, result, **kw)
 
     carried = {"v3": 0, "value": 0.0}
 

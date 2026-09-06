@@ -1257,8 +1257,10 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
     started = time.monotonic()
     try:
         venue_opts = venue_opts or {"extra_arcs": stake_arcs}
+        # `extra_arcs` only: a venue's arcs join after this, so they are in the
+        # graph and not in the reference-price fit.  See `pipeline.route`.
         prepared = prepare(load.pools, nodes, client, src_token=src, dst_token=dst,
-                           extra_arcs=venue_opts["extra_arcs"])
+                           extra_arcs=venue_opts.get("extra_arcs", stake_arcs))
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
         return 2
@@ -2385,7 +2387,9 @@ def _venue_options(args, chain, rpc, nodes, client, stake_arcs) -> dict:
     venue.teach(client)
     print(f"  uniswap v3: {answered:,} pool(s), {len(venue.arcs):,} tick-arc(s) "
           f"in {(time.monotonic() - started) * 1000:,.0f} ms")
-    options["extra_arcs"] = list(stake_arcs) + venue.arcs
+    # `late_arcs`, not `extra_arcs`: a venue's arcs belong in the graph and not
+    # in the reference-price fit.  See `pipeline.route`.
+    options["late_arcs"] = venue.arcs
     options["collapse"] = venue.collapse
     options["audit"] = venue.auditor(rpc)
     options["max_spread"] = venue.max_spread

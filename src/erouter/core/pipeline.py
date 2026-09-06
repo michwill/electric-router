@@ -572,6 +572,7 @@ def route(
     refit_rounds: int = 2,
     prepared: Prepared | None = None,
     extra_arcs: list[PoolArc] | None = None,
+    late_arcs: list[PoolArc] | None = None,
     optimise_split: bool = True,
     max_legs: int = DEFAULT_MAX_LEGS,
     gas_table: GasTable | None = None,
@@ -584,15 +585,24 @@ def route(
     audit=None,
     max_spread: float = PATHOLOGICAL_CONDITION,
 ) -> RouteResult:
-    """`collapse`, `audit` and `max_spread` are the seams a venue needs.
+    """`late_arcs`, `collapse`, `audit` and `max_spread` are a venue's seams.
 
-    `extra_arcs` puts its arcs in the graph, and the other three are what has to
-    follow if those arcs are unlike Curve's: `collapse` puts a venue's parallel
-    arcs back into one leg before Decision 3 counts them, `audit` gets the last
-    word on a winner whose legs the chain could not price for itself, and
-    `max_spread` is §9.7's bound, which reads a genuinely tiny `B` as a floored
-    one.  All three default to what a Curve-only universe wants, which is
-    nothing.
+    `late_arcs` puts arcs in the *graph* without putting them in the *frame*.
+    `extra_arcs` joins before §4 fits the reference prices, which is right for
+    the handful of mint and stake arcs it was built for and wrong for a venue:
+    one Uniswap v3 pool contributes up to 32 tick-arcs, each an observation of
+    the same price, so 146 pools outvote every Curve pool in a weighted least
+    squares that has no idea they are one pool each.  Measured on
+    `crvUSD -> sDOLA` at $2M: through `extra_arcs` the answer fell 9.50 bp and
+    used no v3 leg at all, because every *Curve* arc's `eps` had moved under it;
+    through `late_arcs` it matches the Curve-only answer to the wei.
+
+    The rest follow from the arcs being unlike Curve's: `collapse` puts a
+    venue's parallel arcs back into one leg before Decision 3 counts them,
+    `audit` gets the last word on a winner whose legs the chain could not price
+    for itself, and `max_spread` is §9.7's bound, which reads a genuinely tiny
+    `B` as a floored one.  All of them default to what a Curve-only universe
+    wants, which is nothing.
     """
     result = RouteResult(
         src_token=src_token.lower(),
@@ -666,6 +676,12 @@ def route(
     resident = (prepared.resident.fork()
                 if _ACCEL_ON and prepared.resident is not None else None)
     nu = prepared.nu
+    # After the frame is fitted and before anything is solved: see above.
+    if late_arcs:
+        have = {a.id for a in arcs}
+        fresh = [copy.copy(a) for a in late_arcs if a.id not in have]
+        arcs = arcs + fresh
+        result.counters["late_arcs"] = len(fresh)
     result.arcs = arcs
     result.nu = nu
     result.pool_names = dict(prepared.pool_names)

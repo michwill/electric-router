@@ -230,6 +230,10 @@ class RouterSession:
         self.raw_pools = raw_pools
         self.min_tvl = min_tvl
         self.max_legs = max_legs or pipeline.DEFAULT_MAX_LEGS
+        # A venue the session routes over besides Curve, or `None`.  Held rather
+        # than imported so a chain with no census, and every test, is exactly
+        # the router it was.
+        self.univ3 = univ3
 
         self.block = 0
         self.pools: list[PoolSpec] = []
@@ -324,6 +328,16 @@ class RouterSession:
         await self._build_wrappers(say)
         report.arcs = await self._preflight_arcs(say)
         report.exact = await self._build_models(say)
+
+        if self.univ3 is not None:
+            say("univ3", 0.0)
+            # Per block, not per quote: the ticks cost ~2 s for 146 pools and
+            # every quote at this block reuses them.
+            report.univ3_pools = self.univ3.refresh(
+                getattr(self.rpc, "_t", self.rpc), self.nodes, self.block)
+            self.univ3.teach(self.client)
+            report.univ3_ms = self.univ3.read_ms
+            say("univ3", 1.0)
 
         self.gas_table, _ = self.facts.table(self.pools), None
         self.risk_table = self.facts.risk_table()
@@ -425,12 +439,22 @@ class RouterSession:
         if self.prepared is None or self.pair is None:
             raise SessionError("quote before set_pair")
         src, dst = self.pair
+        seams: dict = {}
+        if self.univ3 is not None and self.univ3.arcs:
+            seams = {
+                # In the graph, not in the frame: see `pipeline.route`.
+                "late_arcs": self.univ3.arcs,
+                "collapse": self.univ3.collapse,
+                "audit": self.univ3.auditor(getattr(self.rpc, "_t", self.rpc)),
+                "max_spread": self.univ3.max_spread,
+            }
         return pipeline.route(
             self.pools, self.nodes, self.client,
             src_token=src, dst_token=dst, amount_in=int(amount_in),
             prepared=self.prepared, extra_arcs=self.stake_arcs,
             max_legs=self.max_legs, gas_price_wei=self.gas_price_wei,
             gas_table=self.gas_table, risk_table=self.risk_table,
+            **seams,
         )
 
     def diagram(self, result, **kw):
