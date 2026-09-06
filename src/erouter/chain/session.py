@@ -119,6 +119,9 @@ class WarmReport:
     exact: int = 0
     unreadable: int = 0
     ms: float = 0.0
+    #: Zero on every chain with no v3 census, which is every chain but one.
+    univ3_pools: int = 0
+    univ3_ms: float = 0.0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -218,7 +221,8 @@ class RouterSession:
     """Everything one chain needs, held between quotes."""
 
     def __init__(self, chain, rpc, backend, data, raw_pools, *,
-                 min_tvl: float = DEFAULT_MIN_TVL, max_legs: int | None = None):
+                 min_tvl: float = DEFAULT_MIN_TVL, max_legs: int | None = None,
+                 univ3=None):
         self.chain = chain
         self.rpc = rpc
         self.backend = backend

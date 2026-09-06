@@ -1175,9 +1175,11 @@ def cmd_route(args: argparse.Namespace) -> int:
         print(f"{BAD} token not routable in this universe")
         return 2
 
+    venue_opts = _venue_options(args, chain, rpc, nodes, client, stake_arcs)
+
     if args.amount is None and not args.amount_wei:
         return _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
-                            stake_arcs)
+                            stake_arcs, venue_opts)
 
     amount_in = int(Decimal((args.amount or "1").replace("_", "")) * 10 ** nodes.decimals(src))
     if args.amount_wei:
@@ -1192,10 +1194,10 @@ def cmd_route(args: argparse.Namespace) -> int:
             max_candidates=args.candidates,
             gas_price_wei=gas_price_wei,
             refit_rounds=args.refit,
-            extra_arcs=stake_arcs,
             max_legs=args.max_legs,
             gas_table=gas_table,
             risk_table=risk_table,
+            **venue_opts,
             **route_opts,
         )
     except RoutingError as exc:
@@ -1219,10 +1221,10 @@ def cmd_route(args: argparse.Namespace) -> int:
                 max_candidates=args.candidates,
                 gas_price_wei=gas_price_wei,
                 refit_rounds=args.refit,
-                extra_arcs=stake_arcs,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
                 risk_table=risk_table,
+                **venue_opts,
                 **route_opts,
             )
         except RoutingError as exc:
@@ -1233,7 +1235,7 @@ def cmd_route(args: argparse.Namespace) -> int:
 
 
 def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
-                 stake_arcs=None) -> int:
+                 stake_arcs, venue_opts=None) -> int:
     """Quote sizes as they are typed, reusing what does not depend on one.
 
     The expensive half of a route -- probing every arc and fitting reference
@@ -1254,8 +1256,9 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
     print("  preparing (probing arcs, fitting reference prices)...", flush=True)
     started = time.monotonic()
     try:
+        venue_opts = venue_opts or {"extra_arcs": stake_arcs}
         prepared = prepare(load.pools, nodes, client, src_token=src, dst_token=dst,
-                           extra_arcs=stake_arcs)
+                           extra_arcs=venue_opts["extra_arcs"])
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
         return 2
@@ -1322,10 +1325,10 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                            amount_in=amount_in, verify_on_chain=not args.no_verify,
                            max_candidates=args.candidates,
                            gas_price_wei=getattr(args, "gas_price_wei", 0),
-                           refit_rounds=args.refit, extra_arcs=stake_arcs,
+                           refit_rounds=args.refit,
                            max_legs=args.max_legs, prepared=prepared,
                            gas_table=gas_table,
-                           risk_table=risk_table, **route_opts)
+                           risk_table=risk_table, **venue_opts, **route_opts)
         _present(result, args, chain, rpc, nodes, wrappers, load,
                  src, dst, amount_in, started, lean=True, suppress=prep_warnings)
 
@@ -2345,6 +2348,50 @@ def _route_options(args=None) -> dict:
     return options
 
 
+def _venue_options(args, chain, rpc, nodes, client, stake_arcs) -> dict:
+    """The `route()` kwargs a venue adds, or just `extra_arcs` without one.
+
+    `--univ3` is opt-in and costs a chain with no census nothing: `Univ3.load`
+    returns `None` and the caller routes exactly as it did.  The tick read is
+    per block, so it happens once here rather than once per quote.
+    """
+    options = {"extra_arcs": stake_arcs}
+    if not getattr(args, "univ3", False):
+        return options
+    import pathlib
+
+    from ..venues.univ3_session import Univ3
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    venue = Univ3.load(root, chain.name.lower(),
+                       floor_usd=float(getattr(args, "univ3_floor", 10_000.0)))
+    if venue is None:
+        print(f"  {WARN} no Uniswap v3 census for {chain.name}; routing Curve only")
+        return options
+    started = time.monotonic()
+    answered = venue.refresh(rpc, nodes, rpc.block)
+    if not answered:
+        above, priceable, wanted = venue.considered
+        print(f"  {WARN} no Uniswap v3 pool answered: {len(venue.census):,} in the "
+              f"census, {above:,} above the floor, {priceable:,} with both coins "
+              f"in the node map, {wanted:,} asked for; routing Curve only")
+        if wanted and not getattr(args, "private", False):
+            # The committed endpoint is scoped to Curve's own contracts, so a
+            # storage read on a Uniswap pool comes back empty rather than
+            # refused -- which reads here as "no pool answered".
+            print(f"  {WARN} --univ3 reads pool storage directly, which the "
+                  f"scoped endpoint will not serve; try --private")
+        return options
+    venue.teach(client)
+    print(f"  uniswap v3: {answered:,} pool(s), {len(venue.arcs):,} tick-arc(s) "
+          f"in {(time.monotonic() - started) * 1000:,.0f} ms")
+    options["extra_arcs"] = list(stake_arcs) + venue.arcs
+    options["collapse"] = venue.collapse
+    options["audit"] = venue.auditor(rpc)
+    options["max_spread"] = venue.max_spread
+    return options
+
+
 def _risk_table(chain, args=None):
     """Per-pool minimum-out risk, measured, or nothing at all.
 
@@ -2801,6 +2848,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="an end-to-end bound as well, this far below the modelled output. "
              "Every leg already carries its own minimum rate; this is the one "
              "that bounds the whole trade")
+    route_cmd.add_argument(
+        "--univ3", action="store_true",
+        help="route over Uniswap v3 as well as Curve. Costs one tick read per "
+             "block (~2 s for 144 pools) and needs data/univ3/<chain>.json. "
+             "Reads pool storage directly, so it wants --private: the scoped "
+             "endpoint serves Curve's contracts and not Uniswap's")
+    route_cmd.add_argument(
+        "--univ3-floor", type=float, default=10_000.0,
+        help="skip v3 pools below this TVL in USD (default 10,000)")
     route_cmd.set_defaults(func=cmd_route)
 
     # Every subcommand takes it, so it is added in one place rather than

@@ -363,13 +363,23 @@ def realize(
     dst_token: str,
     amount_in: int,
     potentials: np.ndarray | None = None,
+    collapse=None,
 ) -> RealizedRoute:
     """Build the executable leg list from a solved flow.
 
     `arcs` and `psi` are parallel and already restricted to the arcs carrying
     flow.  `psi` is value; `delta = psi / nu[tau]` converts back to canonical
     token units, and the node map converts those to the pool's actual token.
+
+    `collapse(arcs, psi, nu, nodes) -> (arcs, psi)` runs first, if given.  A
+    venue whose arcs are parallel -- many of them describing one swap the solver
+    was allowed to split piecewise -- has to put them back together before the
+    legs exist, or Decision 3 sees one pool entered K times.  It is a parameter
+    rather than something `core` knows how to do, because what the pieces mean
+    is the venue's business.
     """
+    if collapse is not None:
+        arcs, psi = collapse(arcs, psi, nu, nodes)
     route = RealizedRoute(
         src_token=src_token.lower(),
         dst_token=dst_token.lower(),

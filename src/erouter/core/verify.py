@@ -93,6 +93,7 @@ def realize_candidates(
     amount_in: int,
     potentials: np.ndarray | None = None,
     max_legs: int = MAX_LEGS,
+    collapse=None,
 ) -> None:
     """Turn each candidate's flow into legs, marking the ones that cannot be.
 
@@ -117,6 +118,7 @@ def realize_candidates(
                 dst_token=dst_token,
                 amount_in=amount_in,
                 potentials=potentials,
+                collapse=collapse,
             )
         except RealizationError as exc:
             candidate.status = "infeasible"

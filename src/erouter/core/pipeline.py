@@ -25,7 +25,7 @@ from . import accel as _accel
 from .calibrate import DRIFT_TOL, Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
 from .gas import GasTable, min_useful_flow, shape_cost, value_per_gas
-from .graph import MAX_CONDITION, ArcArrays, build, scale
+from .graph import MAX_CONDITION, PATHOLOGICAL_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
 from .pools import PoolSpec
 from .prices import (
@@ -580,7 +580,20 @@ def route(
     leg_cost_bp: float = LEG_COST_BP,
     measure_impact: bool = True,
     impact_fraction: float = IMPACT_FRACTION,
+    collapse=None,
+    audit=None,
+    max_spread: float = PATHOLOGICAL_CONDITION,
 ) -> RouteResult:
+    """`collapse`, `audit` and `max_spread` are the seams a venue needs.
+
+    `extra_arcs` puts its arcs in the graph, and the other three are what has to
+    follow if those arcs are unlike Curve's: `collapse` puts a venue's parallel
+    arcs back into one leg before Decision 3 counts them, `audit` gets the last
+    word on a winner whose legs the chain could not price for itself, and
+    `max_spread` is §9.7's bound, which reads a genuinely tiny `B` as a floored
+    one.  All three default to what a Curve-only universe wants, which is
+    nothing.
+    """
     result = RouteResult(
         src_token=src_token.lower(),
         dst_token=dst_token.lower(),
@@ -670,6 +683,7 @@ def route(
         gas_table=gas_table, risk_table=risk_table,
                         revert_cost_bp=revert_cost_bp, leg_cost_bp=leg_cost_bp,
         optimise_split=optimise_split, resident=resident,
+        collapse=collapse, audit=audit, max_spread=max_spread,
     )
 
 
@@ -697,6 +711,9 @@ def _quote(
     prepared: Prepared | None,
     resident: object | None = None,
     optimise_split: bool = True,
+    collapse=None,
+    audit=None,
+    max_spread: float = PATHOLOGICAL_CONDITION,
     max_legs: int = DEFAULT_MAX_LEGS,
     gas_table: GasTable | None = None,
     risk_table: RiskTable | None = None,
@@ -713,7 +730,8 @@ def _quote(
 
     # --- graph (§3.1, §9.5-9.7) -----------------------------------------
     with clock("graph"):
-        arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result)
+        arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result,
+                                 max_spread=max_spread)
     with clock("seed"):
         g, Psi_scaled = scale(g, Psi)
         seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
@@ -765,7 +783,8 @@ def _quote(
                 refined = _recalibrate(arcs, ladders, nodes)
         if refined:
             result.counters["arcs_refined"] = refined
-            arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result)
+            arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result,
+                                 max_spread=max_spread)
             g, Psi_scaled = scale(g, Psi)
             seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
     result.arcs = arcs
@@ -838,7 +857,8 @@ def _quote(
                 refitted = _recalibrate(arcs, ladders, nodes)
                 result.counters["arcs_size_checked"] = refitted
                 if refitted:
-                    arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result)
+                    arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result,
+                                 max_spread=max_spread)
                     g, Psi_scaled = scale(g, Psi)
                     seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
                     report = solve(g, src_node, dst_node, Psi_scaled, seed=seed,
@@ -923,7 +943,7 @@ def _quote(
         result.route = realize(
             live, psi[active], nu, nodes,
             src_token=src_token, dst_token=dst_token, amount_in=amount_in,
-            potentials=report.solution.u,
+            potentials=report.solution.u, collapse=collapse,
         )
     conflicts = check_one_arc_per_pool(result.route)
     if conflicts:
@@ -983,6 +1003,7 @@ def _quote(
                 pool_set, arcs, nu, nodes,
                 src_token=src_token, dst_token=dst_token, amount_in=amount_in,
                 potentials=report.solution.u, max_legs=max_legs,
+                collapse=collapse,
             )
         with clock("verify"):
             verify(
@@ -1013,7 +1034,7 @@ def _quote(
                 realize_candidates(
                     trial, [arc], nu, nodes,
                     src_token=src_token, dst_token=dst_token, amount_in=amount_in,
-                    max_legs=max_legs,
+                    max_legs=max_legs, collapse=collapse,
                 )
                 if candidate.status == "ready":
                     pool_set.candidates.append(candidate)
@@ -1025,7 +1046,7 @@ def _quote(
                 realize_candidates(
                     trial, pair, nu, nodes,
                     src_token=src_token, dst_token=dst_token, amount_in=amount_in,
-                    max_legs=max_legs,
+                    max_legs=max_legs, collapse=collapse,
                 )
                 if candidate.status == "ready":
                     pool_set.candidates.append(candidate)
@@ -1038,6 +1059,20 @@ def _quote(
                     gas_table=gas_table, risk_table=risk_table,
                         revert_cost_bp=revert_cost_bp, leg_cost_bp=leg_cost_bp,
                 )
+
+        # The last word on a winner the chain could not price for itself.  It
+        # runs after the safety floor, because that is the last thing that can
+        # change who won, and before the winner is read out.
+        if audit is not None:
+            for row in audit(pool_set, client):
+                result.counters["venue_audits"] = \
+                    result.counters.get("venue_audits", 0) + 1
+                if not row[-1]:
+                    result.counters["venue_audit_refused"] = \
+                        result.counters.get("venue_audit_refused", 0) + 1
+                    result.warnings.append(
+                        f"{row[0][:28]} was refused by its venue's own quoter: "
+                        f"ranked {row[1]:,} against {row[2]:,}")
 
         winner = pool_set.best
         if winner is None:
@@ -1929,6 +1964,7 @@ def _assemble(
     src_node: int,
     dst_node: int,
     result: RouteResult,
+    max_spread: float = PATHOLOGICAL_CONDITION,
 ):
     """Build the solver arrays from the current calibration.
 
@@ -1954,6 +1990,7 @@ def _assemble(
         clamped=np.array([a.clamped for a in arcs]),
         n_nodes=nodes.n_nodes,
         merge_duplicates=False,
+        max_spread=max_spread,
         require=(src_node, dst_node),
     )
     arcs = [arcs[group[0]] for group in g.sources]
