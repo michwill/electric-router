@@ -427,6 +427,27 @@ def test_a_venue_is_dropped_in_turn():
     assert any(c.label == "without the base venue" for c in out.candidates)
 
 
+def test_each_venue_is_asked_twice():
+    """Capped and solved out are different routes, and both belong on the ballot.
+
+    `CANDIDATE_PIVOTS` is doing two jobs -- a budget and a sparsity control --
+    and the venue family needs both answers.  Measured: solving it out won
+    `WETH->USDC 800` by 208 bp and *lost* `WETH->WBTC 40` by 162, because the
+    converged optimum was too wide for the quoter and got skipped.
+    """
+    arcs = [
+        arc(0, POOL[0], 0, 1, B=1.0),
+        arc(1, POOL[1], 0, 1, B=1.5),
+        arc(2, POOL[2], 0, 1, B=0.5),
+    ]
+    g = build(arcs)
+    base = active_set_solve(g, 0, 1, 1.0)
+    plain = generate(g, arcs, 0, 1, 1.0, base)
+    both = generate(g, arcs, 0, 1, 1.0, base, venues=["", "", "new venue"])
+    # Two venues, asked twice each; the answers may dedup but the asking does not.
+    assert both.solves >= plain.solves + 4
+
+
 def test_one_venue_generates_no_venue_candidates():
     """Which is every universe until an injector says otherwise -- so master
     pays nothing for this."""

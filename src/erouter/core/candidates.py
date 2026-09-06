@@ -70,6 +70,11 @@ CANDIDATE_PIVOTS = 60
 # one choice; branching to the next arc down spends a round each time it has to
 # back out, and the deepest measured chain is three bans then two backtracks.
 REPAIR_ROUNDS = 6
+# The venue family solves a different question from every other candidate: not
+# "what if this arc were unavailable" but "what would the router have answered
+# before this venue existed".  That is a fresh optimum, so it gets the solver's
+# own budget rather than the perturbation budget above.
+VENUE_PIVOTS = 600
 
 
 def repair_order(conflicts: dict, psi: np.ndarray) -> dict:
@@ -411,7 +416,8 @@ def generate(
         )
         return True
 
-    def resolve(forbidden: np.ndarray, label: str, kind: str, pinned=None) -> bool:
+    def resolve(forbidden: np.ndarray, label: str, kind: str, pinned=None,
+                *, maxit: int = CANDIDATE_PIVOTS, start=None) -> bool:
         """Re-solve, then repair pool conflicts rather than discarding them.
 
         Decision 3 allows a pool at most one arc per route, and the Laplacian
@@ -442,7 +448,8 @@ def generate(
             # candidate cannot be certified anyway.
             out.solves += 1
             solution = active_set_solve(
-                g, src, dst, Psi, A0=warm, forbidden=banned, forced_upper=pinned,
+                g, src, dst, Psi, A0=warm if start is None else start,
+                forbidden=banned, forced_upper=pinned,
                 # §11.1: gas cannot enter the objective without making the
                 # program mixed-integer, but it bounds it from outside.  An arc
                 # carrying less value than its leg costs to execute cannot pay
@@ -450,7 +457,7 @@ def generate(
                 # sound rather than heuristic.
                 min_flow=MIN_FLOW_FRACTION * Psi,
                 gas_cost=gas_floor,
-                maxit=CANDIDATE_PIVOTS, partial_ok=True,
+                maxit=maxit, partial_ok=True,
             )
             out.pivots += solution.pivots
             if not solution.feasible:
@@ -519,8 +526,29 @@ def generate(
         if len(seen_venues) > 1:
             groups = np.asarray(venues, dtype=object)
             for label in seen_venues:
-                resolve(groups == label, f"without {label or 'the base venue'}",
-                        "venue")
+                drop = groups == label
+                # Start from what survives the ban rather than from a support
+                # that is mostly banned.
+                kept = warm[~drop[warm]] if warm.size else warm
+                named = label or "the base venue"
+                # Twice, because `CANDIDATE_PIVOTS` is doing two jobs and only
+                # one of them is a budget.  Dropping a venue bans a third of the
+                # active set, so this is not the "small perturbation of a known
+                # optimum" that budget assumes: on `WETH->USDC 800` the capped
+                # solve stopped at an objective of 3.54e-2 where solving it out
+                # reaches 2.97e-2, and the arm lost 17 bp to the difference.
+                #
+                # But truncation is also what keeps a candidate *realisable*.
+                # Solved out on `WETH->WBTC 40` the same family converges on a
+                # wider optimum than the quoter has legs for, gets skipped, and
+                # takes a route worth +46 bp off the ballot with it -- while the
+                # capped solve lands on a sparse four-leg answer that wins.
+                #
+                # They are different questions and the quoter is what decides
+                # between candidates, so it gets both.  Identical answers dedup.
+                resolve(drop, f"without {named}", "venue", start=kept)
+                resolve(drop, f"without {named}, solved out", "venue",
+                        maxit=VENUE_PIVOTS, start=kept)
 
     # Per-family budgets.  Ordering alone is not enough: with many flagged arcs
     # the pin sweep alone is 3 x 7 = 21 candidates, which used to consume the

@@ -52,6 +52,12 @@ pub const WIDE_STREAK: usize = 2;
 /// Candidates are heuristics; stopping early yields a feasible flow, not a
 /// broken one, and the quoter is what decides between them anyway.
 pub const CANDIDATE_PIVOTS: u32 = 60;
+/// The venue family solves a different question from every other candidate: not
+/// "what if this arc were unavailable" but "what would the router have answered
+/// before this venue existed". That is a fresh optimum, so it gets the solver's
+/// own budget as well as the perturbation budget above -- both, because the
+/// truncated solve is also what keeps a candidate realisable.
+pub const VENUE_PIVOTS: u32 = 600;
 /// Repair rounds per candidate. Three was enough while the repair only ever
 /// made one choice; branching to the next arc down spends a round each time it
 /// has to back out, and the deepest measured chain is three bans then two
@@ -585,6 +591,13 @@ impl Generator<'_> {
     /// down.
     fn resolve(&mut self, forbidden: Vec<bool>, label: String, kind: &str,
                pinned: &[(usize, f64)]) -> bool {
+        self.resolve_with(forbidden, label, kind, pinned, CANDIDATE_PIVOTS, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_with(&mut self, forbidden: Vec<bool>, label: String, kind: &str,
+                    pinned: &[(usize, f64)], maxit: u32,
+                    start: Option<Vec<bool>>) -> bool {
         let mut banned = forbidden;
         // (bans before the repair, arcs per conflicting pool, which one we kept)
         let mut undo: Option<(Vec<bool>, Vec<(String, Vec<usize>)>, usize)> = None;
@@ -602,13 +615,14 @@ impl Generator<'_> {
                 // carrying less value than its leg costs to execute cannot pay
                 // for itself even if it were pure profit.
                 gas_cost: self.opts.gas_floor,
-                maxit: CANDIDATE_PIVOTS,
+                maxit,
                 partial_ok: true,
                 ..Default::default()
             };
+            let begin = start.as_ref().unwrap_or(&self.warm);
             let got = active_set_solve(
                 &self.arc_view(), self.src, self.dst, self.psi_total,
-                Some(&self.warm), Some(&banned), pinned, &options,
+                Some(begin), Some(&banned), pinned, &options,
             );
             self.out.pivots += got.pivots as usize;
             if !got.stop.feasible() {
@@ -723,7 +737,18 @@ pub fn generate(
                 let drop: Vec<bool> =
                     opts.venues.iter().map(|v| v == label).collect();
                 let named = if label.is_empty() { "the base venue" } else { label };
-                ballot.resolve(drop, format!("without {named}"), "venue", &[]);
+                // Start from what survives the ban rather than from a support
+                // that is mostly banned.
+                let kept: Vec<bool> = ballot.warm.iter().zip(&drop)
+                    .map(|(&w, &d)| w && !d).collect();
+                // Twice: capped keeps the candidate realisable, solved out
+                // keeps it optimal, and they are not the same route. See the
+                // reference for the two measurements that say so.
+                ballot.resolve_with(drop.clone(), format!("without {named}"),
+                                    "venue", &[], CANDIDATE_PIVOTS,
+                                    Some(kept.clone()));
+                ballot.resolve_with(drop, format!("without {named}, solved out"),
+                                    "venue", &[], VENUE_PIVOTS, Some(kept));
             }
         }
     }
