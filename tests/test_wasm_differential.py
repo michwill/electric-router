@@ -1122,7 +1122,11 @@ def test_the_model_free_floor_agrees_in_the_browser():
     browser one whole.
     """
     import erouter_solve
-    from tests.test_naive_differential import (
+    # No `tests` package (no __init__.py), so pytest puts `tests/` itself on
+    # sys.path and the module is importable by its own name.  Spelling it
+    # `tests.test_naive_differential` made this the one test in the suite that
+    # has never run.
+    from test_naive_differential import (
         TWO_STEP_CASES,
         FakeQuoter,
         facts_of,
