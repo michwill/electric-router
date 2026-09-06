@@ -751,13 +751,34 @@ def generate(
                     alt[k] = True
             resolve(alt, f"repair alt {arcs[keep_index].note[:18]}", "repair")
 
-    # 5. drop each active arc in turn (§6.2)
-    for k in order[: max(0, max_candidates - len(out))]:
-        forbidden = np.zeros(g.m, bool)
-        forbidden[k] = True
-        resolve(forbidden, f"drop {arcs[int(k)].note[:20]}", "drop")
+    # 5. drop each active *leg* in turn (§6.2)
+    #
+    # A leg, not an arc, for the reason `conflicting_pools` gives one stage
+    # earlier: a bank of parallel arcs is one leg, and banning one tick of
+    # sixteen is not an alternative route -- the water-fill moves to the
+    # neighbouring tick and answers within a basis point of the same number.
+    # This is the family that wins on a Curve-only universe, where every active
+    # arc is a different pool and nine drops are nine genuine alternatives.  Let
+    # a venue of parallel arcs into the active set and the same budget buys
+    # sixteen restatements of one candidate instead.
+    dropped_units: set[tuple] = set()
+    for k in order:
         if len(out) >= max_candidates or exhausted("drop"):
             break
+        arc = arcs[int(k)]
+        if not arc.parallel:
+            forbidden = np.zeros(g.m, bool)
+            forbidden[k] = True
+            resolve(forbidden, f"drop {arc.note[:20]}", "drop")
+            continue
+        unit = (pools[int(k)], arc.kind, arc.i, arc.j)
+        if unit in dropped_units:
+            continue
+        dropped_units.add(unit)
+        forbidden = np.array(
+            [a.parallel and (p, a.kind, a.i, a.j) == unit
+             for a, p in zip(arcs, pools, strict=True)], dtype=bool)
+        resolve(forbidden, f"drop bank {unit[0][2:10]}", "drop")
 
     out.candidates = out.candidates[:max_candidates]
     return out

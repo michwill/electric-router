@@ -1016,16 +1016,39 @@ pub fn generate(
         }
     }
 
-    // 5. drop each active arc in turn (§6.2)
-    let room = opts.max_candidates.saturating_sub(ballot.out.len());
-    for &k in order.iter().take(room) {
-        let mut forbidden = vec![false; g.m()];
-        forbidden[k] = true;
-        let label = format!("drop {}", truncate(&arcs[k].note, 20));
-        ballot.resolve(forbidden, label, "drop", &[]);
+    // 5. drop each active *leg* in turn (§6.2)
+    //
+    // A leg, not an arc, for the reason `conflicting_pools` gives one stage
+    // earlier: a bank of parallel arcs is one leg, and banning one tick of
+    // sixteen is not an alternative route -- the water-fill moves to the
+    // neighbouring tick and answers within a basis point of the same number.
+    let mut dropped_units: Vec<(String, ArcKind, i32, i32)> = Vec::new();
+    for &k in order.iter() {
         if ballot.out.len() >= opts.max_candidates || ballot.exhausted("drop") {
             break;
         }
+        let arc = &arcs[k];
+        if !arc.parallel {
+            let mut forbidden = vec![false; g.m()];
+            forbidden[k] = true;
+            let label = format!("drop {}", truncate(&arc.note, 20));
+            ballot.resolve(forbidden, label, "drop", &[]);
+            continue;
+        }
+        let unit = (pools[k].clone(), arc.kind, arc.i, arc.j);
+        if dropped_units.contains(&unit) {
+            continue;
+        }
+        dropped_units.push(unit.clone());
+        let forbidden: Vec<bool> = arcs
+            .iter()
+            .zip(pools.iter())
+            .map(|(a, p)| {
+                a.parallel && (p.clone(), a.kind, a.i, a.j) == unit
+            })
+            .collect();
+        let name: String = unit.0.chars().skip(2).take(8).collect();
+        ballot.resolve(forbidden, format!("drop bank {name}"), "drop", &[]);
     }
 
     ballot.out.candidates.truncate(opts.max_candidates);
