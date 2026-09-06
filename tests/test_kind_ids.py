@@ -104,3 +104,21 @@ def test_the_lending_kinds_are_not_swaps_and_not_merges(name):
     kind = ArcKind[name]
     assert kind.is_lending
     assert not kind.is_swap
+
+
+def test_the_ported_solver_knows_every_kind():
+    """`ArcKind` is a fourth hand-maintained list: `rust/src/types.rs`.
+
+    It is not on the wire, so `OFF_CHAIN_KINDS` does not excuse it -- the
+    accelerated ballot is handed every arc the reference has, including the
+    ones no contract will ever see.  A gap here is not a wrong answer but a
+    refusal: `ValueError: no such kind: 17`, which is how `SWAP_UNIV3` was
+    found missing after the venue work had already shipped.
+    """
+    erouter_solve = pytest.importorskip("erouter_solve")
+    arcs = erouter_solve.Arcs()
+    for kind in ArcKind:
+        arcs.add(f"a{int(kind)}", "0x" + "11" * 20, int(kind), 0, 1, 2,
+                 "0x" + "22" * 20, "0x" + "33" * 20, 0, 1,
+                 1.0, 1.0, float("inf"), 1.0, 0.0, 0, 18, 0.0, 1.0)
+    assert len(arcs) == len(list(ArcKind))

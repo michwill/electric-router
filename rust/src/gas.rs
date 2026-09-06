@@ -51,6 +51,9 @@ pub fn leg_gas(kind: ArcKind) -> i64 {
         // figure per token.
         LendMint => 170_000,
         LendRedeem => 173_000,
+        // A v3 swap that crosses nothing is ~110k; each initialized tick it
+        // crosses adds ~20k. Routes that use one usually cross a few.
+        SwapUniv3 => 150_000,
     }
 }
 

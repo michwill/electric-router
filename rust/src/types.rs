@@ -35,6 +35,11 @@ pub enum ArcKind {
     // branch, and `data/facts` still records that survey under it.
     LendMint = 15,           // underlying -> cToken, at `exchangeRateStored`
     LendRedeem = 16,         // cToken -> underlying, at `exchangeRateStored`
+    // Priced from tick state rather than by a call, and executed only by
+    // `RouteExecutor`. It is in `OFF_CHAIN_KINDS` on the reference side, which
+    // is why neither the quoter nor the router declares it -- but the ballot
+    // has to carry it, because that is where the arcs are.
+    SwapUniv3 = 17,
 }
 
 impl ArcKind {
@@ -57,6 +62,7 @@ impl ArcKind {
             13 => StakeNative,
             15 => LendMint,
             16 => LendRedeem,
+            17 => SwapUniv3,
             _ => return None,
         })
     }
@@ -84,6 +90,7 @@ impl ArcKind {
             WstethUnwrap => "WSTETH_UNWRAP",
             WstethWrap => "WSTETH_WRAP",
             StakeNative => "STAKE_NATIVE",
+            SwapUniv3 => "SWAP_UNIV3",
             LendMint => "LEND_MINT",
             LendRedeem => "LEND_REDEEM",
         }

@@ -587,6 +587,11 @@ fn derive_rule(kind: ArcKind) -> Option<(Derive, Derive)> {
         LendRedeem => (Target, Getter),
         WrapNative | StakeNative => (Native, Target),
         UnwrapNative => (Target, Native),
+        // `None`, and that is the answer rather than a gap: a v3 leg is in
+        // `OFF_CHAIN_KINDS`, `ElectricRouter` does not declare the kind, and
+        // there is no calldata to place it in. The reference says the same by
+        // leaving it out of `_DERIVE`.
+        SwapUniv3 => return None,
     })
 }
 
