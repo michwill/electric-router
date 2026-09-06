@@ -41,7 +41,7 @@ from erouter.dev.rpc import BATCH_FLOOR, AsyncTransport, JsonRpcTransport
 from erouter.dev.universe import load_pools
 from erouter.venues import univ3
 from erouter.venues.univ3_chain import read_pools
-from erouter.venues.univ3_client import Bank, teach
+from erouter.venues.univ3_client import Bank, audit, teach
 
 ROOT = Path(__file__).resolve().parents[1]
 QUOTER_V2 = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
@@ -328,6 +328,22 @@ def main(argv: list[str] | None = None) -> int:
     real_assemble = pipeline._assemble
     real_realize = pipeline.realize
     real_verify_realize = verify.realize
+
+    # The winner is ranked on a number the bank produced, so the bank is held to
+    # the pool's own quoter before that number leaves.  After `verify`, because
+    # it is `verify` that decides who won.
+    real_pipeline_verify = pipeline.verify
+
+    def audited(pool_set, client_, **kw):
+        got = real_pipeline_verify(pool_set, client_, **kw)
+        if enabled["on"]:
+            for label, ranked, truth, bp, kept in audit(
+                    pool_set, session.client, transport, wanted, block=block):
+                audits.append((label, ranked, truth, bp, kept))
+        return got
+
+    pipeline.verify = audited
+    audits: list[tuple] = []
     enabled = {"on": False}
 
     # `session.quote` does not take these, and the question is whether the
@@ -479,8 +495,17 @@ def main(argv: list[str] | None = None) -> int:
                       f"{leg.amount_in:>26,} -> {leg.amount_out:>26,}")
         check_v3_legs(legs, wanted, transport, block)
 
+    if audits:
+        print(f"           v3 audit: {len(audits)} winner(s) checked against "
+              f"QuoterV2, {sum(1 for a in audits if not a[4])} refused")
+        for label, ranked, truth, bp, kept in audits:
+            if not kept or abs(bp) > 0.5:
+                print(f"             {label[:26]:<28}{ranked:>22,}"
+                      f"{truth:>22,}{bp:>+9.3f}bp  {'kept' if kept else 'REFUSED'}")
+
     pipeline.build = real_build
     pipeline._assemble, pipeline.realize = real_assemble, real_realize
+    pipeline.verify = real_pipeline_verify
     verify.realize = real_verify_realize
     return 0
 
