@@ -445,3 +445,60 @@ def test_the_gap_bound_is_unchanged_without_a_capacity():
     assert bound == pytest.approx(
         float(np.sum(0.5 * g.G[held] * sol.rho[held] ** 2))
     )
+
+
+def test_a_wide_conductance_range_still_conserves_flow():
+    """§12.4 measures `B^T psi`, and `psi = G(du - eps)` scales any error in a
+    potential by `G`.
+
+    With `G` spanning eleven orders -- what a venue of near-linear capped arcs
+    puts in the graph -- a potential good to machine precision still gives a
+    flow that misses conservation by 1e-5, and a quote whose arithmetic is fine
+    gets refused.  Measured live before the refinement existed: 7.802e-06
+    against an achievable 7.183e-06.
+    """
+    from erouter.core import solve as solve_mod
+
+    # Three parallel routes whose conductances are 1, 1e5 and 1e10 apart.
+    g = make([0, 0, 0, 1, 1, 1], [1, 1, 1, 2, 2, 2],
+             [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+             [1.0, 1e-5, 1e-10, 1.0, 1e-5, 1e-10], Psi=1.0)
+    sol = active_set_solve(g, 0, 2, 1.0)
+    assert sol.feasible
+    assert kcl_residual(g, sol, 0, 2, 1.0) < 1e-12
+
+    # And the refinement is what holds it there.
+    was, solve_mod.REFINE_ROUNDS = solve_mod.REFINE_ROUNDS, 0
+    try:
+        raw = active_set_solve(g, 0, 2, 1.0)
+    finally:
+        solve_mod.REFINE_ROUNDS = was
+    assert kcl_residual(g, raw, 0, 2, 1.0) >= kcl_residual(g, sol, 0, 2, 1.0)
+
+
+def test_refinement_never_makes_conservation_worse():
+    """It is applied only while it reduces the imbalance, so a step that would
+    trade conservation for something else is dropped rather than taken."""
+    from erouter.core import solve as solve_mod
+
+    for seed in range(6):
+        rng = np.random.default_rng(seed)
+        n = 4
+        tau, sig, a, B = [], [], [], []
+        for tail in range(n - 1):
+            for _ in range(3):
+                tau.append(tail)
+                sig.append(tail + 1)
+                a.append(float(rng.uniform(0.98, 0.999)))
+                B.append(float(np.exp(rng.uniform(np.log(1e-10), np.log(1e-2)))))
+        g = make(tau, sig, a, B, n=n, Psi=1.0)
+        polished = active_set_solve(g, 0, n - 1, 1.0)
+        was, solve_mod.REFINE_ROUNDS = solve_mod.REFINE_ROUNDS, 0
+        try:
+            plain = active_set_solve(g, 0, n - 1, 1.0)
+        finally:
+            solve_mod.REFINE_ROUNDS = was
+        if not (polished.feasible and plain.feasible):
+            continue
+        assert (kcl_residual(g, polished, 0, n - 1, 1.0)
+                <= kcl_residual(g, plain, 0, n - 1, 1.0) + 1e-15), seed

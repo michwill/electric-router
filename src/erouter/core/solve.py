@@ -81,6 +81,13 @@ PERTURB_ROUNDS = 8
 # each round multiplies by ten in case the first was inside the noise it meant
 # to clear.
 PERTURB_SCALE = 1e-11
+#: Steps of iterative refinement on the flow residual, at a feasible exit.
+#
+# One is nearly always enough -- measured, it takes the worst live residual from
+# 7.8e-06 to 1.8e-08 -- and the second costs one solve against a factorisation
+# already formed and is refused the moment it stops helping.  Zero restores the
+# behaviour before this existed, which is what the replay compares against.
+REFINE_ROUNDS = 2
 # When two candidates score within this *relative* distance of each other, treat
 # them as tied and take the lower index.
 #
@@ -320,6 +327,65 @@ def active_set_solve(
     cycles = 0
 
     reseeded = False
+
+    def polished(u, psi, rounds=None):
+        """One or two steps of iterative refinement, on the *flow* residual.
+
+        The claim below -- that every iterate satisfies conservation exactly
+        because `u` solves the Laplacian system -- is true in exact arithmetic
+        and false in double precision the moment `G` is wide.  `psi = G(du -
+        eps)` multiplies any error in a potential by `G`, and once a venue of
+        near-linear arcs is in the graph `G` spans eleven orders: a potential
+        good to 1e-15 gives a flow that misses conservation by 1e-5, and §12.4
+        refuses a quote whose arithmetic is otherwise fine.
+
+        The correction is the textbook one and costs one solve against a
+        factorisation already formed: `B^T dpsi = L du`, so solving `L du = s -
+        B^T psi` on the free nodes and re-deriving `psi` removes exactly the
+        amplified error.  Applied only while it *reduces* the imbalance, so a
+        step that would trade conservation for something else is dropped.
+        """
+        if rounds is None:
+            rounds = REFINE_ROUNDS
+
+        def snap(flow):
+            # §5.4's cleanup, and it belongs *inside* the refinement: snapping
+            # afterwards puts back an imbalance of up to `tol` per arc, which on
+            # the graph this exists for is the whole error again.
+            return np.where(np.abs(flow) < tol, 0.0, flow)
+
+        psi = snap(psi)
+        if not rounds or not keep.size or not idx.size:
+            return u, psi
+
+        def imbalance(flow):
+            net = np.zeros(n)
+            np.add.at(net, g.tau, flow)
+            np.subtract.at(net, g.sig, flow)
+            return s_hat - net
+
+        for _ in range(rounds):
+            residual = imbalance(psi)
+            before = float(np.max(np.abs(residual[keep]))) if keep.size else 0.0
+            if before == 0.0:
+                break
+            try:
+                delta = solver.solve(L, residual[keep])
+            except SingularSystem:
+                break
+            trial_u = u.copy()
+            trial_u[keep] += delta
+            trial = np.zeros(m)
+            trial[U] = psi_upper[U]
+            trial[idx] = g.G[idx] * (
+                trial_u[g.tau[idx]] - trial_u[g.sig[idx]] - eps[idx])
+            trial[~(comp[g.tau] & comp[g.sig])] = 0.0
+            trial = snap(trial)
+            after = float(np.max(np.abs(imbalance(trial)[keep])))
+            if not (after < before):
+                break
+            u, psi = trial_u, trial
+        return u, psi
     adjacency = None
     # One turn back per arc, which is what bounds the repair below.
     sent_to_zero = np.zeros(m, bool)
@@ -459,7 +525,7 @@ def active_set_solve(
                     # screened retry passes `partial_ok`, and refusing it there
                     # turns a route that used to be quoted into no route at all.
                     if partial_ok:
-                        psi = np.where(np.abs(psi) < tol, 0.0, psi)
+                        u, psi = polished(u, psi)
                         return Solution(psi, u, A, U, psi_upper, rho, pivots,
                                         feasible=True, reason="PARTIAL")
                     return Solution(
@@ -525,11 +591,11 @@ def active_set_solve(
         if not partial_ok:
             return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=False,
                             reason=f"no convergence in {maxit} pivots")
-        psi = np.where(np.abs(psi) < tol, 0.0, psi)
+        u, psi = polished(u, psi)
         return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True,
                         reason="PARTIAL")
 
-    psi = np.where(np.abs(psi) < tol, 0.0, psi)
+    u, psi = polished(u, psi)
     return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True)
 
 

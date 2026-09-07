@@ -62,6 +62,9 @@ pub const PERTURB_ROUNDS: usize = 4;
 /// problem; each round multiplies by ten in case the first was inside the
 /// noise it meant to clear.
 pub const PERTURB_SCALE: f64 = 1e-11;
+/// Steps of iterative refinement on the flow residual, at a feasible exit.
+/// See the reference for what it is for and what it measured.
+pub const REFINE_ROUNDS: usize = 2;
 
 /// Relative distance within which two candidates count as tied, the lower
 /// index winning.
@@ -361,6 +364,104 @@ fn bland(mask: &[bool]) -> usize {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// One or two steps of iterative refinement, on the *flow* residual.
+///
+/// `psi = G(du - eps)` multiplies any error in a potential by `G`, and once a
+/// venue of near-linear arcs is in the graph `G` spans eleven orders: a
+/// potential good to 1e-15 gives a flow that misses conservation by 1e-5, and
+/// §12.4 refuses a quote whose arithmetic is otherwise fine. Solving the same
+/// system against the imbalance -- `B^T dpsi = L du` -- removes exactly that
+/// amplified error. Applied only while it reduces the imbalance.
+#[allow(clippy::too_many_arguments)]
+fn polish(
+    arcs: &Arcs, u: &mut [f64], psi: &mut [f64], s_hat: &[f64], eps: &[f64],
+    active: &[bool], upper: &[bool], psi_upper: &[f64], comp: &[bool],
+    keep: &[usize], index: &[usize], n: usize, m: usize, tol: f64,
+    rounds: usize,
+) {
+    // §5.4's cleanup, and it belongs *inside* the refinement: snapping
+    // afterwards puts back an imbalance of up to `tol` per arc, which on the
+    // graph this exists for is the whole error again.
+    let snap = |flow: &mut [f64]| {
+        for v in flow.iter_mut() {
+            if v.abs() < tol {
+                *v = 0.0;
+            }
+        }
+    };
+    snap(psi);
+    if rounds == 0 || keep.is_empty() || !active.iter().any(|&v| v) {
+        return;
+    }
+    let imbalance = |flow: &[f64]| -> Vec<f64> {
+        let mut net = vec![0.0; n];
+        for p in 0..m {
+            net[arcs.tau[p] as usize] += flow[p];
+            net[arcs.sig[p] as usize] -= flow[p];
+        }
+        (0..n).map(|k| s_hat[k] - net[k]).collect()
+    };
+    let worst = |r: &[f64]| keep.iter().fold(0.0f64, |a, &k| a.max(r[k].abs()));
+    let k = keep.len();
+    for _ in 0..rounds {
+        let residual = imbalance(psi);
+        let before = worst(&residual);
+        if before == 0.0 {
+            break;
+        }
+        // The same Laplacian the solve formed, rebuilt rather than kept: this
+        // runs once at an exit, not once per pivot.
+        let mut matrix = vec![0.0; k * k];
+        for p in 0..m {
+            if !active[p] {
+                continue;
+            }
+            let (a, b) = (index[arcs.tau[p] as usize], index[arcs.sig[p] as usize]);
+            let g = arcs.g[p];
+            if a != usize::MAX {
+                matrix[a * k + a] += g;
+            }
+            if b != usize::MAX {
+                matrix[b * k + b] += g;
+            }
+            if a != usize::MAX && b != usize::MAX {
+                matrix[a * k + b] -= g;
+                matrix[b * k + a] -= g;
+            }
+        }
+        let mut delta: Vec<f64> = keep.iter().map(|&node| residual[node]).collect();
+        if lu::solve_in_place(&mut matrix, &mut delta, k).is_err() {
+            break;
+        }
+        let mut trial_u = u.to_vec();
+        for (slot, &node) in keep.iter().enumerate() {
+            trial_u[node] += delta[slot];
+        }
+        let mut trial = vec![0.0; m];
+        for p in 0..m {
+            trial[p] = if upper[p] { psi_upper[p] } else { 0.0 };
+        }
+        for p in 0..m {
+            if active[p] {
+                trial[p] = arcs.g[p]
+                    * (trial_u[arcs.tau[p] as usize] - trial_u[arcs.sig[p] as usize]
+                       - eps[p]);
+            }
+        }
+        for p in 0..m {
+            if !comp[arcs.tau[p] as usize] || !comp[arcs.sig[p] as usize] {
+                trial[p] = 0.0;
+            }
+        }
+        snap(&mut trial);
+        if !(worst(&imbalance(&trial)) < before) {
+            break;
+        }
+        u.copy_from_slice(&trial_u);
+        psi.copy_from_slice(&trial);
+    }
+}
+
 pub fn active_set_solve(
     arcs: &Arcs,
     src: usize,
@@ -435,6 +536,10 @@ pub fn active_set_solve(
     let mut readmitted = vec![false; m];
     let mut chol_failures = 0u32;
     let mut keep_changes = 0u32;
+    // Hoisted so `polish` at a feasible exit sees the basis the last solve
+    // used; assigned every iteration below.
+    let mut keep: Vec<usize> = Vec::new();
+    let mut index: Vec<usize> = vec![usize::MAX; n];
     let mut refits = 0u32;
     let mut timings = [0u64; 7];
     let mut mark = Mark::now();
@@ -575,11 +680,11 @@ pub fn active_set_solve(
         mark.lap(&mut timings[0]);
         // Solve on the kept nodes only: `dst` is grounded, and anything
         // outside `dst`'s component is not in the system at all.
-        let keep: Vec<usize> = (0..n).filter(|&i| comp[i] && i != dst).collect();
+        keep = (0..n).filter(|&i| comp[i] && i != dst).collect();
         u.iter_mut().for_each(|v| *v = 0.0);
         if !keep.is_empty() {
             let k = keep.len();
-            let mut index = vec![usize::MAX; n];
+            index.iter_mut().for_each(|v| *v = usize::MAX);
             for (slot, &node) in keep.iter().enumerate() {
                 index[node] = slot;
             }
@@ -771,6 +876,9 @@ pub fn active_set_solve(
                 cycles += 1;
                 if cycles >= CYCLE_PATIENCE {
                     if opt.partial_ok {
+                        polish(arcs, &mut u, &mut psi, &s_hat, &eps, &active,
+                               &upper, &psi_upper, &comp, &keep, &index, n, m,
+                               opt.tol, REFINE_ROUNDS);
                         for v in psi.iter_mut() {
                             if v.abs() < opt.tol {
                                 *v = 0.0;
@@ -867,6 +975,8 @@ pub fn active_set_solve(
             continue;
         }
 
+        polish(arcs, &mut u, &mut psi, &s_hat, &eps, &active, &upper,
+               &psi_upper, &comp, &keep, &index, n, m, opt.tol, REFINE_ROUNDS);
         for v in psi.iter_mut() {
             if v.abs() < opt.tol {
                 *v = 0.0;
@@ -884,11 +994,8 @@ pub fn active_set_solve(
             psi, u, active, upper, psi_upper, rho, pivots,
             stop: Stop::NoConvergence(opt.maxit), chol_failures, keep_changes, refits, timings };
     }
-    for v in psi.iter_mut() {
-        if v.abs() < opt.tol {
-            *v = 0.0;
-        }
-    }
+    polish(arcs, &mut u, &mut psi, &s_hat, &eps, &active, &upper,
+           &psi_upper, &comp, &keep, &index, n, m, opt.tol, REFINE_ROUNDS);
     Solution { psi, u, active, upper, psi_upper, rho, pivots, stop: Stop::Partial, chol_failures, keep_changes, refits, timings }
 }
 
