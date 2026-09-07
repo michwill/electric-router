@@ -144,3 +144,41 @@ def test_route_keeps_the_frame_and_the_graph_apart():
     params = inspect.signature(route).parameters
     assert params["late_arcs"].default is None
     assert params["extra_arcs"].default is None
+
+
+def _arc(id_, tau, sigma, venue_=""):
+    from erouter.core.types import ArcKind, PoolArc
+
+    return PoolArc(
+        id=id_, pool="0x" + "cc" * 20, kind=ArcKind.SWAP_STABLE, i=0, j=1,
+        n_coins=2, token_in="0xin", token_out="0xout", tau=tau, sigma=sigma,
+        a=1.0, B=1.0, venue=venue_,
+    )
+
+
+def test_a_late_arc_reaching_an_unpriced_node_is_refused():
+    """Being in the node map is not being priced.
+
+    `Univ3.wanted` admits a pool when `nodes.has()` both coins, but §4 fits
+    `nu` from the arcs it is given -- so a node no arc reaches keeps the
+    default 1.0 and a late arc into it reads as enormous arbitrage.  Measured:
+    RSR and XYO are in the map with zero Curve arcs, and a `WETH -> RSR` tick
+    arc came out at `eps = -5.4e7`.
+    """
+    from erouter.core.pipeline import admissible_late_arcs
+
+    frame = [_arc("curve:0", 0, 1), _arc("curve:1", 1, 2)]
+    good = _arc("v3:0", 0, 2, "uniswap v3")          # both ends priced
+    orphan = _arc("v3:1", 0, 9, "uniswap v3")        # node 9 is in no arc
+    fresh, unpriced = admissible_late_arcs(frame, [good, orphan])
+    assert [a.id for a in fresh] == ["v3:0"]
+    assert unpriced == 1
+
+
+def test_a_late_arc_already_in_the_frame_is_not_added_twice():
+    """The seam is re-entered on refit, and a duplicated arc is a second pool."""
+    from erouter.core.pipeline import admissible_late_arcs
+
+    frame = [_arc("curve:0", 0, 1), _arc("v3:0", 0, 1, "uniswap v3")]
+    fresh, unpriced = admissible_late_arcs(frame, [_arc("v3:0", 0, 1, "uniswap v3")])
+    assert fresh == [] and unpriced == 0

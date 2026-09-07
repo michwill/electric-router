@@ -13,6 +13,11 @@ use std::fmt;
 
 /// §9.6 an arc that cannot carry meaningful flow only adds pivots
 pub const DUST_FLOOR: f64 = 1e-6;
+/// How much free value an arc may claim before it is a bug rather than an
+/// opportunity. `eps = -1` is already "pays twice its input": see the
+/// reference. Dropped rather than clamped, because a clamped -1 is still the
+/// most attractive arc in the graph.
+pub const EPS_FLOOR: f64 = -1.0;
 /// §9.7 clamped (B=0) arcs would otherwise carry G = inf
 pub const CEILING_FACTOR: f64 = 1e3;
 pub const MAX_CONDITION: f64 = 1e12;
@@ -42,6 +47,7 @@ type Result<T> = std::result::Result<T, GraphError>;
 pub enum Dropped {
     Dust,
     Merged,
+    Unpriced,
 }
 
 impl Dropped {
@@ -49,6 +55,7 @@ impl Dropped {
         match self {
             Dropped::Dust => "DUST",
             Dropped::Merged => "MERGED",
+            Dropped::Unpriced => "UNPRICED",
         }
     }
 }
@@ -501,6 +508,17 @@ pub fn build(
     for (k, alive) in keep.iter().enumerate() {
         if !alive {
             dropped.push((k, Dropped::Dust));
+        }
+    }
+
+    // --- an arc that claims absurd free value is not priced ---------------
+    // `eps` may be negative -- that is a dislocated pool. It may not be
+    // impossible: past this floor it is a broken calibration or an endpoint
+    // §4 never priced, and the solver empties the trade into it.
+    for k in 0..m {
+        if keep[k] && eps[k] < EPS_FLOOR {
+            keep[k] = false;
+            dropped.push((k, Dropped::Unpriced));
         }
     }
 

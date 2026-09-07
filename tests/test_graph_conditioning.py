@@ -108,3 +108,37 @@ def test_the_condition_number_counts_the_capped_arcs():
     assert g.condition() == pytest.approx(
         float(g.G.max() / g.G.min())
     ), "every arc, not just the uncapped ones"
+
+
+def test_a_dislocated_arc_is_kept_because_that_is_what_arbitrage_looks_like():
+    """`eps < 0` is a favourably dislocated pool, not an error (§2.3).
+
+    The third arc quotes 1.05x against a frame that prices both ends at 1, so
+    `eps = -0.05` -- twenty times worse than the worst real Curve arc measured
+    (-4.5e-02) and still nowhere near the floor.
+    """
+    tau, sig, a, B, nu = _arcs([1.0, 1.0, 1.05], [1e-3, 1e-3, 1e-3])
+    g = graph.build(tau, sig, a, B, nu, 100.0, n_nodes=3, merge_duplicates=False,
+                    require=(0, 2))
+    assert g.m == 3
+    assert float(g.eps.min()) < 0.0
+
+
+def test_an_arc_claiming_impossible_value_is_dropped_not_solved_through():
+    """An endpoint §4 never priced keeps `nu = 1`, and its arcs read as riches.
+
+    Measured: a Uniswap v3 `WETH -> RSR` arc came out at
+    `eps = 1 - 1.71e6 * 1.0 / 3.15e-2 = -5.4e7`, because no Curve arc reaches
+    RSR so the least squares left its price at the default.  The relaxation
+    chased it to an objective of -1.2e14, returned PARTIAL, and every candidate
+    built on that base -- `FRAX -> WBTC` at $1M lost 4805 bp.
+    """
+    # `nu` is left at the default 1 everywhere, which is the whole point: the
+    # third arc's far end was never fitted, so its rate is read against a price
+    # nobody set.
+    tau, sig, a, B, nu = _arcs([1.0, 1.0, 1.71e6], [1e-3, 1e-3, 1e-3])
+    g = graph.build(tau, sig, a, B, nu, 100.0, n_nodes=3, merge_duplicates=False,
+                    require=(0, 2))
+    assert g.m == 2, "the impossible arc must not reach the solver"
+    assert float(g.eps.min()) >= graph.EPS_FLOOR
+    assert "UNPRICED" in set(g.dropped.values())

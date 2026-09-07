@@ -556,6 +556,45 @@ class Prepared:
     block: int = 0
 
 
+def admissible_late_arcs(
+    arcs: list[PoolArc], late_arcs: list[PoolArc]
+) -> tuple[list[PoolArc], int]:
+    """The late arcs the frame can price, and how many it could not.
+
+    `late_arcs` puts arcs in the *graph* without putting them in the *frame*,
+    which is the whole point of the seam -- 146 Uniswap pools contributing 32
+    tick-arcs each would outvote every Curve pool in §4's weighted least
+    squares.  The other half of that bargain is enforced here: §4 fits `nu`
+    from the arcs it was given, so a node no such arc reaches keeps the default
+    1.0, and an arc into one reads as free money.
+
+    Measured at block 25,925,722: RSR and XYO are in the node map -- so
+    `Univ3.wanted`'s `nodes.has()` admits them -- but no Curve arc touches
+    either, so a `WETH -> RSR` tick arc came out at
+
+        eps = 1 - a nu_sig / nu_tau = 1 - 1.71e6 * 1.0 / 3.15e-2 = -5.4e7
+
+    The relaxation emptied the trade into it, reached an objective of -1.2e14,
+    returned PARTIAL, and every candidate family is a perturbation of that
+    base: `FRAX -> WBTC` at $1M quoted 4,805 bp below Curve alone, with no
+    Uniswap leg in the route it settled for.
+
+    Being in the node map is not being priced.
+    """
+    have = {a.id for a in arcs}
+    priced = {a.tau for a in arcs} | {a.sigma for a in arcs}
+    fresh: list[PoolArc] = []
+    unpriced = 0
+    for arc in late_arcs:
+        if arc.id in have:
+            continue
+        if arc.tau not in priced or arc.sigma not in priced:
+            unpriced += 1
+            continue
+        fresh.append(copy.copy(arc))
+    return fresh, unpriced
+
+
 def route(
     pools: list[PoolSpec],
     nodes: NodeMap,
@@ -678,10 +717,11 @@ def route(
     nu = prepared.nu
     # After the frame is fitted and before anything is solved: see above.
     if late_arcs:
-        have = {a.id for a in arcs}
-        fresh = [copy.copy(a) for a in late_arcs if a.id not in have]
+        fresh, unpriced = admissible_late_arcs(arcs, late_arcs)
         arcs = arcs + fresh
         result.counters["late_arcs"] = len(fresh)
+        if unpriced:
+            result.counters["late_arcs_unpriced"] = unpriced
     result.arcs = arcs
     result.nu = nu
     result.pool_names = dict(prepared.pool_names)

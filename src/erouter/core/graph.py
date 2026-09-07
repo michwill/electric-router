@@ -15,6 +15,9 @@ import numpy as np
 
 # §9.6 an arc that cannot carry meaningful flow only adds pivots
 DUST_FLOOR = 1e-6
+#: How much free value an arc may claim before it is a bug rather than an
+#: opportunity.  `eps = -1` is already "pays twice its input"; see `build`.
+EPS_FLOOR = -1.0
 # §9.7 clamped (B=0) arcs would otherwise carry G = inf
 CEILING_FACTOR = 1e3
 MAX_CONDITION = 1e12
@@ -327,6 +330,26 @@ def build(
     keep = ~dust
     for k in np.flatnonzero(dust):
         dropped[int(k)] = "DUST"
+
+    # --- an arc that claims absurd free value is not priced ---------------
+    #
+    # `eps` is allowed to be negative -- that is a dislocated pool, and §2.3
+    # says it is how arbitrage enters the problem.  What it is not allowed to
+    # be is impossible.  `eps = -1` already says the arc pays twice what it is
+    # given; the worst real Curve arc measured is -4.5e-02, and cross-venue
+    # dislocations are basis points.  So anything past this floor is a broken
+    # calibration or an unpriced endpoint, not an opportunity, and the solver
+    # will empty the trade into it: one WETH -> RSR arc at `eps = -5.4e7` took
+    # the objective to -1.2e14 and the base solve to PARTIAL.
+    #
+    # Dropped rather than clamped, for the reason §2.3 clamps `B` instead: a
+    # clamped `eps` of -1 is still the most attractive arc in the graph.  An
+    # arc nothing can price is not an arc.
+    absurd = keep & (eps < EPS_FLOOR)
+    if absurd.any():
+        keep = keep & ~absurd
+        for k in np.flatnonzero(absurd):
+            dropped[int(k)] = "UNPRICED"
 
     # --- §9.5 duplicates, as parallel resistors -------------------------
     if merge_duplicates:
