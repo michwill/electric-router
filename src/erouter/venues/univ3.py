@@ -269,7 +269,11 @@ def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
                 # And this is what buys the ballot a candidate without them, so
                 # that adding the venue cannot cost the answer.
                 venue="uniswap v3",
-                tvl_usd=tvl_usd, note=f"v3 tick {k}"))
+                # Named for the venue and the fee tier, because the note is
+                # what the route diagram prints: "v3, 16 tick(s)" is not a
+                # thing anyone scanning a route for Uniswap will recognise.
+                tvl_usd=tvl_usd,
+                note=f"Uniswap v3 {state.fee / 10_000:g}% tick {k}"))
     return out
 
 
@@ -329,5 +333,8 @@ def collapse(live, psi, nu, nodes, banks):
         # Measured: every v3 leg vanished from the winning candidate while the
         # solve was still routing nineteen v3 arcs through it.
         arc.cap = capacity(banks[key]) * arc.rate_in
-        arc.note = f"v3, {len(banks[key])} tick(s)"
+        # The tick arcs carry the venue and fee tier; the collapsed leg keeps
+        # that and drops the tick index, which no longer means anything once
+        # they are one leg.
+        arc.note = f"{arc.note.split(' tick ')[0]} x{len(banks[key])}"
     return keep, np.array(flows, dtype=float)
