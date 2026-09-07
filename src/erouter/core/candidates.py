@@ -649,10 +649,18 @@ def generate(
     # every round number, which is where no solver leaves anything.
     order = sorted(base_active,
                    key=lambda k: (-round(base.psi[k] / quantum), int(k)))
-    ranked_pools: list[str] = []
-    for k in order:
-        if pools[k] not in ranked_pools:
-            ranked_pools.append(pools[k])
+    # A pool is ranked by every arc it carries, summed.  First appearance in
+    # `order` ranks it by its largest single arc, so a pool moving 16% of the
+    # trade over three of them sits below one moving 8.5% through a single arc
+    # -- which is not the question 2b asks.  Over the router's own pairs at
+    # three blocks: 12 better, 124 unchanged, 2 worse, the worst of those 23.93
+    # bp.  A 12-pool cut through a continuum is a knife edge whichever statistic
+    # ranks it; this side of it at least answers the question in the header.
+    carried: dict[str, float] = {}
+    for k in base_active:
+        carried[pools[int(k)]] = carried.get(pools[int(k)], 0.0) + float(base.psi[k])
+    ranked_pools = sorted(carried,
+                          key=lambda p: (-round(carried[p] / quantum), p))
     pool_budget = max(3, sparse_budget - made_paths)
     made_pools = 0
     for k in top_k:

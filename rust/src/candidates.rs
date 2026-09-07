@@ -21,6 +21,8 @@
 //! active set is *identical* across the endpoint allocations, so no
 //! drop-an-arc candidate can find the interior optimum.
 
+use std::collections::HashMap;
+
 use crate::graph::ArcArrays;
 use crate::multiport::element_from;
 use crate::realize::{prune_dust, RealizedRoute, DUST_SHARE};
@@ -831,12 +833,19 @@ pub fn generate(
     let rank = |k: usize| (base.psi[k] / quantum).round() as i64;
     let mut order = base_active.clone();
     order.sort_by(|&a, &b| rank(b).cmp(&rank(a)).then(a.cmp(&b)));
-    let mut ranked_pools: Vec<String> = Vec::new();
-    for &k in &order {
-        if !ranked_pools.contains(&pools[k]) {
-            ranked_pools.push(pools[k].clone());
-        }
+    // A pool is ranked by every arc it carries, summed: see the reference.
+    // Ranking on its largest single arc understates one that splits its flow.
+    // Accumulated in index order, as there, so the two sums agree bit for bit.
+    let mut carried: HashMap<&str, f64> = HashMap::new();
+    for &k in &base_active {
+        *carried.entry(pools[k].as_str()).or_insert(0.0) += base.psi[k];
     }
+    let mut ranked_pools: Vec<String> =
+        carried.keys().map(|p| (*p).to_string()).collect();
+    ranked_pools.sort_by(|a, b| {
+        let (x, y) = (carried[a.as_str()] / quantum, carried[b.as_str()] / quantum);
+        (y.round() as i64).cmp(&(x.round() as i64)).then(a.cmp(b))
+    });
     let pool_budget = 3.max(sparse_budget.saturating_sub(made_paths));
     let mut made_pools = 0usize;
     for &k in &opts.top_k {
