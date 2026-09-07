@@ -381,14 +381,28 @@ def active_set_solve(
                 delta = solver.solve(matrix, residual[keep])
             except SingularSystem:
                 break
-            trial_u = u.copy()
-            trial_u[keep] += delta
-            trial = np.zeros(m)
+            # The correction is added to the *flow*, never to `u` and back.
+            #
+            # `psi = G(u_tau - u_sig - eps)` and the potentials carry a large
+            # common offset -- 5.86e3 on the graph this was found on, where one
+            # ULP is 9.1e-13.  The corrections themselves are ~2.0e-08, but what
+            # the flow depends on is the difference between two neighbouring
+            # ones: 6.5e-13 there, *below* that ULP.  So `(u + du)_tau -
+            # (u + du)_sig` rounds to `u_tau - u_sig` and the whole correction
+            # is annihilated by the subtraction -- `dpsi` came out exactly 0.0
+            # on an arc the system said should move by 2.1e-08.
+            #
+            # Differencing `du` first keeps every digit of it, because `du` has
+            # no offset to lose them to.
+            step = np.zeros(n)
+            step[keep] = delta
+            trial = psi.copy()
+            trial[idx] += g.G[idx] * (step[g.tau[idx]] - step[g.sig[idx]])
             trial[U] = psi_upper[U]
-            trial[idx] = g.G[idx] * (
-                trial_u[g.tau[idx]] - trial_u[g.sig[idx]] - eps[idx])
             trial[~(comp[g.tau] & comp[g.sig])] = 0.0
             trial = snap(trial)
+            trial_u = u.copy()
+            trial_u[keep] += delta
             after = float(np.max(np.abs(imbalance(trial)[keep])))
             if not (after < before):
                 break

@@ -433,25 +433,35 @@ fn polish(
         if lu::solve_in_place(&mut matrix, &mut delta, k).is_err() {
             break;
         }
-        let mut trial_u = u.to_vec();
+        // The correction is added to the *flow*, never to `u` and back: see the
+        // reference.  The potentials carry a large common offset and the flow
+        // depends on the difference between two neighbouring corrections, which
+        // is below one ULP of that offset -- so re-deriving `psi` from `u + du`
+        // rounds the whole correction away.
+        let mut step = vec![0.0; n];
         for (slot, &node) in keep.iter().enumerate() {
-            trial_u[node] += delta[slot];
+            step[node] = delta[slot];
         }
-        let mut trial = vec![0.0; m];
-        for p in 0..m {
-            trial[p] = if upper[p] { psi_upper[p] } else { 0.0 };
-        }
+        let mut trial = psi.to_vec();
         for p in 0..m {
             if active[p] {
-                trial[p] = arcs.g[p]
-                    * (trial_u[arcs.tau[p] as usize] - trial_u[arcs.sig[p] as usize]
-                       - eps[p]);
+                trial[p] += arcs.g[p]
+                    * (step[arcs.tau[p] as usize] - step[arcs.sig[p] as usize]);
+            }
+        }
+        for p in 0..m {
+            if upper[p] {
+                trial[p] = psi_upper[p];
             }
         }
         for p in 0..m {
             if !comp[arcs.tau[p] as usize] || !comp[arcs.sig[p] as usize] {
                 trial[p] = 0.0;
             }
+        }
+        let mut trial_u = u.to_vec();
+        for (slot, &node) in keep.iter().enumerate() {
+            trial_u[node] += delta[slot];
         }
         snap(&mut trial);
         if !(worst(&imbalance(&trial)) < before) {

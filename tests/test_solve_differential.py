@@ -215,7 +215,10 @@ def test_a_restricted_resolve_from_a_narrow_warm_start_agrees():
     theirs = np.frombuffer(got["psi"], dtype=np.float64)
 
     assert ours.reason == "" and got["reason"] == "", (ours.reason, got["reason"])
-    assert ours.pivots == got["pivots"] == 4
+    # Three since the refinement landed: `base` is refined too, so the
+    # `acyclic` warm start this is seeded from is a different one.  Both
+    # sides moved together, which is what this test is actually for.
+    assert ours.pivots == got["pivots"] == 3
     assert np.allclose(ours.psi, theirs, atol=1e-6), (ours.psi, theirs)
 
 
