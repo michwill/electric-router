@@ -358,6 +358,14 @@ def active_set_solve(
         if not rounds or not keep.size or not idx.size:
             return u, psi
 
+        # Rebuilt from the basis being returned rather than reused from the
+        # loop: `keep` is recomputed at the top of an iteration and several
+        # pivot branches `continue` before the Laplacian is rebuilt, so the two
+        # can disagree by an arc at an exit -- which numpy reports as a
+        # dimension mismatch inside `solve`, and which read as a routing refusal
+        # on three of seventeen live cases.
+        matrix = laplacian(g.tau[idx], g.sig[idx], g.G[idx], n, keep)
+
         def imbalance(flow):
             net = np.zeros(n)
             np.add.at(net, g.tau, flow)
@@ -370,7 +378,7 @@ def active_set_solve(
             if before == 0.0:
                 break
             try:
-                delta = solver.solve(L, residual[keep])
+                delta = solver.solve(matrix, residual[keep])
             except SingularSystem:
                 break
             trial_u = u.copy()
