@@ -961,7 +961,14 @@ def _quote(
             src_token=src_token, dst_token=dst_token, amount_in=amount_in,
             potentials=report.solution.u, collapse=collapse,
         )
-    conflicts = check_one_arc_per_pool(result.route)
+    # The same set the pricer refuses off, asked of the client the same way.
+    # A client that cannot advance a pool advances none, so an empty set is the
+    # honest answer rather than "no opinion": without it a re-entering route
+    # goes to the chain, whose static calls price the second leg against a pool
+    # the first one already moved and hand back a number that beats every
+    # honest candidate.
+    advanceable = frozenset(getattr(client, "reentrant_pools", ()) or ())
+    conflicts = check_one_arc_per_pool(result.route, advanceable)
     if conflicts:
         result.warnings.append(
             f"{len(conflicts)} pool(s) used more than once; a view-only quote "
@@ -1007,6 +1014,7 @@ def _quote(
                 max_candidates=max_candidates, gas_floor=gas_floor,
                 max_legs=max_legs,
                 element_split=element_split if splitter is not None else None,
+                advanceable=advanceable,
                 # §6: one candidate per venue, dropping it.  Costs nothing on a
                 # universe of one venue, which is every universe until something
                 # declares otherwise.
@@ -1019,7 +1027,7 @@ def _quote(
                 pool_set, arcs, nu, nodes,
                 src_token=src_token, dst_token=dst_token, amount_in=amount_in,
                 potentials=report.solution.u, max_legs=max_legs,
-                collapse=collapse,
+                collapse=collapse, advanceable=advanceable,
             )
         with clock("verify"):
             verify(
@@ -1050,7 +1058,7 @@ def _quote(
                 realize_candidates(
                     trial, [arc], nu, nodes,
                     src_token=src_token, dst_token=dst_token, amount_in=amount_in,
-                    max_legs=max_legs, collapse=collapse,
+                    max_legs=max_legs, collapse=collapse, advanceable=advanceable,
                 )
                 if candidate.status == "ready":
                     pool_set.candidates.append(candidate)
@@ -1062,7 +1070,7 @@ def _quote(
                 realize_candidates(
                     trial, pair, nu, nodes,
                     src_token=src_token, dst_token=dst_token, amount_in=amount_in,
-                    max_legs=max_legs, collapse=collapse,
+                    max_legs=max_legs, collapse=collapse, advanceable=advanceable,
                 )
                 if candidate.status == "ready":
                     pool_set.candidates.append(candidate)
@@ -1926,6 +1934,7 @@ def _refit_winner(
         trial, arcs, nu, nodes,
         src_token=src_token, dst_token=dst_token, amount_in=amount_in,
         max_legs=max_legs,
+        advanceable=frozenset(getattr(client, "reentrant_pools", ()) or ()),
     )
     verify_candidates(trial, client, amount_in=amount_in)
     if not refitted.ok:

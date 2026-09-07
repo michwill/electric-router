@@ -940,7 +940,9 @@ ADVANCEABLE = (ArcKind.SWAP_STABLE, ArcKind.DEPOSIT_FIXED,
                ArcKind.DEPOSIT_DYN, ArcKind.DEPOSIT_FIXED_NOFLAG)
 
 
-def check_one_arc_per_pool(route: RealizedRoute) -> list[str]:
+def check_one_arc_per_pool(route: RealizedRoute,
+                           advanceable: frozenset[str] | None = None,
+                           ) -> list[str]:
     """Decision 3: a pool appears once, or its legs form one multi-port element.
 
     A view-only chained quoter cannot see its own earlier leg, so two arcs of
@@ -964,6 +966,11 @@ def check_one_arc_per_pool(route: RealizedRoute) -> list[str]:
     * an LP *input* paying several coins is refused: `evaluate` cannot advance a
       withdrawal, so it would price every burn against one supply.
 
+    `advanceable` is the same gate `candidates.conflicting_pools` applies one
+    stage earlier: an element is admissible only where a second leg can be
+    priced against the pool the first one left.  `None` asks the structural
+    question alone.
+
     Returns the pool addresses whose legs are not an admissible element.
     """
     order: dict[str, list[RealizedLeg]] = {}
@@ -978,6 +985,9 @@ def check_one_arc_per_pool(route: RealizedRoute) -> list[str]:
         try:
             element_of(legs)
         except (MultiPortError, ValueError):
+            bad.append(pool)
+            continue
+        if advanceable is not None and pool not in advanceable:
             bad.append(pool)
     return sorted(bad)
 

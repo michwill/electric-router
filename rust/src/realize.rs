@@ -1255,7 +1255,12 @@ fn reused_pools(arcs: &[PoolArc]) -> Vec<String> {
 /// than a rule to remember (`multiport.rs`).
 ///
 /// Returns the pool addresses whose legs are not an admissible element.
-pub fn check_one_arc_per_pool(route: &RealizedRoute) -> Vec<String> {
+/// `advanceable` is the gate `candidates::conflicting_pools` applies one stage
+/// earlier: an element counts only where the pool can be advanced.
+pub fn check_one_arc_per_pool(
+    route: &RealizedRoute,
+    advanceable: Option<&std::collections::HashSet<String>>,
+) -> Vec<String> {
     let mut order: Vec<(String, Vec<usize>)> = Vec::new();
     for (k, realized) in route.legs.iter().enumerate() {
         if realized.is_conversion() {
@@ -1280,7 +1285,9 @@ pub fn check_one_arc_per_pool(route: &RealizedRoute) -> Vec<String> {
                 (rl.kind, rl.leg.i, rl.leg.j)
             })
             .collect();
-        if element_of_legs(&first.target, first.leg.n, &triples).is_err() {
+        if element_of_legs(&first.target, first.leg.n, &triples).is_err()
+            || advanceable.is_some_and(|set| !set.contains(pool))
+        {
             bad.push(pool.clone());
         }
     }

@@ -410,7 +410,7 @@ impl Route {
     /// The pools whose legs are not an admissible element (decision 3).
     #[wasm_bindgen(js_name = checkOneArcPerPool)]
     pub fn check_one_arc_per_pool(&self) -> Vec<String> {
-        realize::check_one_arc_per_pool(&self.inner)
+        realize::check_one_arc_per_pool(&self.inner, None)
     }
 
     #[wasm_bindgen(js_name = routeConductance)]

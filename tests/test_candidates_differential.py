@@ -326,6 +326,19 @@ def both_ballots(seed, **kw):
 
 
 @pytest.mark.parametrize("seed", SEEDS)
+def test_the_advanceable_gate_lands_the_same_way_on_both_sides(seed):
+    """An empty set is the strictest gate, so it moves the most candidates.
+
+    It is also the one a client with no exact models supplies, which makes it
+    the case that actually ships rather than a corner.
+    """
+    skip_where_the_solver_diverges(seed)
+    *_, want, got = both_ballots(seed, advanceable=[])
+    assert got.labels() == [c.label for c in want.candidates]
+    assert got.kinds() == [c.kind for c in want.candidates]
+
+
+@pytest.mark.parametrize("seed", SEEDS)
 def test_the_same_candidates_are_generated_in_the_same_order(seed):
     skip_where_the_solver_diverges(seed)
     *_, want, got = both_ballots(seed)

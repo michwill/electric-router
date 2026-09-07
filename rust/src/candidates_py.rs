@@ -9,6 +9,7 @@
 //! see `verify.rs` -- so `ready()` says which candidates need pricing and
 //! `verify()` takes what came back.
 
+use std::collections::HashSet;
 use crate::candidates::{self, CandidateSet, GenerateOptions};
 use crate::gas::GasTable;
 use crate::graph_py::Graph;
@@ -105,13 +106,13 @@ impl Ballot {
     #[pyo3(signature = (graph, arcs, src, dst, psi_total, base_psi, *,
                         base_certificate=false, max_candidates=20, top_k=None,
                         gas_floor=0.0, max_legs=32, max_slots=8,
-                        element_split=None, venues=None))]
+                        element_split=None, venues=None, advanceable=None))]
     fn generate(
         graph: PyRef<'_, Graph>, arcs: PyRef<'_, Arcs>, src: usize, dst: usize,
         psi_total: f64, base_psi: Vec<f64>, base_certificate: bool,
         max_candidates: usize, top_k: Option<Vec<usize>>, gas_floor: f64,
         max_legs: usize, max_slots: usize, element_split: Option<Py<PyAny>>,
-        venues: Option<Vec<String>>,
+        venues: Option<Vec<String>>, advanceable: Option<Vec<String>>,
     ) -> PyResult<Ballot> {
         let opts = GenerateOptions {
             base_certificate,
@@ -121,6 +122,9 @@ impl Ballot {
             max_legs,
             max_slots,
             venues: venues.unwrap_or_default(),
+            advanceable: advanceable.map(|v| {
+                v.into_iter().map(|p| p.to_ascii_lowercase()).collect()
+            }),
         };
         let base = Solution { psi: base_psi, ..empty_solution() };
         let members = &arcs.inner;
@@ -189,9 +193,10 @@ impl Ballot {
 
     /// Pools carrying flow on more than one arc whose arcs are not one element.
     #[staticmethod]
-    #[pyo3(signature = (arcs, psi, psi_total=0.0))]
+    #[pyo3(signature = (arcs, psi, psi_total=0.0, *, advanceable=None))]
     fn conflicting_pools(
         arcs: PyRef<'_, Arcs>, psi: Vec<f64>, psi_total: f64,
+        advanceable: Option<Vec<String>>,
     ) -> PyResult<Vec<(String, Vec<usize>)>> {
         if psi.len() != arcs.inner.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -199,7 +204,11 @@ impl Ballot {
                 psi.len(), arcs.inner.len()
             )));
         }
-        Ok(candidates::conflicting_pools(&arcs.inner, &psi, psi_total, None, None))
+        let gate: Option<HashSet<String>> = advanceable
+            .map(|v| v.into_iter().map(|p| p.to_ascii_lowercase()).collect());
+        Ok(candidates::conflicting_pools(
+            &arcs.inner, &psi, psi_total, None, None, gate.as_ref(),
+        ))
     }
 
     /// Each conflicting pool's arcs, the one carrying most first.
@@ -324,18 +333,23 @@ impl Ballot {
     /// Turn each candidate's flow into legs, marking the ones that cannot be.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (arcs, nu, nodes, src_token, dst_token, amount_in, *,
-                        potentials=None, max_legs=32, max_slots=8))]
+                        potentials=None, max_legs=32, max_slots=8,
+                        advanceable=None))]
     fn realize_candidates(
         &mut self, arcs: PyRef<'_, Arcs>, nu: Vec<f64>, nodes: PyRef<'_, NodeMap>,
         src_token: &str, dst_token: &str, amount_in: &str,
         potentials: Option<Vec<f64>>, max_legs: usize, max_slots: usize,
+        advanceable: Option<Vec<String>>,
     ) -> PyResult<()> {
         let amount = amount_in.parse().map_err(|_| {
             pyo3::exceptions::PyValueError::new_err(format!("not a u256: {amount_in}"))
         })?;
+        let gate = advanceable.map(|v| {
+            v.into_iter().map(|p| p.to_ascii_lowercase()).collect::<HashSet<String>>()
+        });
         verify::realize_candidates(
             &mut self.inner, &arcs.inner, &nu, &nodes.inner, src_token, dst_token,
-            amount, potentials.as_deref(), max_legs, max_slots,
+            amount, potentials.as_deref(), max_legs, max_slots, gate.as_ref(),
         );
         Ok(())
     }

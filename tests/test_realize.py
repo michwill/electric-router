@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import replace
 
@@ -379,6 +380,34 @@ def test_one_arc_per_pool_violation_is_detected():
         src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
     )
     assert check_one_arc_per_pool(route) == [POOL_A.lower()]
+
+
+def test_an_admissible_element_still_needs_an_advanceable_pool():
+    """The realise-side half of the gate `conflicting_pools` applies earlier.
+
+    One coin in and two out is a legal element on a 3-coin pool, so the
+    structural question alone says nothing is wrong.  Pricing the second port
+    means asking the pool as the first port left it, which only a stableswap
+    answers -- so the caller says which pools it can advance, and an element on
+    any other is the re-entry it always was.
+    """
+    nodes = base_nodes()
+    fan = [
+        dataclasses.replace(
+            arc(POOL_A, USDC, CRVUSD, nodes, a=1.0, i=0, j=1), n_coins=3),
+        dataclasses.replace(
+            arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, i=0, j=2), n_coins=3),
+        arc(POOL_B, CRVUSD, WETH, nodes, a=1 / 4000.0, i=0, j=1),
+    ]
+    nu = np.ones(nodes.n_nodes)
+    nu[nodes.node(WETH)] = 4000.0
+    route = realize(
+        fan, np.array([600.0, 400.0, 600.0]), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+    assert check_one_arc_per_pool(route) == []
+    assert check_one_arc_per_pool(route, frozenset()) == [POOL_A.lower()]
+    assert check_one_arc_per_pool(route, frozenset({POOL_A.lower()})) == []
 
 
 def test_a_deposit_and_a_swap_on_one_pool_conflict():

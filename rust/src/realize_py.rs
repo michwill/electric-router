@@ -357,7 +357,7 @@ impl Route {
 
     /// The pools whose legs are not an admissible element (decision 3).
     fn check_one_arc_per_pool(&self) -> Vec<String> {
-        realize::check_one_arc_per_pool(&self.inner)
+        realize::check_one_arc_per_pool(&self.inner, None)
     }
 
     fn route_conductance(&self) -> f64 {

@@ -21,7 +21,7 @@
 //! active set is *identical* across the endpoint allocations, so no
 //! drop-an-arc candidate can find the interior optimum.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::graph::ArcArrays;
 use crate::multiport::element_from;
@@ -297,12 +297,17 @@ pub fn legs_of(arcs: &[PoolArc], psi: &[f64], pools: Option<&[String]>) -> usize
     total
 }
 
+/// `advanceable` is which pools a second leg can be priced against, and an
+/// element is admitted only for those: see the reference. Structure alone is
+/// not enough, because pricing the second port needs the pool as the first
+/// port left it. `None` asks the structural question by itself.
 pub fn conflicting_pools(
     arcs: &[PoolArc],
     psi: &[f64],
     psi_total: f64,
     pools: Option<&[String]>,
     cache: Option<&mut Vec<(Vec<usize>, bool)>>,
+    advanceable: Option<&HashSet<String>>,
 ) -> Vec<(String, Vec<usize>)> {
     let owned;
     let lowered = match pools {
@@ -362,8 +367,10 @@ pub fn conflicting_pools(
         }
         let clashes = if triples.len() == 1 {
             false
+        } else if element_from(&arcs[idx[0]].pool, arcs[idx[0]].n_coins, &triples).is_err() {
+            true
         } else {
-            element_from(&arcs[idx[0]].pool, arcs[idx[0]].n_coins, &triples).is_err()
+            advanceable.is_some_and(|set| !set.contains(&pool))
         };
         if clashes {
             out.push((pool, idx.clone()));
@@ -467,6 +474,9 @@ pub struct GenerateOptions {
     pub max_slots: usize,
     /// Per-arc venue labels, or empty for a universe of one venue.
     pub venues: Vec<String>,
+    /// Pools a second leg can be priced against. `None` asks the structural
+    /// element question alone; see `conflicting_pools`.
+    pub advanceable: Option<HashSet<String>>,
 }
 
 impl Default for GenerateOptions {
@@ -480,6 +490,7 @@ impl Default for GenerateOptions {
             max_legs: 32,
             max_slots: 8,
             venues: Vec::new(),
+            advanceable: None,
         }
     }
 }
@@ -650,6 +661,7 @@ impl Generator<'_> {
             }
             let conflicts = conflicting_pools(
                 self.arcs, &got.psi, 0.0, Some(&self.pools), Some(&mut self.elements),
+                self.opts.advanceable.as_ref(),
             );
             if conflicts.is_empty() {
                 solution = Some(got);
@@ -991,6 +1003,7 @@ pub fn generate(
     // 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
     let conflicts = conflicting_pools(
         arcs, &base.psi, psi_total, Some(&pools), Some(&mut ballot.elements),
+        opts.advanceable.as_ref(),
     );
     if !conflicts.is_empty() {
         let mut forbidden = vec![false; g.m()];
@@ -1124,6 +1137,7 @@ pub fn generate(
                     max_legs: opts.max_legs,
                     max_slots: opts.max_slots,
                     venues: Vec::new(),
+                    advanceable: opts.advanceable.clone(),
                 };
                 let inner = generate(&sub, &sub_arcs, src, dst, psi_total,
                                      &sub_base, &sub_opts, element_split);

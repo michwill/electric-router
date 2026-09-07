@@ -82,6 +82,7 @@ pub fn realize_candidates(
     potentials: Option<&[f64]>,
     max_legs: usize,
     max_slots: usize,
+    advanceable: Option<&std::collections::HashSet<String>>,
 ) {
     for candidate in candidates.candidates.iter_mut() {
         let active: Vec<usize> =
@@ -103,7 +104,7 @@ pub fn realize_candidates(
             }
         };
 
-        let conflicts = check_one_arc_per_pool(&route);
+        let conflicts = check_one_arc_per_pool(&route, advanceable);
         if !conflicts.is_empty() {
             candidate.status = "conflict".into();
             candidate.note = format!("{} pool(s) used twice", conflicts.len());

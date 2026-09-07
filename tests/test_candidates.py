@@ -388,6 +388,74 @@ def test_a_parallel_arc_does_not_excuse_a_real_re_entry():
     assert list(conflicts) == [POOL[0].lower()]
 
 
+def element(index, pool, tau, sigma, *, i, j, n_coins=3, B=1.0):
+    """One port of a multi-port element: same pool, same input coin, other out."""
+    return PoolArc(
+        id=f"{pool}:{index}", pool=pool, kind=ArcKind.SWAP_CRYPTO,
+        i=i, j=j, n_coins=n_coins, token_in=f"0xin{i}", token_out=f"0xout{j}",
+        tau=tau, sigma=sigma, a=1.0, B=B, note=f"pool{index}",
+    )
+
+
+ELEMENT = [element(0, POOL[0], 0, 1, i=0, j=1),
+           element(1, POOL[0], 0, 2, i=0, j=2, B=2.0)]
+LIVE = np.array([1.0, 1.0])
+
+
+def test_an_element_is_admitted_on_its_structure_alone_by_default():
+    """`advanceable=None` asks the port question and nothing else.
+
+    One coin in and two out fits `#in + #out <= N` on a 3-coin pool, so the
+    structural rule admits it -- which is this function as its own reference.
+    """
+    assert conflicting_pools(ELEMENT, LIVE) == {}
+
+
+def test_an_element_needs_a_pool_a_second_leg_can_be_priced_against():
+    """Structure is not enough once the caller says what it can price.
+
+    The second port has to be priced against the pool the first one left, and
+    only a stableswap can be advanced.  `element_split` already refuses off
+    this same set, so admitting the element here only ever produced a candidate
+    that reached the quoter and scored 0.
+    """
+    assert conflicting_pools(ELEMENT, LIVE, advanceable=frozenset()) == {
+        POOL[0].lower(): [0, 1]
+    }
+    assert conflicting_pools(
+        ELEMENT, LIVE, advanceable=frozenset({POOL[0].lower()})) == {}
+
+
+def test_the_gate_does_not_touch_a_parallel_bank():
+    """A v3 bank is one leg, not an element, so no pool has to be advanceable."""
+    arcs = [
+        arc(0, POOL[0], 0, 1, parallel=True),
+        arc(1, POOL[0], 0, 1, B=2.0, parallel=True),
+    ]
+    assert conflicting_pools(arcs, LIVE, advanceable=frozenset()) == {}
+
+
+def test_one_pool_does_not_read_another_pools_cached_verdict():
+    """The cache is keyed by arc indices, and `ArcKind` is an `IntEnum`.
+
+    Writing the verdict under the last arc's `(kind, i, j)` made
+    `(SWAP_STABLE, 1, 2)` and the index tuple `(0, 1, 2)` the same dict key, so
+    a pool whose arcs were 0, 1 and 2 could be answered for by a pool that
+    merely had a stable 1 -> 2 leg.
+    """
+    shared: dict = {}
+    first = [arc(0, POOL[0], 0, 1), arc(1, POOL[0], 1, 2),
+             arc(2, POOL[0], 2, 3)]
+    conflicting_pools(first, np.array([1.0, 1.0, 1.0]), cache=shared)
+    assert all(isinstance(k, tuple) and all(isinstance(v, int) for v in k)
+               for k in shared)
+    # The same three indices, now a genuine element on an advanceable pool.
+    again = [element(0, POOL[1], 0, 1, i=0, j=1),
+             element(1, POOL[1], 0, 2, i=0, j=2)]
+    assert conflicting_pools(again, LIVE, cache=shared,
+                             advanceable=frozenset({POOL[1].lower()})) == {}
+
+
 def test_parallel_arcs_count_as_one_leg():
     """`resolve` rejects on the leg count, and legs are what a route executes."""
     from erouter.core.candidates import legs_of

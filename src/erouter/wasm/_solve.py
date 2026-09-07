@@ -287,7 +287,8 @@ class Ballot:
     @staticmethod
     def generate(graph, arcs, src, dst, psi_total, base_psi, *,
                  base_certificate=False, max_candidates=20, top_k=None,
-                 gas_floor=0.0, max_legs=32, max_slots=8, element_split=None):
+                 gas_floor=0.0, max_legs=32, max_slots=8, element_split=None,
+                 venues=None, advanceable=None):
         proxy = None
         if element_split is not None:
             from pyodide.ffi import create_proxy, to_js
@@ -310,6 +311,8 @@ class Ballot:
                 bool(base_certificate), int(max_candidates),
                 None if top_k is None else _u32(top_k),
                 float(gas_floor), int(max_legs), int(max_slots), proxy,
+                None if venues is None else [str(v) for v in venues],
+                None if advanceable is None else sorted(str(p) for p in advanceable),
             )
         finally:
             # The module keeps no reference once `generate` returns, so the

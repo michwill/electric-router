@@ -277,7 +277,9 @@ def legs_of(arcs: list[PoolArc], psi: np.ndarray,
 
 def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
                       Psi: float = 0.0, *, pools: np.ndarray | None = None,
-                      cache: dict | None = None) -> dict[str, list[int]]:
+                      cache: dict | None = None,
+                      advanceable: frozenset[str] | None = None,
+                      ) -> dict[str, list[int]]:
     """Pools carrying flow on more than one arc whose arcs are not one element.
 
     The same rule `check_one_arc_per_pool` applies to realised legs, asked here
@@ -296,6 +298,18 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
     pool read as 17 entries, and the repair in `generate.resolve` then banned 788
     arcs a quote, squeezing 203 feasible re-solves down to 3 distinct
     candidates.
+
+    `advanceable` is which pools a second leg can actually be priced against,
+    and an element is admitted only for those.  Structure is not enough: the
+    port bound says a 3-coin pool *may* be entered once and left twice, but
+    pricing the second port needs the pool as the first port left it, and only
+    a stableswap can be advanced (`exact_probe.reentrant_pools` says why).  The
+    pricer already refuses the rest -- `element_split` returns `None` off that
+    same set -- so admitting them here only produced candidates that reached
+    the quoter and scored 0: 440 of 1,680 at one block, every one of them a
+    Curve tricrypto.  An exemption that cannot be priced is not an exemption.
+    `None` asks the structural question alone, which is this function as its
+    own reference.
 
     `pools` and `cache` are the same answer asked twice.  `generate` calls this
     thirty-six times a quote against arcs that do not change, so lowering every
@@ -319,15 +333,19 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
         # A parallel arc stands in for its siblings, because they are one leg
         # by the time the rule is checked; anything else is counted as it comes,
         # so two Curve arcs on one pool are the re-entry they have always been.
+        # `port`, not `key`: rebinding the cache's key here wrote every verdict
+        # under the last arc's triple instead of `tuple(idx)`, and `ArcKind` is
+        # an `IntEnum`, so `(SWAP_STABLE, 1, 2)` and the index tuple `(0, 1, 2)`
+        # are the same dict key.  A pool could read another's answer.
         triples, folded = [], set()
         for k in idx:
             arc = arcs[k]
-            key = (arc.kind, arc.i, arc.j)
+            port = (arc.kind, arc.i, arc.j)
             if arc.parallel:
-                if key in folded:
+                if port in folded:
                     continue
-                folded.add(key)
-            triples.append(key)
+                folded.add(port)
+            triples.append(port)
         if len(triples) == 1:
             clashes = False
         else:
@@ -337,7 +355,7 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
             except (MultiPortError, ValueError):
                 clashes = True
             else:
-                clashes = False
+                clashes = advanceable is not None and pool not in advanceable
         if clashes:
             out[pool] = idx
         if cache is not None:
@@ -387,6 +405,7 @@ def generate(
     max_legs: int = MAX_LEGS,
     element_split=None,
     venues: list[str] | None = None,
+    advanceable: frozenset[str] | None = None,
 ) -> CandidateSet:
     if _ACCEL_ON and _accel.available():
         got = _accel.ballot(
@@ -394,6 +413,7 @@ def generate(
             base_certificate=base_certificate, max_candidates=max_candidates,
             top_k=top_k, gas_floor=gas_floor, max_legs=max_legs,
             max_slots=MAX_SLOTS, element_split=element_split, venues=venues,
+            advanceable=advanceable,
         )
         if got is not None:
             return _from_ballot(got)
@@ -499,7 +519,7 @@ def generate(
                 undo = (before, ordered, rank)
                 continue
             conflicts = conflicting_pools(arcs, solution.psi, pools=pools,
-                                          cache=elements)
+                                          cache=elements, advanceable=advanceable)
             if not conflicts:
                 break
             ordered = repair_order(conflicts, solution.psi)
@@ -779,7 +799,7 @@ def generate(
 
     # 4. one arc per pool (decision 3) -- keep the largest, forbid the rest
     conflicts = conflicting_pools(arcs, base.psi, Psi, pools=pools,
-                                  cache=elements)
+                                  cache=elements, advanceable=advanceable)
     if conflicts:
         forbidden = np.zeros(g.m, bool)
         for indices in conflicts.values():

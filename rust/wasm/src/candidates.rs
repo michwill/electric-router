@@ -107,6 +107,7 @@ impl Ballot {
         max_candidates: Option<usize>, top_k: Option<Vec<usize>>,
         gas_floor: Option<f64>, max_legs: Option<usize>, max_slots: Option<usize>,
         element_split: Option<js_sys::Function>, venues: Option<Vec<String>>,
+        advanceable: Option<Vec<String>>,
     ) -> Ballot {
         let opts = GenerateOptions {
             base_certificate: base_certificate.unwrap_or(false),
@@ -116,6 +117,9 @@ impl Ballot {
             max_legs: max_legs.unwrap_or(32),
             max_slots: max_slots.unwrap_or(8),
             venues: venues.unwrap_or_default(),
+            advanceable: advanceable.map(|v| {
+                v.into_iter().map(|p| p.to_ascii_lowercase()).collect()
+            }),
         };
         let base = Solution { psi: base_psi, ..empty_solution() };
         let members = &arcs.inner;
@@ -365,14 +369,17 @@ impl Ballot {
         &mut self, arcs: &Arcs, nu: Vec<f64>, nodes: &NodeMap, src_token: &str,
         dst_token: &str, amount_in: &str, potentials: Option<Vec<f64>>,
         max_legs: Option<usize>, max_slots: Option<usize>,
+        advanceable: Option<Vec<String>>,
     ) -> Result<(), JsValue> {
         let amount = amount_in
             .parse()
             .map_err(|_| JsError::new(&format!("not a u256: {amount_in}")))?;
+        let gate: Option<std::collections::HashSet<String>> = advanceable
+            .map(|v| v.into_iter().map(|p| p.to_ascii_lowercase()).collect());
         verify::realize_candidates(
             &mut self.inner, &arcs.inner, &nu, &nodes.inner, src_token, dst_token,
             amount, potentials.as_deref(), max_legs.unwrap_or(32),
-            max_slots.unwrap_or(8),
+            max_slots.unwrap_or(8), gate.as_ref(),
         );
         Ok(())
     }
@@ -470,7 +477,7 @@ impl Ballot {
             .into());
         }
         Ok(candidates::conflicting_pools(
-            &arcs.inner, psi, psi_total.unwrap_or(0.0), None, None,
+            &arcs.inner, psi, psi_total.unwrap_or(0.0), None, None, None,
         ))
     }
 

@@ -292,7 +292,7 @@ def ladders_from(ladders):
 
 def ballot(g, arcs, src, dst, psi_total, base_psi, *, base_certificate,
            max_candidates, top_k, gas_floor, max_legs, max_slots,
-           element_split=None, venues=None):
+           element_split=None, venues=None, advanceable=None):
     """The whole generation, in Rust.  `None` when it cannot run.
 
     The graph crosses through `Graph.from_arrays` rather than `Graph.build`:
@@ -344,4 +344,5 @@ def ballot(g, arcs, src, dst, psi_total, base_psi, *, base_certificate,
         max_slots=int(max_slots),
         element_split=priced,
         venues=list(venues) if venues else None,
+        advanceable=None if advanceable is None else sorted(advanceable),
     )
