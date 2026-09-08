@@ -26,6 +26,7 @@ succeeds and is wrong.  `WarmStats.unreadable` is what refuses to route on one.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from ..core.evm import CALLER, CALLER_BALANCE
@@ -34,6 +35,11 @@ from ..core.transport import Answer, Call, Status
 #: Erigon refuses a JSON-RPC batch larger than this by default, and refuses the
 #: *whole* batch -- so a sweep has to be split or none of it arrives.
 BATCH_LIMIT = 100
+
+#: Chunks to have in the air at once when a transport does not say.  The loop
+#: this serves is strictly serial -- run the stage, fetch what it missed, run
+#: it again -- so the only concurrency available anywhere is inside one fetch.
+DEFAULT_STREAMS = 8
 
 #: Gas for one `eth_call`.  Far above EIP-7825's 16.7M transaction cap on
 #: purpose: a probe batch is several hundred sub-calls inside one call, which
@@ -301,9 +307,32 @@ class LocalEvm:
 
     @staticmethod
     async def _batched(rpc, payloads: list[tuple[str, list]]) -> list:
+        """Every payload, in order, split small enough for any node to take.
+
+        The chunks go out together.  Sent one after another they were the
+        whole cost of a warm: 205 posts of one mainnet run went out strictly
+        serially, never more than one in flight of the eight the transport
+        allows, and that was 19.5 s of the 23.9 s it took.  Nothing above can
+        recover it -- the round trip is what the miss loop is made of.
+
+        `BATCH_LIMIT` still holds for each one.  It is what a node will accept
+        and an `rpc` that does not chunk for itself depends on it, so this
+        makes the posts concurrent and not larger.
+
+        Bounded by what the transport says it can carry at once: eighty-four
+        posts arriving together is a different kind of rude, and a hosted
+        endpoint is entitled to say so.
+        """
+        chunks = [payloads[k:k + BATCH_LIMIT]
+                  for k in range(0, len(payloads), BATCH_LIMIT)]
+        if len(chunks) <= 1:
+            return list(await rpc.batch(chunks[0])) if chunks else []
+        streams = max(1, getattr(rpc, "max_streams", 0) or DEFAULT_STREAMS)
         out: list = []
-        for start in range(0, len(payloads), BATCH_LIMIT):
-            out.extend(await rpc.batch(payloads[start:start + BATCH_LIMIT]))
+        for start in range(0, len(chunks), streams):
+            for answers in await asyncio.gather(
+                    *(rpc.batch(chunk) for chunk in chunks[start:start + streams])):
+                out.extend(answers)
         return out
 
 

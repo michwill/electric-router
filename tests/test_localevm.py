@@ -18,7 +18,7 @@ import pytest
 
 #: This repo has no asyncio plugin and one file is not a reason to add one, so
 #: each coroutine gets a one-line sync wrapper that drives it.
-from erouter.chain.localevm import LocalEvm, LocalEvmError
+from erouter.chain.localevm import LocalEvm, LocalEvmError, _slot
 from erouter.core.evm import CALLER
 from erouter.core.transport import Call, Status
 
@@ -248,3 +248,91 @@ async def _test_an_account_that_answers_both_halves_is_kept():
     assert evm.stats.complete
     assert evm.stats.unreadable == 0
     assert backend.code_size(POOL) == len(READS_SLOT_7)
+
+def test_the_chunks_of_one_fetch_go_out_together():
+    asyncio.run(_test_the_chunks_of_one_fetch_go_out_together())
+
+
+async def _test_the_chunks_of_one_fetch_go_out_together():
+    """Serially they were the whole cost of a warm: the loop around them is
+    strictly serial, so one fetch is the only place concurrency exists."""
+    evm, _ = fresh()
+
+    class Watches(FakeRpc):
+        max_streams = 8
+
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.live = 0
+            self.peak = 0
+
+        async def batch(self, requests):
+            self.live += 1
+            self.peak = max(self.peak, self.live)
+            try:
+                await asyncio.sleep(0)          # let the others start
+                return await super().batch(requests)
+            finally:
+                self.live -= 1
+
+    rpc = Watches(code={POOL: READS_SLOT_7})
+    wanted = [(POOL, k) for k in range(250)]
+
+    await evm._fetch(rpc, {"accounts": [], "slots": wanted, "blocks": []},
+                     block="latest")
+
+    assert rpc.batches == 3, "250 slots is still three batches of at most 100"
+    assert rpc.peak == 3, "and all three were in the air at once"
+
+
+def test_but_no_more_at_once_than_the_transport_allows():
+    asyncio.run(_test_but_no_more_at_once_than_the_transport_allows())
+
+
+async def _test_but_no_more_at_once_than_the_transport_allows():
+    """A hosted endpoint is entitled to object to eighty-four at once."""
+    evm, _ = fresh()
+
+    class Watches(FakeRpc):
+        max_streams = 2
+
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self.live = 0
+            self.peak = 0
+
+        async def batch(self, requests):
+            self.live += 1
+            self.peak = max(self.peak, self.live)
+            try:
+                await asyncio.sleep(0)
+                return await super().batch(requests)
+            finally:
+                self.live -= 1
+
+    rpc = Watches(code={POOL: READS_SLOT_7})
+    wanted = [(POOL, k) for k in range(1000)]
+
+    await evm._fetch(rpc, {"accounts": [], "slots": wanted, "blocks": []},
+                     block="latest")
+
+    assert rpc.batches == 10
+    assert rpc.peak == 2, "two streams means two"
+
+
+def test_the_answers_stay_in_the_order_they_were_asked():
+    asyncio.run(_test_the_answers_stay_in_the_order_they_were_asked())
+
+
+async def _test_the_answers_stay_in_the_order_they_were_asked():
+    """`_fetch` zips them back against what it wanted, so a reordering here
+    would file every value under its neighbour's slot."""
+    evm, _backend = fresh()
+    storage = {(POOL, k): k + 1 for k in range(250)}
+    rpc = FakeRpc(code={POOL: READS_SLOT_7}, storage=storage)
+
+    got = await evm._batched(
+        rpc, [("eth_getStorageAt", [POOL, _slot(k), "latest"])
+              for k in range(250)])
+
+    assert [int(v, 16) for v in got] == [k + 1 for k in range(250)]
