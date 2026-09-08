@@ -196,3 +196,55 @@ async def _test_a_batch_is_split_at_the_limit():
     await evm._fetch(rpc, {"accounts": [], "slots": wanted, "blocks": []},
                      block="latest")
     assert rpc.batches == 3, "250 slots is three batches of at most 100"
+
+
+def test_a_balance_the_chain_will_not_serve_is_counted_too():
+    asyncio.run(_test_a_balance_the_chain_will_not_serve_is_counted_too())
+
+
+async def _test_a_balance_the_chain_will_not_serve_is_counted_too():
+    """The same hazard one level up, and the one that was live.
+
+    A balance is a plausible number too: written as zero it cannot be told
+    from an account that holds nothing, and the account -- being present --
+    is never reported missing again, so the loop cannot repair it.
+    """
+    evm, _backend = fresh()
+
+    class NoBalances(FakeRpc):
+        async def batch(self, requests):
+            out = await super().batch(requests)
+            return [RuntimeError("declined") if m == "eth_getBalance" else v
+                    for (m, _), v in zip(requests, out, strict=True)]
+
+    rpc = NoBalances(code={POOL: READS_SLOT_7}, balances={POOL: 5})
+
+    def run():
+        return evm.call_many([Call(POOL, b"")])
+
+    await evm.fill(rpc, run, rounds=3)
+
+    assert not evm.stats.complete, "the warm has to say it is short"
+    assert evm.stats.unreadable >= 1
+    assert any("unreadable" in note for note in evm.stats.errors)
+
+
+def test_an_account_that_answers_both_halves_is_kept():
+    asyncio.run(_test_an_account_that_answers_both_halves_is_kept())
+
+
+async def _test_an_account_that_answers_both_halves_is_kept():
+    """Including an empty one: `0x` code is an EOA, not a refusal."""
+    evm, backend = fresh()
+    rpc = FakeRpc(code={POOL: READS_SLOT_7}, storage={(POOL, 7): 5},
+                  balances={POOL: 9})
+
+    def run():
+        return evm.call_many([Call(POOL, b"")])
+
+    got = await evm.fill(rpc, run, rounds=3)
+
+    assert int.from_bytes(got[0].data, "big") == 5
+    assert evm.stats.complete
+    assert evm.stats.unreadable == 0
+    assert backend.code_size(POOL) == len(READS_SLOT_7)

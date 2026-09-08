@@ -260,11 +260,19 @@ class LocalEvm:
             balances = await self._batched(
                 rpc, [("eth_getBalance", [a, block]) for a in wanted_code])
             for address, code, balance in zip(wanted_code, got, balances, strict=True):
-                blob = b"" if not isinstance(code, str) else bytes.fromhex(code[2:])
+                # Both halves or neither, for the reason the slots below are
+                # left absent.  A balance the node never sent was being
+                # written as `0x0`, which is a plausible number no later
+                # reader can tell from a real one -- and the account, now
+                # present, is never asked for again, so the miss loop cannot
+                # repair it and `unreadable` never counts it.  Left out, it
+                # is reported by `basic` next round and counted at the end,
+                # which is what stops a quote going out against it.
+                if not isinstance(code, str) or not isinstance(balance, str):
+                    continue
                 self._evm.insert_account(
-                    address, nonce=1,
-                    balance=balance if isinstance(balance, str) else "0x0",
-                    code=blob or None,
+                    address, nonce=1, balance=balance,
+                    code=bytes.fromhex(code[2:]) or None,
                 )
                 self.stats.fetched += 1
         for address in wanted_code:
