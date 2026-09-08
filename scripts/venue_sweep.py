@@ -25,6 +25,11 @@ is reported as unstable instead of becoming a finding.
 Usage:
 
     uv run python scripts/venue_sweep.py --block 25925722 --private
+    uv run python scripts/venue_sweep.py --venue v2 --block 25925722 --private
+
+`--venue` picks what the A/B switches off.  Measuring `v3,v2` together answers
+a different question from measuring each alone: two venues can each be neutral
+and still cost the answer jointly, by crowding the ballot.
 
 `--private` is needed for Uniswap: its tick reads are `eth_getStorageAt`, which
 a scoped endpoint refuses.
@@ -37,6 +42,7 @@ import asyncio
 import statistics
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -53,12 +59,39 @@ from erouter.core.types import ArcKind  # noqa: E402
 from erouter.dev import config  # noqa: E402
 from erouter.dev.rpc import BATCH_FLOOR, AsyncTransport, JsonRpcTransport  # noqa: E402
 from erouter.dev.universe import load_pools  # noqa: E402
+from erouter.venues.univ2_session import Univ2  # noqa: E402
 from erouter.venues.univ3_session import Univ3  # noqa: E402
 
 #: Notionals in USD.  Priced per token by probing, so "1e6" is the same trade
 #: whichever coin it starts from -- a sweep in token units compares a $1k WBTC
 #: trade against a $1M USDC one and calls the difference a venue effect.
 NOTIONALS = (1e3, 1e4, 1e5, 1e6)
+
+
+@dataclass
+class Venue:
+    """One venue, and the two things the sweep does to it: switch it off and
+    count its legs.
+
+    The A/B is `setattr(session, attr, None)`, which is the same seam the CLI
+    flag uses, so an arm with the venue off is a session that never loaded it
+    rather than one carrying its arcs and declining to pick them.
+    """
+
+    name: str
+    attr: str
+    kind: ArcKind
+    obj: object
+
+    def arc_count(self) -> int:
+        return len(self.obj.arcs)
+
+
+#: Venues the sweep can measure, and what `--venue` accepts.
+VENUES = {
+    "v3": ("univ3", ArcKind.SWAP_UNIV3, Univ3),
+    "v2": ("univ2", ArcKind.SWAP_UNIV2, Univ2),
+}
 
 
 class _Files:
@@ -80,18 +113,23 @@ def session_for(args):
     if cache.get(chain.chain_id, args.min_tvl, allow_stale=True) is None:
         load_pools(chain, min_tvl=args.min_tvl)
     universe = cache.get(chain.chain_id, args.min_tvl, allow_stale=True)
-    venue = Univ3.load(ROOT, args.chain)
-    if venue is None:
-        raise SystemExit(f"no uniswap census for {args.chain}")
+    venues, kwargs = [], {}
+    for want in args.venue:
+        attr, kind, cls = VENUES[want]
+        obj = cls.load(ROOT, args.chain)
+        if obj is None:
+            raise SystemExit(f"no {want} census for {args.chain}")
+        venues.append(Venue(want, attr, kind, obj))
+        kwargs[attr] = obj
     session = RouterSession(
         chain, AsyncTransport(transport),
         erouter_evm.Evm("Osaka", chain.chain_id), _Files(ROOT), universe,
-        min_tvl=args.min_tvl, univ3=venue)
+        min_tvl=args.min_tvl, **kwargs)
     report = asyncio.run(session.warm(block=args.block or transport.block))
-    return session, venue, report
+    return session, venues, report
 
 
-def token_set(session, venue, limit):
+def token_set(session, venues, limit):
     """The venue's most connected tokens, priced, most first.
 
     A token the venue offers but the frame cannot reach has no comparison to
@@ -104,10 +142,11 @@ def token_set(session, venue, limit):
         for coin in pool.coins:
             symbols.setdefault(coin.address.lower(), coin.symbol)
     seen: Counter = Counter()
-    for meta in venue.pools.values():
-        for addr in (meta[0], meta[1]):
-            if nodes.has(addr.lower()):
-                seen[addr.lower()] += 1
+    for venue in venues:
+        for meta in venue.obj.pools.values():
+            for addr in (meta[0], meta[1]):
+                if nodes.has(addr.lower()):
+                    seen[addr.lower()] += 1
     usdc = next((a for a, n in symbols.items()
                  if n.upper() == "USDC" and nodes.has(a)), None)
     if usdc is None:
@@ -131,19 +170,24 @@ def token_set(session, venue, limit):
     return tokens, price, symbols
 
 
-def read_once(session, venue, amount):
+def read_once(session, venues, amount):
     """One `curve -> venue -> curve` reading, or `None` if contaminated."""
+    kinds = {v.kind for v in venues}
+
     def one(with_venue):
-        held, session.univ3 = session.univ3, (venue if with_venue else None)
+        held = {v.attr: getattr(session, v.attr) for v in venues}
+        for v in venues:
+            setattr(session, v.attr, v.obj if with_venue else None)
         try:
             got = session.quote(amount)
             legs = got.route.legs if got.route else []
             return (int(got.verified_out or 0),
-                    sum(1 for leg in legs if leg.kind is ArcKind.SWAP_UNIV3))
+                    sum(1 for leg in legs if leg.kind in kinds))
         except Exception:
             return (0, 0)
         finally:
-            session.univ3 = held
+            for attr, was in held.items():
+                setattr(session, attr, was)
 
     base, _ = one(False)
     got, legs = one(True)
@@ -153,7 +197,7 @@ def read_once(session, venue, amount):
     return ((got / base - 1) * 1e4, base, got, legs)
 
 
-def measure(session, venue, amount, repeats, agree_bp):
+def measure(session, venues, amount, repeats, agree_bp):
     """Read until two agree, or give up and say so.
 
     The A/B/A control inside `read_once` catches drift *within* a case; this
@@ -162,7 +206,7 @@ def measure(session, venue, amount, repeats, agree_bp):
     """
     seen: list = []
     for _ in range(repeats):
-        got = read_once(session, venue, amount)
+        got = read_once(session, venues, amount)
         if got is None:
             continue
         for other in seen:
@@ -178,6 +222,9 @@ def main() -> int:
     ap.add_argument("--block", type=int, default=0)
     ap.add_argument("--private", action="store_true")
     ap.add_argument("--min-tvl", type=float, default=10_000.0)
+    ap.add_argument("--venue", default="v3",
+                    help="which venue(s) the A/B switches: v3, v2, or v3,v2 "
+                         "to measure them together")
     ap.add_argument("--tokens", type=int, default=7)
     ap.add_argument("--repeats", type=int, default=3,
                     help="most readings per case before calling it unstable")
@@ -186,16 +233,21 @@ def main() -> int:
     ap.add_argument("--worse-bp", type=float, default=0.5,
                     help="a loss past this is reported as a regression")
     args = ap.parse_args()
+    args.venue = [v.strip() for v in args.venue.split(",") if v.strip()]
+    unknown = [v for v in args.venue if v not in VENUES]
+    if unknown or not args.venue:
+        raise SystemExit(f"--venue takes {'/'.join(VENUES)}, not {unknown}")
 
-    session, venue, report = session_for(args)
-    print(f"block {session.block:,} · {report.pools} pools · "
-          f"v3 {report.univ3_pools} · {len(venue.arcs):,} tick-arc(s)")
-    tokens, price, symbols = token_set(session, venue, args.tokens)
+    session, venues, report = session_for(args)
+    held = " · ".join(f"{v.name} {v.arc_count():,} arc(s)" for v in venues)
+    print(f"block {session.block:,} · {report.pools} pools · {held}")
+    tokens, price, symbols = token_set(session, venues, args.tokens)
     print(f"tokens: {[symbols.get(a, a[:8]) for a in tokens]}\n")
     nodes = session.nodes
 
+    legs_col = "+".join(v.name for v in venues)
     print(f"{'pair':<18}{'notional':>12}{'curve':>26}{'curve+venue':>26}"
-          f"{'delta':>10}{'v3':>4}{'reads':>7}")
+          f"{'delta':>10}{legs_col:>6}{'reads':>7}")
     deltas: list[float] = []
     worse: list = []
     unstable: list = []
@@ -213,7 +265,7 @@ def main() -> int:
                 if amount <= 0:
                     continue
                 got, reads, agreed = measure(
-                    session, venue, amount, args.repeats, args.agree_bp)
+                    session, venues, amount, args.repeats, args.agree_bp)
                 if got is None:
                     print(f"{name:<18}{usd:>12,.0f}   no comparable reading")
                     continue
@@ -221,14 +273,14 @@ def main() -> int:
                 if not agreed:
                     unstable.append((name, usd, [r[0] for r in reads]))
                     print(f"{name:<18}{usd:>12,.0f}{base:>26,}{out:>26,}"
-                          f"{delta:>+9.2f}bp{legs:>4}{len(reads):>7}  UNSTABLE "
+                          f"{delta:>+9.2f}bp{legs:>6}{len(reads):>7}  UNSTABLE "
                           f"{[round(r[0], 2) for r in reads]}")
                     continue
                 deltas.append(delta)
                 if delta < -args.worse_bp:
                     worse.append((name, usd, delta, legs))
                 print(f"{name:<18}{usd:>12,.0f}{base:>26,}{out:>26,}"
-                      f"{delta:>+9.2f}bp{legs:>4}{len(reads):>7}")
+                      f"{delta:>+9.2f}bp{legs:>6}{len(reads):>7}")
 
     if not deltas:
         print("\nnothing measured")
@@ -242,7 +294,8 @@ def main() -> int:
           f"{statistics.median(ordered):+.2f} bp   worst {ordered[0]:+.2f} bp")
     print(f"\n  worse than {args.worse_bp} bp: {len(worse)}")
     for name, usd, delta, legs in sorted(worse, key=lambda r: r[2]):
-        print(f"    {name:<18}${usd:>12,.0f}{delta:>+9.2f}bp   {legs} v3 leg(s)")
+        print(f"    {name:<18}${usd:>12,.0f}{delta:>+9.2f}bp   "
+              f"{legs} {legs_col} leg(s)")
     print(f"  unstable, never repeated: {len(unstable)}")
     for name, usd, reads in unstable:
         print(f"    {name:<18}${usd:>12,.0f}   {[round(r, 2) for r in reads]}")
