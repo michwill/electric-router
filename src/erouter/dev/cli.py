@@ -1176,6 +1176,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 2
 
     venue_opts = _venue_options(args, chain, rpc, nodes, client, stake_arcs)
+    venue_opts = _univ2_options(args, chain, rpc, nodes, venue_opts)
 
     if args.amount is None and not args.amount_wei:
         return _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
@@ -2403,6 +2404,43 @@ def _venue_options(args, chain, rpc, nodes, client, stake_arcs) -> dict:
     return options
 
 
+def _univ2_options(args, chain, rpc, nodes, options: dict) -> dict:
+    """Add Uniswap v2's arcs to whatever seam the caller already has.
+
+    Both venues use `late_arcs`, so they are concatenated rather than one
+    replacing the other.  v2 brings no `collapse`: a pair has one range, so its
+    arc is already the leg it will be realised as.
+
+    Cheaper than v3 in the way that matters at the console -- `getReserves()` is
+    an ordinary `eth_call`, so this needs no `--private` and no storage reads.
+    """
+    if not getattr(args, "univ2", False):
+        return options
+    import pathlib
+
+    from ..venues.univ2_session import Univ2
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    venue = Univ2.load(root, chain.name.lower(),
+                       floor_usd=float(getattr(args, "univ2_floor", 10_000.0)))
+    if venue is None:
+        print(f"  {WARN} no Uniswap v2 census for {chain.name}; "
+              f"run scripts/v2_census.py or route without --univ2")
+        return options
+    started = time.monotonic()
+    answered = venue.refresh(rpc, nodes, rpc.block)
+    if not answered:
+        above, priceable, wanted = venue.considered
+        print(f"  {WARN} no Uniswap v2 pair answered: {len(venue.census):,} in "
+              f"the census, {above:,} above the floor, {priceable:,} with both "
+              f"coins in the node map, {wanted:,} asked for; routing without it")
+        return options
+    print(f"  uniswap v2: {answered:,} pair(s), {len(venue.arcs):,} arc(s) "
+          f"in {(time.monotonic() - started) * 1000:,.0f} ms")
+    options["late_arcs"] = [*options.get("late_arcs", ()), *venue.arcs]
+    return options
+
+
 def _risk_table(chain, args=None):
     """Per-pool minimum-out risk, measured, or nothing at all.
 
@@ -2868,6 +2906,14 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd.add_argument(
         "--univ3-floor", type=float, default=10_000.0,
         help="skip v3 pools below this TVL in USD (default 10,000)")
+    route_cmd.add_argument(
+        "--univ2", action="store_true",
+        help="route over Uniswap v2 as well. Needs data/univ2/<chain>.json "
+             "from scripts/v2_census.py. Reads reserves with an ordinary "
+             "eth_call, so unlike --univ3 it wants no --private")
+    route_cmd.add_argument(
+        "--univ2-floor", type=float, default=10_000.0,
+        help="skip v2 pairs below this TVL in USD (default 10,000)")
     route_cmd.set_defaults(func=cmd_route)
 
     # Every subcommand takes it, so it is added in one place rather than

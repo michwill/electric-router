@@ -122,6 +122,8 @@ class WarmReport:
     #: Zero on every chain with no v3 census, which is every chain but one.
     univ3_pools: int = 0
     univ3_ms: float = 0.0
+    univ2_pairs: int = 0
+    univ2_ms: float = 0.0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -222,7 +224,7 @@ class RouterSession:
 
     def __init__(self, chain, rpc, backend, data, raw_pools, *,
                  min_tvl: float = DEFAULT_MIN_TVL, max_legs: int | None = None,
-                 univ3=None):
+                 univ3=None, univ2=None):
         self.chain = chain
         self.rpc = rpc
         self.backend = backend
@@ -234,6 +236,7 @@ class RouterSession:
         # than imported so a chain with no census, and every test, is exactly
         # the router it was.
         self.univ3 = univ3
+        self.univ2 = univ2
 
         self.block = 0
         self.pools: list[PoolSpec] = []
@@ -338,6 +341,15 @@ class RouterSession:
             self.univ3.teach(self.client)
             report.univ3_ms = self.univ3.read_ms
             say("univ3", 1.0)
+
+        if self.univ2 is not None:
+            say("univ2", 0.0)
+            # Per block for the same reason, and far cheaper: one `eth_call` a
+            # pair against v3's three round trips of storage reads.
+            report.univ2_pairs = self.univ2.refresh(
+                getattr(self.rpc, "_t", self.rpc), self.nodes, self.block)
+            report.univ2_ms = self.univ2.read_ms
+            say("univ2", 1.0)
 
         self.gas_table, _ = self.facts.table(self.pools), None
         self.risk_table = self.facts.risk_table()
@@ -448,6 +460,11 @@ class RouterSession:
                 "audit": self.univ3.auditor(getattr(self.rpc, "_t", self.rpc)),
                 "max_spread": self.univ3.max_spread,
             }
+        if self.univ2 is not None and self.univ2.arcs:
+            # Both venues join the same seam, so they are concatenated rather
+            # than one replacing the other -- and a v2 arc needs no `collapse`,
+            # so v3's stays whatever it was.
+            seams["late_arcs"] = [*seams.get("late_arcs", ()), *self.univ2.arcs]
         return pipeline.route(
             self.pools, self.nodes, self.client,
             src_token=src, dst_token=dst, amount_in=int(amount_in),
