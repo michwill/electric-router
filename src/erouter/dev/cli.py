@@ -1176,7 +1176,7 @@ def cmd_route(args: argparse.Namespace) -> int:
         return 2
 
     venue_opts = _venue_options(args, chain, rpc, nodes, client, stake_arcs)
-    venue_opts = _univ2_options(args, chain, rpc, nodes, venue_opts)
+    venue_opts = _univ2_options(args, chain, rpc, nodes, client, venue_opts)
 
     if args.amount is None and not args.amount_wei:
         return _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
@@ -2404,7 +2404,7 @@ def _venue_options(args, chain, rpc, nodes, client, stake_arcs) -> dict:
     return options
 
 
-def _univ2_options(args, chain, rpc, nodes, options: dict) -> dict:
+def _univ2_options(args, chain, rpc, nodes, client, options: dict) -> dict:
     """Add Uniswap v2's arcs to whatever seam the caller already has.
 
     Both venues use `late_arcs`, so they are concatenated rather than one
@@ -2413,11 +2413,18 @@ def _univ2_options(args, chain, rpc, nodes, options: dict) -> dict:
 
     Cheaper than v3 in the way that matters at the console -- `getReserves()` is
     an ordinary `eth_call`, so this needs no `--private` and no storage reads.
+
+    `client` is here to be taught.  `verify` re-quotes every candidate through
+    the deployed quoter, which has never heard of `SWAP_UNIV2`, so an untaught
+    client answers zero, `verify` reads zero as a revert, and each route
+    carrying v2 is dropped before it can win -- which looks exactly like v2
+    losing on the merits.  That is how `--univ3` shipped broken.
     """
     if not getattr(args, "univ2", False):
         return options
     import pathlib
 
+    from ..venues import univ2_client
     from ..venues.univ2_session import Univ2
 
     root = pathlib.Path(__file__).resolve().parents[3]
@@ -2435,6 +2442,7 @@ def _univ2_options(args, chain, rpc, nodes, options: dict) -> dict:
               f"the census, {above:,} above the floor, {priceable:,} with both "
               f"coins in the node map, {wanted:,} asked for; routing without it")
         return options
+    univ2_client.teach(client, venue.state)
     print(f"  uniswap v2: {answered:,} pair(s), {len(venue.arcs):,} arc(s) "
           f"in {(time.monotonic() - started) * 1000:,.0f} ms")
     options["late_arcs"] = [*options.get("late_arcs", ()), *venue.arcs]
