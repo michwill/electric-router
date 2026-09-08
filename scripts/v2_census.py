@@ -68,60 +68,121 @@ STABLES = {
 }
 
 
+def _log_windows(rpc, windows, factory) -> tuple[dict, list]:
+    """`PairCreated` for each `(lo, hi)`; the pairs found and the windows that
+    would not answer."""
+    if not windows:
+        return {}, []
+    got = rpc.fetch_multi([("eth_getLogs", [{
+        "fromBlock": hex(lo), "toBlock": hex(hi),
+        "address": factory, "topics": [CREATED]}]) for lo, hi in windows],
+        concurrent=True)
+    pairs, refused = {}, []
+    for (lo, hi), raw in zip(windows, got, strict=True):
+        if isinstance(raw, Exception) or not isinstance(raw, list):
+            refused.append((lo, hi))
+            continue
+        for log in raw:
+            # `data` is (address pair, uint256 allPairsLength); the pair is
+            # the first word, and the tokens are indexed.
+            pairs["0x" + log["data"][2:][24:64]] = (
+                "0x" + log["topics"][1][-40:], "0x" + log["topics"][2][-40:])
+    return pairs, refused
+
+
+def retry_refused(rpc, windows, factory, depth: int = 5) -> tuple[dict, list]:
+    """Re-ask refused windows on a narrower span, halving each round.
+
+    A window is refused for one of two reasons and both of them shrink: the
+    node capped the result set, or the query timed out.  The transport has
+    already tried four times, so asking again unchanged asks the same question.
+
+    Counting refusals and moving on made each one a permanent hole.  Worse, the
+    count was cached and the windows were not, so a resumed run refused to write
+    a census over a window it could no longer even name -- 24 windows lost in
+    one batch, and every later resume inheriting the refusal.
+    """
+    found = {}
+    for _ in range(depth):
+        if not windows:
+            break
+        halved = []
+        for lo, hi in windows:
+            mid = (lo + hi) // 2
+            halved += [(lo, mid), (mid + 1, hi)] if mid > lo else [(lo, hi)]
+        print(f"  re-asking {len(windows):,} refused window(s) as "
+              f"{len(halved):,} narrower ones", flush=True)
+        got, windows = _log_windows(rpc, halved, factory)
+        found |= got
+        print(f"    {len(got):,} pair(s); {len(windows):,} still refused",
+              flush=True)
+    return found, windows
+
+
 def discover(rpc, head: int, span: int, factory: str, deploy: int,
-             cache: Path | None = None) -> tuple[dict, int]:
-    """Every pair the factory ever made, as `pair -> (token0, token1)`.
+             cache: Path | None = None) -> tuple[dict, list]:
+    """Every pair the factory ever made, and the windows that would not answer.
 
     A refused window is a silently missing slice and a short census looks
-    exactly like a small one, so refusals are counted and said aloud rather
-    than tallied into the total.
+    exactly like a small one, so refusals are returned rather than swallowed --
+    and as *which windows*, so they can be re-asked.
 
     **Resumable.**  Enumerating 1,594 windows takes over an hour against a
-    rate-limiting endpoint, and the first two attempts here died -- one to a
-    100,000-block span the node would not serve, one to a timeout at window
-    1,272 of 1,594 with 281,167 pairs already found and nothing written.  So
+    public endpoint and the run has been lost twice: once to a 100,000-block
+    span the node would not serve, one to a timeout at window 1,272.  So
     progress is written as it goes and a restart picks up from the last window
     finished.  The cache is keyed by `(factory, span)`: a different scan is a
-    different file, not a resume.
+    different file rather than a subtly wrong resume.
     """
     spans = [(lo, min(lo + span - 1, head))
              for lo in range(deploy, head + 1, span)]
-    pairs: dict[str, tuple[str, str]] = {}
-    refused = 0
-    done = 0
+    done, pairs, refused = 0, {}, []
     if cache is not None and cache.exists():
         held = json.loads(cache.read_text())
         if held.get("factory") == factory and held.get("span") == span:
             pairs = {k: tuple(v) for k, v in held["pairs"].items()}
-            done = int(held.get("done", 0))
-            refused = int(held.get("refused", 0))
+            was = held.get("refused", [])
+            if isinstance(was, int):
+                # An older cache counted refusals without recording which
+                # windows, so the holes cannot be re-asked by name.  The pairs
+                # are still good -- discovery is a union, so re-asking a window
+                # already read costs time and changes nothing -- and the only
+                # way to find the holes again is to walk the windows again.
+                if was:
+                    print(f"  cache counts {was} refused window(s) but not "
+                          f"which; rescanning to find them")
+                else:
+                    done = held.get("done", 0)
+            else:
+                refused = [tuple(w) for w in was]
+                done = held.get("done", 0)
             print(f"  resuming at window {done}/{len(spans)} with "
-                  f"{len(pairs):,} pair(s)")
+                  f"{len(pairs):,} pairs already found")
+
+    def save(at: int) -> None:
+        if cache is None:
+            return
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({
+            "factory": factory, "span": span, "done": at,
+            "refused": [list(w) for w in refused],
+            "pairs": {k: list(v) for k, v in pairs.items()}}))
+
     started = time.monotonic()
     for start in range(done, len(spans), 24):
-        window = spans[start:start + 24]
-        got = rpc.fetch_multi([("eth_getLogs", [{
-            "fromBlock": hex(lo), "toBlock": hex(hi),
-            "address": factory, "topics": [CREATED]}]) for lo, hi in window],
-            concurrent=True)
-        for raw in got:
-            if isinstance(raw, Exception) or not isinstance(raw, list):
-                refused += 1
-                continue
-            for log in raw:
-                # `data` is (address pair, uint256 allPairsLength); the pair is
-                # the first word, and the tokens are indexed.
-                pairs["0x" + log["data"][2:][24:64]] = (
-                    "0x" + log["topics"][1][-40:], "0x" + log["topics"][2][-40:])
-        print(f"  {min(start + 24, len(spans)):>5}/{len(spans)} windows  "
-              f"{len(pairs):,} pairs  {time.monotonic() - started:,.0f}s",
-              flush=True)
-        if cache is not None:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({
-                "factory": factory, "span": span,
-                "done": min(start + 24, len(spans)), "refused": refused,
-                "pairs": {k: list(v) for k, v in pairs.items()}}))
+        got, no = _log_windows(rpc, spans[start:start + 24], factory)
+        pairs |= got
+        refused += no
+        at = min(start + 24, len(spans))
+        print(f"  {at:>5}/{len(spans)} windows  {len(pairs):,} pairs  "
+              f"{time.monotonic() - started:,.0f}s"
+              + (f"  ({len(no)} refused)" if no else ""), flush=True)
+        save(at)
+
+    if refused:
+        got, refused = retry_refused(rpc, refused, factory)
+        pairs |= got
+        save(len(spans))
     return pairs, refused
 
 
@@ -267,9 +328,11 @@ def main() -> int:
         # Refusing to continue rather than censusing a slice of the factory: a
         # short census and a small one look identical downstream, and the pairs
         # missing from it are missing silently for as long as the file lives.
-        print(f"  ! {refused} log window(s) refused -- not writing a partial "
-              f"census.  A smaller --span is the usual fix; endpoints commonly "
-              f"cap it at 10,000 blocks.")
+        # These already survived halving five times, so they are not a width
+        # problem; the blocks are named so the next run can start there.
+        print(f"  ! {len(refused)} log window(s) still refused after being "
+              f"narrowed -- not writing a partial census.  First few: "
+              f"{[f'{lo}-{hi}' for lo, hi in refused[:5]]}")
         return 1
 
     wanted = {p: v for p, v in pairs.items() if quoted_side(*v) is not None}
