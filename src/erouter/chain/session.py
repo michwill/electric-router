@@ -40,6 +40,7 @@ from ..core.rendermodel import build_diagram
 from ..core.routecall import NEEDED, encode_route
 from ..core.schema import ROUTER_ADDRESS
 from ..core.solve import accel_in_use
+from ..venues import univ2_client
 from . import gas_probe
 from .exact_cache import ExactCache
 from .facts import FactsCache, apply_broken_facts
@@ -348,6 +349,10 @@ class RouterSession:
             # pair against v3's three round trips of storage reads.
             report.univ2_pairs = self.univ2.refresh(
                 getattr(self.rpc, "_t", self.rpc), self.nodes, self.block)
+            # Without this a v2 leg has no quoter that answers for it, `verify`
+            # reads the zero as a revert, and every candidate carrying one is
+            # dropped -- which reads as v2 losing rather than never being asked.
+            univ2_client.teach(self.client, self.univ2.state)
             report.univ2_ms = self.univ2.read_ms
             say("univ2", 1.0)
 
