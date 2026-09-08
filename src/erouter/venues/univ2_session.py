@@ -28,6 +28,22 @@ from .univ2_chain import read_pairs
 
 #: Pairs below this hold too little to route through and cost a read each.
 DEFAULT_FLOOR_USD = 10_000.0
+#: The most pairs a venue may put in one graph, deepest first.
+#:
+#: A second line of defence behind the census floor, and it is worth having
+#: because **arc count is a cliff rather than a cost**.  Most of the v2 factory
+#: is pairs seeded once and abandoned, so a floor set a little too low does not
+#: cost a little -- it multiplies the graph.  Measured elsewhere in this router:
+#: taking a graph from 450 arcs to 7,486 stopped the base solve converging at
+#: all, every large loss landed on a `PARTIAL` solve, and the answers were worse
+#: by tens to hundreds of basis points.
+#:
+#: Two arcs a pair, so this is a 1,000-arc budget -- the same order as the 2,418
+#: v3 contributes and twice Curve's own ~490, which is as far as the graph has
+#: been measured to stay healthy.  A floor that already admits fewer pairs makes
+#: this inert, which is the intended relationship: the floor decides, this
+#: catches a floor that was wrong.
+MAX_PAIRS = 500
 
 
 def census_path(root: Path, chain: str) -> Path:
@@ -44,6 +60,7 @@ class Univ2:
 
     census: dict
     floor_usd: float = DEFAULT_FLOOR_USD
+    max_pairs: int = MAX_PAIRS
     arcs: list[PoolArc] = field(default_factory=list)
     #: `pair -> (token0, token1, fee_bps, decimals0, decimals1)`, which is both
     #: what `read_pairs` takes and what the arc builder needs afterwards.
@@ -96,6 +113,12 @@ class Univ2:
                 continue
             out[pool.lower()] = (token0, token1, fee,
                                  nodes.decimals(token0), nodes.decimals(token1))
+        if self.max_pairs and len(out) > self.max_pairs:
+            # Deepest first, so what is dropped is what was least worth having.
+            deepest = sorted(
+                out, key=lambda p: -(self.census.get(p, [0, 0, 0, 0])[3]
+                                     if len(self.census.get(p, [])) > 3 else 0.0))
+            out = {p: out[p] for p in deepest[:self.max_pairs]}
         self.considered = (above, priceable, len(out))
         return out
 

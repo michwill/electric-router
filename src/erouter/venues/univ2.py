@@ -21,11 +21,13 @@ before a route is realised.  A v2 pair has one range, so it produces one arc
 each way and needs no collapse, no `parallel` flag and no Decision 3 exemption.
 That is most of why this file is a fifth of `univ3.py`.
 
-**The fee is per pool, not per protocol.**  Uniswap's own pairs charge 30 bp,
-but the same bytecode is deployed at 25 bp (Sushi, Pancake) and 20 bp, and a
-fork that changed it and kept the interface reads as a Uniswap pair to every
-call this makes.  So `fee_bps` travels with the state rather than being a
-constant here, and a census that does not know it is not admitted.
+**Uniswap v2 itself has no fee tiers.**  Every pair charges 30 bp, hard-coded
+as `997/1000` with no getter; the protocol-fee switch takes a share of that
+rather than changing it.  `fee_bps` still travels with the state because the
+*forks* differ -- the same bytecode and the same event signature deployed at
+another rate reads as a Uniswap pair to every call this makes, and pricing one
+at 30 bp is wrong in one direction on every leg.  So the field exists for them,
+and for Uniswap's own factory it is always 30.
 """
 
 from __future__ import annotations

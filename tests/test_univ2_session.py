@@ -167,3 +167,26 @@ def test_the_fee_from_the_census_reaches_the_arc():
                   Nodes(), block=1)
     forward = next(a for a in venue.arcs if a.i == 0)
     assert forward.a == pytest.approx(2_500 * 0.9975, rel=1e-9)
+
+
+def test_the_pair_count_is_capped_and_keeps_the_deepest():
+    """Arc count is a cliff, not a cost, so the venue bounds its own share.
+
+    Most of the v2 factory is pairs seeded once and abandoned, so a census floor
+    set a little too low does not cost a little -- it multiplies the graph.  A
+    graph taken from 450 arcs to 7,486 elsewhere in this router stopped
+    converging at all.  What gets dropped is what holds least.
+    """
+    census = {f"0x{n:040x}": [WETH, USDC, 30, float(n)] for n in range(1, 11)}
+    venue = Univ2(census, floor_usd=0.0, max_pairs=3)
+    kept = venue.wanted(Nodes())
+    assert len(kept) == 3
+    assert set(kept) == {f"0x{n:040x}" for n in (10, 9, 8)}
+    assert venue.considered == (10, 10, 3), "counted before the cap, kept after"
+
+
+def test_a_floor_that_already_bites_makes_the_cap_inert():
+    """The floor decides; the cap catches a floor that was wrong."""
+    census = {f"0x{n:040x}": [WETH, USDC, 30, float(n) * 1_000] for n in range(1, 11)}
+    venue = Univ2(census, floor_usd=8_000.0, max_pairs=500)
+    assert len(venue.wanted(Nodes())) == 3      # 8k, 9k, 10k

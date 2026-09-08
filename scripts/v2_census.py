@@ -45,9 +45,14 @@ from erouter.dev.rpc import JsonRpcTransport  # noqa: E402
 from erouter.venues.univ2 import DEFAULT_FEE_BPS  # noqa: E402
 from erouter.venues.univ2_chain import decode_reserves  # noqa: E402
 
-#: Uniswap v2 on ethereum, and the block it was deployed at.  A fork with the
-#: same event signature can be censused by pointing `--factory` at it; the fee
-#: is the thing that differs and `--fee-bps` carries it.
+#: Uniswap v2 on ethereum, and the block it was deployed at.
+#:
+#: **Every Uniswap v2 pair charges 30 bp.**  It is hard-coded in the pair as
+#: `997/1000` with no getter and no tiers -- the protocol-fee switch takes a
+#: share of that 30 bp rather than changing it.  So `--fee-bps` exists for
+#: *forks*: the same event signature and bytecode deployed at 25 bp reads as a
+#: Uniswap pair to every call this makes, and a census that assumed otherwise
+#: would misprice every leg of it in one direction.
 FACTORY = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
 DEPLOY = 10_000_835
 CREATED = "0x" + keccak256(b"PairCreated(address,address,address,uint256)").hex()
@@ -63,19 +68,37 @@ STABLES = {
 }
 
 
-def discover(rpc, head: int, span: int, factory: str, deploy: int) -> dict:
+def discover(rpc, head: int, span: int, factory: str, deploy: int,
+             cache: Path | None = None) -> tuple[dict, int]:
     """Every pair the factory ever made, as `pair -> (token0, token1)`.
 
     A refused window is a silently missing slice and a short census looks
     exactly like a small one, so refusals are counted and said aloud rather
     than tallied into the total.
+
+    **Resumable.**  Enumerating 1,594 windows takes over an hour against a
+    rate-limiting endpoint, and the first two attempts here died -- one to a
+    100,000-block span the node would not serve, one to a timeout at window
+    1,272 of 1,594 with 281,167 pairs already found and nothing written.  So
+    progress is written as it goes and a restart picks up from the last window
+    finished.  The cache is keyed by `(factory, span)`: a different scan is a
+    different file, not a resume.
     """
     spans = [(lo, min(lo + span - 1, head))
              for lo in range(deploy, head + 1, span)]
     pairs: dict[str, tuple[str, str]] = {}
     refused = 0
+    done = 0
+    if cache is not None and cache.exists():
+        held = json.loads(cache.read_text())
+        if held.get("factory") == factory and held.get("span") == span:
+            pairs = {k: tuple(v) for k, v in held["pairs"].items()}
+            done = int(held.get("done", 0))
+            refused = int(held.get("refused", 0))
+            print(f"  resuming at window {done}/{len(spans)} with "
+                  f"{len(pairs):,} pair(s)")
     started = time.monotonic()
-    for start in range(0, len(spans), 24):
+    for start in range(done, len(spans), 24):
         window = spans[start:start + 24]
         got = rpc.fetch_multi([("eth_getLogs", [{
             "fromBlock": hex(lo), "toBlock": hex(hi),
@@ -93,6 +116,12 @@ def discover(rpc, head: int, span: int, factory: str, deploy: int) -> dict:
         print(f"  {min(start + 24, len(spans)):>5}/{len(spans)} windows  "
               f"{len(pairs):,} pairs  {time.monotonic() - started:,.0f}s",
               flush=True)
+        if cache is not None:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({
+                "factory": factory, "span": span,
+                "done": min(start + 24, len(spans)), "refused": refused,
+                "pairs": {k: list(v) for k, v in pairs.items()}}))
     return pairs, refused
 
 
@@ -159,6 +188,9 @@ def main() -> int:
     ap.add_argument("--factory", default=FACTORY)
     ap.add_argument("--deploy", type=int, default=DEPLOY)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--cache", default=None,
+                    help="where to keep discovery progress so a killed run "
+                         "resumes; a full scan is over an hour")
     ap.add_argument("--limit", type=int, default=0,
                     help="stop after this many pairs pass the quote filter")
     args = ap.parse_args()
@@ -169,7 +201,9 @@ def main() -> int:
     head = rpc.block
     print(f"{chain.name} · block {head:,} · factory {args.factory}")
 
-    pairs, refused = discover(rpc, head, args.span, args.factory, args.deploy)
+    cache = Path(args.cache) if args.cache else None
+    pairs, refused = discover(rpc, head, args.span, args.factory, args.deploy,
+                              cache)
     print(f"\n{len(pairs):,} pair(s) ever created")
     if refused:
         # Refusing to continue rather than censusing a slice of the factory: a
@@ -214,6 +248,7 @@ def main() -> int:
     print(f"  {len(reserves):,} answered")
 
     out: dict[str, list] = {}
+    valued: dict[str, float] = {}
     for pool, (t0, t1) in wanted.items():
         got = reserves.get(pool)
         if not got:
@@ -229,9 +264,22 @@ def main() -> int:
                 continue
         held = got[index] / 10 ** decimals * price
         tvl = 2.0 * held
+        valued[pool] = tvl
         if tvl < args.floor:
             continue
         out[pool] = [t0, t1, args.fee_bps, round(tvl, 2)]
+
+    # What the floor is actually buying, because it is the parameter that
+    # decides whether this venue helps or wrecks the solve.  Most of the
+    # factory is pairs that were seeded once and abandoned: without a cutoff
+    # the arc count blows up, and arc count is a cliff rather than a cost --
+    # measured elsewhere in this router, a graph taken from 450 arcs to 7,486
+    # stopped converging at all and every large loss sat on a `PARTIAL` solve.
+    print(f"\n{'floor':>13}{'pairs':>10}{'arcs':>9}{'cumulative TVL':>20}")
+    for step in (0, 1_000, 10_000, 100_000, 1_000_000, 10_000_000):
+        kept = [v for v in valued.values() if v >= step]
+        print(f"{'$' + format(step, ',') :>13}{len(kept):>10,}{len(kept) * 2:>9,}"
+              f"{'$' + format(round(sum(kept)), ','):>20}")
 
     print(f"\n{len(out):,} pair(s) at or above ${args.floor:,.0f}")
     total = sum(row[3] for row in out.values())
