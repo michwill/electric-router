@@ -176,6 +176,50 @@ def read_reserves(rpc, addrs, head: int, chunk: int = 2000) -> dict:
     return out
 
 
+def emit(valued: dict, meta: dict, args) -> int:
+    """The floor table, the cut, and the write.
+
+    `valued` is every priced pair's TVL, floor or no floor, because the floor
+    is the parameter that decides whether this venue helps the solve or wrecks
+    it and it should be chosen off a table rather than guessed.  Most of the
+    factory is pairs seeded once and abandoned, so **arc count is a cliff
+    rather than a cost**: measured elsewhere in this router, a graph taken from
+    450 arcs to 7,486 stopped converging at all and every large loss sat on a
+    `PARTIAL` solve.
+    """
+    def shown(path: Path) -> str:
+        """`--out` is allowed to point anywhere, so this cannot assume it does
+        not.  It used to throw after the file was written, which made a good
+        run exit non-zero with the census sitting on disk."""
+        try:
+            return str(path.relative_to(ROOT))
+        except ValueError:
+            return str(path)
+
+    print(f"\n{'floor':>13}{'pairs':>10}{'arcs':>9}{'cumulative TVL':>20}")
+    for step in (0, 1_000, 10_000, 100_000, 1_000_000, 10_000_000):
+        kept = [v for v in valued.values() if v >= step]
+        print(f"{'$' + format(step, ',') :>13}{len(kept):>10,}{len(kept) * 2:>9,}"
+              f"{'$' + format(round(sum(kept)), ','):>20}")
+
+    out = {pool: [meta[pool][0], meta[pool][1], meta[pool][2], round(tvl, 2)]
+           for pool, tvl in valued.items() if tvl >= args.floor}
+    print(f"\n{len(out):,} pair(s) at or above ${args.floor:,.0f}")
+    print(f"  holding ${sum(row[3] for row in out.values()):,.0f} between them")
+    where = Path(args.out) if args.out else ROOT / "data" / "univ2" / f"{args.chain}.json"
+    if not out:
+        # An empty census is worse than none: `Univ2.load` would find a file,
+        # read no pairs from it, and the venue would be silently absent -- which
+        # is the failure `--univ3` shipped with and took a day to notice.  The
+        # run above already said why it is empty.
+        print(f"  ! nothing to write; {shown(where)} left alone")
+        return 1
+    where.parent.mkdir(parents=True, exist_ok=True)
+    where.write_text(json.dumps(out, separators=(",", ":"), sort_keys=True))
+    print(f"  written to {shown(where)} ({where.stat().st_size:,} B)")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--chain", default="ethereum")
@@ -191,9 +235,23 @@ def main() -> int:
     ap.add_argument("--cache", default=None,
                     help="where to keep discovery progress so a killed run "
                          "resumes; a full scan is over an hour")
+    ap.add_argument("--from", dest="source", default=None,
+                    help="re-cut an existing census at a different --floor "
+                         "instead of scanning; the reserve read is the hour, "
+                         "and the TVL it found is already in the file")
     ap.add_argument("--limit", type=int, default=0,
                     help="stop after this many pairs pass the quote filter")
     args = ap.parse_args()
+
+    if args.source:
+        # Only ever a narrowing: the file holds what passed its own floor, so
+        # a lower one here cannot invent the pairs it already dropped.  Said
+        # plainly rather than silently producing a census missing its tail.
+        held = json.loads(Path(args.source).read_text())
+        print(f"re-cutting {len(held):,} pair(s) from {args.source}")
+        return emit({p: row[3] for p, row in held.items()},
+                    {p: (row[0], row[1], row[2]) for p, row in held.items()},
+                    args)
 
     chain = chain_table.CHAINS[args.chain]
     url = config.rpc_url(chain.rpc_attr) if args.private else chain.public_rpc
@@ -269,33 +327,8 @@ def main() -> int:
             continue
         out[pool] = [t0, t1, args.fee_bps, round(tvl, 2)]
 
-    # What the floor is actually buying, because it is the parameter that
-    # decides whether this venue helps or wrecks the solve.  Most of the
-    # factory is pairs that were seeded once and abandoned: without a cutoff
-    # the arc count blows up, and arc count is a cliff rather than a cost --
-    # measured elsewhere in this router, a graph taken from 450 arcs to 7,486
-    # stopped converging at all and every large loss sat on a `PARTIAL` solve.
-    print(f"\n{'floor':>13}{'pairs':>10}{'arcs':>9}{'cumulative TVL':>20}")
-    for step in (0, 1_000, 10_000, 100_000, 1_000_000, 10_000_000):
-        kept = [v for v in valued.values() if v >= step]
-        print(f"{'$' + format(step, ',') :>13}{len(kept):>10,}{len(kept) * 2:>9,}"
-              f"{'$' + format(round(sum(kept)), ','):>20}")
-
-    print(f"\n{len(out):,} pair(s) at or above ${args.floor:,.0f}")
-    total = sum(row[3] for row in out.values())
-    print(f"  holding ${total:,.0f} between them")
-    where = Path(args.out) if args.out else ROOT / "data" / "univ2" / f"{args.chain}.json"
-    if not out:
-        # An empty census is worse than none: `Univ2.load` would find a file,
-        # read no pairs from it, and the venue would be silently absent -- which
-        # is the failure `--univ3` shipped with and took a day to notice.  The
-        # run above already said why it is empty.
-        print(f"  ! nothing to write; {where.relative_to(ROOT)} left alone")
-        return 1
-    where.parent.mkdir(parents=True, exist_ok=True)
-    where.write_text(json.dumps(out, separators=(",", ":"), sort_keys=True))
-    print(f"  written to {where.relative_to(ROOT)} ({where.stat().st_size:,} B)")
-    return 0
+    return emit(valued, {p: (t0, t1, args.fee_bps)
+                         for p, (t0, t1) in wanted.items()}, args)
 
 
 if __name__ == "__main__":
