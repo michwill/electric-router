@@ -592,6 +592,11 @@ fn derive_rule(kind: ArcKind) -> Option<(Derive, Derive)> {
         // there is no calldata to place it in. The reference says the same by
         // leaving it out of `_DERIVE`.
         SwapUniv3 => return None,
+        // Same answer, for now and not for the same reason: a v2 leg is
+        // sendable -- transfer, then `swap` -- but no contract declares the
+        // kind yet, so there is no calldata to place it in. See
+        // `core::types::OFF_CHAIN_KINDS`.
+        SwapUniv2 => return None,
     })
 }
 

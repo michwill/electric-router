@@ -40,6 +40,8 @@ pub enum ArcKind {
     // is why neither the quoter nor the router declares it -- but the ballot
     // has to carry it, because that is where the arcs are.
     SwapUniv3 = 17,
+    /// A v2 pair: constant product with a flat fee, one arc per direction.
+    SwapUniv2 = 18,
 }
 
 impl ArcKind {
@@ -63,6 +65,7 @@ impl ArcKind {
             15 => LendMint,
             16 => LendRedeem,
             17 => SwapUniv3,
+            18 => SwapUniv2,
             _ => return None,
         })
     }
@@ -91,6 +94,7 @@ impl ArcKind {
             WstethWrap => "WSTETH_WRAP",
             StakeNative => "STAKE_NATIVE",
             SwapUniv3 => "SWAP_UNIV3",
+            SwapUniv2 => "SWAP_UNIV2",
             LendMint => "LEND_MINT",
             LendRedeem => "LEND_REDEEM",
         }

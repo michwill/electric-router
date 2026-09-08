@@ -36,6 +36,10 @@ class ArcKind(IntEnum):
     # by `RouteExecutor` -- there is no callback in it -- so a route carrying
     # one quotes but does not send.
     SWAP_UNIV3 = 17  # a v3 tick range, from `venues.univ3`
+    # Constant product with a flat fee, from reserves alone.  One arc per
+    # direction rather than a bank: a v2 pair has one range, so nothing has to
+    # be collapsed before a route is realised and Decision 3 needs no exemption.
+    SWAP_UNIV2 = 18  # a v2 pair, from `venues.univ2`
 
     @property
     def is_lending(self) -> bool:
@@ -51,7 +55,7 @@ class ArcKind(IntEnum):
     @property
     def is_swap(self) -> bool:
         return self in (ArcKind.SWAP_STABLE, ArcKind.SWAP_CRYPTO,
-                        ArcKind.SWAP_UNIV3)
+                        ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV2)
 
     @property
     def is_deposit(self) -> bool:
@@ -78,12 +82,20 @@ class ArcKind(IntEnum):
 # each other number for number -- drift there is silent, a leg priced as some
 # other operation with a plausible answer coming back.
 #
-# A model-only kind is the one thing that rule cannot cover: `SWAP_UNIV3` is a
-# concentrated-liquidity tick range, computed from `venues.univ3` rather than
-# quoted, and `RouteExecutor` has no v3 callback to send it with.  A route
-# carrying one is a quote, not a plan.  Named here so the exemption is a
-# decision with a place to live rather than a hole in a test.
-OFF_CHAIN_KINDS = frozenset({ArcKind.SWAP_UNIV3})
+# A model-only kind is the one thing that rule cannot cover.  A route carrying
+# one is a quote, not a plan.  Named here so each exemption is a decision with a
+# place to live rather than a hole in a test.
+#
+# `SWAP_UNIV3` is a concentrated-liquidity tick range, computed from
+# `venues.univ3` rather than quoted, and the deployed contracts have no v3
+# callback to send it with.
+#
+# `SWAP_UNIV2` is here for a weaker reason and should not stay: a pair is
+# `transfer` then `swap(amount0Out, amount1Out, to, b"")`, with no callback and
+# no tick walk, so both contracts can learn it in a way v3 cannot.  It is
+# model-only because the arithmetic landed first, not because sending it is
+# hard.
+OFF_CHAIN_KINDS = frozenset({ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV2})
 
 
 class Dialect(StrEnum):
