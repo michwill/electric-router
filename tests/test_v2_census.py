@@ -135,3 +135,74 @@ def test_discovery_is_a_union_so_re_asking_costs_only_time():
     first, _ = v2_census.discover(node, 999, 100, "0xf", 0, None)
     second, _ = v2_census.discover(node, 999, 100, "0xf", 0, None)
     assert first == second and len(first) == 2
+
+
+class Reader:
+    """Answers `getReserves()`, but refuses any batch over `cap`.
+
+    The endpoint caps batches at 100 and the transport defaulted to 500, so
+    every request came back refused and was dropped without a word.
+    """
+
+    def __init__(self, reserves: dict, cap: int = 10**9, flaky: int = 0):
+        self.reserves, self.cap = reserves, cap
+        self.flaky = flaky        # refuse this many reads, once each
+        self.refused_once: set = set()
+
+    def fetch_multi(self, requests, concurrent=False):
+        if len(requests) > self.cap:
+            return [RuntimeError(f"batch limit {self.cap} exceeded")] * len(requests)
+        out = []
+        for _method, params in requests:
+            pool = params[0]["to"]
+            if self.flaky and pool not in self.refused_once:
+                self.refused_once.add(pool)
+                self.flaky -= 1
+                out.append(RuntimeError("timeout"))
+                continue
+            got = self.reserves.get(pool)
+            if got is None:
+                out.append("0x")          # no code behind it
+                continue
+            out.append("0x" + got[0].to_bytes(32, "big").hex()
+                       + got[1].to_bytes(32, "big").hex()
+                       + (0).to_bytes(32, "big").hex())
+        return out
+
+
+def test_a_refused_read_is_not_an_empty_pool():
+    """The distinction that decides whether a census is small or short."""
+    pools = [f"0x{n:040x}" for n in range(1, 6)]
+    reader = Reader({}, cap=0)
+    got, unread = v2_census.read_reserves(reader, pools, 1, chunk=10, retries=0)
+    assert got == {}
+    assert sorted(unread) == sorted(pools), "refusals are named, not dropped"
+
+
+def test_a_pair_with_no_code_is_counted_but_not_re_asked():
+    """It answered.  Asking again gets the same `0x`."""
+    pools = [f"0x{n:040x}" for n in range(1, 6)]
+    got, unread = v2_census.read_reserves(Reader({}), pools, 1, chunk=10)
+    assert got == {} and unread == [], "answered, so nothing to re-ask"
+
+
+def test_a_flaky_read_is_re_asked_and_recovered():
+    pools = [f"0x{n:040x}" for n in range(1, 6)]
+    reserves = dict.fromkeys(pools, (10 ** 18, 2000 * 10 ** 6))
+    got, unread = v2_census.read_reserves(
+        Reader(reserves, flaky=3), pools, 1, chunk=10)
+    assert unread == []
+    assert len(got) == 5, "every pair recovered on a retry"
+
+
+def test_the_batch_cap_failure_is_visible_rather_than_silent():
+    """514,027 pairs read in 63 s, 27 answered -- and nothing said so.
+
+    The 27 were the final partial chunk, the only request under the cap.
+    """
+    pools = [f"0x{n:040x}" for n in range(1, 128)]
+    reserves = dict.fromkeys(pools, (10 ** 18, 2000 * 10 ** 6))
+    reader = Reader(reserves, cap=100)
+    got, unread = v2_census.read_reserves(reader, pools, 1, chunk=120, retries=0)
+    assert len(unread) == 120, "the oversized chunk is reported, not swallowed"
+    assert len(got) == 7, "only the chunk under the cap answered"

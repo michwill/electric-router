@@ -31,14 +31,19 @@ def decode_reserves(raw: bytes) -> tuple[int, int]:
     reserves arrive as separate 32-byte slots rather than packed -- reading it
     as the *storage* layout would give one enormous number and one zero, which
     is a plausible-looking pair rather than an error.
+
+    A short answer raises for the same reason.  `eth_call` to an address with
+    no code returns `0x`, and reading that as a pool holding nothing says the
+    pair is dead when the truth is that nothing was asked.  The census counts
+    the two separately.
     """
     if len(raw) < 64:
-        return 0, 0
+        raise ValueError(f"getReserves() answered {len(raw)} bytes, not 64")
     return (int.from_bytes(raw[:32], "big") & _RESERVE_MASK,
             int.from_bytes(raw[32:64], "big") & _RESERVE_MASK)
 
 
-def read_pairs(rpc, pairs: dict, block: int, *, batch: int = 3000):
+def read_pairs(rpc, pairs: dict, block: int):
     """`pair -> PairState` for every pair that answered.
 
     `pairs` maps address to `(token0, token1, fee_bps, decimals0, decimals1)`,
@@ -64,7 +69,10 @@ def read_pairs(rpc, pairs: dict, block: int, *, batch: int = 3000):
             raw = bytes.fromhex(answer[2:])
         except ValueError:
             continue
-        reserve0, reserve1 = decode_reserves(raw)
+        try:
+            reserve0, reserve1 = decode_reserves(raw)
+        except ValueError:
+            continue
         row = pairs[pool]
         state = PairState(
             reserve0=reserve0, reserve1=reserve1,

@@ -41,7 +41,7 @@ from erouter.chain import chains as chain_table  # noqa: E402
 from erouter.core.codec import encode_call  # noqa: E402
 from erouter.core.keccak import keccak256  # noqa: E402
 from erouter.dev import config  # noqa: E402
-from erouter.dev.rpc import JsonRpcTransport  # noqa: E402
+from erouter.dev.rpc import BATCH_FLOOR, JsonRpcTransport  # noqa: E402
 from erouter.venues.univ2 import DEFAULT_FEE_BPS  # noqa: E402
 from erouter.venues.univ2_chain import decode_reserves  # noqa: E402
 
@@ -215,10 +215,27 @@ def decimals_for(rpc, tokens, head: int) -> dict:
     return out
 
 
-def read_reserves(rpc, addrs, head: int, chunk: int = 2000) -> dict:
+def read_reserves(rpc, addrs, head: int, chunk: int = 2000,
+                  retries: int = 3) -> tuple[dict, list]:
+    """Reserves per pair, and the pairs the node would not answer for.
+
+    A refused read is not an empty pool, and mistaking one for the other is
+    what decides whether a census is *small* or *short*.  This dropped both on
+    the floor and cost a full run: the endpoint caps batches at 100, the
+    transport defaults to 500, and every batch came back `batch limit 100
+    exceeded`.  514,027 pairs were "read" in 63 s and 27 answered -- those 27
+    being the last partial chunk, the only request under the cap.  Nothing in
+    the output said so; the floor table simply showed an empty factory.
+
+    Refusals are re-asked, because they are usually the endpoint and not the
+    pair.  An answer that is not a reserve triple is a different thing -- a
+    pair with no code behind it -- and is counted, not retried.
+    """
     call = "0x" + encode_call("getReserves()").hex()
     at = hex(head)
-    out = {}
+    out: dict = {}
+    unread: list = []
+    empty = 0
     started = time.monotonic()
     for start in range(0, len(addrs), chunk):
         part = addrs[start:start + chunk]
@@ -227,14 +244,25 @@ def read_reserves(rpc, addrs, head: int, chunk: int = 2000) -> dict:
             concurrent=True)
         for pool, answer in zip(part, got, strict=True):
             if isinstance(answer, Exception) or not isinstance(answer, str):
+                unread.append(pool)
                 continue
             try:
                 out[pool] = decode_reserves(bytes.fromhex(answer[2:]))
             except ValueError:
-                continue
+                empty += 1
         print(f"  {min(start + chunk, len(addrs)):>7,}/{len(addrs):,} read  "
-              f"{time.monotonic() - started:,.0f}s", flush=True)
-    return out
+              f"{time.monotonic() - started:,.0f}s"
+              + (f"  ({len(unread):,} refused)" if unread else ""), flush=True)
+
+    for _ in range(retries):
+        if not unread:
+            break
+        print(f"  re-asking {len(unread):,} refused read(s)", flush=True)
+        again, unread = read_reserves(rpc, unread, head, chunk, retries=0)
+        out |= again
+    if empty:
+        print(f"  {empty:,} answered with no reserves (no code behind them)")
+    return out, unread
 
 
 def emit(valued: dict, meta: dict, args) -> int:
@@ -317,8 +345,15 @@ def main() -> int:
     chain = chain_table.CHAINS[args.chain]
     url = config.rpc_url(chain.rpc_attr) if args.private else chain.public_rpc
     rpc = JsonRpcTransport(url, chain_id=chain.chain_id)
+    # Ask the endpoint what it will take rather than assuming the default.
+    # It caps batches at 100 and the transport defaults to 500, so every
+    # batched read came back `batch limit 100 exceeded` and was dropped -- a
+    # whole census read as an empty factory.
+    rpc.batch_size = max(rpc.probe_batch_limit(("eth_blockNumber", [])),
+                         BATCH_FLOOR)
     head = rpc.block
-    print(f"{chain.name} · block {head:,} · factory {args.factory}")
+    print(f"{chain.name} · block {head:,} · factory {args.factory} · "
+          f"batch {rpc.batch_size}")
 
     cache = Path(args.cache) if args.cache else None
     pairs, refused = discover(rpc, head, args.span, args.factory, args.deploy,
@@ -352,7 +387,7 @@ def main() -> int:
         if best is None:
             print(f"  ! no {name}/stable pair; pairs holding it are dropped")
             continue
-        got = read_reserves(rpc, [best[0]], head)
+        got, _ = read_reserves(rpc, [best[0]], head)
         if best[0] not in got:
             continue
         r0, r1 = got[best[0]]
@@ -365,8 +400,15 @@ def main() -> int:
 
     addrs = list(wanted)
     print(f"\nreading reserves for {len(addrs):,} pair(s)")
-    reserves = read_reserves(rpc, addrs, head)
+    reserves, unread = read_reserves(rpc, addrs, head)
     print(f"  {len(reserves):,} answered")
+    if len(unread) > 0.01 * max(len(addrs), 1):
+        # A handful failing at random is noise the floor dominates anyway; a
+        # systematic refusal takes out the whole census and must not be allowed
+        # to look like a small factory.  This is the guard that was missing.
+        print(f"  ! {len(unread):,} of {len(addrs):,} pair(s) never answered "
+              f"after retries -- not writing a census built on the rest")
+        return 1
 
     out: dict[str, list] = {}
     valued: dict[str, float] = {}

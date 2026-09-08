@@ -157,3 +157,19 @@ def test_decimals_are_carried_into_the_rate():
     a, _b, _cap = univ2.arc_params(pair(), True)
     raw = univ2.output(pair(), True, 10**18)
     assert raw / 10**6 == pytest.approx(a, rel=1e-3)
+
+
+def test_a_short_answer_is_an_error_and_not_an_empty_pool():
+    """`eth_call` to an address with no code returns `0x`.
+
+    Reading that as a pool holding nothing says the pair is dead when the truth
+    is that nothing was asked -- the same conflation as reading the storage
+    layout, which this function already refuses.
+    """
+    from erouter.venues.univ2_chain import decode_reserves
+
+    with pytest.raises(ValueError):
+        decode_reserves(b"")
+    with pytest.raises(ValueError):
+        decode_reserves(bytes(63))
+    assert decode_reserves(bytes(96)) == (0, 0), "a real answer of zeros is zeros"
