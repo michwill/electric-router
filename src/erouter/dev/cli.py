@@ -1308,6 +1308,13 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
                 max_legs=args.max_legs,
                 gas_table=gas_table,
                 risk_table=risk_table,
+                # `venue_opts` too, and this is the whole quote: without it the
+                # venue is read, its ticks are fetched, the boot line says how
+                # many -- and every keystroke routes Curve alone.  Measured on
+                # `WETH -> sDOLA` at 1,000: 1,690,935 sDOLA interactively
+                # against 1,750,896 for the same pair, block and flags one-shot,
+                # 354 bp for a splat that was on the re-quote below and not here.
+                **venue_opts,
                 **route_opts,
             )
         except RoutingError as exc:
