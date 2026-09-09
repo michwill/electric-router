@@ -36,7 +36,7 @@ def test_a_node_only_the_venue_reaches_is_priced_from_its_arcs():
     frame = [_arc("curve:0", 0, 1)]              # nodes 0 and 1 are priced
     nu = np.array([1.0, 2.0, 1.0])              # node 2 is the default
     bridge = _arc("v2:0", 2, 1, "uniswap v2", a=3.0)   # X -> node 1
-    fresh, refused, out, bridged = admissible_late_arcs(frame, [bridge], nu)
+    fresh, refused, out, bridged = admissible_late_arcs(frame, [bridge], nu, bridgeable=(2,))
     assert [a.id for a in fresh] == ["v2:0"], "the bridge arc is admitted"
     assert refused == 0 and bridged == 1
     # §4 wants nu_tau = a * nu_sig for an arc it fits perfectly.
@@ -57,7 +57,7 @@ def test_both_directions_land_the_arc_on_the_pool_s_own_fee():
     frame = [_arc("curve:0", 0, 1)]
     nu = np.array([1.0, 1.0, 1.0])
     _fresh, _refused, out, _b = admissible_late_arcs(
-        frame, [forward, reverse], nu)
+        frame, [forward, reverse], nu, bridgeable=(2,))
     assert out[2] == pytest.approx(spot, rel=1e-12), "the mid price, not a side"
     for arc in (forward, reverse):
         eps = 1 - arc.a * out[arc.sigma] / out[arc.tau]
@@ -74,7 +74,7 @@ def test_nothing_the_frame_priced_is_moved():
     nu = np.array([1.0, 7.0, 13.0, 1.0])
     before = nu.copy()
     _f, _r, out, _b = admissible_late_arcs(
-        frame, [_arc("v2:0", 3, 1, "uniswap v2", a=2.0)], nu)
+        frame, [_arc("v2:0", 3, 1, "uniswap v2", a=2.0)], nu, bridgeable=(3,))
     assert np.array_equal(out[:3], before[:3]), "Curve's prices are untouched"
     assert out[3] != 1.0, "and the new node is no longer the default"
     assert nu is not out, "the caller's array is not mutated in place"
@@ -85,7 +85,7 @@ def test_an_arc_with_neither_end_priced_is_still_refused():
     frame = [_arc("curve:0", 0, 1)]
     nu = np.array([1.0, 1.0, 1.0, 1.0])
     fresh, refused, _out, bridged = admissible_late_arcs(
-        frame, [_arc("v2:0", 2, 3, "uniswap v2")], nu)
+        frame, [_arc("v2:0", 2, 3, "uniswap v2")], nu, bridgeable=(2, 3))
     assert fresh == [] and refused == 1 and bridged == 0
 
 
@@ -98,7 +98,7 @@ def test_a_failed_probe_prices_nothing():
     frame = [_arc("curve:0", 0, 1)]
     nu = np.array([1.0, 1.0, 1.0])
     fresh, refused, out, bridged = admissible_late_arcs(
-        frame, [_arc("v2:0", 2, 1, "uniswap v2", a=0.0)], nu)
+        frame, [_arc("v2:0", 2, 1, "uniswap v2", a=0.0)], nu, bridgeable=(2,))
     assert bridged == 0 and fresh == [] and refused == 1
     assert np.isfinite(out).all()
 
@@ -109,7 +109,8 @@ def test_the_deeper_pool_wins_when_two_bridges_disagree():
     nu = np.array([1.0, 1.0, 1.0])
     thin = _arc("v2:0", 2, 1, "uniswap v2", a=1.0, tvl=1.0)
     deep = _arc("v3:0", 2, 1, "uniswap v3", a=100.0, tvl=1e9)
-    _f, _r, out, _b = admissible_late_arcs(frame, [thin, deep], nu)
+    _f, _r, out, _b = admissible_late_arcs(
+        frame, [thin, deep], nu, bridgeable=(2,))
     assert out[2] > 50.0, "the $1e9 pool should dominate a $1 one"
     # Exactly the weighted mean of the logs the two arcs ask for.
     want = math.exp((1.0 * math.log(1.0) + 1e9 * math.log(100.0)) / (1.0 + 1e9))
@@ -145,7 +146,8 @@ def test_a_pool_s_tick_arcs_price_from_the_top_of_the_book():
         )
         for n in range(8)
     ]
-    _f, _r, out, bridged = admissible_late_arcs(frame, book, nu)
+    _f, _r, out, bridged = admissible_late_arcs(
+        frame, book, nu, bridgeable=(2,))
     assert bridged == 1
     assert out[2] == pytest.approx(spot), "the marginal price, not the mean"
     assert out[2] > spot / 1.5, "and well above what averaging the book gives"
@@ -163,7 +165,8 @@ def test_two_pools_still_both_vote_for_the_same_token():
         id="v3:b", pool="0x" + "bb" * 20, kind=ArcKind.SWAP_UNIV3, i=0, j=1,
         n_coins=2, token_in="0xin", token_out="0xout", tau=2, sigma=1,
         a=1000.0, B=1.0, venue="uniswap v3", tvl_usd=1e9, parallel=True)
-    _f, _r, out, _b = admissible_late_arcs(frame, [a, b], nu)
+    _f, _r, out, _b = admissible_late_arcs(
+        frame, [a, b], nu, bridgeable=(2,))
     assert out[2] > 900.0, "the $1e9 pool dominates, but both were counted"
     assert out[2] < 1000.0, "the $1 pool still moved it a little"
 
@@ -211,3 +214,32 @@ def test_a_node_with_one_curve_pool_and_one_pair_can_be_passed_through():
 
     # Without the venue counted, node 2 is a dead end and the hop is deleted.
     assert len(_prune_dead_end_nodes(frame, 0, 3, result)) < 2
+
+
+def test_a_node_nobody_asked_for_is_not_priced_even_where_it_could_be():
+    """Being in the node map and being priced by the frame are different.
+
+    RSR and XYO are in the map with no Curve arc touching them.  Pricing every
+    node the frame missed would admit arcs that have always been refused, on
+    every route, whether or not anyone asked to reach them -- measured at
+    1.03 bp on `USDC -> WETH` alone.  `venues/bridge.py` decides who gets a
+    node, this decides who gets a price, and they must agree.
+    """
+    frame = [_arc("curve:0", 0, 1)]
+    nu = np.array([1.0, 1.0, 1.0, 1.0])
+    reach_2 = _arc("v2:0", 2, 1, "uniswap v2", a=3.0)
+    reach_3 = _arc("v2:1", 3, 1, "uniswap v2", a=5.0)
+    fresh, refused, out, bridged = admissible_late_arcs(
+        frame, [reach_2, reach_3], nu, bridgeable=(2,))
+    assert bridged == 1 and [a.id for a in fresh] == ["v2:0"]
+    assert refused == 1, "node 3 was never asked for"
+    assert out[3] == 1.0, "and keeps the default rather than a derived price"
+
+
+def test_naming_no_node_bridges_nothing():
+    """The default, so a caller that has not thought about it changes nothing."""
+    frame = [_arc("curve:0", 0, 1)]
+    nu = np.array([1.0, 1.0, 1.0])
+    fresh, refused, _out, bridged = admissible_late_arcs(
+        frame, [_arc("v2:0", 2, 1, "uniswap v2", a=3.0)], nu)
+    assert bridged == 0 and fresh == [] and refused == 1

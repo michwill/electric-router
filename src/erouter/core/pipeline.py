@@ -436,10 +436,24 @@ def prepare(
     # -- and those arcs give conductances orders of magnitude off, wrecking the
     # Laplacian's conditioning for everything else.
     with clock("component"):
-        arcs = _restrict_to_component(arcs, dst_node, nodes.n_nodes, scratch,
-                                      joining=late_arcs)
-        arcs = _prune_dead_end_nodes(arcs, src_node, dst_node, scratch,
-                                     joining=late_arcs)
+        # Widen the component by the venue's arcs only when an endpoint has no
+        # frame arc at all -- a bridged token, which is the case that needs it.
+        # Widening it always would keep frame islands that are reachable only
+        # through a venue, and this function's own reason for existing is that
+        # such an island is *unpriced*: §4 returns 1.0 there as a placeholder,
+        # not a valuation, and venue arcs do not vote in the fit that would fix
+        # that.  Every run without a bridged endpoint stays as it was.
+        touched = {a.tau for a in arcs} | {a.sigma for a in arcs}
+        stranded = [n for n in (src_node, dst_node) if n not in touched]
+        if stranded:
+            scratch.counters["endpoints_reached_only_by_a_venue"] = len(stranded)
+        arcs = _restrict_to_component(
+            arcs, dst_node, nodes.n_nodes, scratch,
+            joining=late_arcs if stranded else None)
+        # No `joining` here: a bridged token is an endpoint and endpoints are
+        # already exempt, so this needs no widening -- and widening it cost
+        # `USDC -> WBTC` its graph.  See `_prune_dead_end_nodes`.
+        arcs = _prune_dead_end_nodes(arcs, src_node, dst_node, scratch)
     reaching = arcs if not late_arcs else arcs + late_arcs
     if not reaching:
         raise RoutingError(f"{nodes.symbol(dst_token)} is not reachable from any pool")
@@ -567,7 +581,7 @@ class Prepared:
 
 
 def admissible_late_arcs(
-    arcs: list[PoolArc], late_arcs: list[PoolArc], nu=None
+    arcs: list[PoolArc], late_arcs: list[PoolArc], nu=None, bridgeable=(),
 ) -> tuple[list[PoolArc], int] | tuple[list[PoolArc], int, object, int]:
     """The late arcs the graph can take, and a price for what only they reach.
 
@@ -610,6 +624,15 @@ def admissible_late_arcs(
     a $10,000 floor no v2 pair has both coins outside the frame, so a second
     round would have nothing to do.
 
+    `bridgeable` names the nodes allowed to be priced this way, and it is the
+    trade's own endpoints.  Being *in the node map* and being *priced by the
+    frame* are different things -- RSR and XYO are in the map with no Curve arc
+    touching them -- so pricing every node the frame missed would quietly admit
+    arcs that have always been refused, on every route, whether or not anyone
+    asked to reach them.  Measured, that moved `USDC -> WETH` at 10,000 by
+    1.03 bp on its own.  `venues/bridge.py` decides who gets a node; this
+    decides who gets a price, and they have to be the same answer.
+
     Called with `nu` it returns `(fresh, refused, nu, bridged)`; without it the
     original `(fresh, refused)`, since callers that have no frame prices to
     hand cannot bridge anything anyway.
@@ -619,7 +642,8 @@ def admissible_late_arcs(
     candidates = [arc for arc in late_arcs if arc.id not in have]
 
     bridged = 0
-    if nu is not None:
+    allowed = frozenset(bridgeable)
+    if nu is not None and allowed:
         # One price per pool per direction, and it is the *best* rate, not the
         # mean of them.  A v3 pool contributes 32 tick arcs that are not 32
         # observations of a price -- they are one curve cut into pieces, and
@@ -637,12 +661,14 @@ def admissible_late_arcs(
                 continue                    # both priced, or neither anchored
             if not (arc.a > 0.0):
                 continue                    # a failed probe prices nothing
+            new_node = arc.tau if sig_ok else arc.sigma
+            if new_node not in allowed:
+                continue
             key = (arc.pool.lower(), arc.tau, arc.sigma)
             weight = max(float(arc.tvl_usd), 1.0)
             held = best.get(key)
             if held is None or arc.a > held[1]:
-                best[key] = (weight, float(arc.a), arc.tau if sig_ok else arc.sigma,
-                             sig_ok)
+                best[key] = (weight, float(arc.a), new_node, sig_ok)
 
         # `node -> [(weight, log nu it wants)]`, one entry per pool direction.
         wants: dict[int, list[tuple[float, float]]] = {}
@@ -796,7 +822,8 @@ def route(
     nu = prepared.nu
     # After the frame is fitted and before anything is solved: see above.
     if late_arcs:
-        fresh, unpriced, nu, bridged = admissible_late_arcs(arcs, late_arcs, nu)
+        fresh, unpriced, nu, bridged = admissible_late_arcs(
+            arcs, late_arcs, nu, bridgeable=(src_node, dst_node))
         arcs = arcs + fresh
         result.counters["late_arcs"] = len(fresh)
         if unpriced:
@@ -2451,12 +2478,18 @@ def _prune_dead_end_nodes(
     Endpoints are never pruned: quoting `HLX -> USDC` is a fair question and its
     single pool is the answer.
 
-    `joining` is the late arcs.  They count towards how many pools touch a node
-    and are never returned, for the same reason `_restrict_to_component` takes
-    them: a node with one Curve pool and one Uniswap pair *can* be passed
-    through, and pruning it for want of a second Curve pool would delete the
-    hop before the arc that completes it has joined.  They do not enter §4's
-    fit either way.
+    `joining` is the late arcs, counted towards how many pools touch a node and
+    never returned.  A node with one Curve pool and one Uniswap pair can be
+    passed through, so on paper it should not be pruned.
+
+    In practice pass nothing.  Bridging needs no help here -- a bridged token is
+    always an endpoint, and endpoints are already exempt -- while counting the
+    venue everywhere keeps arcs whose conductance §4 has almost no evidence for.
+    Measured: `USDC -> WBTC` at 10,000 went from a quote to
+    `max(G)/min(G) = 1.13e16` and §9.7 refusing the graph, and `USDC -> WETH`
+    to "src not connected to dst through the active set".  The parameter stays
+    because the reasoning above is sound and a future caller may want it; the
+    default is off because the frame is what §4 fitted.
     """
     live = list(arcs)
     ends = {src_node, dst_node}
