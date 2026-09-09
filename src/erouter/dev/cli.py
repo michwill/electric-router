@@ -1171,6 +1171,8 @@ def cmd_route(args: argparse.Namespace) -> int:
           f"{'' if args.gas_price is not None else ' (live)'}")
     if getattr(args, "timings", False):
         print(_boot_line(started))
+    for line in _introduce_endpoints(args, chain, rpc, nodes, src, dst):
+        print(f"  {line}")
     if not nodes.has(src) or not nodes.has(dst):
         print(f"{BAD} token not routable in this universe")
         return 2
@@ -1258,10 +1260,14 @@ def _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
     started = time.monotonic()
     try:
         venue_opts = venue_opts or {"extra_arcs": stake_arcs}
-        # `extra_arcs` only: a venue's arcs join after this, so they are in the
-        # graph and not in the reference-price fit.  See `pipeline.route`.
+        # `extra_arcs` is what joins the fit; a venue's arcs join after this,
+        # so they are in the graph and not in the reference-price fit.  See
+        # `pipeline.route`.  `late_arcs` is passed for connectivity alone --
+        # without it a bridged token is pruned as unreachable before the arc
+        # that reaches it has joined, and bridging buys nothing.
         prepared = prepare(load.pools, nodes, client, src_token=src, dst_token=dst,
-                           extra_arcs=venue_opts.get("extra_arcs", stake_arcs))
+                           extra_arcs=venue_opts.get("extra_arcs", stake_arcs),
+                           late_arcs=venue_opts.get("late_arcs"))
     except RoutingError as exc:
         print(f"{BAD} no route: {exc}")
         return 2
@@ -2356,6 +2362,54 @@ def _route_options(args=None) -> dict:
     if getattr(args, "no_impact", False):
         options["measure_impact"] = False
     return options
+
+
+def _introduce_endpoints(args, chain, rpc, nodes, src, dst) -> list[str]:
+    """Give the trade's own endpoints a node when only a venue reaches them.
+
+    A token Curve has never held is absent from the node map, so it is not
+    routable at all -- `X -> USDT -> crvUSD` was refused for want of a node for
+    `X`, not for want of a path.  `venues/bridge.py` carries the reasoning,
+    including why this is the endpoints and not the 6,379 tokens that would
+    qualify.
+
+    Runs before the venues are built, so their `wanted()` sees the new nodes
+    and needs no second read.  Costs nothing in the ordinary case: the censuses
+    are only opened when a token is actually missing.
+
+    Name such a token by address.  A symbol is resolved against the universe,
+    which by definition has never heard of it.
+    """
+    missing = [t for t in (src, dst) if not nodes.has(t)]
+    if not missing:
+        return []
+    import pathlib
+
+    from ..venues import bridge
+    from ..venues.univ2_session import Univ2
+    from ..venues.univ3_session import Univ3
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    held = []
+    for flag, floor, cls in (("univ3", "univ3_floor", Univ3),
+                             ("univ2", "univ2_floor", Univ2)):
+        if not getattr(args, flag, False):
+            continue
+        venue = cls.load(root, chain.name.lower(),
+                         floor_usd=float(getattr(args, floor, 10_000.0)))
+        if venue is not None:
+            held.append(venue)
+    if not held:
+        return [f"{WARN} {missing[0][:10]} is not in this universe; "
+                f"--univ2/--univ3 can bring it in if a pair holds it"]
+    out = []
+    for token in missing:
+        got = bridge.introduce(token, nodes, held, rpc, rpc.block)
+        if got:
+            deep = bridge.bridges_for(token, nodes, held)
+            out.append(f"bridged {got} ({token[:10]}) into the graph from "
+                       f"{len(deep)} pair(s), deepest ${deep[0][2]:,.0f}")
+    return out
 
 
 def _venue_options(args, chain, rpc, nodes, client, stake_arcs) -> dict:

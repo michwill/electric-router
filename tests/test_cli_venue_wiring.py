@@ -75,12 +75,18 @@ def test_the_one_shot_path_is_given_the_venue_too():
 
 @pytest.mark.parametrize("name", ["_interactive", "cmd_route"])
 def test_the_venue_is_never_folded_into_the_reference_prices(name):
-    """`prepare` takes `extra_arcs` only.
+    """A venue's arcs belong in the graph, never in §4's fit.
 
-    A venue's arcs belong in the graph and not in §4's fit -- 146 pools at 32
-    tick-arcs each outvote every Curve pool in a weighted least squares that has
-    no idea they are one pool.  Through `extra_arcs` that cost 9.50 bp on
-    `crvUSD -> sDOLA`; `late_arcs` is the seam that exists for it.
+    146 pools at 32 tick-arcs each outvote every Curve pool in a weighted least
+    squares that has no idea they are one pool.  Through `extra_arcs` that cost
+    9.50 bp on `crvUSD -> sDOLA`.
+
+    `prepare` does now take `late_arcs`, and takes them *for connectivity
+    alone* -- it never fits them and never returns them, which
+    `test_late_arc_bridging.py` pins on the two functions that use them.  What
+    must not happen is the venue reaching `extra_arcs`, and the way that would
+    happen is a splat: `**venue_opts` carries `late_arcs` and `extra_arcs`
+    together, and `prepare` would quietly fit both.
     """
     for node in ast.walk(_function(name)):
         if not isinstance(node, ast.Call):
@@ -89,8 +95,11 @@ def test_the_venue_is_never_folded_into_the_reference_prices(name):
         if called != "prepare":
             continue
         splats = {kw.arg for kw in node.keywords}
-        assert "late_arcs" not in splats
         assert None not in splats, "prepare must not be splatted the venue kwargs"
+        for kw in node.keywords:
+            if kw.arg == "extra_arcs":
+                assert "late_arcs" not in ast.unparse(kw.value), (
+                    "the venue's arcs are being handed to the fit")
 
 
 @pytest.mark.parametrize("fn,teacher", [
@@ -149,3 +158,46 @@ def test_the_two_venues_concatenate_their_arcs():
                 "late_arcs is assigned a fresh list; v3's arcs are dropped")
             return
     raise AssertionError("no late_arcs assignment found in _univ2_options")
+
+
+def test_the_endpoints_are_introduced_before_routability_is_judged():
+    """`nodes.has()` decides whether a token is routable at all.
+
+    A token only Uniswap holds has no node, so the check refuses it -- which is
+    the whole reason `X -> USDT -> crvUSD` could not be quoted.  Bridging has
+    to run first or it may as well not exist.
+    """
+    fn = _function("cmd_route")
+    lines = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call):
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name == "_introduce_endpoints":
+                lines["introduce"] = node.lineno
+        # `not nodes.has(src) or not nodes.has(dst)` -- the refusal.
+        if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or):
+            src = ast.unparse(node)
+            if "nodes.has(src)" in src and "nodes.has(dst)" in src:
+                lines["refuse"] = node.lineno
+    assert "introduce" in lines, "cmd_route never tries to bridge an endpoint"
+    assert "refuse" in lines, "the routability check is gone; rewrite this test"
+    assert lines["introduce"] < lines["refuse"], (
+        "bridging runs after the token has already been refused")
+
+
+def test_bridging_runs_before_the_venues_are_built():
+    """`wanted()` filters on the node map, so the nodes must exist first.
+
+    Otherwise the pairs reaching the new token are dropped at read time and the
+    venue would have to be read twice.
+    """
+    fn = _function("cmd_route")
+    at = {}
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name in ("_introduce_endpoints", "_venue_options", "_univ2_options"):
+            at.setdefault(name, node.lineno)
+    assert at.get("_introduce_endpoints", 1e9) < at.get("_venue_options", 0)
+    assert at.get("_introduce_endpoints", 1e9) < at.get("_univ2_options", 0)

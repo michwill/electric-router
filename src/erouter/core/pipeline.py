@@ -379,11 +379,18 @@ def prepare(
     src_token: str,
     dst_token: str,
     extra_arcs: list[PoolArc] | None = None,
+    late_arcs: list[PoolArc] | None = None,
     timings: dict[str, float] | None = None,
 ) -> Prepared:
     """The size-independent half: probe, calibrate, restrict, price.
 
     A function of the block and the pair, not the amount -- so it is paid once.
+
+    `late_arcs` are *not* fitted here and are not returned; they are passed only
+    so the component restriction knows what is connected.  See
+    `_restrict_to_component`: a token whose only pool is a Uniswap pair used to
+    be pruned as unreachable before the arc that reaches it had joined, so
+    bridging it into the node map bought nothing.
     """
     scratch = RouteResult(src_token=src_token.lower(), dst_token=dst_token.lower(),
                           nodes=nodes)
@@ -429,11 +436,14 @@ def prepare(
     # -- and those arcs give conductances orders of magnitude off, wrecking the
     # Laplacian's conditioning for everything else.
     with clock("component"):
-        arcs = _restrict_to_component(arcs, dst_node, nodes.n_nodes, scratch)
-        arcs = _prune_dead_end_nodes(arcs, src_node, dst_node, scratch)
-    if not arcs:
+        arcs = _restrict_to_component(arcs, dst_node, nodes.n_nodes, scratch,
+                                      joining=late_arcs)
+        arcs = _prune_dead_end_nodes(arcs, src_node, dst_node, scratch,
+                                     joining=late_arcs)
+    reaching = arcs if not late_arcs else arcs + late_arcs
+    if not reaching:
         raise RoutingError(f"{nodes.symbol(dst_token)} is not reachable from any pool")
-    if not any(a.tau == src_node or a.sigma == src_node for a in arcs):
+    if not any(a.tau == src_node or a.sigma == src_node for a in reaching):
         raise RoutingError(
             f"no path from {nodes.symbol(src_token)} to {nodes.symbol(dst_token)}"
         )
@@ -557,9 +567,9 @@ class Prepared:
 
 
 def admissible_late_arcs(
-    arcs: list[PoolArc], late_arcs: list[PoolArc]
-) -> tuple[list[PoolArc], int]:
-    """The late arcs the frame can price, and how many it could not.
+    arcs: list[PoolArc], late_arcs: list[PoolArc], nu=None
+) -> tuple[list[PoolArc], int] | tuple[list[PoolArc], int, object, int]:
+    """The late arcs the graph can take, and a price for what only they reach.
 
     `late_arcs` puts arcs in the *graph* without putting them in the *frame*,
     which is the whole point of the seam -- 146 Uniswap pools contributing 32
@@ -579,20 +589,88 @@ def admissible_late_arcs(
     base: `FRAX -> WBTC` at $1M quoted 4,805 bp below Curve alone, with no
     Uniswap leg in the route it settled for.
 
-    Being in the node map is not being priced.
+    Being in the node map is not being priced -- but it can be *made* priced,
+    and refusing the arc was only ever the cheaper of the two fixes.  Given
+    `nu`, a node that no frame arc reaches and a late arc does takes its price
+    from those arcs.  §4 minimises `w (z_tau - z_sig - log a)^2` over `z = log
+    nu`, so solving that for one node with every other held fixed is a single
+    Gauss-Seidel step -- and because such a node's arcs all land on priced
+    nodes, that one step is already the exact minimiser for it.  No iteration,
+    and nothing Curve priced can move: the venue fills a hole rather than
+    outvoting anyone, which is the same bargain `late_arcs` was built on.
+
+    Both directions of a pair vote, which is what makes the answer honest.  One
+    direction alone would fit `nu_tau = a nu_sig` exactly and hand the arc
+    `eps = 0` -- a lossless edge into a real pool.  With both, `nu` lands at
+    `sqrt(a_f / a_r)` and each direction gets `eps = 1 - sqrt(a_f a_r)`, which
+    is the pool's own fee.
+
+    A node whose late arcs reach nothing priced is still refused: there is no
+    anchor to price it against, and one round is all this does.  On ethereum at
+    a $10,000 floor no v2 pair has both coins outside the frame, so a second
+    round would have nothing to do.
+
+    Called with `nu` it returns `(fresh, refused, nu, bridged)`; without it the
+    original `(fresh, refused)`, since callers that have no frame prices to
+    hand cannot bridge anything anyway.
     """
     have = {a.id for a in arcs}
     priced = {a.tau for a in arcs} | {a.sigma for a in arcs}
+    candidates = [arc for arc in late_arcs if arc.id not in have]
+
+    bridged = 0
+    if nu is not None:
+        # One price per pool per direction, and it is the *best* rate, not the
+        # mean of them.  A v3 pool contributes 32 tick arcs that are not 32
+        # observations of a price -- they are one curve cut into pieces, and
+        # every piece past the first is worse than spot by construction.
+        # Averaging their logs biases `nu` below the market, which leaves the
+        # near ticks looking profitable and the far ones dreadful: measured on
+        # `PEPE -> crvUSD` the solver smeared the trade over the book and the
+        # modelled route needed 197 legs against a 32-leg ceiling.  The top of
+        # the book is the marginal price, which is the one arc a Curve pool
+        # would have contributed.
+        best: dict[tuple, tuple[float, float, int, bool]] = {}
+        for arc in candidates:
+            tau_ok, sig_ok = arc.tau in priced, arc.sigma in priced
+            if tau_ok == sig_ok:
+                continue                    # both priced, or neither anchored
+            if not (arc.a > 0.0):
+                continue                    # a failed probe prices nothing
+            key = (arc.pool.lower(), arc.tau, arc.sigma)
+            weight = max(float(arc.tvl_usd), 1.0)
+            held = best.get(key)
+            if held is None or arc.a > held[1]:
+                best[key] = (weight, float(arc.a), arc.tau if sig_ok else arc.sigma,
+                             sig_ok)
+
+        # `node -> [(weight, log nu it wants)]`, one entry per pool direction.
+        wants: dict[int, list[tuple[float, float]]] = {}
+        for (_pool, tau, sigma), (weight, a, new_node, sig_ok) in best.items():
+            if sig_ok and nu[sigma] > 0.0:
+                wants.setdefault(new_node, []).append(
+                    (weight, math.log(a) + math.log(float(nu[sigma]))))
+            elif not sig_ok and nu[tau] > 0.0:
+                wants.setdefault(new_node, []).append(
+                    (weight, math.log(float(nu[tau])) - math.log(a)))
+        if wants:
+            nu = np.array(nu, dtype=float, copy=True)
+            for node, terms in wants.items():
+                total = sum(w for w, _ in terms)
+                nu[node] = math.exp(sum(w * z for w, z in terms) / total)
+                priced.add(node)
+            bridged = len(wants)
+
     fresh: list[PoolArc] = []
-    unpriced = 0
-    for arc in late_arcs:
-        if arc.id in have:
-            continue
+    refused = 0
+    for arc in candidates:
         if arc.tau not in priced or arc.sigma not in priced:
-            unpriced += 1
+            refused += 1
             continue
         fresh.append(copy.copy(arc))
-    return fresh, unpriced
+    if nu is None:
+        return fresh, refused
+    return fresh, refused, nu, bridged
 
 
 def route(
@@ -691,7 +769,8 @@ def route(
         with clock("prepare"):
             prepared = prepare(
                 pools, nodes, client, src_token=src_token, dst_token=dst_token,
-                extra_arcs=extra_arcs, timings=result.timings,
+                extra_arcs=extra_arcs, late_arcs=late_arcs,
+                timings=result.timings,
             )
     else:
         result.counters["reused_preparation"] = 1
@@ -717,11 +796,16 @@ def route(
     nu = prepared.nu
     # After the frame is fitted and before anything is solved: see above.
     if late_arcs:
-        fresh, unpriced = admissible_late_arcs(arcs, late_arcs)
+        fresh, unpriced, nu, bridged = admissible_late_arcs(arcs, late_arcs, nu)
         arcs = arcs + fresh
         result.counters["late_arcs"] = len(fresh)
         if unpriced:
             result.counters["late_arcs_unpriced"] = unpriced
+        if bridged:
+            # Nodes whose only price comes from the venue.  Worth counting on
+            # its own: it is the difference between a token being in the graph
+            # and being in it on Curve's evidence.
+            result.counters["late_arcs_bridged_nodes"] = bridged
     result.arcs = arcs
     result.nu = nu
     result.pool_names = dict(prepared.pool_names)
@@ -2341,7 +2425,8 @@ def _kcl_detail(
 
 
 def _prune_dead_end_nodes(
-    arcs: list[PoolArc], src_node: int, dst_node: int, result: RouteResult
+    arcs: list[PoolArc], src_node: int, dst_node: int, result: RouteResult,
+    joining: list[PoolArc] | None = None,
 ) -> list[PoolArc]:
     """Drop arcs into nodes no route can pass *through*.
 
@@ -2365,11 +2450,23 @@ def _prune_dead_end_nodes(
     Iterated, because removing a node can leave its neighbour with one pool.
     Endpoints are never pruned: quoting `HLX -> USDC` is a fair question and its
     single pool is the answer.
+
+    `joining` is the late arcs.  They count towards how many pools touch a node
+    and are never returned, for the same reason `_restrict_to_component` takes
+    them: a node with one Curve pool and one Uniswap pair *can* be passed
+    through, and pruning it for want of a second Curve pool would delete the
+    hop before the arc that completes it has joined.  They do not enter §4's
+    fit either way.
     """
     live = list(arcs)
     ends = {src_node, dst_node}
+    extra: dict[int, set[str]] = {}
+    for arc in joining or ():
+        pool = arc.pool.lower()
+        extra.setdefault(arc.tau, set()).add(pool)
+        extra.setdefault(arc.sigma, set()).add(pool)
     for _ in range(len(live) + 1):
-        touching: dict[int, set[str]] = {}
+        touching: dict[int, set[str]] = {k: set(v) for k, v in extra.items()}
         for arc in live:
             pool = arc.pool.lower()
             touching.setdefault(arc.tau, set()).add(pool)
@@ -2384,12 +2481,22 @@ def _prune_dead_end_nodes(
 
 
 def _restrict_to_component(
-    arcs: list[PoolArc], dst_node: int, n_nodes: int, result: RouteResult
+    arcs: list[PoolArc], dst_node: int, n_nodes: int, result: RouteResult,
+    joining: list[PoolArc] | None = None,
 ) -> list[PoolArc]:
+    """Frame arcs that can reach `dst_node`, `joining` counted for connectivity.
+
+    `joining` is the late arcs.  They are not returned and never enter §4's
+    fit -- they only get a say in *what is connected to what*, which they
+    plainly are: a token whose sole pool is a Uniswap pair is reachable through
+    that pair, and pruning it here for want of a Curve arc deleted the whole
+    island before the arc that reaches it had joined.
+    """
     from .graph import component_of
 
-    tau = np.array([a.tau for a in arcs], dtype=np.int64)
-    sig = np.array([a.sigma for a in arcs], dtype=np.int64)
+    linked = arcs if not joining else arcs + joining
+    tau = np.array([a.tau for a in linked], dtype=np.int64)
+    sig = np.array([a.sigma for a in linked], dtype=np.int64)
     reachable = component_of(dst_node, tau, sig, n_nodes)
     keep = [a for a in arcs if reachable[a.tau] and reachable[a.sigma]]
     result.counters["arcs_unreachable"] = len(arcs) - len(keep)

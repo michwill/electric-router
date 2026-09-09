@@ -40,7 +40,7 @@ from ..core.rendermodel import build_diagram
 from ..core.routecall import NEEDED, encode_route
 from ..core.schema import ROUTER_ADDRESS
 from ..core.solve import accel_in_use
-from ..venues import univ2_client
+from ..venues import bridge, univ2_client
 from . import gas_probe
 from .exact_cache import ExactCache
 from .facts import FactsCache, apply_broken_facts
@@ -422,6 +422,37 @@ class RouterSession:
 
     # -------------------------------------------------------------- the pair
 
+    def _late_arcs(self) -> list:
+        """Every venue arc this session holds, in one list.
+
+        Both venues join the same seam, so they are concatenated rather than
+        one replacing the other.  `set_pair` needs them too -- for connectivity
+        only, so a bridged token is not pruned as unreachable before the arc
+        that reaches it has joined.
+        """
+        out: list = []
+        for venue in (self.univ3, self.univ2):
+            if venue is not None and venue.arcs:
+                out += list(venue.arcs)
+        return out
+
+    def _reread_venues(self) -> None:
+        """Read the venues again against the node map as it now stands.
+
+        Only called when `set_pair` introduced a token: the venues were read at
+        warm, when `wanted()` could not see the new node and dropped every pair
+        that reaches it.  Costs what the warm-time read costs -- one `eth_call`
+        a pair for v2, and the tick state for v3 -- which is why nothing calls
+        it when no node was gained.
+        """
+        transport = getattr(self.rpc, "_t", self.rpc)
+        if self.univ3 is not None:
+            self.univ3.refresh(transport, self.nodes, self.block)
+            self.univ3.teach(self.client)
+        if self.univ2 is not None:
+            self.univ2.refresh(transport, self.nodes, self.block)
+            univ2_client.teach(self.client, self.univ2.state)
+
     async def set_pair(self, src: str, dst: str, progress=None):
         """Probe and price for one (src, dst).  Independent of the amount."""
         if self.client is None or self.nodes is None:
@@ -432,6 +463,22 @@ class RouterSession:
         say = progress or (lambda phase, fraction: None)
         say("pair", 0.0)
         src, dst = src.lower(), dst.lower()
+        # A token Curve has never held has no node, so it is not routable at
+        # all however deep its Uniswap pair.  Introduce the trade's own
+        # endpoints when a venue joins them to a coin the frame prices --
+        # `venues/bridge.py` says why only the endpoints.
+        held = [v for v in (self.univ3, self.univ2) if v is not None]
+        if held:
+            gained = False
+            for token in (src, dst):
+                if bridge.introduce(token, self.nodes, held,
+                                    getattr(self.rpc, "_t", self.rpc),
+                                    self.block):
+                    gained = True
+            if gained:
+                # The venues were read at warm, before these nodes existed, so
+                # `wanted()` filtered their pairs out.  Ask again.
+                self._reread_venues()
         if not self.nodes.has(src) or not self.nodes.has(dst):
             raise SessionError("token not routable in this universe")
 
@@ -439,6 +486,10 @@ class RouterSession:
             return pipeline.prepare(
                 self.pools, self.nodes, self.client,
                 src_token=src, dst_token=dst, extra_arcs=self.stake_arcs,
+                # For connectivity only -- see `prepare`.  Without them a
+                # bridged token is pruned as unreachable before the venue arc
+                # that reaches it has joined.
+                late_arcs=self._late_arcs(),
             )
 
         self.prepared = await self.evm.fill(
