@@ -902,53 +902,79 @@ def route(
     # perturbation of the base solve, the base solve moves when a venue joins,
     # and only the *winner* is refined -- so the route that would have won is
     # ranked on the split the model gave it and never re-split.  §6's
-    # sub-ballot puts the venue-free neighbourhood back on the ballot and got
+    # sub-ballot puts each venue-free neighbourhood back on the ballot and got
     # the worst case from -1547 bp to -40.59, but a seed cannot reproduce a
-    # route that only exists downstream of refinement: `ALD -> WBTC` at $1M
-    # was still 30.68 bp behind a 25-leg route the venue-on ballot never built.
+    # route that only exists downstream of refinement.
     #
-    # So quote the frame on its own, refinement and all, and keep whichever is
-    # better.  That is the promise made structurally rather than approached
-    # asymptotically.  It costs a second `_quote` -- not a second `prepare`,
-    # which is the expensive half and is shared.
-    plain = RouteResult(
-        src_token=src_token.lower(), dst_token=dst_token.lower(),
-        amount_in=amount_in, nodes=nodes,
-    )
-    try:
-        without = one_quote(plain, None)
-    except RoutingError:
-        # A bridged token has no frame arc at all, so the frame alone cannot
-        # route it.  That is the venue earning its place, not a failure.
-        with_venue.counters["incumbent_unroutable"] = 1
-        return with_venue
+    # So the alternatives are quoted for real, refinement and all, and the best
+    # answer wins.  One arm per venue with that venue's arcs taken out, plus
+    # the frame alone:
+    #
+    #     curve+v2+v3 >= curve         the frame arm
+    #     curve+v2+v3 >= curve+v3      the "without v2" arm
+    #     curve+v2+v3 >= curve+v2      the "without v3" arm
+    #
+    # Leave-one-out rather than every subset, which would be 2^V quotes for V
+    # venues against V+2.  It is the statement that matters -- *this* venue,
+    # added to everything else, did not cost the answer -- and at two venues
+    # the two coincide anyway.
+    #
+    # With one venue the leave-one-out arm *is* the frame arm, so nothing extra
+    # is quoted and this stays the two quotes it was.
+    labels = sorted({a.venue for a in late_arcs if a.venue})
+    arms: list[tuple[str, list[PoolArc] | None]] = []
+    if len(labels) > 1:
+        for label in labels:
+            arms.append((f"without {label}",
+                         [a for a in late_arcs if a.venue != label]))
+    arms.append(("the frame alone", None))
 
-    return better_of(with_venue, without)
+    rivals: list[tuple[str, RouteResult]] = []
+    for name, joining in arms:
+        plain = RouteResult(
+            src_token=src_token.lower(), dst_token=dst_token.lower(),
+            amount_in=amount_in, nodes=nodes,
+        )
+        try:
+            rivals.append((name, one_quote(plain, joining)))
+        except RoutingError:
+            # A bridged token has no frame arc at all, so an arm without the
+            # venue that reaches it cannot route.  That is the venue earning
+            # its place, not a failure.
+            with_venue.counters["incumbent_unroutable"] = \
+                with_venue.counters.get("incumbent_unroutable", 0) + 1
+    return best_of(with_venue, rivals)
 
 
-def better_of(with_venue: RouteResult, without: RouteResult) -> RouteResult:
-    """Whichever of the two quotes pays more, with the choice recorded.
+def best_of(with_venue: RouteResult, rivals) -> RouteResult:
+    """`with_venue` unless one of `rivals` pays more, with the choice recorded.
 
     Ties go to the venue: it was asked for, its result is the one every other
     counter describes, and an equal answer is not a reason to throw that away.
 
-    A venue that loses is not an error and not silently corrected either --
-    the counters and the warning say by how much, because a venue that keeps
-    costing the search is worth knowing about even once the answer is safe.
+    A venue that loses is not an error and not silently corrected either -- the
+    counters and the warning say by how much and to which arm, because a venue
+    that keeps costing the search is worth knowing about even once the answer
+    is safe.
     """
     got = int(with_venue.verified_out or 0)
-    held = int(without.verified_out or 0)
+    ranked = sorted(((int(r.verified_out or 0), name, r) for name, r in rivals),
+                    key=lambda row: -row[0])
+    if not ranked:
+        return with_venue
+    held, name, winner = ranked[0]
     with_venue.counters["incumbent_out"] = held
     if held <= got:
         return with_venue
     cost_bp = (1 - got / held) * 1e4 if held else 0.0
-    without.counters["venue_declined"] = 1
-    without.counters["venue_cost_bp"] = round(cost_bp, 4)
-    without.warnings.append(
+    winner.counters["venue_declined"] = 1
+    winner.counters["venue_cost_bp"] = round(cost_bp, 4)
+    winner.counters["venue_declined_for"] = name
+    winner.warnings.append(
         f"the venue's arcs cost {cost_bp:.2f} bp on the search, so this quote "
-        f"is the one without them"
+        f"is {name}"
     )
-    return without
+    return winner
 
 
 def _quote(

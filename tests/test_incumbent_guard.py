@@ -18,7 +18,7 @@ from __future__ import annotations
 import ast
 import inspect
 
-from erouter.core.pipeline import RouteResult, better_of, route
+from erouter.core.pipeline import RouteResult, best_of, route
 
 
 def _result(out, **counters):
@@ -30,7 +30,7 @@ def _result(out, **counters):
 
 def test_the_venue_free_answer_wins_when_it_pays_more():
     venue, plain = _result(100), _result(125)
-    got = better_of(venue, plain)
+    got = best_of(venue, [("the frame alone", plain)])
     assert got is plain
     assert got.counters["venue_declined"] == 1
     assert got.counters["venue_cost_bp"] == 2000.0, "25 of 125 is 2,000 bp"
@@ -39,7 +39,7 @@ def test_the_venue_free_answer_wins_when_it_pays_more():
 
 def test_the_venue_keeps_the_answer_when_it_pays_more():
     venue, plain = _result(140), _result(100)
-    got = better_of(venue, plain)
+    got = best_of(venue, [("the frame alone", plain)])
     assert got is venue
     assert "venue_declined" not in got.counters
     assert got.counters["incumbent_out"] == 100, "and what it beat is recorded"
@@ -51,13 +51,13 @@ def test_a_tie_goes_to_the_venue():
     An equal answer is not a reason to throw that away.
     """
     venue, plain = _result(100), _result(100)
-    assert better_of(venue, plain) is venue
+    assert best_of(venue, [("the frame alone", plain)]) is venue
 
 
 def test_a_venue_that_loses_is_recorded_rather_than_quietly_corrected():
     """A venue that keeps costing the search is worth knowing about even once
     the answer is safe."""
-    got = better_of(_result(999), _result(1000))
+    got = best_of(_result(999), [("the frame alone", _result(1000))])
     assert got.counters["venue_declined"] == 1
     assert got.counters["venue_cost_bp"] == 10.0
     assert got.warnings, "silence would make this look like it never happened"
@@ -66,8 +66,8 @@ def test_a_venue_that_loses_is_recorded_rather_than_quietly_corrected():
 def test_an_unquotable_incumbent_does_not_beat_a_real_answer():
     """`verified_out` of zero is a quote that failed, not a free one."""
     venue = _result(100)
-    assert better_of(venue, _result(0)) is venue
-    assert better_of(venue, _result(None)) is venue
+    assert best_of(venue, [("the frame alone", _result(0))]) is venue
+    assert best_of(venue, [("the frame alone", _result(None))]) is venue
 
 
 def test_the_guard_is_on_by_default_and_can_be_turned_off():
@@ -99,3 +99,55 @@ def test_the_second_quote_shares_the_preparation():
                 if isinstance(n, ast.Call)
                 and (getattr(n.func, "id", None) == "prepare")]
     assert len(prepares) <= 1, "the guard must not re-run preparation"
+
+
+def test_the_best_rival_wins_not_the_first():
+    """With two venues there are three rivals, and they are not ordered."""
+    venue = _result(100)
+    got = best_of(venue, [("without uniswap v2", _result(110)),
+                          ("without uniswap v3", _result(130)),
+                          ("the frame alone", _result(120))])
+    assert got.verified_out == 130
+    assert got.counters["venue_declined_for"] == "without uniswap v3"
+    assert venue.counters["incumbent_out"] == 130, "the best of them, not any"
+
+
+def test_no_rival_at_all_keeps_the_venue():
+    """Every arm can fail to route -- a bridged token has no frame arc."""
+    venue = _result(100)
+    assert best_of(venue, []) is venue
+
+
+def test_a_leave_one_out_arm_exists_per_venue_when_there_are_several():
+    """`curve+v2+v3 >= curve` alone does not say `>= curve+v2`.
+
+    The second is the statement that matters when a venue is added to a router
+    that already has one, and it needs its own finished quote: the sub-ballot
+    only puts the neighbourhood on the ballot, where a candidate can still be
+    ranked on a split nobody refined.
+    """
+    import ast
+    import inspect
+
+    src = inspect.getsource(route)
+    tree = ast.parse(src.lstrip())
+    text = ast.unparse(tree)
+    assert "a.venue for a in late_arcs" in text, (
+        "the arms are not built by venue, so there is no leave-one-out")
+    assert "len(labels) > 1" in text, (
+        "with one venue the leave-one-out arm is the frame arm; quoting both "
+        "doubles the cost for nothing")
+
+
+def test_one_venue_costs_two_quotes_and_two_venues_four():
+    """The guard is V+2 quotes, not 2^V."""
+    def arms(labels):
+        out = []
+        if len(labels) > 1:
+            out += [f"without {v}" for v in labels]
+        out.append("the frame alone")
+        return out
+
+    assert len(arms(["uniswap v2"])) == 1, "one venue: just the frame"
+    assert len(arms(["uniswap v2", "uniswap v3"])) == 3
+    assert len(arms(["a", "b", "c"])) == 4, "V+1 rivals, so V+2 quotes"
