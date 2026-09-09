@@ -288,6 +288,13 @@ def main() -> int:
                     help="most readings per case before calling it unstable")
     ap.add_argument("--agree-bp", type=float, default=0.5,
                     help="how close two readings must be to be believed")
+    ap.add_argument("--gas-price", type=float, default=0.0,
+                    help="gwei to rank against. §11.1 is gas-aware and "
+                         "`warm` otherwise takes whatever was live, so two "
+                         "runs rank against different gas: measured, "
+                         "`FRAX -> WETH` at $100k reads -21.08 bp at 0.05 "
+                         "gwei and -0.00 at 1.0. Default pins every session "
+                         "to the first warm's price and prints it")
     ap.add_argument("--explain-bp", type=float, default=50.0,
                     help="print the venue arm's legs for losses past this")
     ap.add_argument("--worse-bp", type=float, default=0.5,
@@ -301,9 +308,18 @@ def main() -> int:
     built = [session_for(args) for _ in range(max(args.sessions, 1))]
     session, venues, report = built[0]
     arms = [(s, v) for s, v, _ in built]
+    # Pin the gas, or every session ranks against whatever was live when it
+    # warmed -- including the two sessions of one run, which warm minutes
+    # apart.  The block is pinned and this was not, which is enough on its own
+    # to make two runs of the same commit disagree.
+    pinned = int(args.gas_price * 1e9) or session.gas_price_wei
+    for arm, _v in arms:
+        arm.gas_price_wei = pinned
     held = " · ".join(f"{v.name} {v.arc_count():,} arc(s)" for v in venues)
     print(f"block {session.block:,} · {report.pools} pools · {held} · "
-          f"{len(arms)} session(s) that must agree")
+          f"{len(arms)} session(s) that must agree · "
+          f"gas {pinned / 1e9:.4f} gwei"
+          f"{'' if args.gas_price else ' (live at warm; pass --gas-price to reproduce)'}")
     tokens, price, symbols = token_set(session, venues, args.tokens)
     print(f"tokens: {[symbols.get(a, a[:8]) for a in tokens]}\n")
     nodes = session.nodes

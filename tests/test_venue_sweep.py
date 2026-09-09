@@ -192,3 +192,24 @@ def test_a_case_one_session_could_not_measure_is_dropped_not_halved():
               {("a", "b", 1e3): None}]
     seen = [tbl.get(("a", "b", 1e3)) for tbl in tables]
     assert any(r is None for r in seen), "the join must skip this case"
+
+
+def test_the_gas_price_is_pinned_across_every_session():
+    """§11.1 ranks gas-aware and `warm` takes whatever was live.
+
+    The block is pinned and this was not, so two runs of the same commit rank
+    against different gas -- measured, `FRAX -> WETH` at $100k reads -21.08 bp
+    at 0.05 gwei and -0.00 bp at 1.0.  Even the two sessions of one run warm
+    minutes apart.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(venue_sweep))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "main")
+    writes = [n for n in ast.walk(fn)
+              if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Attribute) and t.attr == "gas_price_wei"
+                      for t in n.targets)]
+    assert writes, "no session has its gas pinned; runs cannot be compared"
