@@ -367,9 +367,14 @@ def main() -> int:
         if delta < -args.explain_bp and route is not None:
             for leg in route.legs:
                 mark = "*" if leg.kind in {v.kind for v in venues} else " "
-                print(f"      {mark} {leg.kind.name:<18} "
-                      f"{getattr(leg, 'target', '?')[:14]} "
-                      f"i={getattr(leg, 'i', '?')} j={getattr(leg, 'j', '?')}")
+                # A realised leg names its pool and says what share of the node
+                # it took, which is what a route is read by.  `i`/`j` live on
+                # `leg.leg` and say much less.
+                name = getattr(leg, "pool_name", "") or getattr(
+                    leg, "target", "?")[:14]
+                share = getattr(leg, "share_of_node", 1.0)
+                print(f"      {mark} {leg.kind.name:<16} {name[:26]:<26} "
+                      f"{share:>6.1%} of node")
     print(f"  unstable, never repeated: {len(unstable)}")
     for name, usd, reads in unstable:
         print(f"    {name:<18}${usd:>12,.0f}   {[round(r, 2) for r in reads]}")
