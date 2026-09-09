@@ -59,9 +59,9 @@ def _loss_bp(result, ledger: dict[str, float] | None, total_bp: float) -> dict:
 #: 0xf5438dafc165b466f4a61ce57bd3aa59bcd5979e and still works; it just cannot
 #: carry the wide routes.
 #:
-#: **Not yet deployed.**  The address is deterministic, so this is where it
-#: will land, but until the redeploy execution has no code to call.  Quoting is
-#: unaffected -- `RouteQuoter` is a separate contract at its own address.
+#: Live, and verified byte-identical to the compiled runtime -- 10,590 bytes,
+#: the same at 32 legs and at 96, since the loops are bounded rather than
+#: unrolled.
 ROUTER_ADDRESS = "0xfb561e51b05ec41a854814495b51aa48b6728d81"
 
 
