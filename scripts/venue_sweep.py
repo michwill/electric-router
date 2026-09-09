@@ -11,16 +11,26 @@ could reach were never priced by the frame, so their arcs read as 5.4e7 of free
 value and wrecked the base solve.  A token list that cannot reach the venue's
 own pools cannot find that.
 
-**Every case is measured until it repeats.**  Each reading is
-`curve -> venue -> curve`, and the third quote is a contamination control: a
-session warms its ladders as it goes, so if the two curve-only readings of one
-case disagree, that case is thrown out rather than counted.  That control is
-necessary and *not sufficient* -- it catches drift inside a case and misses
-drift across the session.  Twice this cost a day: `DAI -> WBTC` reported
--1604 bp and would not reproduce, and `PYUSD -> FRAX` at $1M read **-38.47 bp
-once and +12.20 bp another time** on the same commit and block.  So a case is
-re-measured until two readings agree to `--agree-bp`, and one that never agrees
-is reported as unstable instead of becoming a finding.
+**Every case is measured until it repeats, in more than one session.**  Each
+reading is `curve -> venue -> curve`, and the third quote is a contamination
+control: a session warms its ladders as it goes, so if the two curve-only
+readings of one case disagree, that case is thrown out rather than counted.
+
+That control is necessary and *not sufficient*, at two levels, and both were
+learned by believing a number that was not true.  It catches drift inside a
+case and misses drift across the session: `DAI -> WBTC` reported -1604 bp and
+would not reproduce, and `PYUSD -> FRAX` at $1M read **-38.47 bp once and
++12.20 bp another time** on the same commit and block.  So a case is
+re-measured until two readings agree to `--agree-bp`.
+
+Repeating inside one session is *also* not sufficient, because a session
+settles into a state and then reports that state consistently.  `FRAX -> WBTC`
+at $1M read **-5088.34 bp twice** in one session -- agreeing to well inside the
+tolerance, control passing, reported as believed -- and **+0.00 bp** in the
+next session at the same commit and block.  Eleven of 104 comparable cases
+moved between two runs, concentrated on the large notionals a venue is judged
+by.  So `--sessions` independently built sessions must also agree, and a case
+they disagree on is reported as unstable rather than becoming a finding.
 
 Usage:
 
@@ -233,6 +243,35 @@ def measure(session, venues, amount, repeats, agree_bp):
     return (seen[-1] if seen else None), seen, False
 
 
+def measure_across(arms, amount, repeats, agree_bp):
+    """Believe a case only when independently built sessions agree.
+
+    Repeating inside one session is not enough, and this was measured the
+    expensive way.  `FRAX -> WBTC` at $1M read **-5088.34 bp twice** in one
+    session -- agreeing to well inside the tolerance, its A/B/A control
+    passing, reported as believed -- and **+0.00 bp** in the next session at
+    the same commit and the same block.  `DAI -> ALD` at $100k went +49.66 bp
+    to -3.50 bp the same way.  A session settles into a state and then reports
+    that state consistently, so repetition inside one measures how stable the
+    state is, not how true the number is.
+
+    Across the two runs, 93 of 104 comparable cases agreed and 11 did not, so
+    this is not a rare corner -- it is a tenth of every sweep, concentrated on
+    exactly the large-notional cases a venue is judged by.
+    """
+    seen = []
+    for session, venues in arms:
+        got, _reads, agreed = measure(session, venues, amount, repeats, agree_bp)
+        if got is None:
+            return None, seen, False
+        seen.append(got)
+        if not agreed:
+            return got, seen, False
+    worst = max(abs(a.delta - b.delta)
+                for a in seen for b in seen) if len(seen) > 1 else 0.0
+    return seen[0], seen, worst <= agree_bp
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--chain", default="ethereum")
@@ -243,6 +282,10 @@ def main() -> int:
                     help="which venue(s) the A/B switches: v3, v2, or v3,v2 "
                          "to measure them together")
     ap.add_argument("--tokens", type=int, default=7)
+    ap.add_argument("--sessions", type=int, default=2,
+                    help="independently built sessions that must agree; 1 is "
+                         "half the wall clock and has been seen to report a "
+                         "5,088 bp regression that the next session did not")
     ap.add_argument("--repeats", type=int, default=3,
                     help="most readings per case before calling it unstable")
     ap.add_argument("--agree-bp", type=float, default=0.5,
@@ -257,9 +300,12 @@ def main() -> int:
     if unknown or not args.venue:
         raise SystemExit(f"--venue takes {'/'.join(VENUES)}, not {unknown}")
 
-    session, venues, report = session_for(args)
+    built = [session_for(args) for _ in range(max(args.sessions, 1))]
+    session, venues, report = built[0]
+    arms = [(s, v) for s, v, _ in built]
     held = " · ".join(f"{v.name} {v.arc_count():,} arc(s)" for v in venues)
-    print(f"block {session.block:,} · {report.pools} pools · {held}")
+    print(f"block {session.block:,} · {report.pools} pools · {held} · "
+          f"{len(arms)} session(s) that must agree")
     tokens, price, symbols = token_set(session, venues, args.tokens)
     print(f"tokens: {[symbols.get(a, a[:8]) for a in tokens]}\n")
     nodes = session.nodes
@@ -275,7 +321,8 @@ def main() -> int:
             if src == dst:
                 continue
             try:
-                asyncio.run(session.set_pair(src, dst))
+                for arm, _v in arms:
+                    asyncio.run(arm.set_pair(src, dst))
             except Exception:
                 continue
             name = f"{symbols.get(src, src[:6])}->{symbols.get(dst, dst[:6])}"
@@ -283,8 +330,8 @@ def main() -> int:
                 amount = int(usd / price[src] * 10 ** nodes.decimals(src))
                 if amount <= 0:
                     continue
-                got, reads, agreed = measure(
-                    session, venues, amount, args.repeats, args.agree_bp)
+                got, reads, agreed = measure_across(
+                    arms, amount, args.repeats, args.agree_bp)
                 if got is None:
                     print(f"{name:<18}{usd:>14,.0f}   no comparable reading")
                     continue
