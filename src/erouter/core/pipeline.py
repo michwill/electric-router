@@ -717,6 +717,7 @@ def route(
     extra_arcs: list[PoolArc] | None = None,
     late_arcs: list[PoolArc] | None = None,
     optimise_split: bool = True,
+    incumbent_guard: bool = True,
     max_legs: int = DEFAULT_MAX_LEGS,
     gas_table: GasTable | None = None,
     risk_table: RiskTable | None = None,
@@ -801,57 +802,122 @@ def route(
     else:
         result.counters["reused_preparation"] = 1
 
-    # A fresh copy per quote: `_assemble` writes `G`/`eps` back onto the arcs
-    # and the §8 refit re-anchors `B` at one size's realised flows, so handing
-    # the same objects to the next quote would leak this size into it.
-    arcs = [copy.copy(a) for a in prepared.arcs]
-    # The ladders need the same treatment.  §8 probes at the sizes *this* quote
-    # realised and `merge`s them in, so without a copy a second quote through
-    # the same `Prepared` recalibrates from the first quote's sizes.  Shallow is
-    # enough for the lists, which `merge` rebinds rather than mutates, but
-    # `failures` is updated in place and needs its own dict.
-    ladders = []
-    for ladder in prepared.ladders:
-        clone = copy.copy(ladder)
-        clone.failures = dict(ladder.failures)
-        ladders.append(clone)
-    # And the resident copy, which forks rather than being rebuilt: the same
-    # statement as above, on the side that holds the numbers.
-    resident = (prepared.resident.fork()
-                if _ACCEL_ON and prepared.resident is not None else None)
-    nu = prepared.nu
-    # After the frame is fitted and before anything is solved: see above.
-    if late_arcs:
-        fresh, unpriced, nu, bridged = admissible_late_arcs(
-            arcs, late_arcs, nu, bridgeable=(src_node, dst_node))
-        arcs = arcs + fresh
-        result.counters["late_arcs"] = len(fresh)
-        if unpriced:
-            result.counters["late_arcs_unpriced"] = unpriced
-        if bridged:
-            # Nodes whose only price comes from the venue.  Worth counting on
-            # its own: it is the difference between a token being in the graph
-            # and being in it on Curve's evidence.
-            result.counters["late_arcs_bridged_nodes"] = bridged
-    result.arcs = arcs
-    result.nu = nu
-    result.pool_names = dict(prepared.pool_names)
-    result.counters.update(prepared.counters)
-    result.warnings.extend(prepared.warnings)
+    def one_quote(into: RouteResult, joining):
+        """The whole size-dependent half, over the frame plus `joining`.
 
-    return _quote(
-        result, clock, pools, nodes, client, arcs, ladders, nu,
-        src_token=src_token, dst_token=dst_token, amount_in=amount_in,
-        src_node=src_node, dst_node=dst_node, max_rounds=max_rounds,
-        seed_k=seed_k, verify_on_chain=verify_on_chain,
-        max_candidates=max_candidates, gas_price_wei=gas_price_wei,
-        refit_rounds=refit_rounds, prepared=prepared, max_legs=max_legs,
-        measure_impact=measure_impact, impact_fraction=impact_fraction,
-        gas_table=gas_table, risk_table=risk_table,
-                        revert_cost_bp=revert_cost_bp, leg_cost_bp=leg_cost_bp,
-        optimise_split=optimise_split, resident=resident,
-        collapse=collapse, audit=audit, max_spread=max_spread,
+        Everything below the frame is copied per call for the reason the arcs
+        are: `_assemble` writes `G`/`eps` back onto them and the §8 refit
+        re-anchors `B` at one size's realised flows, so two runs sharing them
+        would leak the first into the second.
+        """
+        arcs = [copy.copy(a) for a in prepared.arcs]
+        # The ladders need the same treatment.  §8 probes at the sizes *this*
+        # quote realised and `merge`s them in, so without a copy a second quote
+        # through the same `Prepared` recalibrates from the first quote's
+        # sizes.  Shallow is enough for the lists, which `merge` rebinds rather
+        # than mutates, but `failures` is updated in place and needs its own
+        # dict.
+        ladders = []
+        for ladder in prepared.ladders:
+            clone = copy.copy(ladder)
+            clone.failures = dict(ladder.failures)
+            ladders.append(clone)
+        # And the resident copy, which forks rather than being rebuilt: the
+        # same statement as above, on the side that holds the numbers.
+        resident = (prepared.resident.fork()
+                    if _ACCEL_ON and prepared.resident is not None else None)
+        nu = prepared.nu
+        # After the frame is fitted and before anything is solved: see above.
+        if joining:
+            fresh, unpriced, nu, bridged = admissible_late_arcs(
+                arcs, joining, nu, bridgeable=(src_node, dst_node))
+            arcs = arcs + fresh
+            into.counters["late_arcs"] = len(fresh)
+            if unpriced:
+                into.counters["late_arcs_unpriced"] = unpriced
+            if bridged:
+                # Nodes whose only price comes from the venue.  Worth counting
+                # on its own: it is the difference between a token being in the
+                # graph and being in it on Curve's evidence.
+                into.counters["late_arcs_bridged_nodes"] = bridged
+        into.arcs = arcs
+        into.nu = nu
+        into.pool_names = dict(prepared.pool_names)
+        into.counters.update(prepared.counters)
+        into.warnings.extend(prepared.warnings)
+
+        return _quote(
+            into, clock, pools, nodes, client, arcs, ladders, nu,
+            src_token=src_token, dst_token=dst_token, amount_in=amount_in,
+            src_node=src_node, dst_node=dst_node, max_rounds=max_rounds,
+            seed_k=seed_k, verify_on_chain=verify_on_chain,
+            max_candidates=max_candidates, gas_price_wei=gas_price_wei,
+            refit_rounds=refit_rounds, prepared=prepared, max_legs=max_legs,
+            measure_impact=measure_impact, impact_fraction=impact_fraction,
+            gas_table=gas_table, risk_table=risk_table,
+            revert_cost_bp=revert_cost_bp, leg_cost_bp=leg_cost_bp,
+            optimise_split=optimise_split, resident=resident,
+            collapse=collapse, audit=audit if joining else None,
+            max_spread=max_spread,
+        )
+
+    with_venue = one_quote(result, late_arcs)
+    if not late_arcs or not incumbent_guard:
+        return with_venue
+
+    # --- adding liquidity must never cost the answer ---------------------
+    #
+    # The ballot cannot promise this on its own.  Every candidate family is a
+    # perturbation of the base solve, the base solve moves when a venue joins,
+    # and only the *winner* is refined -- so the route that would have won is
+    # ranked on the split the model gave it and never re-split.  §6's
+    # sub-ballot puts the venue-free neighbourhood back on the ballot and got
+    # the worst case from -1547 bp to -40.59, but a seed cannot reproduce a
+    # route that only exists downstream of refinement: `ALD -> WBTC` at $1M
+    # was still 30.68 bp behind a 25-leg route the venue-on ballot never built.
+    #
+    # So quote the frame on its own, refinement and all, and keep whichever is
+    # better.  That is the promise made structurally rather than approached
+    # asymptotically.  It costs a second `_quote` -- not a second `prepare`,
+    # which is the expensive half and is shared.
+    plain = RouteResult(
+        src_token=src_token.lower(), dst_token=dst_token.lower(),
+        amount_in=amount_in, nodes=nodes,
     )
+    try:
+        without = one_quote(plain, None)
+    except RoutingError:
+        # A bridged token has no frame arc at all, so the frame alone cannot
+        # route it.  That is the venue earning its place, not a failure.
+        with_venue.counters["incumbent_unroutable"] = 1
+        return with_venue
+
+    return better_of(with_venue, without)
+
+
+def better_of(with_venue: RouteResult, without: RouteResult) -> RouteResult:
+    """Whichever of the two quotes pays more, with the choice recorded.
+
+    Ties go to the venue: it was asked for, its result is the one every other
+    counter describes, and an equal answer is not a reason to throw that away.
+
+    A venue that loses is not an error and not silently corrected either --
+    the counters and the warning say by how much, because a venue that keeps
+    costing the search is worth knowing about even once the answer is safe.
+    """
+    got = int(with_venue.verified_out or 0)
+    held = int(without.verified_out or 0)
+    with_venue.counters["incumbent_out"] = held
+    if held <= got:
+        return with_venue
+    cost_bp = (1 - got / held) * 1e4 if held else 0.0
+    without.counters["venue_declined"] = 1
+    without.counters["venue_cost_bp"] = round(cost_bp, 4)
+    without.warnings.append(
+        f"the venue's arcs cost {cost_bp:.2f} bp on the search, so this quote "
+        f"is the one without them"
+    )
+    return without
 
 
 def _quote(
