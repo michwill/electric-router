@@ -21,7 +21,7 @@ from erouter.core.schema import ROUTER_ADDRESS
 boa = pytest.importorskip("boa", reason="deriving the address needs the compiler")
 
 CONTRACT = "contracts/ElectricRouter.vy"
-SALT_PHRASE = b"erouter.ElectricRouter.v2"
+SALT_PHRASE = b"erouter.ElectricRouter.v3"
 
 
 def test_the_source_still_deploys_to_the_recorded_address():

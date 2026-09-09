@@ -40,7 +40,14 @@ ONE = 10**18
 #: Curve's sentinel for native ETH.
 NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 
-MAX_LEGS = 32
+#: Must match `contracts/ElectricRouter.vy`.  The executor's `DynArray` bounds
+#: are what a route has to fit, and the quoter's own 128 is irrelevant to that:
+#: a route that cannot be executed is not a quote.
+MAX_LEGS = 96
+#: 31 and not 96, because `in_ref`/`out_ref` are five-bit fields in the packed
+#: word (see `IN_REF_SHIFT`).  Raising it is a format change rather than a
+#: constant: there are 41 reserved bits, so six-bit refs would fit, but every
+#: side of the encoding moves together.
 MAX_TOKENS = 31
 
 # Packing, low bit first.  Must match `contracts/ElectricRouter.vy`.

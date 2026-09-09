@@ -78,26 +78,37 @@ from .verify import (
 # (MAX_LEGS, 128).  A 67-leg route is not executable by any deployed router;
 # `--max-legs` opens it up.
 # The most legs a route may have.  A candidate over it is discarded whole
-# rather than trimmed, so this bounds the *search* and not just the answer.
+# rather than trimmed, so this bounds the *search* and not just the answer:
+# raising it changes which routes are ever considered.
 #
-# It is 32 because `ElectricRouter.vy` is: `MAX_LEGS: constant(uint256) = 32`,
-# and `routecall.encode_route` refuses anything longer.  The quoter allows 128,
-# but a route that cannot be executed is not a quote.  So this is not a tuning
-# knob -- it is the deployed executor's own bound, and raising it here alone
-# would produce answers that cannot be filled.
+# It must not exceed what `ElectricRouter.vy` will execute -- a route that
+# cannot be encoded is not a quote -- so this and `routecall.MAX_LEGS` and the
+# contract's own `MAX_LEGS` move together.  All three are 96.
 #
-# Worth recording what it costs, because the number is large and the remedy is
-# a contract change rather than a constant.  Replaying the sweep's 168 cases on
-# Curve alone at one block, 64 against 32: 47 better, 118 unchanged, 3 worse
-# and none of those by a basis point.  Mean +34.45 bp.  The worst of it is not
-# a tail case: `WBTC -> FRAX` at $1M comes back as six legs paying **5,112 bp
-# of impact**, 659,705 FRAX, because the route that does it properly needs 58
-# legs.  With 64 allowed the same trade is 993,538 FRAX at 45 bp.  A cliff
-# rather than a gradient -- 48 gives the same six legs.
+# It was 32, matching the executor, and 32 was expensive.  Replaying the
+# sweep's 168 cases on Curve alone at one block, 64 against 32: 47 better, 118
+# unchanged, 3 worse and none of those by a basis point, mean +34.45 bp.  The
+# worst of it was not a tail case -- `WBTC -> FRAX` at $1M came back as six
+# legs paying **5,112 bp of impact**, 659,705 FRAX, because the route that does
+# it properly needs 58.  At 64 the same trade is 993,538 FRAX at 45 bp.  A
+# cliff rather than a gradient: 48 gives the same six legs.
 #
-# And not a gas trade-off: §11.1 already ranks gas-aware and does that job, so
-# at 30 gwei the same pair returns the four-leg route at either bound.
-DEFAULT_MAX_LEGS = 32
+# 96 rather than 64: measured over those same cases at a 96 budget the widest
+# route wanted 73 legs, so 64 would still have been binding.  Raising the
+# contract's bound costs nothing to deploy -- the loops are bounded rather than
+# unrolled and the runtime is 10,590 bytes either way -- and nothing per call,
+# since the `DynArray`s are calldata and only their real length is paid for.
+#
+# Not a gas trade-off: §11.1 already ranks gas-aware and does that job itself,
+# so at 30 gwei `FRAX -> WETH` returns the same four-leg route at either bound.
+# The cost is wall clock, roughly double on a case that explores wide, because
+# every extra candidate is realised and verified.
+#
+# `routecall.MAX_TOKENS` stays 31 and does not need to move with it.  Five-bit
+# `in_ref`/`out_ref` fields bound the tokens a route must *name*, not the slots
+# it uses, and 0 there means "read it from the pool": the 60-leg `WBTC -> FRAX`
+# route above spans 28 slots and names five tokens.
+DEFAULT_MAX_LEGS = 96
 
 # §12.1's size check.  `theta_p = delta_p / y_p` on the realised flow: how much
 # of the pool's own input reserve this arc takes.  The refine pass probes before

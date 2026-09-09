@@ -49,10 +49,20 @@ def _loss_bp(result, ledger: dict[str, float] | None, total_bp: float) -> dict:
 
 #: `ElectricRouter`, deployed through the canonical CREATE2 proxy, so the
 #: address is a function of the initcode and is the same on every chain.
-#: Verified byte-identical to the compiled runtime on all fifteen.  Editing
-#: the contract at all moves this, because Vyper puts a hash of the source in
-#: the initcode -- see `tests/test_router_address.py`.
-ROUTER_ADDRESS = "0xf5438dafc165b466f4a61ce57bd3aa59bcd5979e"
+#: Editing the contract at all moves this, because Vyper puts a hash of the
+#: source in the initcode -- see `tests/test_router_address.py`.
+#:
+#: v3, under the salt `erouter.ElectricRouter.v3`, taking 96 legs where v2 took
+#: 32.  32 was costing a mean +34.45 bp over the sweep's 168 cases on Curve
+#: alone, and `WBTC -> FRAX` at $1M 5,112 bp of impact, because the route that
+#: does it properly needs 58 legs.  v2 stays where it is at
+#: 0xf5438dafc165b466f4a61ce57bd3aa59bcd5979e and still works; it just cannot
+#: carry the wide routes.
+#:
+#: **Not yet deployed.**  The address is deterministic, so this is where it
+#: will land, but until the redeploy execution has no code to call.  Quoting is
+#: unaffected -- `RouteQuoter` is a separate contract at its own address.
+ROUTER_ADDRESS = "0xfb561e51b05ec41a854814495b51aa48b6728d81"
 
 
 def to_json(

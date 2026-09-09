@@ -32,7 +32,7 @@ pub fn one() -> U256 {
 /// Curve's sentinel for native ETH.
 pub const NATIVE: &str = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
-pub const MAX_LEGS: usize = 32;
+pub const MAX_LEGS: usize = 96;
 pub const MAX_TOKENS: usize = 31;
 
 // Packing, low bit first. Must match `contracts/ElectricRouter.vy`.

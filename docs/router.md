@@ -590,10 +590,10 @@ execute against different state and the bounds are measuring a market that moved
 **Do not reuse a route.**  The fractions are fine at any size, but the minimum
 rates were derived at one, and a dynamic fee moves with the trade.  Re-encode.
 
-**The router is at `0xf5438dafc165b466f4a61ce57bd3aa59bcd5979e`**, the same
+**The router is at `0xfb561e51b05ec41a854814495b51aa48b6728d81`**, the same
 address on ethereum, arbitrum, optimism, base, gnosis, polygon, fraxtal, bsc,
 avalanche, monad, plasma, xlayer, celo, tac and sonic.  It went out through the
-canonical CREATE2 proxy under the salt `erouter.ElectricRouter.v2`, so the
+canonical CREATE2 proxy under the salt `erouter.ElectricRouter.v3`, so the
 address is a function of the proxy, the salt and the initcode alone -- not of
 the chain, the deployer or a nonce.  Every one has been read back and matches
 the compiled runtime byte for byte.  `core.schema.ROUTER_ADDRESS` carries it.

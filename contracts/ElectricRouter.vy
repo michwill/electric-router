@@ -102,7 +102,7 @@ interface Adapter:
     # into USDC through one, and it takes an amount and no value.
     def deposit(amount: uint256): nonpayable
 
-MAX_LEGS: public(constant(uint256)) = 32
+MAX_LEGS: public(constant(uint256)) = 96
 MAX_TOKENS: public(constant(uint256)) = 31
 MAX_COINS: public(constant(uint256)) = 8
 

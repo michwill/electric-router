@@ -33,7 +33,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "src"))
 
 CONTRACT = REPO / "contracts" / "ElectricRouter.vy"
-SALT_PHRASE = "erouter.ElectricRouter.v2"
+SALT_PHRASE = "erouter.ElectricRouter.v3"
 #: A thousandth of the pool's reserve: small enough not to move it, far enough
 #: above dust that the output is a number rather than a rounding artifact.
 SANITY_SHARE = 1e-4
