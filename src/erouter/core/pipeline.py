@@ -77,6 +77,26 @@ from .verify import (
 # What the router proposes by default, against what the quoter can price
 # (MAX_LEGS, 128).  A 67-leg route is not executable by any deployed router;
 # `--max-legs` opens it up.
+# The most legs a route may have.  A candidate over it is discarded whole
+# rather than trimmed, so this bounds the *search* and not just the answer.
+#
+# It is 32 because `ElectricRouter.vy` is: `MAX_LEGS: constant(uint256) = 32`,
+# and `routecall.encode_route` refuses anything longer.  The quoter allows 128,
+# but a route that cannot be executed is not a quote.  So this is not a tuning
+# knob -- it is the deployed executor's own bound, and raising it here alone
+# would produce answers that cannot be filled.
+#
+# Worth recording what it costs, because the number is large and the remedy is
+# a contract change rather than a constant.  Replaying the sweep's 168 cases on
+# Curve alone at one block, 64 against 32: 47 better, 118 unchanged, 3 worse
+# and none of those by a basis point.  Mean +34.45 bp.  The worst of it is not
+# a tail case: `WBTC -> FRAX` at $1M comes back as six legs paying **5,112 bp
+# of impact**, 659,705 FRAX, because the route that does it properly needs 58
+# legs.  With 64 allowed the same trade is 993,538 FRAX at 45 bp.  A cliff
+# rather than a gradient -- 48 gives the same six legs.
+#
+# And not a gas trade-off: §11.1 already ranks gas-aware and does that job, so
+# at 30 gwei the same pair returns the four-leg route at either bound.
 DEFAULT_MAX_LEGS = 32
 
 # §12.1's size check.  `theta_p = delta_p / y_p` on the realised flow: how much
