@@ -243,33 +243,30 @@ def measure(session, venues, amount, repeats, agree_bp):
     return (seen[-1] if seen else None), seen, False
 
 
-def measure_across(arms, amount, repeats, agree_bp):
-    """Believe a case only when independently built sessions agree.
+def sweep_one(session, venues, pairs, price, symbols, nodes, args):
+    """Every case on one session, in the order given.  `case -> Reading`.
 
-    Repeating inside one session is not enough, and this was measured the
-    expensive way.  `FRAX -> WBTC` at $1M read **-5088.34 bp twice** in one
-    session -- agreeing to well inside the tolerance, its A/B/A control
-    passing, reported as believed -- and **+0.00 bp** in the next session at
-    the same commit and the same block.  `DAI -> ALD` at $100k went +49.66 bp
-    to -3.50 bp the same way.  A session settles into a state and then reports
-    that state consistently, so repetition inside one measures how stable the
-    state is, not how true the number is.
-
-    Across the two runs, 93 of 104 comparable cases agreed and 11 did not, so
-    this is not a rare corner -- it is a tenth of every sweep, concentrated on
-    exactly the large-notional cases a venue is judged by.
+    The order is the point.  Sessions that walk the same case list settle the
+    same way and then agree with each other for the wrong reason, which is how
+    the first version of this cross-check would have certified the very number
+    it was written to catch.  The caller hands each session a different order.
     """
-    seen = []
-    for session, venues in arms:
-        got, _reads, agreed = measure(session, venues, amount, repeats, agree_bp)
-        if got is None:
-            return None, seen, False
-        seen.append(got)
-        if not agreed:
-            return got, seen, False
-    worst = max(abs(a.delta - b.delta)
-                for a in seen for b in seen) if len(seen) > 1 else 0.0
-    return seen[0], seen, worst <= agree_bp
+    out: dict = {}
+    for src, dst in pairs:
+        try:
+            asyncio.run(session.set_pair(src, dst))
+        except Exception:
+            continue
+        for usd in NOTIONALS:
+            amount = int(usd / price[src] * 10 ** nodes.decimals(src))
+            if amount <= 0:
+                continue
+            got, _reads, agreed = measure(
+                session, venues, amount, args.repeats, args.agree_bp)
+            out[(src, dst, usd)] = got if agreed else None
+        print(f"  {symbols.get(src, src[:6])}->{symbols.get(dst, dst[:6])}",
+              flush=True)
+    return out
 
 
 def main() -> int:
@@ -283,9 +280,10 @@ def main() -> int:
                          "to measure them together")
     ap.add_argument("--tokens", type=int, default=7)
     ap.add_argument("--sessions", type=int, default=2,
-                    help="independently built sessions that must agree; 1 is "
-                         "half the wall clock and has been seen to report a "
-                         "5,088 bp regression that the next session did not")
+                    help="independent sessions that must agree, each walking "
+                         "the pairs in a different order; 1 is half the wall "
+                         "clock and has been seen to report a 5,088 bp "
+                         "regression that the next session did not")
     ap.add_argument("--repeats", type=int, default=3,
                     help="most readings per case before calling it unstable")
     ap.add_argument("--agree-bp", type=float, default=0.5,
@@ -311,42 +309,45 @@ def main() -> int:
     nodes = session.nodes
 
     legs_col = "+".join(v.name for v in venues)
-    print(f"{'pair':<18}{'notional':>14}{'curve':>30}{'curve+venue':>30}"
-          f"{'delta':>10}{legs_col:>6}{'reads':>7}")
+    pairs = [(s, d) for s in tokens for d in tokens if s != d]
+
+    # Session 0 walks the pairs forward, session 1 backward, and so on.  Two
+    # sessions warmed together and marched through the same list in lockstep
+    # accumulate the same history, so they settle the same way and agree
+    # because they are the same experiment twice -- not because the number is
+    # true.  Alternating the order is what makes the second session evidence.
+    tables = []
+    for n, (arm, arm_venues) in enumerate(arms):
+        order = pairs if n % 2 == 0 else list(reversed(pairs))
+        print(f"\nsession {n + 1}/{len(arms)}, pairs "
+              f"{'forward' if n % 2 == 0 else 'backward'}:")
+        tables.append(sweep_one(arm, arm_venues, order, price, symbols,
+                                nodes, args))
+
+    print(f"\n{'pair':<18}{'notional':>14}{'curve':>30}{'curve+venue':>30}"
+          f"{'delta':>10}{legs_col:>6}")
     deltas: list[float] = []
     worse: list = []
     unstable: list = []
-    for src in tokens:
-        for dst in tokens:
-            if src == dst:
+    for src, dst in pairs:
+        name = f"{symbols.get(src, src[:6])}->{symbols.get(dst, dst[:6])}"
+        for usd in NOTIONALS:
+            seen = [table.get((src, dst, usd)) for table in tables]
+            if any(r is None for r in seen):
                 continue
-            try:
-                for arm, _v in arms:
-                    asyncio.run(arm.set_pair(src, dst))
-            except Exception:
+            spread = max(abs(a.delta - b.delta) for a in seen for b in seen)
+            got = seen[0]
+            if spread > args.agree_bp:
+                unstable.append((name, usd, [r.delta for r in seen]))
+                print(f"{name:<18}{usd:>14,.0f}{got.base:>30,}{got.out:>30,}"
+                      f"{got.delta:>+9.2f}bp{got.legs:>6}  UNSTABLE "
+                      f"{[round(r.delta, 2) for r in seen]}")
                 continue
-            name = f"{symbols.get(src, src[:6])}->{symbols.get(dst, dst[:6])}"
-            for usd in NOTIONALS:
-                amount = int(usd / price[src] * 10 ** nodes.decimals(src))
-                if amount <= 0:
-                    continue
-                got, reads, agreed = measure_across(
-                    arms, amount, args.repeats, args.agree_bp)
-                if got is None:
-                    print(f"{name:<18}{usd:>14,.0f}   no comparable reading")
-                    continue
-                delta, base, out, legs = got.delta, got.base, got.out, got.legs
-                if not agreed:
-                    unstable.append((name, usd, [r.delta for r in reads]))
-                    print(f"{name:<18}{usd:>14,.0f}{base:>30,}{out:>30,}"
-                          f"{delta:>+9.2f}bp{legs:>6}{len(reads):>7}  UNSTABLE "
-                          f"{[round(r.delta, 2) for r in reads]}")
-                    continue
-                deltas.append(delta)
-                if delta < -args.worse_bp:
-                    worse.append((name, usd, delta, legs, got.route))
-                print(f"{name:<18}{usd:>14,.0f}{base:>30,}{out:>30,}"
-                      f"{delta:>+9.2f}bp{legs:>6}{len(reads):>7}")
+            deltas.append(got.delta)
+            if got.delta < -args.worse_bp:
+                worse.append((name, usd, got.delta, got.legs, got.route))
+            print(f"{name:<18}{usd:>14,.0f}{got.base:>30,}{got.out:>30,}"
+                  f"{got.delta:>+9.2f}bp{got.legs:>6}")
 
     if not deltas:
         print("\nnothing measured")

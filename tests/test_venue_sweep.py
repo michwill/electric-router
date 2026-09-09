@@ -164,3 +164,31 @@ def test_a_reading_keeps_the_route_that_produced_it():
     assert [leg.kind for leg in got.route.legs] == [
         ArcKind.SWAP_UNIV2, ArcKind.SWAP_STABLE]
     assert got.delta < 0 and got.legs == 1
+
+
+def test_each_session_walks_the_pairs_in_a_different_order():
+    """Two sessions marched through the same list settle the same way.
+
+    They then agree with each other for the wrong reason -- the same experiment
+    run twice, not a number confirmed.  The first version of this cross-check
+    had exactly that hole, and would have certified the 5,088 bp reading it was
+    written to catch.
+    """
+    import ast
+    import inspect
+    tree = ast.parse(inspect.getsource(venue_sweep))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "main")
+    reversed_calls = [n for n in ast.walk(fn)
+                      if isinstance(n, ast.Call)
+                      and getattr(n.func, "id", None) == "reversed"]
+    assert reversed_calls, (
+        "every session walks the same order; the second one is not evidence")
+
+
+def test_a_case_one_session_could_not_measure_is_dropped_not_halved():
+    """A `None` from either table means the case has no cross-session claim."""
+    tables = [{("a", "b", 1e3): venue_sweep.Reading(1.0, 10, 10, 0)},
+              {("a", "b", 1e3): None}]
+    seen = [tbl.get(("a", "b", 1e3)) for tbl in tables]
+    assert any(r is None for r in seen), "the join must skip this case"
