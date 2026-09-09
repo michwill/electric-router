@@ -1161,8 +1161,26 @@ class RouterSession:
         The pools themselves, plus what their arcs read *through* -- a lending
         pool's cToken, a vault pool's vault, an oracle -- which the slot cache
         records precisely because those are not the pool's own storage.
+
+        And the token being spent.  `allowance[sender][ROUTER_ADDRESS]` lives
+        on that token and on no pool, and it is what the dry run's
+        `transferFrom` stands on.  Left out, an approval between two plans for
+        the same route changed nothing the second plan could see: `fill`
+        repairs *misses*, and a slot already loaded is not one, so the value
+        read before the approval stood until the session was rebuilt.  It
+        reached a reader as `ERC20InsufficientAllowance(router, 0, amount)` on
+        a chain where the allowance was sitting there -- waiting did not clear
+        it and reloading the page did, which is the shape of a cache and not
+        of a block.
+
+        The block was never the problem: `_header_at_least` already pins this
+        at or after the block the approval landed in.  The right block was
+        read and this slot was not asked about.
         """
         touched = {leg.target.lower() for leg in route.legs}
+        spent = str(getattr(route, "src_token", "") or "").lower()
+        if spent:
+            touched.add(spent)
         needs = getattr(self.state, "arc_needs", {}) or {}
         for address in list(touched):
             touched.update(a for a in needs.get(address, ()) if isinstance(a, str))
