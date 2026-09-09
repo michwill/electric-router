@@ -288,6 +288,12 @@ def main() -> int:
                     help="most readings per case before calling it unstable")
     ap.add_argument("--agree-bp", type=float, default=0.5,
                     help="how close two readings must be to be believed")
+    ap.add_argument("--max-legs", type=int, default=0,
+                    help="leg budget per route; 0 keeps the router's default. "
+                         "A candidate over it is discarded whole rather than "
+                         "trimmed, so this bounds the search and not just the "
+                         "answer: measured, `ALD -> WBTC` at $1M threw away 14 "
+                         "candidates at 32 and none at 64")
     ap.add_argument("--gas-price", type=float, default=0.0,
                     help="gwei to rank against. §11.1 is gas-aware and "
                          "`warm` otherwise takes whatever was live, so two "
@@ -315,10 +321,12 @@ def main() -> int:
     pinned = int(args.gas_price * 1e9) or session.gas_price_wei
     for arm, _v in arms:
         arm.gas_price_wei = pinned
+        if args.max_legs:
+            arm.max_legs = args.max_legs
     held = " · ".join(f"{v.name} {v.arc_count():,} arc(s)" for v in venues)
     print(f"block {session.block:,} · {report.pools} pools · {held} · "
           f"{len(arms)} session(s) that must agree · "
-          f"gas {pinned / 1e9:.4f} gwei"
+          f"gas {pinned / 1e9:.4f} gwei · legs {args.max_legs or session.max_legs}"
           f"{'' if args.gas_price else ' (live at warm; pass --gas-price to reproduce)'}")
     tokens, price, symbols = token_set(session, venues, args.tokens)
     print(f"tokens: {[symbols.get(a, a[:8]) for a in tokens]}\n")
