@@ -147,6 +147,12 @@ pub struct CandidateSet {
     /// of it to be realisable; 0 when the pin/drop/repair families ran
     /// normally.
     pub skipped_wide: usize,
+    /// Venues whose incumbent sub-ballot never ran because the restricted
+    /// solve would not converge.  Counted rather than swallowed: this is the
+    /// mechanism that keeps the venue-free answer on the table, and a silent
+    /// skip is a venue quietly costing basis points with no leg in the route
+    /// to show for it.
+    pub incumbent_unsolved: usize,
 }
 
 impl CandidateSet {
@@ -1121,12 +1127,30 @@ pub fn generate(
                     tau: &sub.tau, sig: &sub.sig, g: &sub.g, eps: &sub.eps,
                     cap: &sub.cap, n_nodes: sub.n_nodes,
                 };
+                // Accept an unconverged seed.
+                //
+                // `active_set_solve` makes the argument itself where it returns
+                // PARTIAL: every iterate satisfies conservation exactly, so an
+                // unconverged solve is incomplete in *optimality* and never in
+                // feasibility -- and this one is a seed for candidate
+                // generation, every candidate of which the quoter adjudicates
+                // afterwards.  Refusing it is where the incumbent was lost: on
+                // `USDC -> FRAX` at $1M the Curve-only restriction cycled under
+                // Bland's rule after 477 pivots, the skip below swallowed it,
+                // and the answer came in 46.28 bp behind the venue-free one.
+                let sub_options = Options { partial_ok: true, ..Default::default() };
                 let sub_base = active_set_solve(
                     &sub_view, src, dst, psi_total, None, None, &[],
-                    &Options::default(),
+                    &sub_options,
                 );
                 ballot.out.pivots += sub_base.pivots as usize;
                 if !sub_base.stop.feasible() {
+                    // Dropping the base venue leaves the new venue alone, and a
+                    // venue that cannot reach the destination by itself is the
+                    // ordinary case rather than a fault.
+                    if !label.is_empty() {
+                        ballot.out.incumbent_unsolved += 1;
+                    }
                     continue;
                 }
                 let sub_opts = GenerateOptions {

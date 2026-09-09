@@ -318,6 +318,11 @@ impl Ballot {
     }
 
     #[getter]
+    fn incumbent_unsolved(&self) -> usize {
+        self.inner.incumbent_unsolved
+    }
+
+    #[getter]
     fn skipped_wide(&self) -> usize {
         self.inner.skipped_wide
     }

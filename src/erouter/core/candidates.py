@@ -884,17 +884,6 @@ def generate(
                 idx = np.flatnonzero(keep)
                 sub = restrict(g, keep)
                 out.solves += 1
-                # Warm-start from the base solve's own active set, restricted
-                # the same way.  The incumbent's answer lives near the base
-                # solve with this venue's flow taken out, so that is where to
-                # start looking -- and a cold start on a degenerate graph is
-                # what was cycling: `ALD -> WBTC` at $1M gave up after 477
-                # pivots.  `restrict` compacts with this same mask, so the
-                # active set maps straight across.
-                warm = None
-                held_A = getattr(base, "A", None)
-                if held_A is not None and len(held_A) == len(keep):
-                    warm = np.asarray(held_A)[keep]
                 # `partial_ok`, for the reason `active_set_solve` gives where it
                 # returns PARTIAL: every iterate satisfies conservation exactly,
                 # so only optimality is incomplete, never feasibility -- and
@@ -907,8 +896,7 @@ def generate(
                 # it, §6 contributed nothing, and the venue-on answer came in
                 # 46.28 bp behind the venue-off one with no Uniswap leg in the
                 # route it settled for.
-                sub_base = active_set_solve(sub, src, dst, Psi, A0=warm,
-                                            partial_ok=True)
+                sub_base = active_set_solve(sub, src, dst, Psi, partial_ok=True)
                 out.pivots += sub_base.pivots
                 if not sub_base.feasible:
                     # Dropping the *base* venue leaves the new venue alone, and

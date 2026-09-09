@@ -354,6 +354,16 @@ impl Ballot {
         self.inner.skipped_wide
     }
 
+    /// Venues whose incumbent sub-ballot never ran because the restricted
+    /// solve would not converge.  A browser needs this for the same reason the
+    /// extension does: it is the mechanism that keeps the venue-free answer on
+    /// the table, and when it does not run the venue can cost basis points
+    /// with no leg in the route to show for it.
+    #[wasm_bindgen(getter, js_name = incumbentUnsolved)]
+    pub fn incumbent_unsolved(&self) -> usize {
+        self.inner.incumbent_unsolved
+    }
+
     /// The winner's index, or `undefined`.
     pub fn best(&self) -> Option<usize> {
         let target = self.inner.best()?;
