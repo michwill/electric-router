@@ -100,12 +100,10 @@ def test_measuring_one_venue_leaves_the_other_alone():
 def test_legs_are_counted_for_every_selected_venue():
     session = Session(100, 110, kinds=(ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV2,
                                        ArcKind.SWAP_STABLE))
-    _delta, _base, _out, legs = venue_sweep.read_once(
-        session, venues("v3", "v2"), 1)
-    assert legs == 2, "one v3 and one v2, and not the Curve leg"
+    got = venue_sweep.read_once(session, venues("v3", "v2"), 1)
+    assert got.legs == 2, "one v3 and one v2, and not the Curve leg"
 
-    _d, _b, _o, only_v2 = venue_sweep.read_once(session, venues("v2"), 1)
-    assert only_v2 == 1
+    assert venue_sweep.read_once(session, venues("v2"), 1).legs == 1
 
 
 def test_a_drifting_control_throws_the_case_out():
@@ -116,9 +114,9 @@ def test_a_drifting_control_throws_the_case_out():
 
 def test_the_delta_is_basis_points_against_the_venue_free_arm():
     session = Session(10_000, 10_010)
-    delta, base, out, _legs = venue_sweep.read_once(session, venues("v3"), 1)
-    assert (base, out) == (10_000, 10_010)
-    assert delta == pytest.approx(10.0)
+    got = venue_sweep.read_once(session, venues("v3"), 1)
+    assert (got.base, got.out) == (10_000, 10_010)
+    assert got.delta == pytest.approx(10.0)
 
 
 def test_a_case_is_believed_once_two_readings_agree():
@@ -151,3 +149,18 @@ def test_the_venue_table_names_attributes_the_session_actually_has():
     params = inspect.signature(RouterSession.__init__).parameters
     for name, (attr, _kind, _cls) in venue_sweep.VENUES.items():
         assert attr in params, f"--venue {name} sets session.{attr}, which is gone"
+
+
+def test_a_reading_keeps_the_route_that_produced_it():
+    """The number cannot say why.
+
+    A case that loses through a venue leg and one that loses by perturbing the
+    base solve read identically as a delta; only the legs tell them apart, and
+    at -5088 bp that distinction is the whole question.
+    """
+    session = Session(100, 60, kinds=(ArcKind.SWAP_UNIV2, ArcKind.SWAP_STABLE))
+    got = venue_sweep.read_once(session, venues("v2"), 1)
+    assert got.route is not None
+    assert [leg.kind for leg in got.route.legs] == [
+        ArcKind.SWAP_UNIV2, ArcKind.SWAP_STABLE]
+    assert got.delta < 0 and got.legs == 1

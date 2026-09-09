@@ -44,6 +44,7 @@ import sys
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -170,6 +171,21 @@ def token_set(session, venues, limit):
     return tokens, price, symbols
 
 
+class Reading(NamedTuple):
+    """One believed A/B/A measurement, and the route that produced it.
+
+    The route is kept because the number alone cannot say *why*: a case that
+    loses 5,088 bp through one v2 leg and one that loses it by perturbing the
+    base solve read identically here, and only the legs tell them apart.
+    """
+
+    delta: float
+    base: int
+    out: int
+    legs: int
+    route: object = None
+
+
 def read_once(session, venues, amount):
     """One `curve -> venue -> curve` reading, or `None` if contaminated."""
     kinds = {v.kind for v in venues}
@@ -182,19 +198,20 @@ def read_once(session, venues, amount):
             got = session.quote(amount)
             legs = got.route.legs if got.route else []
             return (int(got.verified_out or 0),
-                    sum(1 for leg in legs if leg.kind in kinds))
+                    sum(1 for leg in legs if leg.kind in kinds),
+                    got.route)
         except Exception:
-            return (0, 0)
+            return (0, 0, None)
         finally:
             for attr, was in held.items():
                 setattr(session, attr, was)
 
-    base, _ = one(False)
-    got, legs = one(True)
-    control, _ = one(False)
+    base, _, _ = one(False)
+    got, legs, route = one(True)
+    control, _, _ = one(False)
     if not base or not got or base != control:
         return None
-    return ((got / base - 1) * 1e4, base, got, legs)
+    return Reading((got / base - 1) * 1e4, base, got, legs, route)
 
 
 def measure(session, venues, amount, repeats, agree_bp):
@@ -210,7 +227,7 @@ def measure(session, venues, amount, repeats, agree_bp):
         if got is None:
             continue
         for other in seen:
-            if abs(other[0] - got[0]) <= agree_bp:
+            if abs(other.delta - got.delta) <= agree_bp:
                 return got, [*seen, got], True
         seen.append(got)
     return (seen[-1] if seen else None), seen, False
@@ -230,6 +247,8 @@ def main() -> int:
                     help="most readings per case before calling it unstable")
     ap.add_argument("--agree-bp", type=float, default=0.5,
                     help="how close two readings must be to be believed")
+    ap.add_argument("--explain-bp", type=float, default=50.0,
+                    help="print the venue arm's legs for losses past this")
     ap.add_argument("--worse-bp", type=float, default=0.5,
                     help="a loss past this is reported as a regression")
     args = ap.parse_args()
@@ -246,7 +265,7 @@ def main() -> int:
     nodes = session.nodes
 
     legs_col = "+".join(v.name for v in venues)
-    print(f"{'pair':<18}{'notional':>12}{'curve':>26}{'curve+venue':>26}"
+    print(f"{'pair':<18}{'notional':>14}{'curve':>30}{'curve+venue':>30}"
           f"{'delta':>10}{legs_col:>6}{'reads':>7}")
     deltas: list[float] = []
     worse: list = []
@@ -267,19 +286,19 @@ def main() -> int:
                 got, reads, agreed = measure(
                     session, venues, amount, args.repeats, args.agree_bp)
                 if got is None:
-                    print(f"{name:<18}{usd:>12,.0f}   no comparable reading")
+                    print(f"{name:<18}{usd:>14,.0f}   no comparable reading")
                     continue
-                delta, base, out, legs = got
+                delta, base, out, legs = got.delta, got.base, got.out, got.legs
                 if not agreed:
-                    unstable.append((name, usd, [r[0] for r in reads]))
-                    print(f"{name:<18}{usd:>12,.0f}{base:>26,}{out:>26,}"
+                    unstable.append((name, usd, [r.delta for r in reads]))
+                    print(f"{name:<18}{usd:>14,.0f}{base:>30,}{out:>30,}"
                           f"{delta:>+9.2f}bp{legs:>6}{len(reads):>7}  UNSTABLE "
-                          f"{[round(r[0], 2) for r in reads]}")
+                          f"{[round(r.delta, 2) for r in reads]}")
                     continue
                 deltas.append(delta)
                 if delta < -args.worse_bp:
-                    worse.append((name, usd, delta, legs))
-                print(f"{name:<18}{usd:>12,.0f}{base:>26,}{out:>26,}"
+                    worse.append((name, usd, delta, legs, got.route))
+                print(f"{name:<18}{usd:>14,.0f}{base:>30,}{out:>30,}"
                       f"{delta:>+9.2f}bp{legs:>6}{len(reads):>7}")
 
     if not deltas:
@@ -293,9 +312,16 @@ def main() -> int:
     print(f"  best {ordered[-1]:+.2f} bp   median "
           f"{statistics.median(ordered):+.2f} bp   worst {ordered[0]:+.2f} bp")
     print(f"\n  worse than {args.worse_bp} bp: {len(worse)}")
-    for name, usd, delta, legs in sorted(worse, key=lambda r: r[2]):
+    for name, usd, delta, legs, route in sorted(worse, key=lambda r: r[2]):
         print(f"    {name:<18}${usd:>12,.0f}{delta:>+9.2f}bp   "
               f"{legs} {legs_col} leg(s)")
+        # The legs, for the ones big enough that the number is not the answer.
+        if delta < -args.explain_bp and route is not None:
+            for leg in route.legs:
+                mark = "*" if leg.kind in {v.kind for v in venues} else " "
+                print(f"      {mark} {leg.kind.name:<18} "
+                      f"{getattr(leg, 'target', '?')[:14]} "
+                      f"i={getattr(leg, 'i', '?')} j={getattr(leg, 'j', '?')}")
     print(f"  unstable, never repeated: {len(unstable)}")
     for name, usd, reads in unstable:
         print(f"    {name:<18}${usd:>12,.0f}   {[round(r, 2) for r in reads]}")
