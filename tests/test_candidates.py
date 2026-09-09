@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
+from erouter.core import candidates as candidates_module
 from erouter.core import graph
 from erouter.core.candidates import (
     CandidateSet,
@@ -566,3 +569,83 @@ def test_the_sub_ballot_does_not_recurse():
                    venues=["", "a", "b", "b"])
     # A recursing implementation would label something twice over.
     assert not any(c.label.count("without ") > 1 for c in out.candidates)
+
+
+def test_a_restriction_that_will_not_converge_still_seeds_the_sub_ballot():
+    """The incumbent's solve is a seed, not the answer.
+
+    `active_set_solve` says it where it returns PARTIAL: every iterate satisfies
+    conservation exactly, so an unconverged solve is incomplete in *optimality*
+    and never in feasibility -- and every candidate generated from it is
+    adjudicated by the quoter afterwards.
+
+    This is where the incumbent was being lost.  On `USDC -> FRAX` at $1M the
+    Curve-only restriction cycled under Bland's rule after 477 pivots, the skip
+    swallowed it, §6 contributed nothing, and the venue-on answer came in
+    46.28 bp behind the venue-off one -- with no Uniswap leg in the route it
+    settled for.  With the seed accepted the same case is +4.59 bp and the
+    winner is a sub-ballot candidate.
+    """
+    seen = {}
+    real = candidates_module.active_set_solve
+
+    def spy(g, src, dst, Psi, **kw):
+        # The restricted solves are the smaller ones.
+        seen.setdefault(g.m, []).append(kw.get("partial_ok", False))
+        return real(g, src, dst, Psi, **kw)
+
+    arcs = [
+        arc(0, POOL[0], 0, 1, B=1.0),
+        arc(1, POOL[1], 0, 1, B=1.5),
+        arc(2, POOL[2], 0, 1, B=0.5),
+    ]
+    g = build(arcs)
+    base = active_set_solve(g, 0, 1, 1.0)
+    held = candidates_module.active_set_solve
+    candidates_module.active_set_solve = spy
+    try:
+        generate(g, arcs, 0, 1, 1.0, base, venues=["", "", "new venue"])
+    finally:
+        candidates_module.active_set_solve = held
+
+    restricted = [ok for m, oks in seen.items() if m < len(arcs) for ok in oks]
+    assert restricted, "no restricted solve was made; §6 did not run"
+    assert all(restricted), (
+        "the incumbent's restricted solve refuses an unconverged seed, so a "
+        "venue whose restriction cycles silently loses its sub-ballot"
+    )
+
+
+def test_a_restriction_that_fails_outright_is_counted_not_swallowed():
+    """A bare `continue` here is a venue quietly costing basis points.
+
+    Nothing in the route shows it: the winner carries no venue leg at all, so
+    the loss reads as the venue being unhelpful rather than as the mechanism
+    that protects against it never having run.
+    """
+    arcs = [
+        arc(0, POOL[0], 0, 1, B=1.0),
+        arc(1, POOL[1], 0, 1, B=1.5),
+        arc(2, POOL[2], 0, 1, B=0.5),
+    ]
+    g = build(arcs)
+    base = active_set_solve(g, 0, 1, 1.0)
+    real = candidates_module.active_set_solve
+
+    def refuse(gg, src, dst, Psi, **kw):
+        got = real(gg, src, dst, Psi, **kw)
+        if gg.m < len(arcs):          # only the restrictions
+            return replace(got, feasible=False, reason="cycling")
+        return got
+
+    held = candidates_module.active_set_solve
+    candidates_module.active_set_solve = refuse
+    try:
+        out = generate(g, arcs, 0, 1, 1.0, base, venues=["", "", "new venue"])
+    finally:
+        candidates_module.active_set_solve = held
+
+    # `restrict` keeps the arc array and forbids entries rather than shrinking
+    # it, so which restrictions this fake refuses depends on that; what the
+    # test pins is that a refusal is *counted* rather than silently skipped.
+    assert out.incumbent_unsolved >= 1, "the skip has to be visible"

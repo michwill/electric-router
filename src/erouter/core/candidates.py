@@ -151,6 +151,12 @@ class CandidateSet:
     # Node count of the relaxation when it was too wide for any perturbation of
     # it to be realisable; 0 when the pin/drop/repair families ran normally.
     skipped_wide: int = 0
+    #: Venues whose incumbent sub-ballot never ran because the restricted solve
+    #: would not converge.  Counted rather than swallowed: this is the mechanism
+    #: that keeps the venue-free answer on the table, and a silent `continue`
+    #: here is a venue that quietly costs basis points with no leg in the route
+    #: to show for it.
+    incumbent_unsolved: int = 0
 
     def __len__(self) -> int:
         return len(self.candidates)
@@ -878,9 +884,22 @@ def generate(
                 idx = np.flatnonzero(keep)
                 sub = restrict(g, keep)
                 out.solves += 1
-                sub_base = active_set_solve(sub, src, dst, Psi)
+                # `partial_ok`, for the reason `active_set_solve` gives where it
+                # returns PARTIAL: every iterate satisfies conservation exactly,
+                # so only optimality is incomplete, never feasibility -- and
+                # this solve is a *seed* for candidate generation, every one of
+                # which the quoter adjudicates afterwards.
+                #
+                # Without it this is where the incumbent was being lost.  On
+                # `USDC -> FRAX` at $1M the Curve-only restriction cycled under
+                # Bland's rule after 477 pivots, the `continue` below swallowed
+                # it, §6 contributed nothing, and the venue-on answer came in
+                # 46.28 bp behind the venue-off one with no Uniswap leg in the
+                # route it settled for.
+                sub_base = active_set_solve(sub, src, dst, Psi, partial_ok=True)
                 out.pivots += sub_base.pivots
                 if not sub_base.feasible:
+                    out.incumbent_unsolved += 1
                     continue
                 inner = generate(
                     sub, [arcs[int(k)] for k in idx], src, dst, Psi, sub_base,

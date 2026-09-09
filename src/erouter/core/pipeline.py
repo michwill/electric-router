@@ -1191,6 +1191,14 @@ def _quote(
         result.counters["candidates"] = len(pool_set)
         result.counters["candidate_solves"] = pool_set.solves
         result.counters["candidate_pivots"] = pool_set.pivots
+        if pool_set.incumbent_unsolved:
+            # The venue-free answer never made it onto the ballot, so this
+            # quote has no guarantee of matching the one without the venue.
+            result.counters["incumbent_unsolved"] = pool_set.incumbent_unsolved
+            result.warnings.append(
+                f"{pool_set.incumbent_unsolved} venue(s) had no incumbent "
+                f"sub-ballot: the restricted solve would not converge, so the "
+                f"answer without them was never put on the table")
         result.counters["candidates_quoted"] = sum(
             1 for c in pool_set.candidates if c.verified_out is not None
         )
