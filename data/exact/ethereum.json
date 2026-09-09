@@ -268,6 +268,14 @@
    "rates": "reported",
    "subtract_one": true
   },
+  "0x2034b76bb7318d5fda07ec183c0308c5e06c9c8c": {
+   "family": "twocrypto",
+   "legacy_fee": true,
+   "legacy_mul2": false,
+   "legacy_pool": false,
+   "stable": false,
+   "v21": true
+  },
   "0x20d4c49a873eaeff76efbd0cf19002f6e19ef52c": {
    "family": "stable",
    "fee_on_xp": true,
@@ -403,6 +411,12 @@
    "subtract_one": true
   },
   "0x2cf99a343e4ecf49623e82f2ec6a9b62e16ff3fe": {
+   "family": "stable",
+   "fee_on_xp": true,
+   "rates": "reported",
+   "subtract_one": true
+  },
+  "0x2d9959af94bf25e5703cbca1475f5d8e688c8d54": {
    "family": "stable",
    "fee_on_xp": true,
    "rates": "reported",
