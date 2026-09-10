@@ -41,17 +41,25 @@ class Bank:
         return int(human * 10**self.decimals_out)
 
 
-def teach(client, banks: dict) -> None:
-    """Make `client` able to walk a v3 leg.  Keyed by `(pool, i, j)`.
+def teach(client, banks: dict, kind: ArcKind = ArcKind.SWAP_UNIV3) -> None:
+    """Make `client` able to walk a tick-bank leg.  Keyed by `(pool, i, j)`.
 
     Installed on the instance rather than the class: a session holds one client
     and the banks are that session's block, so there is nothing to share and
     something to get wrong by sharing it.
+
+    `kind` is a parameter because v4's banks are these banks -- same math, same
+    `Bank`, different `ArcKind` -- and a teacher that answers only for
+    `SWAP_UNIV3` would let a v4 leg fall through to a quoter that has never
+    heard of kind 19.  That returns zero, `verify` reads zero as a revert, and
+    every route carrying the venue is dropped before it can win.  Which is how
+    `--univ3` shipped, and then `--univ2`, and it is not going to be how v4
+    ships.
     """
     real = client._quote_leg
 
     def quote_leg(leg, dx: int) -> int:
-        if leg.kind is not ArcKind.SWAP_UNIV3:
+        if leg.kind is not kind:
             return real(leg, dx)
         bank = banks.get((leg.target.lower(), leg.i, leg.j))
         if bank is None:

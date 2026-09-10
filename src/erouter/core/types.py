@@ -40,6 +40,12 @@ class ArcKind(IntEnum):
     # direction rather than a bank: a v2 pair has one range, so nothing has to
     # be collapsed before a route is realised and Decision 3 needs no exemption.
     SWAP_UNIV2 = 18  # a v2 pair, from `venues.univ2`
+    # v4's swap arithmetic is v3's -- same ticks, same liquidity, same closed
+    # form -- so this is a bank of capped arcs too.  What is new is the hook,
+    # and only pools whose hook cannot touch a swap are admitted: see
+    # `venues.univ4.tier`.  Identified by `PoolId` rather than an address,
+    # because v4 keeps every pool in one singleton.
+    SWAP_UNIV4 = 19  # a v4 tick range, from `venues.univ4`
 
     @property
     def is_lending(self) -> bool:
@@ -55,7 +61,8 @@ class ArcKind(IntEnum):
     @property
     def is_swap(self) -> bool:
         return self in (ArcKind.SWAP_STABLE, ArcKind.SWAP_CRYPTO,
-                        ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV2)
+                        ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV2,
+                        ArcKind.SWAP_UNIV4)
 
     @property
     def is_deposit(self) -> bool:
@@ -95,7 +102,12 @@ class ArcKind(IntEnum):
 # no tick walk, so both contracts can learn it in a way v3 cannot.  It is
 # model-only because the arithmetic landed first, not because sending it is
 # hard.
-OFF_CHAIN_KINDS = frozenset({ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV2})
+# `SWAP_UNIV4` is model-only for the strongest reason of the three: a v4 swap
+# goes through `PoolManager.unlock` and settles a transient balance, so sending
+# one needs an `unlockCallback` the deployed router does not have.  Quoting it
+# needs nothing new.
+OFF_CHAIN_KINDS = frozenset({ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV2,
+                             ArcKind.SWAP_UNIV4})
 
 
 class Dialect(StrEnum):

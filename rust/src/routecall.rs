@@ -592,6 +592,9 @@ fn derive_rule(kind: ArcKind) -> Option<(Derive, Derive)> {
         // there is no calldata to place it in. The reference says the same by
         // leaving it out of `_DERIVE`.
         SwapUniv3 => return None,
+        // And v4 for the strongest reason of the three: sending one needs an
+        // `unlockCallback` on the router, which no deployed version has.
+        SwapUniv4 => return None,
         // Same answer, for now and not for the same reason: a v2 leg is
         // sendable -- transfer, then `swap` -- but no contract declares the
         // kind yet, so there is no calldata to place it in. See

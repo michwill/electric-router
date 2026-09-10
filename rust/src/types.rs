@@ -42,6 +42,9 @@ pub enum ArcKind {
     SwapUniv3 = 17,
     /// A v2 pair: constant product with a flat fee, one arc per direction.
     SwapUniv2 = 18,
+    /// A v4 tick range.  Same arithmetic as v3; the hook is what differs, and
+    /// only pools whose hook cannot touch a swap become arcs at all.
+    SwapUniv4 = 19,
 }
 
 impl ArcKind {
@@ -66,6 +69,7 @@ impl ArcKind {
             16 => LendRedeem,
             17 => SwapUniv3,
             18 => SwapUniv2,
+            19 => SwapUniv4,
             _ => return None,
         })
     }
@@ -95,6 +99,7 @@ impl ArcKind {
             StakeNative => "STAKE_NATIVE",
             SwapUniv3 => "SWAP_UNIV3",
             SwapUniv2 => "SWAP_UNIV2",
+            SwapUniv4 => "SWAP_UNIV4",
             LendMint => "LEND_MINT",
             LendRedeem => "LEND_REDEEM",
         }

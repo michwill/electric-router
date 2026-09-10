@@ -211,7 +211,8 @@ MIN_CAP_SHARE = 1e-6
 
 def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
               token0: str, token1: str, max_ticks: int = 16,
-              tvl_usd: float = 0.0, min_cap_share: float = MIN_CAP_SHARE):
+              tvl_usd: float = 0.0, min_cap_share: float = MIN_CAP_SHARE,
+              kind=None, venue: str = "uniswap v3", label: str = "Uniswap v3"):
     """Both directions of one pool, as arcs the solver can take straight.
 
     Nothing here is probed and nothing is fitted, so these arcs skip the refine
@@ -223,9 +224,18 @@ def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
     Ids carry a `#k` segment because a pool contributes many arcs between the
     same pair of nodes.  They are a decomposition of one swap, not many swaps,
     and `collapse` puts them back together before the route is realised.
+
+    `kind`, `venue` and `label` exist for v4, whose swap arithmetic is this one
+    exactly -- same ticks, same liquidity, same closed form.  What differs there
+    is which pools are allowed to have arcs at all, and that is
+    `venues.univ4.tier`'s business rather than this function's.  `pool` is a
+    `PoolId` there instead of an address, which nothing here minds: it is used
+    as an identity, and v4 has no per-pool address to offer.
     """
     from ..core.nodes import rescale
     from ..core.types import ArcKind, PoolArc
+
+    kind = ArcKind.SWAP_UNIV3 if kind is None else kind
 
     out = []
     for zero_for_one in (True, False):
@@ -256,8 +266,8 @@ def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
         for k, arc in enumerate(bank):
             a, b = rescale(arc.a, arc.B, rate_in, rate_out)
             out.append(PoolArc(
-                id=f"{pool.lower()}:{int(ArcKind.SWAP_UNIV3)}:{i}>{j}#{k}",
-                pool=pool.lower(), kind=ArcKind.SWAP_UNIV3, i=i, j=j, n_coins=2,
+                id=f"{pool.lower()}:{int(kind)}:{i}>{j}#{k}",
+                pool=pool.lower(), kind=kind, i=i, j=j, n_coins=2,
                 token_in=token_in, token_out=token_out, tau=tau, sigma=sigma,
                 a=a, B=b, cap=arc.cap * rate_in,
                 rate_in=rate_in, rate_out=rate_out,
@@ -268,12 +278,12 @@ def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
                 parallel=True,
                 # And this is what buys the ballot a candidate without them, so
                 # that adding the venue cannot cost the answer.
-                venue="uniswap v3",
+                venue=venue,
                 # Named for the venue and the fee tier, because the note is
                 # what the route diagram prints: "v3, 16 tick(s)" is not a
                 # thing anyone scanning a route for Uniswap will recognise.
                 tvl_usd=tvl_usd,
-                note=f"Uniswap v3 {state.fee / 10_000:g}% tick {k}"))
+                note=f"{label} {state.fee / 10_000:g}% tick {k}"))
     return out
 
 

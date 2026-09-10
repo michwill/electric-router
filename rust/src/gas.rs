@@ -54,6 +54,10 @@ pub fn leg_gas(kind: ArcKind) -> i64 {
         // A v3 swap that crosses nothing is ~110k; each initialized tick it
         // crosses adds ~20k. Routes that use one usually cross a few.
         SwapUniv3 => 150_000,
+        // A v4 swap crosses the same ticks as a v3 one and pays for the
+        // singleton's `unlock` and settlement on top, but saves the per-pool
+        // cold `SLOAD`s v3 pays: same order, and nothing measured yet.
+        SwapUniv4 => 150_000,
         // A v2 swap is a transfer and a `swap` with no callback and no ticks to
         // cross, so it is the cheapest AMM leg here and does not vary.
         SwapUniv2 => 100_000,
