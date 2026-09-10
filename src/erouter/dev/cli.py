@@ -1179,6 +1179,7 @@ def cmd_route(args: argparse.Namespace) -> int:
 
     venue_opts = _venue_options(args, chain, rpc, nodes, client, stake_arcs)
     venue_opts = _univ2_options(args, chain, rpc, nodes, client, venue_opts)
+    venue_opts = _univ4_options(args, chain, rpc, nodes, client, venue_opts)
 
     if args.amount is None and not args.amount_wei:
         return _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,
@@ -2503,6 +2504,62 @@ def _univ2_options(args, chain, rpc, nodes, client, options: dict) -> dict:
     return options
 
 
+def _univ4_options(args, chain, rpc, nodes, client, options: dict) -> dict:
+    """Add Uniswap v4's arcs to whatever seam the caller already has.
+
+    A tick bank like v3's, so it brings a `collapse` too -- chained behind v3's
+    when both are on, because each folds its own pools and `collapse` returns
+    `(arcs, psi)` while taking four arguments.
+
+    Nothing here re-checks the hook: `scripts/v4_census.py` writes only tiers 0
+    and 1, and `Univ4.wanted` refuses anything else that reaches it anyway.
+    """
+    if not getattr(args, "univ4", False):
+        return options
+    import pathlib
+
+    from ..venues.univ4_session import Univ4
+
+    root = pathlib.Path(__file__).resolve().parents[3]
+    venue = Univ4.load(root, chain.name.lower(),
+                       floor_usd=float(getattr(args, "univ4_floor", 10_000.0)))
+    if venue is None:
+        print(f"  {WARN} no Uniswap v4 census for {chain.name}; "
+              f"run scripts/v4_census.py or route without --univ4")
+        return options
+    if venue.state_view is None:
+        print(f"  {WARN} no StateView recorded for {chain.name}; routing without v4")
+        return options
+    started = time.monotonic()
+    answered = venue.refresh(rpc, nodes, rpc.block)
+    if not answered:
+        routable, above, priceable, asked = venue.considered
+        print(f"  {WARN} no Uniswap v4 pool answered: {len(venue.census):,} in "
+              f"the census, {routable:,} routable, {above:,} above the floor, "
+              f"{priceable:,} with both coins in the node map, {asked:,} asked "
+              f"for; routing without it")
+        if asked and not getattr(args, "private", False):
+            # The committed endpoint allowlists by address and 403s StateView,
+            # which reads here as "no pool answered" rather than as a refusal.
+            print(f"  {WARN} --univ4 reads through StateView, which the scoped "
+                  f"endpoint will not serve; try --private")
+        return options
+    venue.teach(client)
+    print(f"  uniswap v4: {answered:,} pool(s), {len(venue.arcs):,} tick-arc(s) "
+          f"in {(time.monotonic() - started) * 1000:,.0f} ms")
+    options["late_arcs"] = [*options.get("late_arcs", ()), *venue.arcs]
+    held = options.get("collapse")
+    if held is None:
+        options["collapse"] = venue.collapse
+    else:
+        def both(arcs, psi, nu, nodes_, _a=held, _b=venue.collapse):
+            arcs, psi = _a(arcs, psi, nu, nodes_)
+            return _b(arcs, psi, nu, nodes_)
+        options["collapse"] = both
+    options["max_spread"] = max(options.get("max_spread", 0.0), venue.max_spread)
+    return options
+
+
 def _risk_table(chain, args=None):
     """Per-pool minimum-out risk, measured, or nothing at all.
 
@@ -2976,6 +3033,16 @@ def build_parser() -> argparse.ArgumentParser:
     route_cmd.add_argument(
         "--univ2-floor", type=float, default=10_000.0,
         help="skip v2 pairs below this TVL in USD (default 10,000)")
+    route_cmd.add_argument(
+        "--univ4", action="store_true",
+        help="route over Uniswap v4 as well. Needs data/univ4/<chain>.json "
+             "from scripts/v4_census.py. Only pools whose hook cannot touch a "
+             "swap are in it. Reads through StateView with an ordinary "
+             "eth_call, but the scoped endpoint allowlists by address and 403s "
+             "it, so it wants --private or StateView whitelisted")
+    route_cmd.add_argument(
+        "--univ4-floor", type=float, default=10_000.0,
+        help="skip v4 pools below this measured depth in USD (default 10,000)")
     route_cmd.set_defaults(func=cmd_route)
 
     # Every subcommand takes it, so it is added in one place rather than

@@ -121,3 +121,28 @@ def test_a_pool_key_carries_its_own_verdict():
     assert (key.currency0, key.currency1) == ("0xaaa", "0xbbb")
     assert key.tier == 1 and key.routable
     assert key.as_tuple()[2:4] == (3000, 60), "the ABI ordering, for encoding"
+
+
+def test_two_tick_bank_venues_chain_their_collapse():
+    """v3 and v4 both fold banks into one leg, and both must run.
+
+    `collapse` takes `(arcs, psi, nu, nodes)` and returns `(arcs, psi)`, so a
+    chain that splats the first's output into the second loses `nu` and
+    `nodes` -- and it would only ever show with both venues on at once.
+    """
+    import ast
+    import inspect
+
+    from erouter.chain import session as chain_session
+
+    src = inspect.getsource(chain_session.RouterSession._seams) \
+        if hasattr(chain_session.RouterSession, "_seams") else \
+        inspect.getsource(chain_session)
+    tree = ast.parse(src.lstrip() if src.startswith(" ") else src)
+    both = next((n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "both"), None)
+    assert both is not None, "no collapse chain; this test needs rewriting"
+    body = ast.unparse(both)
+    assert "_a(arcs, psi, nu, nodes)" in body
+    assert "_b(arcs, psi, nu, nodes)" in body, (
+        "the second collapse is not given nu and nodes")

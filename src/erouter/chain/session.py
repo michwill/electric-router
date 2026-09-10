@@ -125,6 +125,8 @@ class WarmReport:
     univ3_ms: float = 0.0
     univ2_pairs: int = 0
     univ2_ms: float = 0.0
+    univ4_pools: int = 0
+    univ4_ms: float = 0.0
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -225,7 +227,7 @@ class RouterSession:
 
     def __init__(self, chain, rpc, backend, data, raw_pools, *,
                  min_tvl: float = DEFAULT_MIN_TVL, max_legs: int | None = None,
-                 univ3=None, univ2=None):
+                 univ3=None, univ2=None, univ4=None):
         self.chain = chain
         self.rpc = rpc
         self.backend = backend
@@ -238,6 +240,7 @@ class RouterSession:
         # the router it was.
         self.univ3 = univ3
         self.univ2 = univ2
+        self.univ4 = univ4
 
         self.block = 0
         self.pools: list[PoolSpec] = []
@@ -356,6 +359,19 @@ class RouterSession:
             report.univ2_ms = self.univ2.read_ms
             say("univ2", 1.0)
 
+        if self.univ4 is not None:
+            say("univ4", 0.0)
+            # Per block, like v3: the same tick reads, through `StateView`
+            # rather than out of storage.
+            report.univ4_pools = self.univ4.refresh(
+                getattr(self.rpc, "_t", self.rpc), self.nodes, self.block)
+            # Its own kind, or the leg falls through to a quoter that has never
+            # heard of kind 19 and answers zero -- which `verify` reads as a
+            # revert.  See `test_venue_teaches_its_kind.py`.
+            self.univ4.teach(self.client)
+            report.univ4_ms = self.univ4.read_ms
+            say("univ4", 1.0)
+
         self.gas_table, _ = self.facts.table(self.pools), None
         self.risk_table = self.facts.risk_table()
         self.gas_price_wei = await self._gas_price()
@@ -431,7 +447,7 @@ class RouterSession:
         that reaches it has joined.
         """
         out: list = []
-        for venue in (self.univ3, self.univ2):
+        for venue in (self.univ3, self.univ2, self.univ4):
             if venue is not None and venue.arcs:
                 out += list(venue.arcs)
         return out
@@ -446,6 +462,9 @@ class RouterSession:
         it when no node was gained.
         """
         transport = getattr(self.rpc, "_t", self.rpc)
+        if self.univ4 is not None:
+            self.univ4.refresh(transport, self.nodes, self.block)
+            self.univ4.teach(self.client)
         if self.univ3 is not None:
             self.univ3.refresh(transport, self.nodes, self.block)
             self.univ3.teach(self.client)
@@ -521,6 +540,25 @@ class RouterSession:
             # than one replacing the other -- and a v2 arc needs no `collapse`,
             # so v3's stays whatever it was.
             seams["late_arcs"] = [*seams.get("late_arcs", ()), *self.univ2.arcs]
+        if self.univ4 is not None and self.univ4.arcs:
+            # v4's arcs are a tick bank like v3's, so they need a `collapse` to
+            # be one leg again before Decision 3 counts them.  Chained, because
+            # two venues can both have banks and each must fold its own.
+            seams["late_arcs"] = [*seams.get("late_arcs", ()), *self.univ4.arcs]
+            held = seams.get("collapse")
+            v4_collapse = self.univ4.collapse
+            if held is None:
+                seams["collapse"] = v4_collapse
+            else:
+                def both(arcs, psi, nu, nodes, _a=held, _b=v4_collapse):
+                    # `collapse` returns `(arcs, psi)` and takes four, so the
+                    # second call needs `nu` and `nodes` again rather than the
+                    # first one's output splatted into it.
+                    arcs, psi = _a(arcs, psi, nu, nodes)
+                    return _b(arcs, psi, nu, nodes)
+                seams["collapse"] = both
+            seams["max_spread"] = max(seams.get("max_spread", 0.0),
+                                      self.univ4.max_spread)
         return pipeline.route(
             self.pools, self.nodes, self.client,
             src_token=src, dst_token=dst, amount_in=int(amount_in),
