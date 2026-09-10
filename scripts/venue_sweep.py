@@ -72,6 +72,7 @@ from erouter.dev.rpc import BATCH_FLOOR, AsyncTransport, JsonRpcTransport  # noq
 from erouter.dev.universe import load_pools  # noqa: E402
 from erouter.venues.univ2_session import Univ2  # noqa: E402
 from erouter.venues.univ3_session import Univ3  # noqa: E402
+from erouter.venues.univ4_session import Univ4  # noqa: E402
 
 #: Notionals in USD.  Priced per token by probing, so "1e6" is the same trade
 #: whichever coin it starts from -- a sweep in token units compares a $1k WBTC
@@ -102,6 +103,7 @@ class Venue:
 VENUES = {
     "v3": ("univ3", ArcKind.SWAP_UNIV3, Univ3),
     "v2": ("univ2", ArcKind.SWAP_UNIV2, Univ2),
+    "v4": ("univ4", ArcKind.SWAP_UNIV4, Univ4),
 }
 
 
