@@ -10,6 +10,7 @@
   "0x5fc50c99e175dfeb8faa7613e050645583ac1501": "f1511e7a949c",
   "0x6bd88c57523bf138a19b263e8ebc8661c836b171": "f1fecbd1749e",
   "0x71db3764d6841d8b01dc27c0fd4a66a8a34b2be0": "0419c71224d1",
+  "0x7956fad09a1d1c47550331e7f06bf7c7b7c2af08": "ff9e005b5ab9",
   "0xb79bbc5c96ba248e10c1bdac1a2b83790ff22b7f": "0b14fb24060c",
   "0xd0a1d2a9350824516ae8729b8311557ba7e55bff": "b7171a650905",
   "0xddbdcebb989b1ef804338d6c9a902f91c2738936": "8498986ca674"
@@ -1108,12 +1109,6 @@
    "v21": true
   },
   "0x78c579a2dcfe10ae8b3c888a583337beb4d91733": {
-   "family": "stable",
-   "fee_on_xp": true,
-   "rates": "reported",
-   "subtract_one": true
-  },
-  "0x7956fad09a1d1c47550331e7f06bf7c7b7c2af08": {
    "family": "stable",
    "fee_on_xp": true,
    "rates": "reported",
