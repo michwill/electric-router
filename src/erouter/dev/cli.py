@@ -2541,8 +2541,9 @@ def _univ4_options(args, chain, rpc, nodes, client, options: dict) -> dict:
         if asked and not getattr(args, "private", False):
             # The committed endpoint allowlists by address and 403s StateView,
             # which reads here as "no pool answered" rather than as a refusal.
-            print(f"  {WARN} --univ4 reads through StateView, which the scoped "
-                  f"endpoint will not serve; try --private")
+            print(f"  {WARN} --univ4 reads through StateView with an "
+                  f"eth_call, which the scoped endpoint allowlists per "
+                  f"address and refuses; try --private")
         return options
     venue.teach(client)
     print(f"  uniswap v4: {answered:,} pool(s), {len(venue.arcs):,} tick-arc(s) "
@@ -3020,16 +3021,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--univ3", action="store_true",
         help="route over Uniswap v3 as well as Curve. Costs one tick read per "
              "block (~2 s for 144 pools) and needs data/univ3/<chain>.json. "
-             "Reads pool storage directly, so it wants --private: the scoped "
-             "endpoint serves Curve's contracts and not Uniswap's")
+             "Reads pool storage directly, which is why it is the one venue "
+             "the scoped endpoint serves: measured, `eth_getStorageAt` is not "
+             "gated there at all, while `eth_call` is allowlisted per address "
+             "and 403s Curve's own pools as readily as Uniswap's")
     route_cmd.add_argument(
         "--univ3-floor", type=float, default=10_000.0,
         help="skip v3 pools below this TVL in USD (default 10,000)")
     route_cmd.add_argument(
         "--univ2", action="store_true",
         help="route over Uniswap v2 as well. Needs data/univ2/<chain>.json "
-             "from scripts/v2_census.py. Reads reserves with an ordinary "
-             "eth_call, so unlike --univ3 it wants no --private")
+             "from scripts/v2_census.py. Wants --private: `getReserves()` is "
+             "an eth_call, and the scoped endpoint allowlists those per "
+             "address -- measured, it refuses all ten pairs sampled. An "
+             "earlier version of this help said the opposite")
     route_cmd.add_argument(
         "--univ2-floor", type=float, default=10_000.0,
         help="skip v2 pairs below this TVL in USD (default 10,000)")

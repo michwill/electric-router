@@ -11,8 +11,15 @@ periphery contract exposing the same four things as ordinary `eth_call`s:
     getTickBitmap(poolId, word)
     getTickLiquidity(poolId, tick) -> liquidityGross, liquidityNet
 
-Which is a straight improvement: no storage reads means no `--private`, and the
-shape is otherwise v3's, so `univ3.arcs` takes the result unchanged.
+The shape is otherwise v3's, so `univ3.arcs` takes the result unchanged.
+
+Not a straight improvement, though it looks like one.  Measured against the
+committed endpoint: `eth_getStorageAt` is not gated there at all -- ten of ten
+v2 pairs and ten of ten v3 pools served -- while `eth_call` is allowlisted per
+address and refuses Curve's own 3pool as readily as Uniswap's periphery.  So
+v3's storage reads are exactly what let it work without a key, and reading
+through a contract is what costs v4 that.  v2 pays the same price for the same
+reason.
 
 `lpFee` from `getSlot0` is the pool's *current* fee.  For the pools this venue
 admits it always equals the `PoolKey`'s, because a static fee cannot be
