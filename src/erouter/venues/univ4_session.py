@@ -128,19 +128,24 @@ class Univ4:
         arcs: list[PoolArc] = []
         banks: dict = {}
         priced: dict = {}
-        for pid, (pool_state, ticks) in state.items():
+        for pid, ((forward, reverse), ticks) in state.items():
             key, dec0, dec1 = self.pools[pid]
             row = self.census.get(pid) or []
-            arcs += univ3.pool_arcs(
-                pid, pool_state, ticks, nodes,
-                token0=key.currency0, token1=key.currency1,
-                max_ticks=self.ticks,
-                tvl_usd=float(row[5]) if len(row) > 5 else 0.0,
-                kind=ArcKind.SWAP_UNIV4, venue="uniswap v4",
-                label="Uniswap v4")
-            for zero_for_one in (True, False):
-                bank = univ3.arcs(pool_state, ticks,
-                                  zero_for_one=zero_for_one,
+            tvl = float(row[5]) if len(row) > 5 else 0.0
+            # One call per direction, because the protocol fee is charged per
+            # direction and each state carries its own effective fee.
+            # `pool_arcs` builds both directions from one state and drops the
+            # one that is not this state's, which is the price of reusing it.
+            for zero_for_one, st in ((True, forward), (False, reverse)):
+                built = univ3.pool_arcs(
+                    pid, st, ticks, nodes,
+                    token0=key.currency0, token1=key.currency1,
+                    max_ticks=self.ticks, tvl_usd=tvl,
+                    kind=ArcKind.SWAP_UNIV4, venue="uniswap v4",
+                    label="Uniswap v4")
+                want_i = 0 if zero_for_one else 1
+                arcs += [a for a in built if a.i == want_i]
+                bank = univ3.arcs(st, ticks, zero_for_one=zero_for_one,
                                   max_ticks=self.ticks)
                 if not bank:
                     continue

@@ -19,12 +19,47 @@ admits it always equals the `PoolKey`'s, because a static fee cannot be
 overridden -- `OVERRIDE_FEE_FLAG` works only on dynamic-fee pools, and those are
 tier 3 and never reach here.  It is read anyway and checked, because a silent
 disagreement would mean the tier gate had let something through.
+
+`protocolFee` is charged *on top* and is not optional.  Ignoring it made every
+arc over-promise by exactly that much -- audited against `V4Quoter`, a pool with
+`protocolFee` 500 quoted +5.007 bp high, one with 125 quoted +1.251, one with 25
+quoted +0.250 and one with 2 quoted +0.020.  Four pools, four exact matches: the
+drift *was* the protocol fee.
+
+It is packed as two twelve-bit fields, `zeroForOne` in the low bits and
+`oneForZero` above, each in hundredths of a bip and capped at 1,000.  v4 takes
+it from the input before the LP fee sees anything, so the two compose rather
+than add:
+
+    total = protocol + lp * (1 - protocol)
 """
 
 from __future__ import annotations
 
+import math
+
 from ..core.codec import decode, encode_call
 from .univ3 import PoolState, Tick
+
+#: Hundredths of a bip, which is what both fees are denominated in.
+PIPS = 1_000_000
+
+
+def effective_fee(lp_fee: int, protocol_fee: int, zero_for_one: bool) -> int:
+    """The fee a swap really pays, in hundredths of a bip.
+
+    `protocol_fee` is the packed pair from `getSlot0`: `zeroForOne` in the low
+    twelve bits, `oneForZero` in the next twelve.  They are allowed to differ,
+    so the direction is a parameter rather than an assumption.
+    """
+    part = (protocol_fee & 0xFFF) if zero_for_one else ((protocol_fee >> 12) & 0xFFF)
+    part = min(part, 1_000)
+    # Up, never to nearest.  A fee rounded down is an output rounded up, which
+    # is the one direction this model must not err in: §5.5's certificate wants
+    # it under-promising, and `round` would have taken 3498.5 to 3498 -- worth
+    # exactly the +0.010 bp over-quote the audit found on the pools where the
+    # composition lands on a half.
+    return math.ceil(part + lp_fee * (PIPS - part) / PIPS)
 
 #: Uniswap's `StateView`, per chain.  Periphery, so it is not the singleton and
 #: not deterministic across chains the way `ElectricRouter` is.
@@ -50,7 +85,11 @@ def _at(call: tuple, block: str) -> tuple:
 
 def read_pools(rpc, view: str, pools: dict, block: int, *, ticks: int = 16,
                words: int = 3):
-    """`poolId -> (PoolState, [Tick])` for every pool that answered.
+    """`poolId -> ((forward, reverse), [Tick])` for every pool that answered.
+
+    Two states, not one: the protocol fee is packed per direction, so the
+    effective fee differs between them and a bank is built one direction at a
+    time anyway.
 
     `pools` maps a `PoolId` to `(key, decimals0, decimals1)`, where `key` is a
     `univ4.PoolKey`.  Three round trips whatever the pool count, the same shape
@@ -73,7 +112,7 @@ def read_pools(rpc, view: str, pools: dict, block: int, *, ticks: int = 16,
         if not (isinstance(slot0, str) and isinstance(liq, str)):
             continue
         try:
-            sqrt_price, tick, _protocol, lp_fee = decode(
+            sqrt_price, tick, protocol, lp_fee = decode(
                 ["uint160", "int24", "uint24", "uint24"],
                 bytes.fromhex(slot0[2:]))
             liquidity = decode(["uint128"], bytes.fromhex(liq[2:]))[0]
@@ -87,13 +126,19 @@ def read_pools(rpc, view: str, pools: dict, block: int, *, ticks: int = 16,
             # gate let a dynamic-fee pool through.  Refuse it rather than build
             # an arc priced at a fee the next swap will not charge.
             continue
-        state[pid] = PoolState(
-            sqrt_price_x96=sqrt_price, tick=tick, liquidity=liquidity,
-            tick_spacing=key.tick_spacing, fee=key.fee,
-            decimals0=dec0, decimals1=dec1)
+        # One state per direction: the protocol fee is packed per direction and
+        # `PoolState` carries a single fee, which is the right shape -- a bank
+        # is built one direction at a time.
+        state[pid] = tuple(
+            PoolState(
+                sqrt_price_x96=sqrt_price, tick=tick, liquidity=liquidity,
+                tick_spacing=key.tick_spacing,
+                fee=effective_fee(lp_fee, protocol, zero_for_one),
+                decimals0=dec0, decimals1=dec1)
+            for zero_for_one in (True, False))
 
     asks, index = [], []
-    for pid, st in state.items():
+    for pid, (st, _reverse) in state.items():
         centre = (st.tick // st.tick_spacing) >> 8
         for w in range(centre - words // 2, centre + words // 2 + 1):
             asks.append(_at(_call(view, "getTickBitmap(bytes32,int16)",
@@ -108,14 +153,14 @@ def read_pools(rpc, view: str, pools: dict, block: int, *, ticks: int = 16,
         bits = int(raw, 16)
         if not bits:
             continue
-        spacing = state[pid].tick_spacing
+        spacing = state[pid][0].tick_spacing
         for bit in range(256):
             if bits >> bit & 1:
                 live.setdefault(pid, []).append(((word << 8) + bit) * spacing)
 
     asks, index = [], []
     for pid, found in live.items():
-        here = state[pid].tick
+        here = state[pid][0].tick
         # Nearest first, both sides: a walk crosses the near ones or nothing.
         for tick in sorted(found, key=lambda t: abs(t - here))[:2 * ticks]:
             asks.append(_at(_call(view, "getTickLiquidity(bytes32,int24)",
@@ -133,6 +178,6 @@ def read_pools(rpc, view: str, pools: dict, block: int, *, ticks: int = 16,
         except (ValueError, IndexError):
             continue
         ticks_of.setdefault(pid, []).append(Tick(index=tick, liquidity_net=net))
-    for pid, st in state.items():
-        out[pid] = (st, sorted(ticks_of.get(pid, []), key=lambda t: t.index))
+    for pid, pair in state.items():
+        out[pid] = (pair, sorted(ticks_of.get(pid, []), key=lambda t: t.index))
     return out
