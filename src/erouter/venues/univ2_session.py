@@ -122,6 +122,17 @@ class Univ2:
         self.considered = (above, priceable, len(out))
         return out
 
+    def token_pairs(self):
+        """`(token0, token1)` for every pool this venue holds.
+
+        Here so a caller does not have to know the shape of `pools`, which
+        differs per venue: v4 names a pool by `PoolKey` because it has no
+        address to name it by.  `venue_sweep.token_set` reached in and read
+        `meta[0]` directly, which worked for two venues and raised on the
+        third.
+        """
+        return [(meta[0], meta[1]) for meta in self.pools.values()]
+
     def refresh(self, transport, nodes, block: int) -> int:
         """Read the reserves and rebuild the arcs.  Returns the pair count."""
         self.pools = self.wanted(nodes)

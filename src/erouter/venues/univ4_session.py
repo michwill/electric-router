@@ -114,6 +114,15 @@ class Univ4:
         self.considered = (routable, above, priceable, len(out))
         return out
 
+    def token_pairs(self):
+        """`(currency0, currency1)` for every pool this venue holds.
+
+        See `Univ2.token_pairs`: the shape of `pools` is this venue's business
+        and not its caller's.
+        """
+        return [(key.currency0, key.currency1)
+                for key, _dec0, _dec1 in self.pools.values()]
+
     def refresh(self, transport, nodes, block: int) -> int:
         """Read the tick state and rebuild the arcs.  Returns the pool count."""
         self.pools = self.wanted(nodes)

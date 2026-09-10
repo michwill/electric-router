@@ -213,3 +213,40 @@ def test_the_gas_price_is_pinned_across_every_session():
               and any(isinstance(t, ast.Attribute) and t.attr == "gas_price_wei"
                       for t in n.targets)]
     assert writes, "no session has its gas pinned; runs cannot be compared"
+
+
+def test_every_venue_offers_its_token_pairs():
+    """The sweep must not know how a venue lays out its `pools` rows.
+
+    It did, and read `meta[0]` as an address -- true for v2 and v3, and v4
+    names a pool by `PoolKey` because it has no address to name it by.  The
+    sweep raised on the first v4 run, before a single case was measured.
+    """
+    from erouter.venues.univ2_session import Univ2
+    from erouter.venues.univ3_session import Univ3
+    from erouter.venues.univ4_session import Univ4
+
+    for cls in (Univ2, Univ3, Univ4):
+        assert hasattr(cls, "token_pairs"), f"{cls.__name__} has no token_pairs"
+
+    v2 = Univ2({}, )
+    v2.pools = {"0xp": ("0xaa", "0xbb", 30, 18, 6)}
+    assert v2.token_pairs() == [("0xaa", "0xbb")]
+
+    from erouter.venues.univ4 import PoolKey
+    v4 = Univ4({})
+    v4.pools = {"0xid": (PoolKey("0xaa", "0xbb", 3000, 60, "0x" + "00" * 20), 18, 6)}
+    assert v4.token_pairs() == [("0xaa", "0xbb")]
+
+
+def test_the_sweep_does_not_reach_into_a_venue_s_rows():
+    """A guard on the thing that broke, rather than on the venue that broke it."""
+    import ast
+    import inspect
+
+    src = inspect.getsource(venue_sweep.token_set)
+    tree = ast.parse(src.lstrip())
+    text = ast.unparse(tree)
+    assert "token_pairs()" in text
+    assert "pools.values()" not in text, (
+        "the sweep is reading a venue's row layout again")

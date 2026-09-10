@@ -118,7 +118,9 @@ class _Files:
 
 def session_for(args):
     chain = chain_table.CHAINS[args.chain]
-    url = config.rpc_url(chain.rpc_attr) if args.private else chain.public_rpc
+    url = (getattr(args, "rpc_url", None)
+           or (config.rpc_url(chain.rpc_attr) if args.private
+               else chain.public_rpc))
     transport = JsonRpcTransport(url, chain_id=chain.chain_id)
     transport.batch_size = max(
         transport.probe_batch_limit(("eth_blockNumber", [])), BATCH_FLOOR)
@@ -156,8 +158,10 @@ def token_set(session, venues, limit):
             symbols.setdefault(coin.address.lower(), coin.symbol)
     seen: Counter = Counter()
     for venue in venues:
-        for meta in venue.obj.pools.values():
-            for addr in (meta[0], meta[1]):
+        # `token_pairs`, not `pools.values()`: the row layout is the venue's
+        # own, and v4's names a pool by `PoolKey` rather than by address.
+        for token0, token1 in venue.obj.token_pairs():
+            for addr in (token0, token1):
                 if nodes.has(addr.lower()):
                     seen[addr.lower()] += 1
     usdc = next((a for a, n in symbols.items()
@@ -276,6 +280,11 @@ def main() -> int:
     ap.add_argument("--chain", default="ethereum")
     ap.add_argument("--block", type=int, default=0)
     ap.add_argument("--private", action="store_true")
+    ap.add_argument("--rpc-url", default=None,
+                    help="an endpoint to use instead of the chain's.  The "
+                         "committed one allowlists `eth_call` per address, so "
+                         "v2 and v4 read nothing through it; pass an unscoped "
+                         "one here rather than committing it")
     ap.add_argument("--min-tvl", type=float, default=10_000.0)
     ap.add_argument("--venue", default="v3",
                     help="which venue(s) the A/B switches: v3, v2, or v3,v2 "
