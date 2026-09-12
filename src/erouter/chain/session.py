@@ -41,6 +41,7 @@ from ..core.routecall import NEEDED, encode_route
 from ..core.schema import ROUTER_ADDRESS
 from ..core.solve import accel_in_use
 from ..venues import bridge, univ2_client
+from ..venues.offchain_client import teach_probes
 from . import gas_probe
 from .exact_cache import ExactCache
 from .facts import FactsCache, apply_broken_facts
@@ -372,6 +373,12 @@ class RouterSession:
             report.univ4_ms = self.univ4.read_ms
             say("univ4", 1.0)
 
+        # After all three, and once: `probe` goes to the deployed quoter, which
+        # answers zero for every off-chain kind.  Unteaching that is what lets
+        # `split` sample a curve instead of falling to the chained hill-climb.
+        if any(v is not None for v in (self.univ2, self.univ3, self.univ4)):
+            teach_probes(self.client)
+
         self.gas_table, _ = self.facts.table(self.pools), None
         self.risk_table = self.facts.risk_table()
         self.gas_price_wei = await self._gas_price()
@@ -471,6 +478,8 @@ class RouterSession:
         if self.univ2 is not None:
             self.univ2.refresh(transport, self.nodes, self.block)
             univ2_client.teach(self.client, self.univ2.state)
+        if any(v is not None for v in (self.univ2, self.univ3, self.univ4)):
+            teach_probes(self.client)
 
     async def set_pair(self, src: str, dst: str, progress=None):
         """Probe and price for one (src, dst).  Independent of the amount."""

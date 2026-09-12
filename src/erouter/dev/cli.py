@@ -1180,6 +1180,13 @@ def cmd_route(args: argparse.Namespace) -> int:
     venue_opts = _venue_options(args, chain, rpc, nodes, client, stake_arcs)
     venue_opts = _univ2_options(args, chain, rpc, nodes, client, venue_opts)
     venue_opts = _univ4_options(args, chain, rpc, nodes, client, venue_opts)
+    # Once, after all of them: `probe` bypasses `_quote_leg` and asks the
+    # deployed quoter, which answers zero for every off-chain kind.  See
+    # `venues/offchain_client.py` -- without this `split` cannot sample a curve
+    # and falls back to re-quoting whole routes through the chain.
+    from ..venues.offchain_client import teach_probes
+
+    teach_probes(client)
 
     if args.amount is None and not args.amount_wei:
         return _interactive(args, chain, rpc, client, nodes, wrappers, load, src, dst,

@@ -81,6 +81,12 @@ REFINE_STARTS = 3
 # Coordinate sweeps stop when one buys less than this, relatively.
 SWEEP_TOL = 1e-9
 MAX_SWEEPS = 12
+# An evaluation is microseconds in Rust and ~0.22 ms here, and the unbudgeted
+# search spends 82,089 of them -- 18.4 s on `WETH -> WBTC` at $1M, invisible
+# until `offchain_client.teach_probes` let the curve path run at all.  So the
+# Python loop gets a ceiling and the accelerated one does not; it costs 0.13 bp
+# there and 0.0003 on `ALD -> FRAX`, both still ahead of the chained fallback.
+PY_EVALUATIONS = 6_000
 # The optimum is proposed to the chain together with its neighbours, so one
 # verification batch both picks the winner and measures how far the composed
 # curves drifted from the real chained quote.
@@ -572,7 +578,8 @@ def _golden(objective, lo: float, hi: float, *, iters: int = GOLDEN_ITERS) -> fl
 
 
 def _ascend(start, evaluate, free, counter, *, iters: int = GOLDEN_ITERS,
-            sweeps: int = MAX_SWEEPS, window: float = 0.0) -> tuple[list, float]:
+            sweeps: int = MAX_SWEEPS, window: float = 0.0,
+            budget: int | None = None) -> tuple[list, float]:
     """Coordinate ascent, each coordinate maximised exactly by golden section.
 
     No step size, no gradient, no normalisation -- all of which existed only to
@@ -595,9 +602,14 @@ def _ascend(start, evaluate, free, counter, *, iters: int = GOLDEN_ITERS,
 
     weights = [w.copy() for w in start]
     best = evaluate(weights)
+    # Per call: one ceiling on the shared counter would be spent by whichever
+    # phase ran first, leaving the refinement of the start it chose nothing.
+    ceiling = counter[0] + budget if budget is not None else None
     for _ in range(sweeps):
         opened = best
         for g, j in free:
+            if ceiling is not None and counter[0] >= ceiling:
+                break
             others = float(weights[g][:-1].sum()) - float(weights[g][j])
             room = 1.0 - MIN_WEIGHT - others
             if room <= MIN_WEIGHT:
@@ -628,7 +640,8 @@ def _ascend(start, evaluate, free, counter, *, iters: int = GOLDEN_ITERS,
             value = evaluate(candidate)
             if value > best:
                 best, weights = value, candidate
-        if best <= opened * (1.0 + SWEEP_TOL):
+        if best <= opened * (1.0 + SWEEP_TOL) or (
+                ceiling is not None and counter[0] >= ceiling):
             break
     return weights, best
 
@@ -924,17 +937,23 @@ def _search_curves(
     #
     # `REFINE_STARTS` go on to a full ascent rather than one, because the winner
     # beat the rest by 0.155 bp and a 6-bisection screen cannot resolve that.
+    # A third to say which basins are worth refining, two thirds to refine
+    # them.  Per call, so a screen that stops early does not lend its share.
+    screen_each = max(1, PY_EVALUATIONS // (3 * max(len(starts), 1)))
+    refine_each = max(1, (2 * PY_EVALUATIONS) // (3 * max(REFINE_STARTS, 1)))
     screened = []
     for start in starts:
         projected = [_project(w) for w in start]
         _, value = _ascend(projected, evaluate, free, counter,
-                           iters=SCREEN_ITERS, sweeps=SCREEN_SWEEPS)
+                           iters=SCREEN_ITERS, sweeps=SCREEN_SWEEPS,
+                           budget=screen_each)
         screened.append((value, projected))
     screened.sort(key=lambda pair: -pair[0])
 
     best_w, best_value = None, -1.0
     for _, projected in screened[:REFINE_STARTS]:
-        found, value = _ascend(projected, evaluate, free, counter)
+        found, value = _ascend(projected, evaluate, free, counter,
+                               budget=refine_each)
         if value > best_value:
             best_w, best_value = found, value
     report.local = counter[0]
@@ -1095,8 +1114,10 @@ def scout(plans, client: QuoterClient, *, amount_in: int,
         for start in ([w.copy() for w in weights],
                       [np.full(w.size, 1.0 / w.size) for w in weights]):
             projected = [_project(w) for w in start]
+            # Once per candidate, so this scales with how many are scouted.
             found, value = _ascend(projected, evaluate, free, counter,
-                                   iters=SCREEN_ITERS, sweeps=SCREEN_SWEEPS)
+                                   iters=SCREEN_ITERS, sweeps=SCREEN_SWEEPS,
+                                   budget=max(1, PY_EVALUATIONS // 6))
             if value > best_value:
                 best_w, best_value = found, value
         if best_w is None:
