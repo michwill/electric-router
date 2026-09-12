@@ -1396,44 +1396,61 @@ def _quote(
                 "modelled route (treat the output as unverified)"
             )
         else:
-            result.route = winner.route
-            result.verified_out = winner.verified_out
-            result.winner = winner
-            if not winner.certificate:
-                report.certificate = False
-                report.reason = report.reason or winner.reason or "RESTRICTED"
+            # Refine several, choose once.
+            #
+            # Ranking happens before the stages that decide how good a route is,
+            # so `_scout_wider` is not a re-ranking pass -- it is a *swap*, and
+            # every knob around it (`SCOUT_MARGIN_BP`, the width gate, the
+            # entrant count) is an argument over who gets the one refinement
+            # slot.  Measured, widening that argument lost: -0.14 bp over 168
+            # cases, and -0.51 scouting each candidate in its own batch.  More
+            # entrants only means more chances to hand the slot to a route that
+            # does not survive the refit.
+            #
+            # A shortlist cannot lose that way.  `finalists[0]` is the candidate
+            # that ranked first, so taking the best *after* refinement is at
+            # least the answer this returned before -- the choice is made on the
+            # numbers that decide it rather than on the ones that precede it.
+            #
+            # `g` and `arcs` are copied per finalist: the refit re-anchors `B`
+            # at one route's realised flows, which is the same leak `route`
+            # already copies them for.
+            finalists = [winner]
+            if FINALISTS > 1:
+                finalists += sorted(
+                    (c for c in pool_set.candidates
+                     if c.ok and c.route and c is not winner),
+                    key=lambda c: -int(c.verified_out or 0))[:FINALISTS - 1]
+            result.counters["finalists"] = len(finalists)
+            spare = ([copy.copy(a) for a in arcs], copy.deepcopy(g)) \
+                if len(finalists) > 1 else None
 
-            # --- §8 refit: re-anchor the winner at its realised sizes --------
-            if refit_rounds > 0:
-                with clock("refit"):
-                    _refit_winner(
-                        result, pool_set, winner, g, arcs, nu, nodes, client,
-                        src_node=src_node, dst_node=dst_node, Psi=Psi_scaled,
-                        src_token=src_token, dst_token=dst_token,
-                        amount_in=amount_in, rounds=refit_rounds,
-                        gas_price_wei=gas_price_wei, max_legs=max_legs,
-                        gas_table=gas_table, risk_table=risk_table,
-                        revert_cost_bp=revert_cost_bp, leg_cost_bp=leg_cost_bp,
-                    )
-
-            # --- is a wider candidate being hidden by its own split? ---------
-            # Ranking compares candidates on the split the model gave them and
-            # only the winner is re-split, so a wide topology whose model split
-            # is bad loses before it can be fixed.  See `split.scout`.
-            if optimise_split and result.route is not None:
-                with clock("scout"):
-                    _scout_wider(result, pool_set, nodes, client,
-                                 amount_in=amount_in,
-                                 gas_price_wei=gas_price_wei,
-                                 dst_wei_per_eth=dst_wei_per_eth,
-                                 gas_table=gas_table, leg_cost_bp=leg_cost_bp)
-
-            # --- §7: let the chain choose the split, not the model -----------
-            # Last, so it runs on whatever the refit and scout left as winner,
-            # and safe there because it only accepts a strict improvement.
-            if optimise_split and result.route is not None:
-                with clock("split"):
-                    _optimise_split(result, nodes, client, amount_in=amount_in)
+            refined = []
+            for nth, cand in enumerate(finalists):
+                if spare is not None and nth:
+                    arcs = [copy.copy(a) for a in spare[0]]
+                    g = copy.deepcopy(spare[1])
+                _refine_one(
+                    result, pool_set, cand, g, arcs, nu, nodes, client, report,
+                    clock, src_node=src_node, dst_node=dst_node,
+                    Psi_scaled=Psi_scaled, src_token=src_token,
+                    dst_token=dst_token, amount_in=amount_in,
+                    refit_rounds=refit_rounds, gas_price_wei=gas_price_wei,
+                    max_legs=max_legs, gas_table=gas_table,
+                    risk_table=risk_table, revert_cost_bp=revert_cost_bp,
+                    leg_cost_bp=leg_cost_bp, optimise_split=optimise_split,
+                    dst_wei_per_eth=dst_wei_per_eth)
+                refined.append((int(result.verified_out or 0), result.route,
+                                result.winner))
+            first = refined[0][0]
+            best_out, best_route, best_winner = max(refined, key=lambda r: r[0])
+            if best_out > first:
+                result.counters["finalist_gain_bp"] = round(
+                    (best_out / max(first, 1) - 1) * 1e4, 3)
+            result.verified_out = best_out
+            result.route = best_route
+            result.winner = best_winner
+            winner = best_winner or winner
 
             # --- what the size itself cost ----------------------------------
             # On the route as finally split, so the figure describes what will
@@ -1707,6 +1724,19 @@ def scout_priority(route) -> float:
 #: probe batch between them, so this is cheap to raise; three covered every
 #: case measured.
 SCOUT_CANDIDATES = 3
+#: How many candidates are refined before one of them is chosen.
+#
+# One, until this was measured: three gave 49 better, 114 tied and 5 worse over
+# 168 cases, mean +2.27 bp, best +53.00.  Five gave the same answers as three on
+# every case checked and cost half as much again, so the shortlist is short.
+FINALISTS = 3
+#
+# It is not free, and the cost is not evenly spread: `USDC -> WETH` at $1M paid
+# 5% for +0.94 bp while `WETH -> WBTC` at $1M roughly doubled for an answer that
+# did not change.  A gate on how far a candidate trails the leader is the
+# obvious remedy and is *not* here, because at 500 bp it changed nothing on
+# every case tried -- candidates cluster far closer than that -- and a knob that
+# has not been measured biting is one more thing to explain.
 #: How far a scouted candidate must beat the incumbent before it is adopted.
 #
 # The comparison is made before either route has been split, and the incumbent
@@ -1714,6 +1744,70 @@ SCOUT_CANDIDATES = 3
 # the lead -- so adopting on a hair loses.  Half a basis point clears that with
 # room and keeps the wins that matter.
 SCOUT_MARGIN_BP = 0.5
+
+
+def _refine_one(
+    result: RouteResult, pool_set, winner, g, arcs, nu, nodes: NodeMap,
+    client: QuoterClient, report, clock, *, src_node: int, dst_node: int,
+    Psi_scaled: float, src_token: str, dst_token: str, amount_in: int,
+    refit_rounds: int, gas_price_wei: int, max_legs: int, gas_table, risk_table,
+    revert_cost_bp: float, leg_cost_bp: float, optimise_split: bool,
+    dst_wei_per_eth: float,
+) -> None:
+    """Put one candidate through the refit, the scout and the split.
+
+    Lifted out of `_quote` unchanged, so that a *shortlist* can be refined
+    rather than only the route that happened to rank first.  Everything in here
+    is what decides how good a route really is, and all of it used to run after
+    the choice between routes had already been made.
+
+    Everything this leaves on `result` has to be cleared first, or the next
+    finalist inherits it.  `scout_curves` is the one that bites: `_scout_wider`
+    hands the winner's sampled curves to the split pass, they are aligned to
+    *that* route's legs, and `_trusted_curves` indexes straight off the end of
+    them on a route with fewer -- which is how this was found, as an IndexError
+    on `USDC -> WBTC` rather than as a quietly mis-scored candidate.
+    """
+    result.scout_curves = []
+    result.route = winner.route
+    result.verified_out = winner.verified_out
+    result.winner = winner
+    if not winner.certificate:
+        report.certificate = False
+        report.reason = report.reason or winner.reason or "RESTRICTED"
+
+    # --- §8 refit: re-anchor the winner at its realised sizes --------
+    if refit_rounds > 0:
+        with clock("refit"):
+            _refit_winner(
+                result, pool_set, winner, g, arcs, nu, nodes, client,
+                src_node=src_node, dst_node=dst_node, Psi=Psi_scaled,
+                src_token=src_token, dst_token=dst_token,
+                amount_in=amount_in, rounds=refit_rounds,
+                gas_price_wei=gas_price_wei, max_legs=max_legs,
+                gas_table=gas_table, risk_table=risk_table,
+                revert_cost_bp=revert_cost_bp, leg_cost_bp=leg_cost_bp,
+            )
+
+    # --- is a wider candidate being hidden by its own split? ---------
+    # Ranking compares candidates on the split the model gave them and
+    # only the winner is re-split, so a wide topology whose model split
+    # is bad loses before it can be fixed.  See `split.scout`.
+    if optimise_split and result.route is not None:
+        with clock("scout"):
+            _scout_wider(result, pool_set, nodes, client,
+                         amount_in=amount_in,
+                         gas_price_wei=gas_price_wei,
+                         dst_wei_per_eth=dst_wei_per_eth,
+                         gas_table=gas_table, leg_cost_bp=leg_cost_bp)
+
+    # --- §7: let the chain choose the split, not the model -----------
+    # Last, so it runs on whatever the refit and scout left as winner,
+    # and safe there because it only accepts a strict improvement.
+    if optimise_split and result.route is not None:
+        with clock("split"):
+            _optimise_split(result, nodes, client, amount_in=amount_in)
+
 
 
 def _scout_wider(
