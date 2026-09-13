@@ -1721,9 +1721,18 @@ def scout_priority(route) -> float:
 
 
 #: How many of the widest candidates go into the shared batch.  They ride one
-#: probe batch between them, so this is cheap to raise; three covered every
-#: case measured.
-SCOUT_CANDIDATES = 3
+#: probe batch between them, so this is cheap to raise.
+#
+# Three, until the scout could see what it was ranking.  Widening measured
+# negative while off-chain legs could not probe -- `scout` samples its curves
+# through `client.probe`, and every v2 leg answered zero -- and while the ascent
+# was rationed to 6,000 evaluations in Python.  With `teach_probes` and the Rust
+# ascent both in, eight halves the discontinuity on `USDC -> WBTC` at $100k,
+# 3.47 bp of spread over a 1e-8 size sweep down to 1.63, by lifting the worst
+# step 1.9 bp and leaving the best where it was.  Sixteen is identical to eight,
+# so this saturates; and it runs no slower, because a better route found here is
+# work the passes after it do not repeat.
+SCOUT_CANDIDATES = 8
 #: How many candidates are refined before one of them is chosen.
 #
 # One, until this was measured: three gave 49 better, 114 tied and 5 worse over
