@@ -755,6 +755,22 @@ def solve(
             and report_solution.reason.startswith("no convergence")
             and screen <= 0
         ):
+            # Widen before degrading.  §5.3's "seed quality only affects the
+            # number of column-generation rounds, never correctness" applies to
+            # a seed that *cycles* as much as to one that disconnects, and the
+            # screen below is not free: it drops the oscillating arcs, so the
+            # answer comes back on a fraction of the support it should have.
+            # Measured on `WETH -> WBTC` at $1M, the amount that lands here:
+            # screened gives gap 2.0e-03 on 35 arcs, widening gives 3.4e-07 on
+            # 96 and 40% less modelled loss -- and 26 bp more on the chain.
+            # This branch has to come first because the screen sets
+            # `degenerate`, after which `partial_ok` makes every later round
+            # feasible and the widening below is never reached.
+            if not widened and in_S.sum() < (~banned).sum():
+                in_S = ~banned
+                widened = True
+                warm = None
+                continue
             # Dozens of arcs within a hair of the diode threshold can oscillate
             # forever, each carrying dust.  Retry with a flow screen and accept
             # the incumbent: every iterate satisfies conservation exactly, so a
