@@ -58,8 +58,12 @@ COMBINED_STEPS = (1.0, 0.5, 0.25)
 # No branch may be driven to nothing: that is a topology change, and the point
 # of this pass is that the topology is fixed.
 MIN_WEIGHT = 1e-4
-#: Opt-in on the same switch as the rest of the port.
-_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
+# The ascent is its own gate, and on by default.  `EROUTER_ACCEL` is off because
+# the *solver* port diverges on the perturbation ladder; this kernel is a
+# different one, held to the reference at rel=1e-12 by `test_split_differential`
+# over 24 random lane sets.  Leaving it off cost `FRAX -> USDC` at $1M 2.14 bp:
+# that route wants 115,208 evaluations and Python affords 6,000 of them.
+_ASCEND_ACCEL = os.environ.get("EROUTER_SPLIT_ACCEL", "1") != "0"
 # Stop when a round buys less than this.
 TOL_BP = 0.01
 
@@ -586,7 +590,7 @@ def _ascend(start, evaluate, free, counter, *, iters: int = GOLDEN_ITERS,
     ration round trips.  With the curves in hand an evaluation is microseconds.
     """
     plan = getattr(evaluate, "plan", None)
-    if _ACCEL_ON and plan is not None and _accel.available():
+    if _ASCEND_ACCEL and plan is not None and _accel.available():
         # The whole search crosses once: ~100,000 evaluations run inside, none
         # of which touch Python.  Porting `Curve.at` alone would have lost --
         # 0.7 us against a ~2 us crossing -- so the loop comes with it.
