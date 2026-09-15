@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..core.codec import encode_call
-from ..core.nodes import Conversion, ConversionKind, NodeMap
+from ..core.nodes import Conversion, ConversionKind, NodeMap, rescale
 from ..core.pools import PoolSpec
 from ..core.quoter import QuoterClient
 from ..core.transport import Call, Status
@@ -721,12 +721,22 @@ def build_stake_arcs(
         if room == 0:
             continue
         total = min(total, room)
+        # Into canonical units, as `PoolArc.a` says it is in and `_to_arc` does
+        # for every pool arc.  A no-op whenever the asset is its node's
+        # canonical token, which is why this went unnoticed: of 17 wrapper arcs
+        # in a `DAI -> FRAX` graph, 16 sit on a canonical token and one does
+        # not.  sDOLA is merged into DOLA at 1.41472554, so `convertToShares`
+        # read in sDOLA units claimed 0.9667 jrDOLA per canonical unit where
+        # the Junior DOLA pool quotes 0.6833 -- the ratio is exactly that merge
+        # rate, and the model booked the difference as 41% free value.
+        a_c, B_c = rescale(1.0 / rate, 0.0,
+                           nodes.rate(asset), nodes.rate(vault))
         arcs.append(PoolArc(
             id=f"mint:{vault}:{asset[:10]}>{vault[:10]}",
             pool=vault, kind=ArcKind.ERC4626_DEPOSIT, i=0, j=0, n_coins=0,
             token_in=asset, token_out=vault, tau=tau, sigma=sigma,
-            a=1.0 / rate, B=0.0,
-            cap=total / 10 ** nodes.decimals(asset),
+            a=a_c, B=B_c,
+            cap=total / 10 ** nodes.decimals(asset) * nodes.rate(asset),
             clamped=True, convex_flag=False,
             decimals_in=nodes.decimals(asset),
             decimals_out=nodes.decimals(vault),
