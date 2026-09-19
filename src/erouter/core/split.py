@@ -83,6 +83,9 @@ SCREEN_SWEEPS = 3
 # which is not a gap a 6-bisection search can be trusted to rank.
 REFINE_STARTS = 3
 # Coordinate sweeps stop when one buys less than this, relatively.
+#: A curve search gaining less than this is one the chained search may beat.
+#: Above it the curves have plainly found the optimum and the chain is latency.
+CURVE_ENOUGH_BP = 5.0
 SWEEP_TOL = 1e-9
 MAX_SWEEPS = 12
 # An evaluation is microseconds in Rust and ~0.22 ms here, and the unbudgeted
@@ -694,11 +697,33 @@ def optimise(
             nominal_in=nominal_in, nominal_out=nominal_out, curves=curves,
         )
         if curves is not None:
-            return _search_curves(
+            tuned, report = _search_curves(
                 legs, client, groups, weights, free, curves, report,
                 amount_in=amount_in, dst_slot=dst_slot, baseline=baseline,
                 budget=budget,
             )
+            gained = (report.after / baseline - 1) * 1e4 if baseline > 0 else 0.0
+            if gained >= CURVE_ENOUGH_BP or not report.improved:
+                return tuned, report
+            # Curves found something, but not much -- and "not much" is where
+            # the chained search they replaced was measurably ahead.  Run it too,
+            # from the *same* baseline, and keep whichever the chain says is
+            # better; both are real quotes of the same route, so the comparison
+            # is exact.  Withholding `nominal_in`/`nominal_out` is what selects
+            # the chained path and keeps this one call deep.
+            chased, chased_report = optimise(
+                legs, client, amount_in=amount_in, dst_slot=dst_slot,
+                baseline=baseline, max_rounds=max_rounds, hot_rounds=hot_rounds,
+            )
+            report.mode = "curves+chained"
+            report.calls += chased_report.calls
+            report.evaluations += chased_report.evaluations
+            report.rounds += chased_report.rounds
+            if chased_report.after <= report.after:
+                return tuned, report
+            report.after = chased_report.after
+            report.improved = True
+            return chased, report
 
     def quote(candidates: list[list[np.ndarray]]) -> list[int]:
         routes = [apply_weights(legs, groups, w) for w in candidates]
