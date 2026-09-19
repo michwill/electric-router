@@ -98,3 +98,45 @@ def test_every_off_chain_kind_has_a_teacher_that_claims_it():
     assert claimed == set(OFF_CHAIN_KINDS), (
         f"no teacher claims {set(OFF_CHAIN_KINDS) - claimed}; those legs would "
         f"be quoted as zero and read as reverts")
+
+
+def test_collapse_folds_its_own_kind_and_leaves_the_others():
+    """The fourth time this seam broke, and the first time `collapse` did it.
+
+    v4's banks *are* v3's banks -- same object, same math -- so v4 folds through
+    `univ3.collapse`.  With the kind hard-coded to `SWAP_UNIV3` that call did
+    the wrong thing twice at once: v4's own arcs were left uncollapsed because
+    their kind did not match, and v3's arcs were folded against v4's banks,
+    which do not hold them.  With both venues live every major pair raised
+    `KeyError('0x60594a405d53811d3bc4766596efd80fd545a270', 0, 1)` -- the v3
+    DAI/WETH pool -- and dropped out of the sweep's token set entirely.
+    """
+    from erouter.venues import univ3
+
+    class Arc:
+        def __init__(self, kind, pool, i=0, j=1):
+            self.kind, self.pool, self.i, self.j = kind, pool, i, j
+            self.a = self.B = 0.0
+            self.note = self.id = f"{pool}:{i}{j}"
+            self.tau, self.sigma = 0, 1
+            self.decimals_in = self.decimals_out = 18
+            self.parallel = True
+            self.rate_in = self.rate_out = 1.0
+            self.cap = float("inf")
+
+    v3_arc = Arc(ArcKind.SWAP_UNIV3, "0x" + "a3" * 20)
+    v4_arc = Arc(ArcKind.SWAP_UNIV4, "0x" + "a4" * 20)
+    # Only v4's bank is on offer, which is exactly the live arrangement when
+    # `Univ4.collapse` runs over a graph that also carries v3 arcs.
+    banks = {(v4_arc.pool, 0, 1): FakeBank()}
+
+    # The v3 arc carries the flow and the v4 arc none, so a correct fold never
+    # reaches a bank at all: v4's arc is its kind but has nothing to fold, and
+    # v3's is not its kind.  Hard-coded to `SWAP_UNIV3` this raised `KeyError`
+    # on the v3 pool, which is the bug.
+    kept, _psi = univ3.collapse([v3_arc, v4_arc], [1.0, 0.0], [1.0, 1.0], None,
+                                banks, kind=ArcKind.SWAP_UNIV4)
+    kinds = [a.kind for a in kept]
+    assert ArcKind.SWAP_UNIV3 in kinds, (
+        "a v3 arc must pass through v4's fold untouched, not be looked up in "
+        "banks that were never given it")

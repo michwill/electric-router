@@ -287,8 +287,17 @@ def pool_arcs(pool: str, state: PoolState, ticks: list[Tick], nodes, *,
     return out
 
 
-def collapse(live, psi, nu, nodes, banks):
+def collapse(live, psi, nu, nodes, banks, kind=None):
     """Put each pool's tick-arcs back into one arc before the route is built.
+
+    `kind` is a parameter for the reason `pool_arcs` and `univ3_client.teach`
+    take one: v4's banks are these banks, and a fold that assumes `SWAP_UNIV3`
+    does the wrong thing twice over when both venues are live.  v4's own arcs
+    are left uncollapsed because their kind does not match, and v3's arcs are
+    folded against **v4's** banks, which do not hold them -- `KeyError` on
+    `('0x60594a405d53811d3bc4766596efd80fd545a270', 0, 1)`, the v3 DAI/WETH
+    pool, and every major pair failing to quote with `--univ3 --univ4` both on.
+    Defaults to `SWAP_UNIV3` so v3's own call is unchanged.
 
     A pool appears once in an executable route or its legs form one element
     (§7 rule 1), and K tick-arcs carrying flow at once would read as K visits.
@@ -304,9 +313,10 @@ def collapse(live, psi, nu, nodes, banks):
 
     from ..core.types import ArcKind
 
+    want = ArcKind.SWAP_UNIV3 if kind is None else kind
     keep, flows, seen = [], [], {}
     for arc, flow in zip(live, psi, strict=True):
-        if arc.kind is not ArcKind.SWAP_UNIV3:
+        if arc.kind is not want:
             keep.append(arc)
             flows.append(float(flow))
             continue

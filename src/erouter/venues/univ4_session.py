@@ -180,7 +180,9 @@ class Univ4:
             teach(client, self.priced, ArcKind.SWAP_UNIV4)
 
     def collapse(self, arcs, psi, nu, nodes):
-        return univ3.collapse(arcs, psi, nu, nodes, self.banks)
+        # Its own kind: these are v3's banks by shape, not by contents.
+        return univ3.collapse(arcs, psi, nu, nodes, self.banks,
+                              kind=ArcKind.SWAP_UNIV4)
 
     @property
     def max_spread(self) -> float:
