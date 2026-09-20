@@ -28,7 +28,7 @@ from ..core.types import ArcKind, PoolArc
 from . import univ3, univ4
 from .univ3_client import Bank, teach
 from .univ3_session import SPREAD
-from .univ4_chain import STATE_VIEW, read_pools
+from .univ4_chain import NATIVE, STATE_VIEW, WRAPPED_NATIVE, read_pools
 
 #: Pools below this hold too little to route through and cost reads each.
 DEFAULT_FLOOR_USD = 10_000.0
@@ -60,6 +60,12 @@ class Univ4:
     #: `poolId -> (PoolKey, decimals0, decimals1)`, which is what the reader
     #: takes and what the arc builder needs afterwards.
     pools: dict = field(default_factory=dict)
+    #: `poolId -> (token0, token1)` as the *node map* names them, which is not
+    #: always how the `PoolKey` does: v4 names ether by the zero address and
+    #: the map prices the wrapped token.  Kept beside `pools` rather than
+    #: rewritten into the key, because the key is what the chain is addressed
+    #: by and `as_tuple()` must keep saying what the pool really holds.
+    tokens: dict = field(default_factory=dict)
     block: int = 0
     read_ms: float = 0.0
     #: How many pools each filter left, so "no v4 here" says which one said no.
@@ -83,6 +89,25 @@ class Univ4:
     def state_view(self) -> str | None:
         return STATE_VIEW.get(self.chain)
 
+    def _priced(self, token: str) -> str:
+        """The address the node map knows this currency by.
+
+        Ether is the whole of the difference, and it is most of the venue:
+        1,932 of ethereum's 2,645 pools name it, and 45 of those clear the
+        floor with a priced counterparty -- $390.7M of TVL, including the two
+        deepest pools in the census.  All of it was invisible because
+        `nodes.has(address(0))` is false.
+
+        Sound for pricing, since wrapping is 1:1.  *Execution* is not the same
+        thing -- a native leg moves value rather than transferring an ERC20 --
+        and v4 cannot be executed at all until the router has its
+        `unlockCallback`, so this widens what is quoted ahead of what can be
+        settled, which is already true of every v4 pool.
+        """
+        if token != NATIVE:
+            return token
+        return WRAPPED_NATIVE.get(self.chain, NATIVE)
+
     def wanted(self, nodes) -> dict:
         """The pools worth reading: routable hook, above the floor, priceable.
 
@@ -91,6 +116,7 @@ class Univ4:
         the arithmetic is ours is.
         """
         out, routable, above, priceable = {}, 0, 0, 0
+        self.tokens = {}
         for pid, row in self.census.items():
             key = univ4.PoolKey.from_row(row)
             if not key.routable:
@@ -100,13 +126,15 @@ class Univ4:
             if tvl < self.floor_usd:
                 continue
             above += 1
-            if not (nodes.has(key.currency0) and nodes.has(key.currency1)):
+            # As the node map names them, so ether resolves to its wrapper.
+            tok0, tok1 = self._priced(key.currency0), self._priced(key.currency1)
+            if not (nodes.has(tok0) and nodes.has(tok1)):
                 continue
             priceable += 1
-            if nodes.node(key.currency0) == nodes.node(key.currency1):
+            if nodes.node(tok0) == nodes.node(tok1):
                 continue
-            out[pid] = (key, nodes.decimals(key.currency0),
-                        nodes.decimals(key.currency1))
+            self.tokens[pid] = (tok0, tok1)
+            out[pid] = (key, nodes.decimals(tok0), nodes.decimals(tok1))
         if self.max_pools and len(out) > self.max_pools:
             deepest = sorted(out, key=lambda p: -(
                 float(self.census[p][5]) if len(self.census[p]) > 5 else 0.0))
@@ -120,8 +148,8 @@ class Univ4:
         See `Univ2.token_pairs`: the shape of `pools` is this venue's business
         and not its caller's.
         """
-        return [(key.currency0, key.currency1)
-                for key, _dec0, _dec1 in self.pools.values()]
+        return [self.tokens.get(pid, (key.currency0, key.currency1))
+                for pid, (key, _dec0, _dec1) in self.pools.items()]
 
     def refresh(self, transport, nodes, block: int) -> int:
         """Read the tick state and rebuild the arcs.  Returns the pool count."""
@@ -139,6 +167,7 @@ class Univ4:
         priced: dict = {}
         for pid, ((forward, reverse), ticks) in state.items():
             key, dec0, dec1 = self.pools[pid]
+            tok0, tok1 = self.tokens.get(pid, (key.currency0, key.currency1))
             row = self.census.get(pid) or []
             tvl = float(row[5]) if len(row) > 5 else 0.0
             # One call per direction, because the protocol fee is charged per
@@ -148,7 +177,7 @@ class Univ4:
             for zero_for_one, st in ((True, forward), (False, reverse)):
                 built = univ3.pool_arcs(
                     pid, st, ticks, nodes,
-                    token0=key.currency0, token1=key.currency1,
+                    token0=tok0, token1=tok1,
                     max_ticks=self.ticks, tvl_usd=tvl,
                     kind=ArcKind.SWAP_UNIV4, venue="uniswap v4",
                     label="Uniswap v4")

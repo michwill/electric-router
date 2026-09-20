@@ -68,6 +68,19 @@ def effective_fee(lp_fee: int, protocol_fee: int, zero_for_one: bool) -> int:
     # composition lands on a half.
     return math.ceil(part + lp_fee * (PIPS - part) / PIPS)
 
+#: What v4 calls the native currency.  Not a token: `PoolKey` names ether by
+#: the zero address, and 1,932 of ethereum's 2,645 pools are on it.
+NATIVE = "0x" + "00" * 20
+
+#: The wrapped token the node map does price, per chain.  A venue whose chain
+#: is missing here simply admits no native pool, which is what every chain did
+#: before this existed.  Only ethereum has a v4 census today; add a chain here
+#: with its census, and check the address rather than assuming the OP-stack
+#: default.
+WRAPPED_NATIVE = {
+    "ethereum": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+}
+
 #: Uniswap's `StateView`, per chain.  Periphery, so it is not the singleton and
 #: not deterministic across chains the way `ElectricRouter` is.
 STATE_VIEW = {
