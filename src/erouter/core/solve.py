@@ -44,6 +44,31 @@ DEGENERACY_SCREEN = 1e-4
 # a cycle.  Bland changes the pivot sequence, so it deserves a few iterations to
 # break out on its own; measured cycles repeat every 2 pivots and never recover.
 CYCLE_PATIENCE = 3
+#: `active_set_solve`'s own default, and the floor here.
+DEFAULT_PIVOTS = 600
+#: The base solve gets pivots in proportion to the graph, not a flat 600.
+#
+# 600 is plenty for a small trade and nowhere near enough for a large one,
+# because the active set grows with the trade rather than with the graph.  On
+# `WETH -> WBTC` over one 2,975-arc graph:
+#
+#     trade      Psi      inner      gap     pivots   active
+#     $100k   0.01423  converged  2.1e-17       41       42
+#     $1M     0.1586   converged  2.4e-17      124       98
+#     $10M    1.634      PARTIAL  7.9e-04      600      357
+#     $40M    4.794      PARTIAL  1.0e-02      600      437
+#
+# The large ones stop at *exactly* the cap.  Given room they run to the cycle
+# detector instead -- 2,864 pivots at $10M -- and land on a much better flow:
+# the answer goes 11,692,969,838 to 12,406,125,434 and the spread over a 1e-8
+# size sweep falls from 399 bp to 74.  Twice the arc count is enough for that
+# everywhere measured, and costs nothing on the small trades that finish in
+# 41 pivots and never reach it.
+#
+# It does not make the solve converge.  These exits are still PARTIAL, now on
+# the cycle detector rather than the budget, and the reported `gap` is worse
+# for it.  What it buys is a better incumbent before the cycling stops it.
+BASE_PIVOT_FACTOR = 2
 # How many times a cycling basis is perturbed before the patience above applies.
 #
 # Degeneracy is what makes the basis repeat: several arcs tie on the quantity the
@@ -749,7 +774,30 @@ def solve(
             min_flow=screen,
             gas_cost=gas_cost,
             partial_ok=degenerate,
+            maxit=DEFAULT_PIVOTS,
         )
+        # Only the solves that actually ran out get more.  Handing every solve
+        # the larger budget up front costs 11-14% of a quote and changes
+        # nothing at $100k, where the base solve converges in 41 pivots and
+        # never reaches 600.  Exhaustion is only knowable afterwards -- it is
+        # `pivots == maxit`, where cycling stops short of it -- so this is a
+        # retry rather than a bigger first attempt.
+        wider = max(DEFAULT_PIVOTS, BASE_PIVOT_FACTOR * m)
+        if (wider > DEFAULT_PIVOTS
+                and report_solution.reason == "PARTIAL"
+                and report_solution.pivots >= DEFAULT_PIVOTS):
+            report_solution = active_set_solve(
+                g, src, dst, Psi,
+                A0=warm,
+                forbidden=~in_S | banned,
+                forced_upper=forced_upper,
+                tol=tol,
+                solver=solver,
+                min_flow=screen,
+                gas_cost=gas_cost,
+                partial_ok=degenerate,
+                maxit=wider,
+            )
         if (
             not report_solution.feasible
             and report_solution.reason.startswith("no convergence")
