@@ -202,6 +202,56 @@ class Reading(NamedTuple):
     route: object = None
 
 
+#: Exceptions swallowed while quoting, by type and message.  Counted because a
+#: raise and a contaminated reading are otherwise the same thing to this script:
+#: `one` returns a zero, `read_once` sees `not got` and drops the case, and the
+#: run reports "unstable, never repeated" for what is really a crash.  That is
+#: how `--venue v3,v4` together hid a `KeyError` in `univ3.collapse` that failed
+#: *every* major pair -- the token set quietly lost WETH, WBTC, DAI and FRAX and
+#: nothing else said a word.
+RAISED: Counter = Counter()
+#: Why readings were thrown away.  Same argument as `RAISED`: a case dropped
+#: for contamination and a case dropped because the venue could not quote look
+#: identical in the output ("nothing measured"), and only one of them is the
+#: control doing its job.
+DROPPED: Counter = Counter()
+
+
+def _report_raised() -> None:
+    """Say what raised, before anything else this run prints.
+
+    It has to come before the early exit: the run that most needs this is the
+    one where *every* quote raised, and that one prints "nothing measured" and
+    returns without reaching the summary.  Which is exactly what
+    `--venue v3,v4` did while `univ3.collapse` was hard-coded to `SWAP_UNIV3`.
+    """
+    if not RAISED:
+        return
+    # `RoutingError` is a refusal, not a fault -- a token nothing trades, a
+    # source the active set cannot reach.  Anything else got as far as the
+    # router believing it had a route and then broke.
+    refused = {k: n for k, n in RAISED.items() if k.startswith("RoutingError")}
+    broke = {k: n for k, n in RAISED.items() if not k.startswith("RoutingError")}
+    if refused:
+        print(f"\n{sum(refused.values())} quote(s) refused (ordinary):")
+        for what, n in sorted(refused.items(), key=lambda kv: -kv[1])[:3]:
+            print(f"   {n:>5}x  {what}")
+    if broke:
+        print(f"\n{sum(broke.values())} quote(s) RAISED -- this is not "
+              f"instability, it is a bug:")
+        for what, n in sorted(broke.items(), key=lambda kv: -kv[1])[:6]:
+            print(f"   {n:>5}x  {what}")
+
+
+def _report_dropped() -> None:
+    """Why readings were thrown away, which "nothing measured" does not say."""
+    if not DROPPED:
+        return
+    print(f"\n{sum(DROPPED.values())} reading(s) dropped:")
+    for what, n in sorted(DROPPED.items(), key=lambda kv: -kv[1])[:6]:
+        print(f"   {n:>5}x  {what}")
+
+
 def read_once(session, venues, amount):
     """One `curve -> venue -> curve` reading, or `None` if contaminated."""
     kinds = {v.kind for v in venues}
@@ -216,7 +266,8 @@ def read_once(session, venues, amount):
             return (int(got.verified_out or 0),
                     sum(1 for leg in legs if leg.kind in kinds),
                     got.route)
-        except Exception:
+        except Exception as exc:
+            RAISED[f"{type(exc).__name__}: {str(exc)[:70]}"] += 1
             return (0, 0, None)
         finally:
             for attr, was in held.items():
@@ -225,7 +276,14 @@ def read_once(session, venues, amount):
     base, _, _ = one(False)
     got, legs, route = one(True)
     control, _, _ = one(False)
-    if not base or not got or base != control:
+    if not base:
+        DROPPED["curve-only reading is zero"] += 1
+        return None
+    if not got:
+        DROPPED["curve+venue reading is zero"] += 1
+        return None
+    if base != control:
+        DROPPED[f"control drifted {(control / base - 1) * 1e4:+.2f} bp"] += 1
         return None
     return Reading((got / base - 1) * 1e4, base, got, legs, route)
 
@@ -290,13 +348,23 @@ def main() -> int:
                     help="which venue(s) the A/B switches: v3, v2, or v3,v2 "
                          "to measure them together")
     ap.add_argument("--tokens", type=int, default=7)
+    ap.add_argument("--notionals", default=None,
+                    help="comma-separated USD sizes instead of "
+                         "1e3,1e4,1e5,1e6.  A v3 or v4 quote costs 20-70 s "
+                         "against Curve's 3, so the default grid is four "
+                         "notionals x three quotes a reading x however many "
+                         "sessions -- hours before it says anything.  Narrow "
+                         "it to make the venues that most need checking "
+                         "checkable at all")
     ap.add_argument("--sessions", type=int, default=2,
                     help="independent sessions that must agree, each walking "
                          "the pairs in a different order; 1 is half the wall "
                          "clock and has been seen to report a 5,088 bp "
                          "regression that the next session did not")
     ap.add_argument("--repeats", type=int, default=3,
-                    help="most readings per case before calling it unstable")
+                    help="most readings per case before calling it unstable; "
+                         "never below 2, because a case is believed only when "
+                         "two readings agree")
     ap.add_argument("--agree-bp", type=float, default=0.5,
                     help="how close two readings must be to be believed")
     ap.add_argument("--max-legs", type=int, default=0,
@@ -317,7 +385,17 @@ def main() -> int:
     ap.add_argument("--worse-bp", type=float, default=0.5,
                     help="a loss past this is reported as a regression")
     args = ap.parse_args()
+    if args.repeats < 2:
+        # `measure` believes a case only when two readings land within
+        # `--agree-bp` of each other, so one reading can never be believed and
+        # the run reports "nothing measured" having quoted everything twice
+        # over.  Refuse rather than spend the wall clock saying nothing.
+        ap.error("--repeats must be at least 2: a case is believed only when "
+                 "two readings agree, so 1 measures nothing")
     args.venue = [v.strip() for v in args.venue.split(",") if v.strip()]
+    if args.notionals:
+        global NOTIONALS
+        NOTIONALS = tuple(float(v) for v in args.notionals.split(",") if v.strip())
     unknown = [v for v in args.venue if v not in VENUES]
     if unknown or not args.venue:
         raise SystemExit(f"--venue takes {'/'.join(VENUES)}, not {unknown}")
@@ -384,6 +462,8 @@ def main() -> int:
             print(f"{name:<18}{usd:>14,.0f}{got.base:>30,}{got.out:>30,}"
                   f"{got.delta:>+9.2f}bp{got.legs:>6}")
 
+    _report_raised()
+    _report_dropped()
     if not deltas:
         print("\nnothing measured")
         return 1
