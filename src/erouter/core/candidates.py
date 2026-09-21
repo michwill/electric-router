@@ -71,6 +71,22 @@ CANDIDATE_PIVOTS = 60
 # back out, and the deepest measured chain is three bans then two backtracks.
 REPAIR_ROUNDS = 6
 
+# Consecutive drop candidates that solved and then deduplicated, before the
+# family gives up.  `WIDE_STREAK` counts the ones that solve and cannot be
+# realised; this counts the way *this* family actually fails, and nothing was
+# counting it -- a pair whose every drop repeated an earlier candidate still
+# paid for all nineteen attempts.  Six is where the measured frontier stops
+# costing candidates.
+DROP_MISS_STREAK = 6
+
+# The same count for the pin sweep, but per swept arc rather than per family.
+# An arc's ladder either answers early or not at all: over 149 swept arcs at two
+# blocks the first candidate came at step x0 or x0.125 every time, and the
+# longest run of misses *inside* an arc that was still followed by one was two.
+# So three cannot cut a candidate, and it is what stops the arcs that answer
+# nothing -- tBTC->WBTC at $1,000 swept all twenty-one rungs for none of them.
+PIN_MISS_STREAK = 3
+
 
 def repair_order(conflicts: dict, psi: np.ndarray) -> dict:
     """Each conflicting pool's arcs, the one carrying most first.
@@ -556,11 +572,16 @@ def generate(
     flagged_active = sorted(swept)
     for arc_index in flagged_active[:3]:
         star = float(base.psi[arc_index])
+        # The ladder is swept per arc, so a streak has to be counted per arc:
+        # a family-wide one reads the gap between two arcs as exhaustion and
+        # stops before the third, which on crvUSD->USDC at $1,000 is where four
+        # of the six candidates come from.
+        arc_misses = 0
         for step in PIN_LADDER:
             pin = min(star * step, float(g.cap[arc_index]))
             if step > 0 and pin <= 0:
                 continue
-            made += bool(
+            got = bool(
                 resolve(
                     np.zeros(g.m, bool),
                     f"pin {arcs[arc_index].note[:18]} x{step:g}",
@@ -568,7 +589,11 @@ def generate(
                     pinned={arc_index: pin},
                 )
             )
+            made += got
+            arc_misses = 0 if got else arc_misses + 1
             if made >= pin_budget or len(out) >= max_candidates or exhausted("pin"):
+                break
+            if arc_misses >= PIN_MISS_STREAK:
                 break
         if made >= pin_budget or len(out) >= max_candidates or exhausted("pin"):
             break
@@ -653,11 +678,27 @@ def generate(
             resolve(alt, f"repair alt {arcs[keep_index].note[:18]}", "repair")
 
     # 5. drop each active arc in turn (§6.2)
+    #
+    # `exhausted` counts candidates that solved and could not be realised; this
+    # counts the way *this* family actually fails -- it solves and then
+    # deduplicates -- and nothing was counting it, so a pair whose every drop
+    # repeated an earlier candidate still paid for all nineteen attempts.
+    #
+    # Restricting the re-solve to the pools already on the ballot is cheaper
+    # still, and was measured and rejected: on USDC->WBTC at $100,000 the
+    # winner is a drop through pools that are in neither the base solution, its
+    # basis, nor any of the twelve shortest paths, and confining the solve
+    # loses it for 5.3 bp.  What this family costs is the price of discovery.
+    misses = 0
     for k in order[: max(0, max_candidates - len(out))]:
         forbidden = np.zeros(g.m, bool)
         forbidden[k] = True
-        resolve(forbidden, f"drop {arcs[int(k)].note[:20]}", "drop")
-        if len(out) >= max_candidates or exhausted("drop"):
+        if resolve(forbidden, f"drop {arcs[int(k)].note[:20]}", "drop"):
+            misses = 0
+        else:
+            misses += 1
+        if (len(out) >= max_candidates or exhausted("drop")
+                or misses >= DROP_MISS_STREAK):
             break
 
     out.candidates = out.candidates[:max_candidates]
