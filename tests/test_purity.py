@@ -27,9 +27,12 @@ CORE = ROOT / "core"
 #: what has to survive under Pyodide.
 CHAIN = ROOT / "chain"
 
-# Anything that is not stdlib or numpy.  scipy is allowed *inside functions*
-# (an optional fast path) but never at module scope, so it can never be a hard
-# import requirement.
+# Anything that is not stdlib or numpy.  scipy and osqp are allowed *inside
+# functions* (optional fast paths) but never at module scope, so neither can
+# become a hard import requirement.  `core/solve.qp_solution` is the osqp one:
+# it hands `(P)` to a QP solver whole, which beats the active set badly once
+# the active set outgrows the size §5.4 designed it for -- and there is no
+# wasm32 wheel for either, so a browser has to keep getting the numpy path.
 FORBIDDEN = {
     "boa",
     "titanoboa",
@@ -41,8 +44,9 @@ FORBIDDEN = {
     "vyper",
     "urllib",
     "scipy",
+    "osqp",
 }
-FORBIDDEN_AT_MODULE_SCOPE_ONLY = {"scipy"}
+FORBIDDEN_AT_MODULE_SCOPE_ONLY = {"scipy", "osqp"}
 
 CORE_FILES = sorted(CORE.rglob("*.py"))
 CHAIN_FILES = sorted(CHAIN.rglob("*.py"))

@@ -386,3 +386,110 @@ def test_the_degenerate_tail_agrees(maxit):
         # this small must exhaust nearly everything, and if a later change
         # makes these converge the test has quietly stopped testing the tail.
         assert partial >= 60, partial
+
+
+# --- `solve.qp_solution`: the same oracle, wired for the router to use -------
+#
+# `reference` above proves the active set right on small problems.  These hold
+# `qp_solution` to the contract the *rest of the code* needs from a `Solution`:
+# the objective it claims, a flow that conserves, potentials that price out,
+# and the basis masks `solve` and `generate` read.  A number that is merely
+# lower is not usable if `u` is wrong or `A` is fiction.
+
+
+@pytest.mark.parametrize("name", list(CASES))
+def test_qp_solution_returns_a_usable_solution(name):
+    from erouter.core.solve import TOL, price_out, qp_solution
+
+    spec = dict(CASES[name])
+    Psi = spec.pop("Psi")
+    g = make(Psi=Psi, **spec)
+    dst = int(max(g.tau.max(), g.sig.max()))
+
+    got = qp_solution(g, 0, dst, Psi)
+    if got is None:
+        pytest.skip("osqp/scipy not installed")
+
+    ours = active_set_solve(g, 0, dst, Psi)
+    assert got.objective(g) <= ours.objective(g) + 1e-9 * Psi, (
+        f"{name}: the QP path is worse than the active set")
+
+    flow = np.zeros(g.n_nodes)
+    np.add.at(flow, g.tau, got.psi)
+    np.add.at(flow, g.sig, -got.psi)
+    want = np.zeros(g.n_nodes)
+    want[0] += Psi
+    want[dst] -= Psi
+    assert np.abs(flow - want).max() <= 1e-7 * Psi, (
+        f"{name}: the QP flow does not conserve -- "
+        f"{np.abs(flow - want).max() / Psi:.2e} of Psi")
+    assert got.psi.min() >= -1e-9 * max(Psi, 1.0), f"{name}: negative flow"
+
+    # §5.5's test, on the potentials this hands back: nothing *outside* the
+    # support may want in.  If `u` were upside down this is what would catch
+    # it, and column generation would never settle.
+    in_s = got.A | got.U
+    assert price_out(got.u, g, in_s, TOL).size == 0, (
+        f"{name}: the QP potentials price idle arcs in at the optimum, so `u` "
+        f"is oriented wrongly or is not dual-feasible")
+    # And the arcs that do carry flow must sit on the KKT equality the active
+    # set writes, which is the other half of `u` being right.
+    if got.A.any():
+        want = got.psi[got.A] / np.where(g.G[got.A] > 0, g.G[got.A], np.inf)
+        have = got.u[g.tau[got.A]] - got.u[g.sig[got.A]] - g.eps[got.A]
+        assert np.allclose(have, want, atol=1e-6 * max(Psi, 1.0)), (
+            f"{name}: a basic arc breaks `u_tau - u_sig - eps = psi / G`")
+
+    assert not bool((got.A & got.U).any()), f"{name}: an arc is both basic and capped"
+    assert np.all(got.psi[~(got.A | got.U)] <= TOL + 1e-12), (
+        f"{name}: an arc carries flow while outside both bases")
+
+
+def test_qp_solution_honours_a_ban():
+    """`forbidden` is how every candidate family restricts the graph."""
+    from erouter.core.solve import qp_solution
+
+    spec = dict(CASES["parallel"])
+    Psi = spec.pop("Psi")
+    g = make(Psi=Psi, **spec)
+    banned = np.zeros(g.m, bool)
+    banned[0] = True
+    got = qp_solution(g, 0, 1, Psi, forbidden=banned)
+    if got is None:
+        pytest.skip("osqp/scipy not installed")
+    assert got.psi[0] <= 1e-9 * Psi, "a banned arc carries flow"
+    assert got.psi[1] == pytest.approx(Psi, rel=1e-6), "the rest did not take it"
+
+
+@pytest.mark.parametrize("name", ["network", "parallel", "series"])
+def test_the_qp_rescue_only_ever_lowers_the_objective(name):
+    """`solve` may swap in the QP answer, and only on the objective.
+
+    The swap is exact to compare -- both flows are scored on the same graph --
+    so this holds the *switch*, not the solver: with it on, the reported
+    solution is never worse than with it off, and the report stays coherent
+    (`in_S` covers the support it now claims).
+    """
+    from erouter.core import solve as S
+
+    spec = dict(CASES[name])
+    Psi = spec.pop("Psi")
+    g = make(Psi=Psi, **spec)
+    dst = int(max(g.tau.max(), g.sig.max()))
+
+    off = S.solve(g, 0, dst, Psi)
+    held, floor = S.QP_RESCUE, S.QP_ACTIVE_FLOOR
+    S.QP_RESCUE, S.QP_ACTIVE_FLOOR = True, 0      # 0 so it fires on any support
+    try:
+        on = S.solve(g, 0, dst, Psi)
+    finally:
+        S.QP_RESCUE, S.QP_ACTIVE_FLOOR = held, floor
+
+    if on.solution.reason != "OSQP":
+        pytest.skip("the QP path did not take over (osqp absent, or no gain)")
+    assert on.solution.objective(g) <= off.solution.objective(g) + 1e-9 * Psi, (
+        f"{name}: the rescue made the objective worse")
+    carried = on.solution.psi > S.TOL
+    assert np.all(on.in_S[carried]), (
+        f"{name}: the report claims a support `in_S` does not cover, so the "
+        f"gap below it is measured against the wrong column set")

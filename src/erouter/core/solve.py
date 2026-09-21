@@ -44,6 +44,20 @@ DEGENERACY_SCREEN = 1e-4
 # a cycle.  Bland changes the pivot sequence, so it deserves a few iterations to
 # break out on its own; measured cycles repeat every 2 pivots and never recover.
 CYCLE_PATIENCE = 3
+#: OSQP's tolerances.  Tight, because this is an oracle rather than a guess and
+#: the differential test has always held the active set to it at 1e-10.
+QP_EPS = 1e-10
+QP_MAX_ITER = 200_000
+#: Support size past which the active set is outside its design range and the
+#: QP path is worth asking.  §5.4's "30-60 out of 1000", taken at the top.
+QP_ACTIVE_FLOOR = 60
+#: Flow below this fraction of the trade is interior-point noise, not a leg.
+QP_DUST = 1e-9
+#: Whether `solve` asks at all.  Off until the swap is measured end to end:
+#: a lower modelled loss is not a better quote by itself -- see `DAI -> WETH`
+#: at $1M, where the objective runs *against* realised output -- so this waits
+#: on a size ladder and an all-venue sweep rather than on the objective alone.
+QP_RESCUE = False
 #: `active_set_solve`'s own default, and the floor here.
 DEFAULT_PIVOTS = 600
 #: The base solve gets pivots in proportion to the graph, not a flat 600.
@@ -698,6 +712,128 @@ def optimality_gap(
     return float(np.sum(rho * settles - settles**2 / (2.0 * G)))
 
 
+def qp_solution(
+    g: ArcArrays,
+    src: int,
+    dst: int,
+    Psi: float,
+    *,
+    forbidden: np.ndarray | None = None,
+    forced_upper: dict[int, float] | None = None,
+    tol: float = TOL,
+) -> Solution | None:
+    """`(P)` handed to OSQP whole, or `None` where OSQP is not installed.
+
+    An optional fast path, on the same terms `scipy` has in `core/linalg.py`:
+    imported inside the function so `erouter.core` still runs on numpy alone
+    under Pyodide, where neither wheel exists.  `tests/test_purity.py` holds
+    that rule.
+
+    Why bother, given §5.4 proves the active set finite: it was sized for
+    "final |S| ~ 30-60 out of 1000" (`docs/quadratic-flow-router.md`), and a
+    $10M trade over curve+v2+v3+v4 puts **357 to 437 arcs of 2,975** in the
+    active set.  Seven times the design point, and the method does not degrade
+    gracefully there -- measured on one `WETH -> WBTC` graph:
+
+        trade   active set                     OSQP            OSQP time
+        $1M     converged gap=2.4e-17 0.000358  0.000228 -36%    0.6 s
+        $10M    PARTIAL   gap=7.9e-04 0.508     0.0225   -96%    1.0 s
+        $40M    PARTIAL   gap=1.0e-02 1.026     0.191    -81%    2.4 s
+
+    The $1M row is why this is not merely a speed question: ours reports §5.5
+    optimality to machine precision and OSQP finds 36% less loss on the same
+    graph, so at this scale the certificate is *wrong* rather than weak.
+
+    The flows are checked, not assumed: KCL residual lands at 1e-13, no
+    component below -1e-9, and `cancel_cycles` removes only dust -- 13, 11 and
+    3 cycles keeping 99.4% to 100% of the flow, moving the objective in the
+    seventh digit.  The gain is not circulation.
+    """
+    try:                                    # optional, and absent in a browser
+        import osqp
+        from scipy import sparse
+    except ImportError:
+        return None
+
+    m, n = g.m, g.n_nodes
+    banned = (np.zeros(m, bool) if forbidden is None
+              else np.asarray(forbidden, bool))
+    pinned = dict(forced_upper or {})
+
+    rows = np.empty(2 * m, dtype=np.int64)
+    cols = np.empty(2 * m, dtype=np.int64)
+    vals = np.empty(2 * m, dtype=float)
+    idx = np.arange(m)
+    rows[0::2], cols[0::2], vals[0::2] = g.tau, idx, 1.0
+    rows[1::2], cols[1::2], vals[1::2] = g.sig, idx, -1.0
+    inc = sparse.csc_matrix((vals, (rows, cols)), shape=(n, m))
+
+    s_hat = np.zeros(n)
+    s_hat[src] += Psi
+    s_hat[dst] -= Psi
+
+    big = 1e12 * max(abs(Psi), 1.0)
+    hi_arc = np.where(np.isfinite(g.cap), g.cap, big).astype(float)
+    lo_arc = np.zeros(m)
+    hi_arc[banned] = 0.0                    # a banned arc may carry nothing
+    for k, at in pinned.items():            # §6.3's pin, as an equality
+        lo_arc[int(k)] = hi_arc[int(k)] = float(at)
+
+    A = sparse.vstack([inc, sparse.eye(m, format="csc")], format="csc")
+    lo = np.concatenate([s_hat, lo_arc])
+    hi = np.concatenate([s_hat, hi_arc])
+    # `psi^2 / (2 G)` against OSQP's own half, so `P = diag(1/G)`.  A clamped
+    # arc has `G = inf` and contributes nothing quadratic, which is the
+    # zero-curvature limit §2.3 admits.
+    inv = np.where(g.G > 0, 1.0 / np.where(np.isfinite(g.G), g.G, np.inf), 0.0)
+    P = sparse.diags(np.nan_to_num(inv, posinf=0.0), format="csc")
+
+    problem = osqp.OSQP()
+    problem.setup(P=P, q=np.asarray(g.eps, float), A=A, l=lo, u=hi,
+                  verbose=False, eps_abs=QP_EPS, eps_rel=QP_EPS,
+                  max_iter=QP_MAX_ITER, polishing=True)
+    res = problem.solve()
+    if "solved" not in str(getattr(res.info, "status", "")):
+        return None
+
+    psi = np.clip(np.asarray(res.x, float), 0.0, hi_arc)
+    # (P) does not forbid circulation and the router cannot execute one, so the
+    # flow is projected onto the acyclic part before anyone sees it.  Skipping
+    # this made every quote die in `realize` with "the active arcs contain a
+    # cycle": OSQP leaves a handful of dust loops -- 13, 11 and 3 on the three
+    # sizes measured -- and they cost nothing to remove, keeping 99.4% to 100%
+    # of the flow and moving the objective in the seventh digit.  The active
+    # set never produces them, which is why nothing downstream tolerates them.
+    # Dust first, then cycles.  An interior-point answer carries ~1e-15 on
+    # arcs it does not really use, and `cancel_cycles` nets the *flow* around a
+    # two-cycle without clearing those residues -- so both directions still read
+    # as carrying, `realize.topological_nodes` sees a cycle in the node graph
+    # and refuses the route.  The active set leaves exact zeros there, which is
+    # why nothing downstream had to care before.
+    psi[psi < QP_DUST * max(abs(Psi), 1.0)] = 0.0
+    from .realize import cancel_cycles
+    psi, _spun = cancel_cycles(g.tau, g.sig, psi)
+    psi[psi < QP_DUST * max(abs(Psi), 1.0)] = 0.0
+    # Potentials from the duals of the conservation rows.  Sign is fixed by
+    # the KKT condition the active set writes: an arc carrying flow between
+    # its bounds has `u_tau - u_sig - eps = psi / G`, so the orientation is
+    # checked against that rather than assumed.
+    y = np.asarray(res.y, float)[:n]
+    u = -y
+    carrying = psi > tol
+    if carrying.any():
+        want = psi[carrying] / np.where(g.G[carrying] > 0, g.G[carrying], np.inf)
+        got = u[g.tau[carrying]] - u[g.sig[carrying]] - g.eps[carrying]
+        if np.linalg.norm(got - want) > np.linalg.norm(-got - want):
+            u = y
+    rho = u[g.tau] - u[g.sig] - np.asarray(g.eps, float)
+    upper = psi >= hi_arc - tol
+    active = carrying & ~upper
+    return Solution(psi, u, active, upper, hi_arc, rho,
+                    int(getattr(res.info, "iter", 0)), feasible=True,
+                    reason="OSQP")
+
+
 def price_out(
     u: np.ndarray, g: ArcArrays, in_S: np.ndarray, tol: float = TOL
 ) -> np.ndarray:
@@ -870,6 +1006,31 @@ def solve(
                            reason=report_solution.reason)
 
     assert report_solution is not None
+
+    # --- the QP path, where the active set is past what §5.4 sized it for ---
+    #
+    # `docs/quadratic-flow-router.md` §5.4 expects "final |S| ~ 30-60 out of
+    # 1000".  A $10M trade over curve+v2+v3+v4 puts 357 of 2,975 arcs in the
+    # active set, and there the method does not merely slow down -- at $1M it
+    # reports §5.5 optimality to machine precision while OSQP finds 36% less
+    # loss on the same graph.  So this is asked whenever the support outgrows
+    # the design point or the solve gave up, and the *objective* decides, which
+    # is exact because both flows are scored on the same graph.
+    #
+    # `qp_solution` sees everything `banned` does not forbid, rather than the
+    # column-generation subset, which is the point of asking it: it solves (P)
+    # globally in one shot.  `in_S` widens to match when it wins, so the gap
+    # below is measured over what actually produced the answer.
+    if QP_RESCUE:
+        support = int(np.count_nonzero(report_solution.psi > tol))
+        if support > QP_ACTIVE_FLOOR or report_solution.reason == "PARTIAL":
+            other = qp_solution(g, src, dst, Psi, forbidden=banned,
+                                forced_upper=forced_upper, tol=tol)
+            if (other is not None
+                    and other.objective(g) < report_solution.objective(g)):
+                report_solution = other
+                in_S = ~banned
+
     # The certificate needs both: no arc outside S wants flow, and no
     # non-concave arc carries any -- §5.5 proves nothing about a flagged arc.
     flagged_active = bool(np.any(g.flagged & (report_solution.psi > 0)))
