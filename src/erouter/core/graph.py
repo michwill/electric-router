@@ -9,7 +9,9 @@ Everything is struct-of-arrays: the solver never sees a Python object.
 
 from __future__ import annotations
 
+import copy as _copy
 from dataclasses import dataclass, field
+from dataclasses import fields as _fields
 
 import numpy as np
 
@@ -188,6 +190,21 @@ class ArcArrays:
     # otherwise nowhere to put it, and the attempt fails silently.  Not part of
     # the value -- excluded from `__eq__` and `repr`.
     accel: object | None = field(default=None, repr=False, compare=False)
+
+    def __deepcopy__(self, memo):
+        """A copy of the graph, without the accelerator's resident copy.
+
+        `problem_for` keys its cache on the `id()` of the very arrays it was
+        built from, so a copy could never have used the original's entry
+        anyway -- and the native object does not pickle, which is what
+        `copy.deepcopy` falls back to.  Refining a second finalist copies the
+        graph, so with `EROUTER_ACCEL=1` that raised rather than refined.
+        """
+        taken = {f.name: _copy.deepcopy(getattr(self, f.name), memo)
+                 for f in _fields(self) if f.name != "accel"}
+        clone = ArcArrays(**taken)
+        memo[id(self)] = clone
+        return clone
 
     @property
     def m(self) -> int:
