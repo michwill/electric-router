@@ -495,7 +495,8 @@ class RouterSession:
         # all however deep its Uniswap pair.  Introduce the trade's own
         # endpoints when a venue joins them to a coin the frame prices --
         # `venues/bridge.py` says why only the endpoints.
-        held = [v for v in (self.univ3, self.univ2) if v is not None]
+        held = [v for v in (self.univ3, self.univ2, self.univ4)
+                if v is not None]
         if held:
             gained = False
             for token in (src, dst):

@@ -135,8 +135,16 @@ def test_the_deepest_bridge_is_offered_first():
     assert [p for _v, p, _t in found] == ["0xdeep", "0xthin"]
 
 
-def test_both_venues_are_searched():
+def test_every_venue_is_searched():
+    """However many are handed over -- the caller decides who is in the list.
+
+    `bridges_for` has always searched all of them; what went wrong was
+    upstream, where the session built that list as `(univ3, univ2)` and left v4
+    out, so no v4 pool could introduce a token however deep it was.
+    """
     nodes = Nodes()
     v2 = Venue({"0xa": [X, USDT, 30, 50_000.0]})
     v3 = Venue({"0xb": [X, WETH, 3000, 80_000.0]})
+    v4 = Venue({"0xc": [X, USDT, 500, 70_000.0]})
     assert len(bridge.bridges_for(X, nodes, [v2, v3])) == 2
+    assert len(bridge.bridges_for(X, nodes, [v2, v3, v4])) == 3
