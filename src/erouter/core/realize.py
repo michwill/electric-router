@@ -39,6 +39,29 @@ class RealizationError(RuntimeError):
     pass
 
 
+#: How far past its cap a leg may be carried before the candidate is refused.
+#:
+#: The solve honours `cap_in` exactly.  `_forward_simulate` then rescales every
+#: leg to what its feeders actually paid, and that rescale moves amounts by the
+#: model's own error -- up to 37.9 bp on a single measured leg, compounding
+#: across a route.  A leg a hair past its cap is that error arriving, not a
+#: pool being asked for more than it holds.
+#:
+#: Refusing it was expensive.  Measured on CRV->WETH at $5M, block 26,019,000:
+#: the best of sixty-one priced candidates was discarded 1.0x over its cap, and
+#: the router settled for one **27.7% worse**.  The three best all tripped the
+#: same way.
+#:
+#: Not a licence to ignore the cap.  A bank genuinely out of depth is out by
+#: multiples, not by a hair: the same ballot held legs 5.1x over, and a v4 bank
+#: reduced to a single sliver arc was 4.4e10x over.  Those stay refused.
+#:
+#: One percent is where the measured frontier sits, not a round number.  Swept
+#: over 18 cases at two blocks: it takes four of the five gains, and the only
+#: thing a wider one adds is WETH->USDC $5M at +2.9 bp -- paid for with
+#: FRAX->USDC $5M at -1.96 at the other block, and -17.6 bp at 25%.
+CAP_TOLERANCE = 0.01
+
 @dataclass(slots=True)
 class RealizedLeg:
     leg: Leg
@@ -159,9 +182,12 @@ class RealizedRoute:
 
         Read rather than stored, so it describes the amounts as they stand
         after whatever last re-weighted them.
+
+        `CAP_TOLERANCE` is what separates a rescale's rounding from a route the
+        pool cannot take; see it for why refusing the first was expensive.
         """
         for realized in self.legs:
-            if realized.amount_in > realized.cap_in:
+            if realized.amount_in > realized.cap_in * (1.0 + CAP_TOLERANCE):
                 return realized
         return None
 
