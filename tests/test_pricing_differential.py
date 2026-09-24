@@ -417,7 +417,7 @@ def ported_of(arcs):
         built.add(a.id, a.pool, int(a.kind), a.i, a.j, a.n_coins, a.token_in,
                   a.token_out, a.tau, a.sigma, a.a, a.B, a.cap, a.G, a.eps,
                   a.reserve_in, a.decimals_in, a.tvl_usd, a.gamma_live, a.note,
-                  a.calib_delta, a.decimals_out)
+                  a.calib_delta, a.decimals_out, a.parallel, a.venue)
         built_last = a
     assert built_last is not None
     return built
@@ -508,3 +508,14 @@ def test_the_convergence_test_agrees(psi_total):
     want = float(np.max(np.abs(np.array([1.0, 2.0, 9.0]) - before)
                         / np.maximum(np.abs(before), 1e-30)))
     assert native().b_change(list(before), [1.0, 2.0, 9.0]) == want
+
+
+def test_neither_side_refits_a_bank_piece():
+    _, ported, arcs = refit_arcs_fixture(a=1.0, B=1e-6, calib=1.0)
+    arcs[0].parallel = True
+    planned = native().Refit.plan(ported_of(arcs), [1000.0], [1.0, 1.0], ported)
+    assert planned.probes() == []
+    client = FakeQuoter(lambda dx: (True, int(dx * 0.99)))
+    got = refit_mod.refit_arcs(None, arcs, np.array([1000.0]), np.array([1.0, 1.0]), client,
+                               rate_in=lambda arc: 1.0, rate_out=lambda arc: 1.0)
+    assert got == (0, 0, 0) and client.seen == []

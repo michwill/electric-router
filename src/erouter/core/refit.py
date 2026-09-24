@@ -124,6 +124,13 @@ def refit_arcs(
     unresolved = 0
     for k in active:
         arc = arcs[int(k)]
+        if arc.parallel:
+            # A bank piece is one range of a pool, and probing the pool at the
+            # piece's flow fits it to the wrong stretch of the curve.  Refitted
+            # that way, CRV->WETH $5M failed its second round "src not
+            # connected"; without, it converges.  The piece's own fit is the
+            # better evidence.
+            continue
         delta_canonical = float(psi[k]) / float(nu[arc.tau])
         delta_token = delta_canonical / rate_in(arc)
         delta_raw = int(delta_token * 10**arc.decimals_in)

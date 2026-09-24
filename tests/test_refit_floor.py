@@ -155,3 +155,13 @@ def test_an_arc_with_no_prior_calibration_is_still_refitted():
     a = arc(B=TRUE_B * 4, calib_delta=0.0)
     quoted, _, unresolved = run(1_000_000.0, a, Chain())
     assert (quoted, unresolved) == (1, 0)
+
+
+def test_a_bank_piece_is_not_refitted_as_if_it_were_the_pool():
+    """A piece is one range of a pool; the pool's quote at the piece's flow is
+    the wrong stretch of the curve, and its secant clamped the piece."""
+    chain = Chain()
+    piece = arc(parallel=True, id="0xpool:0>1#3")
+    quoted, _, _ = run(5_000_000.0, piece, chain)
+    assert (quoted, chain.calls) == (0, 0)
+    assert (piece.a, piece.B, piece.clamped) == (TRUE_A, TRUE_B, False)

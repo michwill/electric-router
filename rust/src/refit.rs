@@ -138,6 +138,12 @@ pub fn plan(
             continue;
         }
         let arc = &arcs[k];
+        if arc.parallel {
+            // A bank piece is one range of a pool; probing the pool at its
+            // flow fits it to the wrong stretch (`refit.py` says what that
+            // cost). The piece's own fit is the better evidence.
+            continue;
+        }
         let delta_canonical = psi[k] / nu[arc.tau];
         let delta_token = delta_canonical / nodes.rate(&arc.token_in);
         let raw = delta_token * scaled(U256::from(10u64).pow(U256::from(arc.decimals_in)), 0);
