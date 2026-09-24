@@ -114,12 +114,17 @@ def bank_arcs(arcs, nu, nodes, client, Psi: float):
                 break
             B = max(B, a * 1e-9 / width)    # finite conductance, never zero
             bank.append(Arc(a=a, B=B, cap=width))
-            ra, rB = rescale(a, B, arc.rate_in or nodes.rate(arc.token_in),
-                             arc.rate_out or nodes.rate(arc.token_out))
+            # The node's rate, not the arc's: a Curve arc leaves `rate_in` at 1.0
+            # even on a merged token, and the fall-through never fired.  Every
+            # wstETH piece came out 1.2445x rich, and the graph held 219 WETH of
+            # arbitrage that no trade could take.
+            rate_in, rate_out = nodes.rate(arc.token_in), nodes.rate(arc.token_out)
+            ra, rB = rescale(a, B, rate_in, rate_out)
             piece = copy.copy(arc)
             piece.id = f"{arc.id}#{seg}"
             piece.a, piece.B = ra, rB
-            piece.cap = width * nodes.rate(arc.token_in)
+            piece.rate_in, piece.rate_out = rate_in, rate_out
+            piece.cap = width * rate_in
             piece.parallel = True
             piece.note = f"{arc.note} tick {seg}"
             pieces.append(piece)

@@ -8,8 +8,8 @@ import math
 import numpy as np
 
 from erouter.core import cryptobank
-from erouter.core.bank import capacity, output
-from erouter.core.nodes import NodeMap
+from erouter.core.bank import capacity, collapse, output
+from erouter.core.nodes import Conversion, ConversionKind, NodeMap
 from erouter.core.quoter import Quote
 from erouter.core.transport import Status
 from erouter.core.types import ArcKind, PoolArc
@@ -98,3 +98,39 @@ def test_only_cryptoswap_arcs_are_banked():
     nodes, arc, nu, client = setup(2e6, 256.0, kind=ArcKind.SWAP_STABLE)
     arcs, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6)
     assert banks == {} and arcs == [arc]
+
+
+STETH = "0xae7ab96520de3a18e5e111b5eaab095312d7fe84"
+WST = "0x7f39c581f595b53c5cb19bd0b3f8da6c935e2ca0"
+
+
+def test_a_merged_token_is_banked_in_canonical_units():
+    """wstETH is 1.2445 stETH, and a Curve arc leaves `rate_in` at 1.0 on it.
+    The pieces were rescaled by that 1.0: every wstETH piece 1.2445x rich, and
+    the graph held 219 WETH of free arbitrage in loops."""
+    nodes = NodeMap()
+    nodes.add_token(STETH, "stETH", 18)
+    nodes.add_token(WST, "wstETH", 18)
+    nodes.add_token(WETH, "WETH", 18)
+    nodes.merge(Conversion(ConversionKind("ERC4626"), WST, STETH, 12, 10, target=WST))
+    rate = nodes.rate(WST)
+    assert rate == 1.2
+    x, y = 1e4, 1.2e4                      # wstETH, WETH: 1.2 WETH a token
+    client = ConstantProduct(x, y)
+    spot_token = y / x * (1 - FEE)
+    arc = PoolArc(
+        id=f"{POOL}:0>1", pool=POOL, kind=ArcKind.SWAP_CRYPTO, i=0, j=1, n_coins=2,
+        token_in=WST, token_out=WETH, tau=nodes.node(WST), sigma=nodes.node(WETH),
+        a=spot_token / rate, B=1e-12, cap=math.inf, G=1e12, eps=0.0,
+        reserve_in=int(x * 1e18), decimals_in=18, decimals_out=18, tvl_usd=1e7, note="LSD")
+    nu = np.ones(nodes.n_nodes)
+    pieces, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=1e4)
+    assert abs(pieces[0].a / arc.a - 1) < 0.01, "canonical, like the arc it replaces"
+
+    dx_token = 2e3
+    psi = np.array([dx_token * rate if k == 1 else 0.0 for k in range(len(pieces))])
+    psi[0] = 0.0
+    folded, flows = collapse(pieces, psi, nu, nodes, banks, kind=ArcKind.SWAP_CRYPTO)
+    leg = folded[0]
+    out_canonical = leg.a * flows[0]
+    assert abs(out_canonical / client.chain(dx_token) - 1) < 0.005

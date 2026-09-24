@@ -134,15 +134,18 @@ def collapse(live, psi, nu, nodes, banks, kind=None):
         # `psi` is value flow: canonical = psi / nu[tau], and human is that
         # over the node-merge rate.  Getting this wrong is silent -- the arc
         # still solves, just at the wrong price (see `nodes.rescale`).
+        # The node's rates, which is what `realize` converts with; an arc's own
+        # `rate_in` is 1.0 on a Curve arc whatever its token.
         price = float(nu[arc.tau])
-        if price <= 0 or arc.rate_in <= 0:
+        rate_in, rate_out = nodes.rate(arc.token_in), nodes.rate(arc.token_out)
+        if price <= 0 or rate_in <= 0:
             continue
         dx_canonical = total / price
-        dx = dx_canonical / arc.rate_in
+        dx = dx_canonical / rate_in
         dy = output(banks[key], dx)
         # The chord, not the first tick's tangent: exact at the size realised,
         # and it is the only point this arc will be asked about.
-        arc.a = (dy * arc.rate_out) / dx_canonical if dx_canonical > 0 else 0.0
+        arc.a = (dy * rate_out) / dx_canonical if dx_canonical > 0 else 0.0
         arc.B = 0.0
         # The bank's whole capacity, *not* the amount that happened to land.
         # `verify` refuses a candidate whose `over_capacity` is set, and
@@ -150,7 +153,7 @@ def collapse(live, psi, nu, nodes, banks, kind=None):
         # pinned to the realised size is a cap the very next step steps over.
         # Measured: every v3 leg vanished from the winning candidate while the
         # solve was still routing nineteen v3 arcs through it.
-        arc.cap = capacity(banks[key]) * arc.rate_in
+        arc.cap = capacity(banks[key]) * rate_in
         # The tick arcs carry the venue and fee tier; the collapsed leg keeps
         # that and drops the tick index, which no longer means anything once
         # they are one leg.
