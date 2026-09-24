@@ -230,14 +230,22 @@ impl Ballot {
         Ok(spans(&found.into_iter().map(|(_, v)| v).collect::<Vec<_>>()))
     }
 
-    /// Each conflicting pool's arcs, the one carrying most first.
+    /// One id per port: an arc's own index, or one shared by a bank's pieces.
+    #[wasm_bindgen(js_name = portIds)]
+    pub fn port_ids(arcs: &Arcs) -> Vec<u32> {
+        candidates::port_ids(&arcs.inner).into_iter().map(|v| v as u32).collect()
+    }
+
+    /// Each conflicting pool's arcs, the port carrying most first.
     #[wasm_bindgen(js_name = repairOrder)]
     pub fn repair_order(
         pools: Vec<String>, arcs: Vec<u32>, arc_spans: Vec<u32>, psi: Vec<f64>,
+        port: Option<Vec<u32>>,
     ) -> Vec<u32> {
         let groups = named(&pools, &unflatten(&arcs, &arc_spans));
+        let port: Option<Vec<usize>> = port.map(|p| p.into_iter().map(|v| v as usize).collect());
         flatten(
-            &candidates::repair_order(&groups, &psi)
+            &candidates::repair_order(&groups, &psi, port.as_deref())
                 .into_iter()
                 .map(|(_, v)| v)
                 .collect::<Vec<_>>(),
@@ -249,17 +257,17 @@ impl Ballot {
     #[wasm_bindgen(js_name = keepOnly)]
     pub fn keep_only(
         banned: Vec<u8>, pools: Vec<String>, arcs: Vec<u32>, arc_spans: Vec<u32>,
-        rank: usize, pinned: Option<Vec<u32>>,
+        rank: usize, pinned: Option<Vec<u32>>, port: Option<Vec<u32>>,
     ) -> Vec<u8> {
-        Self::keep_only_inner(banned, pools, arcs, arc_spans, rank, pinned).0
+        Self::keep_only_inner(banned, pools, arcs, arc_spans, rank, pinned, port).0
     }
 
     #[wasm_bindgen(js_name = keepOnlyApplied)]
     pub fn keep_only_applied(
         banned: Vec<u8>, pools: Vec<String>, arcs: Vec<u32>, arc_spans: Vec<u32>,
-        rank: usize, pinned: Option<Vec<u32>>,
+        rank: usize, pinned: Option<Vec<u32>>, port: Option<Vec<u32>>,
     ) -> bool {
-        Self::keep_only_inner(banned, pools, arcs, arc_spans, rank, pinned).1
+        Self::keep_only_inner(banned, pools, arcs, arc_spans, rank, pinned, port).1
     }
 
     // -- what generation produced -----------------------------------------
@@ -493,8 +501,9 @@ impl Ballot {
 
     fn keep_only_inner(
         banned: Vec<u8>, pools: Vec<String>, arcs: Vec<u32>, arc_spans: Vec<u32>,
-        rank: usize, pinned: Option<Vec<u32>>,
+        rank: usize, pinned: Option<Vec<u32>>, port: Option<Vec<u32>>,
     ) -> (Vec<u8>, bool) {
+        let port: Option<Vec<usize>> = port.map(|p| p.into_iter().map(|v| v as usize).collect());
         let mut mask: Vec<bool> = banned.into_iter().map(|b| b != 0).collect();
         let groups = named(&pools, &unflatten(&arcs, &arc_spans));
         let pins: Vec<(usize, f64)> = pinned
@@ -502,7 +511,7 @@ impl Ballot {
             .into_iter()
             .map(|k| (k as usize, 0.0))
             .collect();
-        let applied = candidates::keep_only(&mut mask, &groups, rank, &pins);
+        let applied = candidates::keep_only(&mut mask, &groups, rank, &pins, port.as_deref());
         (mask.into_iter().map(u8::from).collect(), applied)
     }
 }

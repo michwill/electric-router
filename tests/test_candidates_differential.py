@@ -22,6 +22,7 @@ goes to the shorter route, and a direct candidate is a floor.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -39,6 +40,7 @@ from erouter.core.candidates import (
     conflicting_pools,
     generate,
     keep_only,
+    port_ids,
     repair_order,
 )
 from erouter.core.gas import GasTable
@@ -294,6 +296,59 @@ def test_repair_order_and_keep_only_agree(seed):
                 [False] * g.m, got_order, rank)
             assert got_banned == [bool(v) for v in banned]
             assert got_applied == applied
+
+
+
+def _banked(arcs):
+    """Every arc doubled into a two-piece bank of one port."""
+    out = []
+    for arc in arcs:
+        for piece in (0, 1):
+            twin = dataclasses.replace(arc, id=f"{arc.id}#{piece}", parallel=True)
+            out.append(twin)
+    return out
+
+
+def test_port_ids_agree():
+    import erouter_solve
+
+    arcs = universe(3)[1]
+    banked = _banked(arcs[:6]) + list(arcs[6:])
+    want = port_ids(banked)
+    assert list(erouter_solve.Ballot.port_ids(ported_arcs(banked))) == list(want)
+    assert want[0] == want[1] and want[2] == want[3], "a bank's pieces share a port"
+    assert want[12] == 12, "an arc outside a bank is its own port"
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_a_repair_keeps_the_whole_port_on_both_sides(seed):
+    """A bank is one port: keeping one of its pieces keeps all of them."""
+    import erouter_solve
+
+    arcs = universe(seed)[1]
+    banked = _banked(arcs)
+    port = port_ids(banked)
+    rng = np.random.default_rng(seed + 900)
+    for _ in range(10):
+        psi = rng.random(len(banked)) * (rng.random(len(banked)) > 0.3)
+        conflicts = conflicting_pools(banked, psi, 1.0)
+        if not conflicts:
+            continue
+        want_order = repair_order(conflicts, psi, port)
+        got_order = erouter_solve.Ballot.repair_order(
+            [(p, list(v)) for p, v in conflicts.items()], list(psi), [int(v) for v in port])
+        assert {p: list(v) for p, v in got_order} == {p: list(v) for p, v in want_order.items()}
+        for rank in range(4):
+            banned = np.zeros(len(banked), bool)
+            applied = keep_only(banned, want_order, rank, None, port)
+            got_banned, got_applied = erouter_solve.Ballot.keep_only(
+                [False] * len(banked), got_order, rank, None, [int(v) for v in port])
+            assert got_banned == [bool(v) for v in banned]
+            assert got_applied == applied
+            for indices in want_order.values():
+                kept = {port[k] for k in indices if not banned[k]}
+                assert len(kept) == 1, "one port survives, whole"
+                assert all(not banned[k] for k in indices if port[k] in kept)
 
 
 def test_a_mismatched_flow_is_refused_rather_than_crashing():

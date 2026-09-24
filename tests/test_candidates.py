@@ -571,6 +571,29 @@ def test_the_sub_ballot_does_not_recurse():
     assert not any(c.label.count("without ") > 1 for c in out.candidates)
 
 
+
+def test_the_sub_ballot_asks_which_pools_can_be_re_entered(monkeypatch):
+    """Without `advanceable` the sub-ballot asked the port question alone, so a
+    tricrypto entered once and left twice read as a legal element, was never
+    repaired, and was refused only at `verify`: 40 of 65 candidates on
+    CRV->WETH $5M with cryptoswap banks.  The Rust half always passed it."""
+    seen = []
+    real = candidates_module.generate
+
+    def spy(*args, **kw):
+        seen.append(kw.get("advanceable"))
+        return real(*args, **kw)
+
+    monkeypatch.setattr(candidates_module, "generate", spy)
+    arcs = [arc(k, POOL[k], 0, 1, B=1.0 + k) for k in range(4)]
+    g = build(arcs)
+    base = active_set_solve(g, 0, 1, 1.0)
+    gate = frozenset({POOL[0].lower()})
+    spy(g, arcs, 0, 1, 1.0, base, venues=["", "", "b", "b"], advanceable=gate)
+    assert len(seen) > 1, "a sub-ballot ran"
+    assert all(a == gate for a in seen)
+
+
 def test_a_restriction_that_will_not_converge_still_seeds_the_sub_ballot():
     """The incumbent's solve is a seed, not the answer.
 

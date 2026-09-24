@@ -211,26 +211,34 @@ impl Ballot {
         ))
     }
 
-    /// Each conflicting pool's arcs, the one carrying most first.
+    /// Each conflicting pool's arcs, the port carrying most first.
     #[staticmethod]
+    #[pyo3(signature = (conflicts, psi, port=None))]
     fn repair_order(
-        conflicts: Vec<(String, Vec<usize>)>, psi: Vec<f64>,
+        conflicts: Vec<(String, Vec<usize>)>, psi: Vec<f64>, port: Option<Vec<usize>>,
     ) -> Vec<(String, Vec<usize>)> {
-        candidates::repair_order(&conflicts, &psi)
+        candidates::repair_order(&conflicts, &psi, port.as_deref())
     }
 
-    /// Ban every arc of each conflicting pool but the one at `rank`.
+    /// Ban every arc of each conflicting pool but the port at `rank`.
     #[staticmethod]
-    #[pyo3(signature = (banned, ordered, rank, pinned=None))]
+    #[pyo3(signature = (banned, ordered, rank, pinned=None, port=None))]
     fn keep_only(
         banned: Vec<bool>, ordered: Vec<(String, Vec<usize>)>, rank: usize,
-        pinned: Option<Vec<usize>>,
+        pinned: Option<Vec<usize>>, port: Option<Vec<usize>>,
     ) -> (Vec<bool>, bool) {
         let mut banned = banned;
         let pins: Vec<(usize, f64)> =
             pinned.unwrap_or_default().into_iter().map(|k| (k, 0.0)).collect();
-        let applied = candidates::keep_only(&mut banned, &ordered, rank, &pins);
+        let applied =
+            candidates::keep_only(&mut banned, &ordered, rank, &pins, port.as_deref());
         (banned, applied)
+    }
+
+    /// One id per port: an arc's own index, or one shared by a bank's pieces.
+    #[staticmethod]
+    fn port_ids(arcs: PyRef<'_, Arcs>) -> Vec<usize> {
+        candidates::port_ids(&arcs.inner)
     }
 
     // -- what generation produced -----------------------------------------

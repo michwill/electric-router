@@ -212,28 +212,64 @@ fn pool_of(arcs: &[PoolArc]) -> Vec<String> {
     arcs.iter().map(|a| a.pool.to_ascii_lowercase()).collect()
 }
 
-/// Each conflicting pool's arcs, the one carrying most first.
+/// One id per port: an arc's own index, or one shared by a bank's pieces
+/// (`port_ids`). A repair that keeps "one arc" of a pool has to keep all of a
+/// bank, or the port it keeps has a fraction of its reach.
+pub fn port_ids(arcs: &[PoolArc]) -> Vec<usize> {
+    let mut first: std::collections::HashMap<(String, ArcKind, i32, i32), usize> =
+        std::collections::HashMap::new();
+    arcs.iter()
+        .enumerate()
+        .map(|(k, arc)| {
+            if arc.parallel {
+                *first.entry((arc.pool.to_ascii_lowercase(), arc.kind, arc.i, arc.j)).or_insert(k)
+            } else {
+                k
+            }
+        })
+        .collect()
+}
+
+/// `indices` cut into ports, in the order they first appear (`branches`).
+pub fn branches(indices: &[usize], port: Option<&[usize]>) -> Vec<Vec<usize>> {
+    let mut groups: Vec<(usize, Vec<usize>)> = Vec::new();
+    for &k in indices {
+        let id = port.map_or(k, |p| p[k]);
+        match groups.iter_mut().find(|(g, _)| *g == id) {
+            Some((_, v)) => v.push(k),
+            None => groups.push((id, vec![k])),
+        }
+    }
+    groups.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Each conflicting pool's arcs, the port carrying most first.
 ///
-/// Decision 3 allows a pool one arc per route, so a conflict is a choice of
+/// Decision 3 allows a pool one port per route, so a conflict is a choice of
 /// which to keep. Largest-first is the order to try them in, not the answer.
+/// A port's arcs stay together, largest first.
 pub fn repair_order(
     conflicts: &[(String, Vec<usize>)],
     psi: &[f64],
+    port: Option<&[usize]>,
 ) -> Vec<(String, Vec<usize>)> {
+    let descending = |a: &f64, b: &f64| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal);
     conflicts
         .iter()
         .map(|(pool, indices)| {
             let mut sorted = indices.clone();
             // Stable and descending, which `sorted(key=lambda k: -psi[k])` is.
-            sorted.sort_by(|&a, &b| {
-                psi[b].partial_cmp(&psi[a]).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            (pool.clone(), sorted)
+            sorted.sort_by(|&a, &b| descending(&psi[a], &psi[b]));
+            let mut ports = branches(&sorted, port);
+            // Python's `sum` over the port, in the same order.
+            let total = |arcs: &Vec<usize>| arcs.iter().fold(0.0, |acc, &k| acc + psi[k]);
+            ports.sort_by(|a, b| descending(&total(a), &total(b)));
+            (pool.clone(), ports.into_iter().flatten().collect())
         })
         .collect()
 }
 
-/// Ban every arc of each conflicting pool but the one at `rank`.
+/// Ban every arc of each conflicting pool but the port at `rank`.
 ///
 /// `rank = 0` is the greedy choice; higher ranks are the rest of the branch. A
 /// rank past the end clamps, so a caller sweeping ranks cannot fall off.
@@ -244,13 +280,15 @@ pub fn keep_only(
     ordered: &[(String, Vec<usize>)],
     rank: usize,
     pinned: &[(usize, f64)],
+    port: Option<&[usize]>,
 ) -> bool {
     let mut applied = false;
     for (_, indices) in ordered {
-        let keep = indices[rank.min(indices.len() - 1)];
+        let ports = branches(indices, port);
+        let keep = &ports[rank.min(ports.len() - 1)];
         for &k in indices {
             let is_pinned = pinned.iter().any(|&(at, _)| at == k);
-            if k != keep && !is_pinned && !banned[k] {
+            if !keep.contains(&k) && !is_pinned && !banned[k] {
                 banned[k] = true;
                 applied = true;
             }
@@ -515,6 +553,7 @@ struct Generator<'a> {
     seen: Vec<Vec<(usize, f64)>>,
     streak: Vec<(String, usize)>,
     pools: Vec<String>,
+    port: Vec<usize>,
     /// Whether a set of arc indices forms one element -- a property of the
     /// arcs rather than of the solve that landed on them, so it is asked once
     /// per set.
@@ -655,12 +694,16 @@ impl Generator<'_> {
                     return false;
                 };
                 let rank = rank + 1;
-                let deepest = ordered.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+                let deepest = ordered
+                    .iter()
+                    .map(|(_, v)| branches(v, Some(&self.port)).len())
+                    .max()
+                    .unwrap_or(0);
                 if rank >= deepest {
                     return false;
                 }
                 let mut restored = before.clone();
-                keep_only(&mut restored, &ordered, rank, pinned);
+                keep_only(&mut restored, &ordered, rank, pinned, Some(&self.port));
                 banned = restored;
                 undo = Some((before, ordered, rank));
                 continue;
@@ -674,9 +717,9 @@ impl Generator<'_> {
                 settled = true;
                 break;
             }
-            let ordered = repair_order(&conflicts, &got.psi);
+            let ordered = repair_order(&conflicts, &got.psi, Some(&self.port));
             let before = banned.clone();
-            if !keep_only(&mut banned, &ordered, 0, pinned) {
+            if !keep_only(&mut banned, &ordered, 0, pinned, Some(&self.port)) {
                 return false;
             }
             undo = Some((before, ordered, 0));
@@ -724,6 +767,7 @@ pub fn generate(
         seen: Vec::new(),
         streak: Vec::new(),
         pools: pools.clone(),
+        port: port_ids(arcs),
         elements: Vec::new(),
         warm: Vec::new(),
     };
@@ -1012,20 +1056,10 @@ pub fn generate(
         opts.advanceable.as_ref(),
     );
     if !conflicts.is_empty() {
+        let port = ballot.port.clone();
         let mut forbidden = vec![false; g.m()];
-        for (_, indices) in &conflicts {
-            let Some(&keep_index) = indices
-                .iter()
-                .reduce(|a, b| if base.psi[*b] > base.psi[*a] { b } else { a })
-            else {
-                continue;
-            };
-            for &k in indices {
-                if k != keep_index {
-                    forbidden[k] = true;
-                }
-            }
-        }
+        let ordered = repair_order(&conflicts, &base.psi, Some(&port));
+        keep_only(&mut forbidden, &ordered, 0, &[], Some(&port));
         let label = format!("repair {} pool conflict(s)", conflicts.len());
         ballot.resolve(forbidden, label, "repair", &[]);
 
@@ -1034,23 +1068,17 @@ pub fn generate(
         // not an admissible element, so a legal element was never a conflict.
         // `conflicts` is non-empty here, so `reduce` answers; the `if let`
         // keeps step 5 running if it ever stops being.
+        let width = |v: &Vec<usize>| branches(v, Some(&port)).len();
         if let Some(worst) = conflicts
             .iter()
-            .reduce(|a, b| if b.1.len() > a.1.len() { b } else { a })
+            .reduce(|a, b| if width(&b.1) > width(&a.1) { b } else { a })
             .cloned()
         {
-            let mut by_flow = worst.1.clone();
-            by_flow.sort_by(|&a, &b| {
-                base.psi[b].partial_cmp(&base.psi[a]).unwrap_or(std::cmp::Ordering::Equal)
-            });
-            for &keep_index in by_flow.iter().skip(1).take(1) {
+            let ranked = repair_order(std::slice::from_ref(&worst), &base.psi, Some(&port));
+            for keep in branches(&ranked[0].1, Some(&port)).iter().skip(1).take(1) {
                 let mut alt = vec![false; g.m()];
-                for &k in &worst.1 {
-                    if k != keep_index {
-                        alt[k] = true;
-                    }
-                }
-                let label = format!("repair alt {}", truncate(&arcs[keep_index].note, 18));
+                keep_only(&mut alt, &ranked, 1, &[], Some(&port));
+                let label = format!("repair alt {}", truncate(&arcs[keep[0]].note, 18));
                 ballot.resolve(alt, label, "repair", &[]);
             }
         }
@@ -1220,18 +1248,18 @@ mod tests {
     fn keep_only_clamps_a_rank_past_the_end() {
         let ordered = vec![("0xp".to_string(), vec![0usize, 1])];
         let mut banned = vec![false; 3];
-        assert!(keep_only(&mut banned, &ordered, 9, &[]));
+        assert!(keep_only(&mut banned, &ordered, 9, &[], None));
         // Rank 9 clamps to the last, so arc 0 is banned and arc 1 kept.
         assert_eq!(banned, vec![true, false, false]);
         // Nothing new to ban: the caller must stop rather than loop.
-        assert!(!keep_only(&mut banned, &ordered, 9, &[]));
+        assert!(!keep_only(&mut banned, &ordered, 9, &[], None));
     }
 
     #[test]
     fn a_pinned_arc_is_never_banned() {
         let ordered = vec![("0xp".to_string(), vec![0usize, 1])];
         let mut banned = vec![false; 2];
-        assert!(!keep_only(&mut banned, &ordered, 0, &[(1, 1.0)]));
+        assert!(!keep_only(&mut banned, &ordered, 0, &[(1, 1.0)], None));
         assert_eq!(banned, vec![false, false]);
     }
 

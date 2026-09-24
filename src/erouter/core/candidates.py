@@ -88,18 +88,47 @@ VENUE_PIVOTS = 600
 # which case loses.
 
 
-def repair_order(conflicts: dict, psi: np.ndarray) -> dict:
-    """Each conflicting pool's arcs, the one carrying most first.
+def port_ids(arcs) -> np.ndarray:
+    """One id per port: an arc's own index, or one shared by a bank's pieces.
 
-    Decision 3 allows a pool one arc per route, so a conflict is a choice of
-    which to keep.  Largest-first is the order to try them in, not the answer.
+    A bank is one port the solver was allowed to describe piecewise, so a
+    repair that keeps "one arc" of a pool has to keep all of it.  Keeping one
+    piece left TriCRV's CRV->WETH with an eighth of its reach.
     """
-    return {pool: sorted(indices, key=lambda k: -psi[k])
-            for pool, indices in conflicts.items()}
+    ids = np.arange(len(arcs), dtype=np.int64)
+    first: dict[tuple, int] = {}
+    for k, arc in enumerate(arcs):
+        if arc.parallel:
+            ids[k] = first.setdefault((arc.pool.lower(), arc.kind, arc.i, arc.j), k)
+    return ids
 
 
-def keep_only(banned: np.ndarray, ordered: dict, rank: int, pinned=None) -> bool:
-    """Ban every arc of each conflicting pool but the one at `rank`.
+def branches(indices, port=None) -> list[list[int]]:
+    """`indices` cut into ports, in the order they first appear."""
+    groups: dict[int, list[int]] = {}
+    for k in indices:
+        groups.setdefault(int(port[k]) if port is not None else int(k), []).append(k)
+    return list(groups.values())
+
+
+def repair_order(conflicts: dict, psi: np.ndarray, port=None) -> dict:
+    """Each conflicting pool's arcs, the port carrying most first.
+
+    Decision 3 allows a pool one port per route, so a conflict is a choice of
+    which to keep.  Largest-first is the order to try them in, not the answer.
+    A port's arcs stay together, largest first.
+    """
+    out = {}
+    for pool, indices in conflicts.items():
+        ports = branches(sorted(indices, key=lambda k: -psi[k]), port)
+        ports.sort(key=lambda arcs: -sum(psi[k] for k in arcs))
+        out[pool] = [k for arcs in ports for k in arcs]
+    return out
+
+
+def keep_only(banned: np.ndarray, ordered: dict, rank: int, pinned=None,
+              port=None) -> bool:
+    """Ban every arc of each conflicting pool but the port at `rank`.
 
     `rank = 0` is the greedy choice; higher ranks are the rest of the branch.
     A rank past the end clamps, so a caller sweeping ranks cannot fall off.
@@ -108,9 +137,10 @@ def keep_only(banned: np.ndarray, ordered: dict, rank: int, pinned=None) -> bool
     """
     applied = False
     for indices in ordered.values():
-        keep = indices[min(rank, len(indices) - 1)]
+        ports = branches(indices, port)
+        keep = set(ports[min(rank, len(ports) - 1)])
         for k in indices:
-            if k != keep and not (pinned and k in pinned) and not banned[k]:
+            if k not in keep and not (pinned and k in pinned) and not banned[k]:
                 banned[k] = True
                 applied = True
     return applied
@@ -432,6 +462,7 @@ def generate(
     #: times a quote over arcs that do not change, and lowering an address is
     #: not free at that count.
     pools = _pool_of(arcs)
+    port = port_ids(arcs)
     #: Whether a set of arc indices forms one element -- a property of the arcs
     #: rather than of the solve that landed on them, so it is asked once per
     #: set.  Above `resolve` because `resolve` reads it.
@@ -518,19 +549,19 @@ def generate(
                     return False
                 before, ordered, rank = undo
                 rank += 1
-                if rank >= max(len(v) for v in ordered.values()):
+                if rank >= max(len(branches(v, port)) for v in ordered.values()):
                     return False
                 banned = before.copy()
-                keep_only(banned, ordered, rank, pinned)
+                keep_only(banned, ordered, rank, pinned, port)
                 undo = (before, ordered, rank)
                 continue
             conflicts = conflicting_pools(arcs, solution.psi, pools=pools,
                                           cache=elements, advanceable=advanceable)
             if not conflicts:
                 break
-            ordered = repair_order(conflicts, solution.psi)
+            ordered = repair_order(conflicts, solution.psi, port)
             before = banned.copy()
-            if not keep_only(banned, ordered, 0, pinned):
+            if not keep_only(banned, ordered, 0, pinned, port):
                 return False
             undo = (before, ordered, 0)
         else:
@@ -808,11 +839,8 @@ def generate(
                                   cache=elements, advanceable=advanceable)
     if conflicts:
         forbidden = np.zeros(g.m, bool)
-        for indices in conflicts.values():
-            keep_index = max(indices, key=lambda k: base.psi[k])
-            for k in indices:
-                if k != keep_index:
-                    forbidden[k] = True
+        ordered = repair_order(conflicts, base.psi, port)
+        keep_only(forbidden, ordered, 0, None, port)
         resolve(forbidden, f"repair {len(conflicts)} pool conflict(s)", "repair")
 
         # There is no "re-enter this pool anyway" candidate any more, and none
@@ -821,13 +849,12 @@ def generate(
         # never had to be repaired around.  The gnosis split -- swap through the
         # 3pool, then deposit into it -- is a 1-in-2-out element and survives
         # the base solve untouched.
-        worst = max(conflicts.items(), key=lambda kv: len(kv[1]))
-        for keep_index in sorted(worst[1], key=lambda k: -base.psi[k])[1:2]:
+        worst = max(conflicts.items(), key=lambda kv: len(branches(kv[1], port)))
+        ranked = repair_order({worst[0]: worst[1]}, base.psi, port)
+        for keep in branches(ranked[worst[0]], port)[1:2]:
             alt = np.zeros(g.m, bool)
-            for k in worst[1]:
-                if k != keep_index:
-                    alt[k] = True
-            resolve(alt, f"repair alt {arcs[keep_index].note[:18]}", "repair")
+            keep_only(alt, ranked, 1, None, port)
+            resolve(alt, f"repair alt {arcs[keep[0]].note[:18]}", "repair")
 
     # 5. drop each active *leg* in turn (§6.2)
     #
@@ -911,6 +938,7 @@ def generate(
                     sub, [arcs[int(k)] for k in idx], src, dst, Psi, sub_base,
                     max_candidates=budget, top_k=top_k, gas_floor=gas_floor,
                     max_legs=max_legs, element_split=element_split,
+                    advanceable=advanceable,
                 )
                 out.solves += inner.solves
                 out.pivots += inner.pivots
