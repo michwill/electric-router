@@ -16,6 +16,7 @@ from erouter.core.realize import (
     check_one_arc_per_pool,
     realize,
     topological_nodes,
+    trim_to_capacity,
 )
 from erouter.core.types import ArcKind, PoolArc
 
@@ -230,6 +231,62 @@ def test_a_leg_past_its_arc_cap_is_visible_on_the_route():
     assert over is not None, "900 through an arc capped at 40 has to be visible"
     assert over.target == POOL_A
     assert over.amount_in == 900 * 10**6
+
+
+
+def _two_way(nodes, *, cap_a=math.inf, cap_b=math.inf, psi=(30.0, 970.0)):
+    first = arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, cap=cap_a)
+    second = arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1, cap=cap_b)
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    return realize(
+        [first, second], np.array(psi), nu, nodes,
+        src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6,
+    )
+
+
+def test_a_resplit_past_a_cap_is_cut_back_to_it():
+    """The leg keeps its cap's worth and its sibling takes the rest."""
+    nodes = base_nodes()
+    route = _two_way(nodes, cap_a=40.0)
+    route.legs[0].leg = replace(route.legs[0].leg, bps=9000)
+    _forward_simulate(route, nodes)
+    assert route.over_capacity is not None
+
+    assert trim_to_capacity(route, nodes)
+    assert route.over_capacity is None
+    capped = next(rl for rl in route.legs if rl.target == POOL_A)
+    assert 39 * 10**6 < capped.amount_in <= 40 * 10**6
+    assert sum(rl.amount_in for rl in route.legs) == 1000 * 10**6, "nothing stranded"
+    assert route.legs[-1].leg.bps == 0
+
+
+def test_a_remainder_leg_past_its_cap_hands_the_remainder_on():
+    """The last leg takes whatever is left, so cutting it means another leg
+    has to become the one that does."""
+    nodes = base_nodes()
+    route = _two_way(nodes, cap_b=40.0, psi=(970.0, 30.0))
+    # `realize` puts a capped leg first; a scout's split need not.
+    route.legs.sort(key=lambda rl: rl.target != POOL_A)
+    route.legs[0].leg = replace(route.legs[0].leg, bps=100)
+    route.legs[1].leg = replace(route.legs[1].leg, bps=0)
+    _forward_simulate(route, nodes)
+    assert route.over_capacity is not None
+
+    assert trim_to_capacity(route, nodes)
+    assert route.over_capacity is None
+    assert route.legs[0].target == POOL_B and route.legs[0].leg.bps == 400
+    assert route.legs[-1].target == POOL_A and route.legs[-1].leg.bps == 0
+    assert sum(rl.amount_in for rl in route.legs) == 1000 * 10**6
+
+
+def test_a_slot_with_nowhere_to_go_cannot_be_trimmed():
+    nodes = base_nodes()
+    route = _two_way(nodes, cap_a=40.0, cap_b=40.0, psi=(20.0, 20.0))
+    route.legs[0].leg = replace(route.legs[0].leg, bps=9000)
+    _forward_simulate(route, nodes)
+    assert not trim_to_capacity(route, nodes)
 
 
 def test_the_share_shown_follows_a_retuned_split():
@@ -797,3 +854,26 @@ def test_an_uncalibrated_arc_is_not_reported_as_modelled():
             src_token=CRVUSD, dst_token=WETH, amount_in=10**18,
         )
         assert route.legs[0].modelled is expected
+
+
+def test_a_candidate_over_its_cap_is_put_up_trimmed():
+    """`verify` refused these outright, and the scout can only re-split what
+    survives: on CRV->WETH $5M the topologies worth +30% never reached it."""
+    from erouter.core.candidates import Candidate, CandidateSet
+    from erouter.core.verify import realize_candidates
+
+    nodes = base_nodes()
+    arcs = [arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, cap=40.0),
+            arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1)]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    ballot = CandidateSet([Candidate("over", np.array([900.0, 100.0]), True)])
+    realize_candidates(ballot, arcs, nu, nodes, src_token=USDC, dst_token=WETH,
+                       amount_in=1000 * 10**6)
+
+    candidate = ballot.candidates[0]
+    assert candidate.status == "ready"
+    assert candidate.route.over_capacity is None
+    capped = next(rl for rl in candidate.route.legs if rl.target == POOL_A)
+    assert capped.amount_in <= 40 * 10**6

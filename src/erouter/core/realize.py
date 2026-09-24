@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -898,6 +898,57 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
         balances[src] = available - take
         balances[realized.leg.dst_slot] = balances.get(realized.leg.dst_slot, 0) + produced
     return balances.get(route.dst_slot, 0)
+
+
+def trim_to_capacity(route: RealizedRoute, nodes: NodeMap) -> bool:
+    """Re-weight every leg over its cap down to it, in place.
+
+    A re-split works from quotes, and a view does not refuse what a pool will,
+    so it can hand a leg more than its arc takes.  Discarding the split for
+    that threw away +2,945 bp on CRV->WETH $5M.  So the leg is cut to its cap
+    and the share it frees goes to its siblings -- the legs leaving the same
+    slot -- in proportion to what they carry.  A leg once cut is never raised
+    again, which bounds the loop.  False when a slot has nowhere left to put
+    its flow; the route is then partly re-weighted and the caller reverts it.
+    """
+    held: set[int] = set()
+    for _ in range(4 * len(route.legs) + 1):
+        route.modelled_out = _forward_simulate(route, nodes)
+        over = route.over_capacity
+        if over is None:
+            return True
+        if not over.share_of_node > 0:
+            return False
+        base = over.amount_in / over.share_of_node
+        cut = int(min(over.cap_in / base, 1.0) * BPS)
+        if cut < 1:
+            return False
+        held.add(id(over))
+        slot = over.leg.src_slot
+        at = [k for k, rl in enumerate(route.legs) if rl.leg.src_slot == slot]
+        group = [route.legs[k] for k in at]
+        kept = [rl for rl in group if id(rl) in held]
+        free = [rl for rl in group if id(rl) not in held]
+        pinned = {id(rl): (cut if rl is over else rl.leg.bps) for rl in kept}
+        room = BPS - sum(pinned.values())
+        if not free or room < 1:
+            return False
+        weight = sum(rl.amount_in for rl in free)
+        # The cut legs first with fixed shares, then the rest, the last taking
+        # whatever is left so the slot is emptied rather than left with dust.
+        for rl in kept:
+            rl.leg = replace(rl.leg, bps=pinned[id(rl)])
+        for n, rl in enumerate(free):
+            if n == len(free) - 1:
+                bps = 0
+            elif weight > 0:
+                bps = int(room * rl.amount_in / weight)
+            else:
+                bps = room // len(free)
+            rl.leg = replace(rl.leg, bps=bps)
+        for k, rl in zip(at, kept + free, strict=True):
+            route.legs[k] = rl
+    return False
 
 
 # Paths are display-only, and there can be exponentially many of them: the walk

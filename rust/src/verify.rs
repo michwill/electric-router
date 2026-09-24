@@ -21,7 +21,7 @@
 use crate::candidates::{Candidate, CandidateSet};
 use crate::gas::{leg_gas, plan_gas, shape_cost, value_per_gas, GasTable};
 use crate::nodes::NodeMap;
-use crate::realize::{check_one_arc_per_pool, realize, RealizedRoute};
+use crate::realize::{check_one_arc_per_pool, realize, trim_to_capacity, RealizedRoute};
 use crate::risk::{expected_value, RiskTable, REVERT_COST_BP};
 use crate::types::{ArcKind, PoolArc};
 use ruint::aliases::U256;
@@ -93,7 +93,7 @@ pub fn realize_candidates(
         }
         let members: Vec<PoolArc> = active.iter().map(|&k| arcs[k].clone()).collect();
         let flows: Vec<f64> = active.iter().map(|&k| candidate.psi[k]).collect();
-        let route = match realize(
+        let mut route = match realize(
             &members, &flows, nu, nodes, src_token, dst_token, amount_in, potentials,
         ) {
             Ok(route) => route,
@@ -120,6 +120,11 @@ pub fn realize_candidates(
             candidate.status = "too_long".into();
             candidate.note = format!("{} legs > limit {max_legs}", route.legs.len());
             continue;
+        }
+        // Cut an over-cap split back rather than lose the topology; what
+        // cannot be cut is still refused by `verify`, with the leg named.
+        if route.over_capacity().is_some() {
+            trim_to_capacity(&mut route, nodes);
         }
         candidate.route = Some(route);
         candidate.status = "ready".into();

@@ -349,6 +349,24 @@ impl Route {
         self.inner.pools_used()
     }
 
+    /// Set each leg's `bps` and re-walk the amounts, as a re-split does.
+    fn reweight(&mut self, bps: Vec<i32>, nodes: PyRef<'_, NodeMap>) -> PyResult<()> {
+        if bps.len() != self.inner.legs.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{} bps for {} legs", bps.len(), self.inner.legs.len())));
+        }
+        for (rl, b) in self.inner.legs.iter_mut().zip(bps) {
+            rl.leg.bps = b;
+        }
+        self.inner.modelled_out = realize::forward_simulate(&mut self.inner, &nodes.inner);
+        Ok(())
+    }
+
+    /// Cut every leg over its cap back to it; `False` when a slot cannot.
+    fn trim_to_capacity(&mut self, nodes: PyRef<'_, NodeMap>) -> bool {
+        realize::trim_to_capacity(&mut self.inner, &nodes.inner)
+    }
+
     /// The index of the first leg over its cap, or `None`.
     fn over_capacity(&self) -> Option<usize> {
         let target = self.inner.over_capacity()?;

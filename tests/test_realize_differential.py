@@ -24,6 +24,7 @@ still renders, and it reverts on chain or quotes the wrong split.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import numpy as np
@@ -32,6 +33,7 @@ import pytest
 from erouter.core.accel import available
 from erouter.core.nodes import Conversion, ConversionKind, NodeMap
 from erouter.core.realize import (
+    _forward_simulate,
     check_one_arc_per_pool,
     conversion_route,
     max_theta,
@@ -40,6 +42,7 @@ from erouter.core.realize import (
     route_conductance,
     topological_nodes,
     total_loss_bp,
+    trim_to_capacity,
 )
 from erouter.core.types import ArcKind, PoolArc
 
@@ -427,3 +430,34 @@ def test_total_loss_bp_agrees():
     for price in (3000e-12, 1.0, 0.0, -1.0):
         one, two = got.total_loss_bp(price), total_loss_bp(want, price)
         assert (one == two) or (math.isnan(one) and math.isnan(two)), price
+
+
+@pytest.mark.parametrize("caps, bps, fits", [
+    ((0.05, math.inf, math.inf), (9000, 500, 0), True),    # an explicit leg over
+    ((math.inf, math.inf, 0.05), (100, 100, 0), True),     # the remainder over
+    ((0.05, 0.05, math.inf), (6000, 3000, 0), True),       # two cut, one takes it all
+    ((0.05, 0.05, 0.05), (6000, 3000, 0), False),          # nowhere to go
+])
+def test_a_trimmed_resplit_agrees(caps, bps, fits):
+    """Cutting a re-split back to its caps: same bps, same order, same verdict."""
+    reference, ported = build_nodes()
+    pools = (POOL_A, POOL_B, POOL_C)
+    arcs = [make_arc(pool, WETH, USDC, reference, a=3000.0 - k, B=1e-3 * (k + 1), cap=cap)
+            for k, (pool, cap) in enumerate(zip(pools, caps, strict=True))]
+    want, got = both(arcs, [0.5, 0.3, 0.2], np.ones(reference.n_nodes),
+                     reference, ported, src=WETH, dst=USDC, amount_in=10**18)
+    assert len(want.legs) == 3
+    same_route(want, got)
+    # The remainder is whichever leg `realize` put last.
+    split = [0 if n == 2 else bps[pools.index(rl.target)] for n, rl in enumerate(want.legs)]
+    for rl, b in zip(want.legs, split, strict=True):
+        rl.leg = dataclasses.replace(rl.leg, bps=b)
+    _forward_simulate(want, reference)
+    got.reweight(split, ported)
+    assert want.over_capacity is not None and got.over_capacity() is not None
+
+    assert trim_to_capacity(want, reference) is fits
+    assert got.trim_to_capacity(ported) is fits
+    same_route(want, got)
+    if fits:
+        assert want.over_capacity is None and got.over_capacity() is None

@@ -27,7 +27,7 @@ from .candidates import Candidate, CandidateSet
 from .gas import GasTable, leg_gas, plan_gas, shape_cost, value_per_gas
 from .nodes import NodeMap
 from .quoter import MAX_LEGS, MAX_SLOTS, QuoterClient
-from .realize import RealizationError, check_one_arc_per_pool, realize
+from .realize import RealizationError, check_one_arc_per_pool, realize, trim_to_capacity
 from .risk import REVERT_COST_BP, RiskTable, expected_value
 from .types import ArcKind, PoolArc
 
@@ -139,6 +139,11 @@ def realize_candidates(
             candidate.status = "too_long"
             candidate.note = f"{len(route.legs)} legs > limit {max_legs}"
             continue
+        # Cut an over-cap split back rather than lose the topology: the scout
+        # can only re-split what survives here.  What cannot be cut is still
+        # refused by `verify`, with the leg named.
+        if route.over_capacity is not None:
+            trim_to_capacity(route, nodes)
         candidate.route = route
         candidate.status = "ready"
 

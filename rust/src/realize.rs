@@ -29,6 +29,9 @@ use ruint::aliases::U256;
 use std::fmt;
 
 pub const BPS: i64 = 10_000;
+/// `realize.py`'s `CAP_TOLERANCE`: how far past its cap a leg may be carried
+/// before the candidate is refused.
+pub const CAP_TOLERANCE: f64 = 0.01;
 
 /// A branch carrying less than this share of what leaves its node cannot
 /// change the answer, but it can still destroy it: measured on rETH->WETH, a
@@ -222,7 +225,7 @@ impl RealizedRoute {
     /// Read rather than stored, so it describes the amounts as they stand
     /// after whatever last re-weighted them.
     pub fn over_capacity(&self) -> Option<&RealizedLeg> {
-        self.legs.iter().find(|rl| over(rl.amount_in, rl.cap_in))
+        self.legs.iter().find(|rl| over(rl.amount_in, rl.cap_in * (1.0 + CAP_TOLERANCE)))
     }
 
     fn slot_of(&self, token: &str) -> Option<usize> {
@@ -1140,6 +1143,82 @@ pub fn forward_simulate(route: &mut RealizedRoute, nodes: &NodeMap) -> U256 {
         set(&mut balances, realized.leg.dst_slot, landed);
     }
     get(&balances, route.dst_slot as i32)
+}
+
+/// Re-weight every leg over its cap down to it, in place (`trim_to_capacity`).
+///
+/// The leg is cut to its cap and the share it frees goes to its siblings --
+/// the legs leaving the same slot -- in proportion to what they carry. A leg
+/// once cut is never raised again, which bounds the loop. `false` when a slot
+/// has nowhere left to put its flow.
+pub fn trim_to_capacity(route: &mut RealizedRoute, nodes: &NodeMap) -> bool {
+    let one = U256::from(1u8);
+    // Rides with each leg as its group is reordered.
+    let mut held = vec![false; route.legs.len()];
+    for _ in 0..4 * route.legs.len() + 1 {
+        route.modelled_out = forward_simulate(route, nodes);
+        let Some(k) = route.over_capacity().and_then(|t| {
+            route.legs.iter().position(|rl| std::ptr::eq(rl, t))
+        }) else {
+            return true;
+        };
+        let (share, amount, cap) = {
+            let rl = &route.legs[k];
+            (rl.share_of_node, rl.amount_in, rl.cap_in)
+        };
+        if !(share > 0.0) {
+            return false;
+        }
+        let base = divided(amount, one) / share;
+        let cut = ((cap / base).min(1.0) * BPS as f64) as i64;
+        if cut < 1 {
+            return false;
+        }
+        held[k] = true;
+        let slot = route.legs[k].leg.src_slot;
+        let at: Vec<usize> = (0..route.legs.len())
+            .filter(|&p| route.legs[p].leg.src_slot == slot)
+            .collect();
+        let kept: Vec<usize> = at.iter().copied().filter(|&p| held[p]).collect();
+        let free: Vec<usize> = at.iter().copied().filter(|&p| !held[p]).collect();
+        let pinned: Vec<i64> = kept
+            .iter()
+            .map(|&p| if p == k { cut } else { route.legs[p].leg.bps as i64 })
+            .collect();
+        let room = BPS - pinned.iter().sum::<i64>();
+        if free.is_empty() || room < 1 {
+            return false;
+        }
+        let weight = free.iter().fold(U256::ZERO, |acc, &p| acc + route.legs[p].amount_in);
+        // The cut legs first with fixed shares, then the rest, the last taking
+        // whatever is left so the slot is emptied rather than left with dust.
+        let mut bps: Vec<i64> = pinned;
+        for (n, &p) in free.iter().enumerate() {
+            bps.push(if n == free.len() - 1 {
+                0
+            } else if !weight.is_zero() {
+                let scaled = U256::from(room as u64).saturating_mul(route.legs[p].amount_in);
+                divided(scaled, weight) as i64
+            } else {
+                room / free.len() as i64
+            });
+        }
+        let order: Vec<usize> = kept.iter().chain(free.iter()).copied().collect();
+        let moved: Vec<(RealizedLeg, bool)> = order
+            .iter()
+            .zip(bps)
+            .map(|(&p, b)| {
+                let mut rl = route.legs[p].clone();
+                rl.leg.bps = b as i32;
+                (rl, held[p])
+            })
+            .collect();
+        for (&p, (rl, h)) in at.iter().zip(moved) {
+            route.legs[p] = rl;
+            held[p] = h;
+        }
+    }
+    false
 }
 
 /// `a * b // c`, with the product taken in 512 bits.

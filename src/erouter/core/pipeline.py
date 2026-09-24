@@ -56,6 +56,7 @@ from .realize import (
     prune_dust,
     realize,
     route_conductance,
+    trim_to_capacity,
 )
 from .refit import RefitReport, refit
 from .risk import REVERT_COST_BP, RiskTable
@@ -1903,15 +1904,16 @@ def _scout_wider(
             table=gas_table)
 
     incumbent_legs = [rl.leg for rl in result.route.legs]
-    best_value = net(incumbent, 0, incumbent_legs) if entrants else incumbent
-    best_found, best_gross = None, incumbent
+    incumbent_value = net(incumbent, 0, incumbent_legs) if entrants else incumbent
+    best_value = incumbent_value
+    best_found, best_gross, best_bar = None, incumbent, incumbent
     for (found, bar), value in zip(proposals, quoted, strict=True):
         value = float(value)
         if value <= bar:
             continue  # still has to clear the topology margin, on gross
         scored = net(value, found.index, found.legs)
         if scored > best_value:
-            best_value, best_found, best_gross = scored, found, value
+            best_value, best_found, best_gross, best_bar = scored, found, value, bar
     if best_found is None:
         return
 
@@ -1922,12 +1924,25 @@ def _scout_wider(
         realized.leg = leg
     candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)
     # The re-split works from quotes, which do not refuse what the pool will.
+    # Cut the leg back to its cap and re-quote before giving the split up.
     if candidate.route.over_capacity is not None:
-        for realized, leg in zip(candidate.route.legs, held, strict=True):
-            realized.leg = leg
-        candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)
         result.counters["scout_over_capacity"] = 1
-        return
+        order = list(candidate.route.legs)
+        trimmed = trim_to_capacity(candidate.route, nodes)
+        value = 0.0
+        if trimmed:
+            legs = [rl.leg for rl in candidate.route.legs]
+            value = float(client.quote_routes(
+                [legs], [amount_in], [candidate.route.dst_slot])[0])
+        if (not trimmed or value <= best_bar
+                or net(value, best_found.index, legs) <= incumbent_value):
+            candidate.route.legs[:] = order
+            for realized, leg in zip(candidate.route.legs, held, strict=True):
+                realized.leg = leg
+            candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)
+            return
+        result.counters["scout_trimmed"] = 1
+        best_value = value
     candidate.verified_out = int(best_value)
     # The split pass runs on this route next and would sample the very arcs
     # the scout just sampled.  Hand them over: same block, same ladders, and
@@ -1985,17 +2000,29 @@ def _optimise_split(
     # The modelled per-leg amounts described the old split; re-walk so the
     # diagram and the JSON report the flow that is actually being quoted.
     route.modelled_out = _forward_simulate(route, nodes)
+    after = report.after
     if route.over_capacity is not None:
-        for realized, leg in zip(route.legs, held, strict=True):
-            realized.leg = leg
-        route.modelled_out = _forward_simulate(route, nodes)
+        # As in `_scout_wider`: cut back to the cap and re-quote first.
         result.counters["split_over_capacity"] = 1
-        return
-    result.verified_out = report.after
+        order = list(route.legs)
+        after = 0
+        if trim_to_capacity(route, nodes):
+            after = int(client.quote_routes(
+                [[rl.leg for rl in route.legs]], [amount_in], [route.dst_slot])[0])
+        if after <= (result.verified_out or 0):
+            route.legs[:] = order
+            for realized, leg in zip(route.legs, held, strict=True):
+                realized.leg = leg
+            route.modelled_out = _forward_simulate(route, nodes)
+            return
+        result.counters["split_trimmed"] = 1
+    before = result.verified_out or 0
+    result.verified_out = after
     if result.winner is not None:
         result.winner.route = route
-        result.winner.verified_out = report.after
-    result.counters["split_gain_bp"] = round(report.gain_bp, 2)
+        result.winner.verified_out = after
+    result.counters["split_gain_bp"] = round(
+        (after / before - 1) * 1e4 if before else report.gain_bp, 2)
 
 
 #: **The model-free candidates carry `psi = 1.0` per arc, and that is fine.**

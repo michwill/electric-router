@@ -400,6 +400,25 @@ impl Route {
         self.inner.pools_used()
     }
 
+    /// Set each leg's `bps` and re-walk the amounts, as a re-split does.
+    pub fn reweight(&mut self, bps: Vec<i32>, nodes: &NodeMap) -> Result<(), JsValue> {
+        if bps.len() != self.inner.legs.len() {
+            return Err(JsError::new(&format!(
+                "{} bps for {} legs", bps.len(), self.inner.legs.len())).into());
+        }
+        for (rl, b) in self.inner.legs.iter_mut().zip(bps) {
+            rl.leg.bps = b;
+        }
+        self.inner.modelled_out = realize::forward_simulate(&mut self.inner, &nodes.inner);
+        Ok(())
+    }
+
+    /// Cut every leg over its cap back to it; `false` when a slot cannot.
+    #[wasm_bindgen(js_name = trimToCapacity)]
+    pub fn trim_to_capacity(&mut self, nodes: &NodeMap) -> bool {
+        realize::trim_to_capacity(&mut self.inner, &nodes.inner)
+    }
+
     /// The index of the first leg over its cap, or `undefined`.
     #[wasm_bindgen(js_name = overCapacity)]
     pub fn over_capacity(&self) -> Option<usize> {
