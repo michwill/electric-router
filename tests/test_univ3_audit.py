@@ -133,3 +133,43 @@ def test_the_tolerance_is_the_one_the_measurements_support():
     """Every v3 leg of a winning route in the 21-case sweep landed inside
     1.7 bp of `QuoterV2`, and most inside 0.01."""
     assert 1.7 < AUDIT_TOLERANCE_BP < 50
+
+
+class Batching(Transport):
+    """A node that also takes a batch; counts round trips of each kind."""
+
+    def __init__(self, dy: int) -> None:
+        super().__init__(dy)
+        self.batches = 0
+
+    def fetch_multi(self, payloads):
+        self.batches += 1
+        return [self.fetch(method, params) for method, params in payloads]
+
+
+class BankedClient(Client):
+    """A client whose bank answers the v3 leg, as `teach` makes it."""
+
+    def __init__(self, bank_out: int) -> None:
+        self.bank_out = bank_out
+
+    def _quote_leg(self, leg, dx):
+        return self.bank_out
+
+
+def test_an_agreeing_bank_is_audited_in_one_round_trip():
+    """Ten sequential `eth_call`s were 1.2 s of a 2.1 s quote; a bank that
+    agrees with its pool needs none of them, only one batch."""
+    pool_set = one_v3_candidate(12_345)
+    transport = Batching(12_345)
+    rows = audit(pool_set, BankedClient(12_345), transport, POOLS, block=1)
+    assert rows[0][4] is True and rows[0][2] == 12_345
+    assert transport.batches == 1 and transport.calls == 1   # the batch's one call, no walk
+
+
+def test_a_disagreeing_bank_falls_back_to_the_walk_and_is_refused():
+    pool_set = one_v3_candidate(12_345)
+    transport = Batching(11_000)
+    rows = audit(pool_set, BankedClient(12_345), transport, POOLS, block=1)
+    assert transport.batches == 1 and transport.calls == 2   # the batch, then the walk
+    assert rows[0][4] is False and pool_set.candidates[0].verified_out is None

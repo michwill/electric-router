@@ -88,28 +88,88 @@ QUOTER_V2 = "0x61fFE014bA17989E743c5F6cB21bF9697530B21e"
 AUDIT_TOLERANCE_BP = 5.0
 
 
+def _quoter_call(leg, dx: int, pools: dict, block: int):
+    """The `eth_call` asking QuoterV2 what `leg` pays for `dx`, or `None`."""
+    from ..core.codec import encode_call
+
+    row = pools.get(leg.target.lower())
+    if row is None or dx <= 0:
+        return None
+    token_in, token_out, fee = row[0], row[1], row[2]
+    if leg.i == 1:
+        token_in, token_out = token_out, token_in
+    data = encode_call(
+        "quoteExactInputSingle((address,address,uint256,uint24,uint160))",
+        (token_in, token_out, dx, fee, 0))
+    return "eth_call", [{"to": QUOTER_V2, "data": "0x" + data.hex()}, hex(block)]
+
+
+def _quoted(raw) -> int:
+    from ..core.codec import decode
+
+    return decode(["uint256", "uint160", "uint32", "uint256"], bytes.fromhex(raw[2:]))[0]
+
+
 def _truth_leg(transport, pools: dict, block: int, inner):
     """`inner`, except that a v3 leg is priced by the pool's own quoter."""
-    from ..core.codec import decode, encode_call
 
     def quote_leg(leg, dx: int) -> int:
         if leg.kind is not ArcKind.SWAP_UNIV3:
             return inner(leg, dx)
-        row = pools.get(leg.target.lower())
-        if row is None or dx <= 0:
+        call = _quoter_call(leg, dx, pools, block)
+        if call is None:
             raise LegUnquotable(f"{leg.target}: no quoter row to audit against")
-        token_in, token_out, fee = row[0], row[1], row[2]
-        if leg.i == 1:
-            token_in, token_out = token_out, token_in
-        data = encode_call(
-            "quoteExactInputSingle((address,address,uint256,uint24,uint160))",
-            (token_in, token_out, dx, fee, 0))
-        raw = transport.fetch("eth_call", [
-            {"to": QUOTER_V2, "data": "0x" + data.hex()}, hex(block)])
-        return decode(["uint256", "uint160", "uint32", "uint256"],
-                      bytes.fromhex(raw[2:]))[0]
+        return _quoted(transport.fetch(*call))
 
     return quote_leg
+
+
+#: How far the v3 legs' banks may sit from their pools' quoter, summed, for the
+#: batched audit to stand: 0.1 bp, so the walk it returns is within 0.1 bp of
+#: the sequential one and fifty times inside `AUDIT_TOLERANCE_BP`.  Measured on
+#: a 10-leg route, legs agreed to 1e-11..3e-9 and one small WBTC leg to 1.1e-6:
+#: the pool's integer rounding against the bank's float.
+BATCH_AGREE = 1e-5
+
+
+def _batched_truth(legs, route, client, transport, pools: dict, block: int):
+    """The truth walk in one round trip, when every bank agrees with its pool.
+
+    The truth walk is sequential, one `eth_call` per v3 leg: 10 of them, 1.2 s
+    of a 2.1 s quote.  Where the banks agree with their pools, the walk with
+    the banks standing in is the truth walk, so walk it and check every v3 leg
+    against QuoterV2 in one batch.  `None` if they disagree by more than
+    `BATCH_AGREE`; the caller then walks it the slow way.
+    """
+    from ..core.walk import walk_route
+
+    fetch_multi = getattr(transport, "fetch_multi", None)
+    bank = getattr(client, "_quote_leg", None)
+    if fetch_multi is None or bank is None:
+        return None
+    stateful = client._stateful_leg(legs)
+    asked: list[tuple] = []
+
+    def quote_leg(leg, dx: int) -> int:
+        if leg.kind is not ArcKind.SWAP_UNIV3:
+            return stateful(leg, dx)
+        out = bank(leg, dx)
+        asked.append((leg, dx, out))
+        return out
+
+    walked = walk_route(legs, route.amount_in, route.dst_slot, quote_leg)
+    calls = [_quoter_call(leg, dx, pools, block) for leg, dx, _ in asked]
+    if not walked or not asked or any(c is None for c in calls):
+        return None
+    drift = 0.0
+    for (_, _, out), raw in zip(asked, fetch_multi(calls), strict=True):
+        if not isinstance(raw, str):
+            return None
+        truth = _quoted(raw)
+        if truth <= 0:
+            return None
+        drift += abs(out / truth - 1)
+    return walked if drift <= BATCH_AGREE else None
 
 
 def audit(pool_set, client, transport, pools: dict, *, block: int,
@@ -150,11 +210,16 @@ def audit(pool_set, client, transport, pools: dict, *, block: int,
             return done                      # nothing of ours in it to doubt
         ranked = int(winner.verified_out or 0)
         try:
-            truth = walk_route(
-                legs, winner.route.amount_in, winner.route.dst_slot,
-                _truth_leg(transport, pools, block, client._stateful_leg(legs)))
+            truth = _batched_truth(legs, winner.route, client, transport, pools, block)
         except Exception:
-            truth = 0
+            truth = None
+        if truth is None:
+            try:
+                truth = walk_route(
+                    legs, winner.route.amount_in, winner.route.dst_slot,
+                    _truth_leg(transport, pools, block, client._stateful_leg(legs)))
+            except Exception:
+                truth = 0
         bp = (ranked / truth - 1) * 1e4 if truth else float("inf")
         kept = bool(truth) and abs(bp) <= tolerance_bp
         done.append((winner.label, ranked, truth, bp, kept))
