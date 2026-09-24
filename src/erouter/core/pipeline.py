@@ -22,6 +22,7 @@ from typing import NamedTuple
 import numpy as np
 
 from . import accel as _accel
+from . import circuit as _circuit
 from .bank import collapse as fold
 from .calibrate import DRIFT_TOL, Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
@@ -1299,18 +1300,27 @@ def _quote(
             return first, (total / g.g_scale) - first
 
         with clock("candidates"):
-            pool_set = generate(
-                g, arcs, src_node, dst_node, Psi_scaled, report.solution,
-                base_certificate=report.certificate, seed=seed,
-                max_candidates=max_candidates, gas_floor=gas_floor,
-                max_legs=max_legs,
-                element_split=element_split if splitter is not None else None,
-                advanceable=advanceable,
-                # §6: one candidate per venue, dropping it.  Costs nothing on a
-                # universe of one venue, which is every universe until something
-                # declares otherwise.
-                venues=[arc.venue for arc in arcs],
-            )
+            if CIRCUIT:
+                pool_set = _circuit.candidates(
+                    g, arcs, nu, src_node, dst_node, Psi_scaled,
+                    advanceable=advanceable, leg_cost_bp=leg_cost_bp,
+                    per_gas=value_per_gas(
+                        gas_price_wei, dst_wei_per_eth / 10 ** nodes.decimals(dst_token)),
+                    gas_table=gas_table,
+                )
+            else:
+                pool_set = generate(
+                    g, arcs, src_node, dst_node, Psi_scaled, report.solution,
+                    base_certificate=report.certificate, seed=seed,
+                    max_candidates=max_candidates, gas_floor=gas_floor,
+                    max_legs=max_legs,
+                    element_split=element_split if splitter is not None else None,
+                    advanceable=advanceable,
+                    # §6: one candidate per venue, dropping it.  Costs nothing on a
+                    # universe of one venue, which is every universe until
+                    # something declares otherwise.
+                    venues=[arc.venue for arc in arcs],
+                )
             for candidate in pool_set.candidates:
                 candidate.psi = candidate.psi * g.g_scale
             del scaled
@@ -2423,6 +2433,11 @@ def _dst_per_eth(nodes: NodeMap, nu: np.ndarray, dst_token: str) -> float:
             return 0.0
         return weth_value / dst_value * 10 ** nodes.decimals(dst_token)
     return 0.0
+
+
+#: Generate candidates by solving the routing problem as a nonlinear circuit
+#: (`core/circuit.py`) instead of the ballot.  Off while it is being measured.
+CIRCUIT = False
 
 
 #: Cryptoswap arcs as banks rather than one parabola each.  A module switch so a
