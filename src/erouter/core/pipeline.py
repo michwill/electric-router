@@ -22,8 +22,10 @@ from typing import NamedTuple
 import numpy as np
 
 from . import accel as _accel
+from .bank import collapse as fold
 from .calibrate import DRIFT_TOL, Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
+from .cryptobank import bank_arcs
 from .gas import GasTable, min_useful_flow, shape_cost, value_per_gas
 from .graph import MAX_CONDITION, PATHOLOGICAL_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
@@ -1076,6 +1078,20 @@ def _quote(
             result.counters["arcs_refined"] = refined
             arcs, g = _assemble(arcs, nu, Psi, nodes, src_node, dst_node, result,
                                  max_spread=max_spread)
+            g, Psi_scaled = scale(g, Psi)
+            seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
+    # --- cryptoswap banks ------------------------------------------------
+    # One parabola per cryptoswap arc caps out past its peak, and at size that
+    # is most of the pool: see `core/cryptobank.py`.  After the refine, because
+    # the bank is sized to this trade and `Psi` is only known here.
+    if CRYPTO_BANKS:
+        with clock("crypto_banks"):
+            banked, crypto_banks = bank_arcs(arcs, nu, nodes, client, Psi)
+        if crypto_banks:
+            result.counters["crypto_banks"] = len(crypto_banks)
+            collapse = _with_crypto_banks(collapse, crypto_banks)
+            arcs, g = _assemble(banked, nu, Psi, nodes, src_node, dst_node, result,
+                                max_spread=max_spread)
             g, Psi_scaled = scale(g, Psi)
             seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
     result.arcs = arcs
@@ -2391,6 +2407,19 @@ def _dst_per_eth(nodes: NodeMap, nu: np.ndarray, dst_token: str) -> float:
             return 0.0
         return weth_value / dst_value * 10 ** nodes.decimals(dst_token)
     return 0.0
+
+
+#: Cryptoswap arcs as banks rather than one parabola each.  A module switch so a
+#: measurement can hold everything else still and toggle this alone.
+CRYPTO_BANKS = True
+
+
+def _with_crypto_banks(collapse, banks):
+    """The venue's `collapse`, after the cryptoswap banks are folded too."""
+    def both(arcs, psi, nu, nodes):
+        arcs, psi = fold(arcs, psi, nu, nodes, banks, kind=ArcKind.SWAP_CRYPTO)
+        return collapse(arcs, psi, nu, nodes) if collapse is not None else (arcs, psi)
+    return both
 
 
 def _assemble(
