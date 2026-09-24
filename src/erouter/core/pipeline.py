@@ -1434,10 +1434,13 @@ def _quote(
             # already copies them for.
             finalists = [winner]
             if FINALISTS > 1:
+                # By verify's rank, which is net of what a route costs to
+                # execute, not by gross output.
                 finalists += sorted(
                     (c for c in pool_set.candidates
                      if c.ok and c.route and c is not winner),
-                    key=lambda c: -int(c.verified_out or 0))[:FINALISTS - 1]
+                    key=lambda c: (c.rank if c.rank is not None else len(pool_set),
+                                   -int(c.verified_out or 0)))[:FINALISTS - 1]
             result.counters["finalists"] = len(finalists)
             spare = ([copy.copy(a) for a in arcs], copy.deepcopy(g)) \
                 if len(finalists) > 1 else None
@@ -1459,8 +1462,21 @@ def _quote(
                     dst_wei_per_eth=dst_wei_per_eth)
                 refined.append((int(result.verified_out or 0), result.route,
                                 result.winner))
+            # Net, as verify ranked them and as the scout adopts.  On gross
+            # output a 15-leg route won over a 4-leg one 0.16 bp behind it;
+            # net, CRV->WETH and USDC->WETH $10k gain 1.8-7.4 bp at two blocks.
+            per_gas = value_per_gas(gas_price_wei, dst_wei_per_eth)
+
+            def net(entry) -> float:
+                out, route_, _ = entry
+                if route_ is None:
+                    return float(out)
+                return out - shape_cost(
+                    [rl.leg for rl in route_.legs], [rl.is_conversion for rl in route_.legs],
+                    value=out, leg_cost_bp=leg_cost_bp, per_gas=per_gas, table=gas_table)
+
             first = refined[0][0]
-            best_out, best_route, best_winner = max(refined, key=lambda r: r[0])
+            best_out, best_route, best_winner = max(refined, key=net)
             if best_out > first:
                 result.counters["finalist_gain_bp"] = round(
                     (best_out / max(first, 1) - 1) * 1e4, 3)
