@@ -112,7 +112,7 @@ impl Candidate {
         Self::new(label, psi, false, reason, "direct", n_arcs, 0.0)
     }
 
-    fn new(label: String, psi: Vec<f64>, certificate: bool, reason: &str,
+    pub(crate) fn new(label: String, psi: Vec<f64>, certificate: bool, reason: &str,
            kind: &str, n_arcs: usize, modelled_loss: f64) -> Self {
         Self {
             label, psi, certificate,

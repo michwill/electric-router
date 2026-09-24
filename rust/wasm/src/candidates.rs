@@ -95,6 +95,37 @@ pub struct Ballot {
 
 #[wasm_bindgen]
 impl Ballot {
+    /// The circuit's ballot of two (`circuit.candidates`): Newton on node
+    /// prices, repaired for pools used on two ports, and once more pruned of
+    /// ports earning less than their leg. `gas` is each arc's gas as the
+    /// executor's table charges it; `perGas` one unit of gas in canonical
+    /// destination units.
+    #[allow(clippy::too_many_arguments)]
+    pub fn circuit(
+        arcs: &Arcs, n_nodes: usize, g_scale: f64, nu: Vec<f64>, src: usize, dst: usize,
+        psi_total: f64, advanceable: Option<Vec<String>>, leg_cost_bp: Option<f64>,
+        per_gas: Option<f64>, gas: Option<Vec<f64>>,
+    ) -> Result<Ballot, JsValue> {
+        let m = arcs.inner.len();
+        if nu.len() != n_nodes || src >= n_nodes || dst >= n_nodes
+            || arcs.inner.iter().any(|a| a.tau >= n_nodes || a.sigma >= n_nodes) {
+            return Err(JsError::new("circuit: nu, src, dst or an arc's node is out of range").into());
+        }
+        let gas = gas.unwrap_or_else(|| vec![0.0; m]);
+        if gas.len() != m {
+            return Err(JsError::new(&format!("circuit: gas has {} entries for {m} arcs", gas.len())).into());
+        }
+        let opts = erouter_solve::circuit::CircuitOptions {
+            advanceable: advanceable.map(|v| v.into_iter().map(|p| p.to_ascii_lowercase()).collect()),
+            leg_cost_bp: leg_cost_bp.unwrap_or(0.0),
+            per_gas: per_gas.unwrap_or(0.0),
+            gas,
+        };
+        let inner = erouter_solve::circuit::candidates(
+            &arcs.inner, n_nodes, g_scale, &nu, src, dst, psi_total, &opts);
+        Ok(Ballot { inner })
+    }
+
     /// Generate the ballot: every cheap re-solve worth putting to a quote.
     ///
     /// `elementSplit(a, b, psiA, psiB)` is handed the two arcs' *indices* and

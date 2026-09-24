@@ -24,6 +24,7 @@
 
 pub mod candidates;
 pub mod chol;
+pub mod circuit;
 pub mod codec;
 pub mod curves;
 pub mod gas;
@@ -46,6 +47,7 @@ pub mod pools;
 pub mod lu;
 pub mod slippage;
 pub mod solve;
+pub mod sparse;
 
 #[cfg(feature = "python")]
 mod candidates_py;

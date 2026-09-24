@@ -152,6 +152,38 @@ impl Ballot {
         Ok(Ballot { inner })
     }
 
+    /// The circuit's ballot of two (`circuit.candidates`). `gas` is each
+    /// arc's gas as verify's table charges its leg; `per_gas` one unit of gas
+    /// in canonical destination units.
+    #[staticmethod]
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (arcs, n_nodes, g_scale, nu, src, dst, psi_total, *,
+                        advanceable=None, leg_cost_bp=0.0, per_gas=0.0, gas=None))]
+    fn circuit(
+        arcs: PyRef<'_, Arcs>, n_nodes: usize, g_scale: f64, nu: Vec<f64>, src: usize,
+        dst: usize, psi_total: f64, advanceable: Option<Vec<String>>, leg_cost_bp: f64,
+        per_gas: f64, gas: Option<Vec<f64>>,
+    ) -> PyResult<Ballot> {
+        let m = arcs.inner.len();
+        if nu.len() != n_nodes || src >= n_nodes || dst >= n_nodes
+            || arcs.inner.iter().any(|a| a.tau >= n_nodes || a.sigma >= n_nodes) {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "circuit: nu, src, dst or an arc's node is out of range"));
+        }
+        let gas = gas.unwrap_or_else(|| vec![0.0; m]);
+        if gas.len() != m {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("circuit: gas has {} entries for {m} arcs", gas.len())));
+        }
+        let opts = crate::circuit::CircuitOptions {
+            advanceable: advanceable.map(|v| v.into_iter().map(|p| p.to_ascii_lowercase()).collect()),
+            leg_cost_bp, per_gas, gas,
+        };
+        let inner = crate::circuit::candidates(
+            &arcs.inner, n_nodes, g_scale, &nu, src, dst, psi_total, &opts);
+        Ok(Ballot { inner })
+    }
+
     fn __len__(&self) -> usize {
         self.inner.candidates.len()
     }

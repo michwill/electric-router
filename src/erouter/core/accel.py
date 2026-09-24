@@ -346,3 +346,28 @@ def ballot(g, arcs, src, dst, psi_total, base_psi, *, base_certificate,
         venues=list(venues) if venues else None,
         advanceable=None if advanceable is None else sorted(advanceable),
     )
+
+
+def circuit(arcs, n_nodes, g_scale, nu, src, dst, psi_total, *, advanceable=None,
+            leg_cost_bp=0.0, per_gas=0.0, gas=None):
+    """`circuit.candidates`, in Rust.  `None` when it cannot run.
+
+    The circuit reads each arc's `a`, `B`, `cap`, kind, pool and ports, not the
+    graph's derived `G` and `eps`, so only the arcs and the node prices cross.
+    """
+    if _rust is None:
+        return None
+    built = _rust.Arcs()
+    for arc in arcs:
+        built.add(arc.id, arc.pool, int(arc.kind), arc.i, arc.j, arc.n_coins,
+                  arc.token_in, arc.token_out, arc.tau, arc.sigma,
+                  arc.a, arc.B, arc.cap, arc.G, arc.eps, arc.reserve_in,
+                  arc.decimals_in, arc.tvl_usd, arc.gamma_live, arc.note,
+                  arc.calib_delta, arc.decimals_out, arc.parallel, arc.venue)
+    return _rust.Ballot.circuit(
+        built, int(n_nodes), float(g_scale), [float(v) for v in nu], int(src), int(dst),
+        float(psi_total),
+        advanceable=None if advanceable is None else sorted(advanceable),
+        leg_cost_bp=float(leg_cost_bp), per_gas=float(per_gas),
+        gas=None if gas is None else [float(v) for v in gas],
+    )

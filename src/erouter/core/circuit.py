@@ -32,14 +32,17 @@ counted twice in multi-port pools, which the ballot had been hiding.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import accel as _accel
 from .candidates import (
     MIN_FLOW_FRACTION,
     Candidate,
     CandidateSet,
+    _from_ballot,
     conflicting_pools,
     keep_only,
     port_ids,
@@ -48,6 +51,9 @@ from .candidates import (
 from .gas import STATIC
 from .realize import cancel_cycles, prune_dust
 from .types import ArcKind
+
+#: Opt-in on the same switch as the rest of the port.
+_ACCEL_ON = os.environ.get("EROUTER_ACCEL", "") == "1"
 
 ARMIJO = 1e-4
 MAX_ITER = 60             # Newton iterations per barrier stage
@@ -144,7 +150,15 @@ def respond(dev: Devices, nu: np.ndarray, t: float, d0=None):
             break
         da, ca = d[act], cap[act]
         f1, f2 = _slopes(dev, act, da)
-        F = nu_out[act] * f1 - nu_in[act] + t / da - t / (ca - da)
+        pay, leak, wall = nu_out[act] * f1, t / da, t / (ca - da)
+        F = pay - nu_in[act] + leak - wall
+        # Zero to rounding: F is a difference of terms of order one, and in the
+        # leak regime its derivative is t/d small, so a step test at 1e-14
+        # alone could never pass and every such arc ran to INNER.
+        exact_ = np.abs(F) <= 8.0 * np.finfo(float).eps * (np.abs(pay) + nu_in[act] + leak + wall)
+        act, da, ca, f1, f2, F = (x[~exact_] for x in (act, da, ca, f1, f2, F))
+        if act.size == 0:
+            break
         dF = nu_out[act] * f2 - t / da ** 2 - t / (ca - da) ** 2
         up = F > 0
         lo[act] = np.where(up, da, lo[act])
@@ -275,12 +289,19 @@ def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
     no rent -- the prune alone cost 39 bp on USDC->WBTC $5M -- so the quoter
     chooses, as it does for the ballot.
     """
+    table = gas_table or STATIC
+    if _ACCEL_ON and _accel.available():
+        got = _accel.circuit(
+            arcs, g.n_nodes, g.g_scale, nu, src, dst, Psi, advanceable=advanceable,
+            leg_cost_bp=leg_cost_bp, per_gas=per_gas,
+            gas=[table.gas(arc.kind, arc.pool, arc.i, arc.j) for arc in arcs])
+        if got is not None:
+            return _from_ballot(got)
     V = Psi * g.g_scale
     Q = V / nu[src]
     nu0 = nu / nu[dst]
     dev = devices(arcs, g.n_nodes, nu0, Q * nu0[src])
     port = port_ids(arcs)
-    table = gas_table or STATIC
     out = CandidateSet()
 
     def flow(res):
