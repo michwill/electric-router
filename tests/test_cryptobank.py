@@ -6,6 +6,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 
 from erouter.core import cryptobank
 from erouter.core.bank import capacity, collapse, output
@@ -134,3 +135,30 @@ def test_a_merged_token_is_banked_in_canonical_units():
     leg = folded[0]
     out_canonical = leg.a * flows[0]
     assert abs(out_canonical / client.chain(dx_token) - 1) < 0.005
+
+
+class Amplified(ConstantProduct):
+    """Flat and then a wall: `p L tanh(dx / L)`, an amplified pool's shape."""
+
+    def __init__(self, p: float, L: float):
+        super().__init__(1e12, 1e12)
+        self.p, self.L = p, L
+
+    def chain(self, dx: float) -> float:
+        return self.p * self.L * math.tanh(dx / self.L)
+
+
+def test_a_piece_never_prices_above_the_pools_own_rate_at_zero():
+    """Three points on a curve that is flat and then meets a wall give a slope
+    at zero above the pool's: rETH/ETH's first piece was 10.5% rich."""
+    nodes, arc, nu, _ = setup(2e6, 256.0)
+    # The first piece spans 1.2L, where the three-point slope at zero is
+    # 9.5% above the pool's.
+    client = Amplified(p=1.0, L=2e5 / 1.2)
+    _, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=1.28e6)
+    bank = banks[(POOL, 2, 1)]
+    width = bank[0].cap
+    assert width == pytest.approx(1.2 * client.L)
+    assert bank[0].a <= client.p * (1 + 1e-6)
+    paid = bank[0].a * width - 0.5 * bank[0].B * width * width
+    assert abs(paid / client.chain(width) - 1) < 1e-6

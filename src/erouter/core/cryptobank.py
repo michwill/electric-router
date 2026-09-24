@@ -38,6 +38,8 @@ REACH = 1.25
 #: quadratic: a bank of it is parallel near-identical arcs, which is the
 #: degeneracy above, and it buys no fidelity.
 MIN_IMPACT = 0.02
+#: Where the zero-size rate is read, as a share of the first piece.
+SPOT_PROBE = 1e-4
 #: Nor past this multiple of the pool's input reserve.  A grid sized to the
 #: trade put a small twocrypto pool's first probe at 26x its reserve; the
 #: invariant refused it, the pool kept an uncapped near-linear quadratic, and
@@ -81,7 +83,7 @@ def bank_arcs(arcs, nu, nodes, client, Psi: float):
     probes = []
     for _, arc, _, ends, mids in plans:
         scale = 10 ** arc.decimals_in
-        for x in (*ends, *mids):
+        for x in (ends[0] * SPOT_PROBE, *ends, *mids):
             probes.append(Probe(pool=arc.pool, kind=arc.kind, i=arc.i, j=arc.j,
                                 n=arc.n_coins, dx=max(1, int(x * scale))))
     quotes = iter(client.probe(probes))
@@ -90,12 +92,22 @@ def bank_arcs(arcs, nu, nodes, client, Psi: float):
     replace: dict[int, list] = {}
     for k, arc, starts, ends, mids in plans:
         out_scale = 10 ** arc.decimals_out
+        tiny = ends[0] * SPOT_PROBE
+        raw_tiny = max(1, int(tiny * 10 ** arc.decimals_in))
+        at_spot = next(quotes)
         at_end = [next(quotes) for _ in ends]
         at_mid = [next(quotes) for _ in mids]
 
         bank, pieces = [], []
         previous_end = 0.0
-        exit_price = math.inf
+        # The pool's own rate at zero size caps the first piece, as each exit
+        # caps the next.  Three points on a curve that is flat and then meets
+        # a wall -- an amplified pool, a piece reaching half its reserve -- give
+        # a slope at zero well above the pool's: rETH/ETH's first piece was
+        # 10.5% rich, and 20.7 WETH of free arbitrage ran through such pieces.
+        f_spot = _human(at_spot, out_scale)
+        exit_price = (f_spot / (raw_tiny / 10 ** arc.decimals_in)
+                      if f_spot is not None else math.inf)
         for seg, (lo, hi) in enumerate(zip(starts, ends, strict=True)):
             f_hi = _human(at_end[seg], out_scale)
             f_mid = _human(at_mid[seg], out_scale)
@@ -109,7 +121,12 @@ def bank_arcs(arcs, nu, nodes, client, Psi: float):
             # Concave by construction for a real pool; noise at the far end is
             # not, and a segment priced above its predecessor's exit would fill
             # before it and undo the ordering the bank relies on.
-            a = min(a, exit_price)
+            if a > exit_price:
+                # Keep what the segment pays at its end: the secant from the
+                # capped slope, rather than the fitted curvature of a slope
+                # it no longer has.
+                a = exit_price
+                B = 2.0 * (a * width - F1) / (width * width)
             if not (a > 0.0):
                 break
             B = max(B, a * 1e-9 / width)    # finite conductance, never zero
