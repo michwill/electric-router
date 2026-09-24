@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from ..core.types import ArcKind
 from ..core.walk import LegUnquotable
-from .univ3 import Arc, output
+from .univ3 import Arc, exact_output
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,10 +34,14 @@ class Bank:
     decimals_out: int
 
     def quote(self, dx: int) -> int:
-        """Raw wei in, raw wei out -- the shape `walk_route` chains."""
+        """Raw wei in, raw wei out -- the shape `walk_route` chains.
+
+        Exact rather than the arcs' water-fill: this is the number a route is
+        ranked on, and the audit refuses what the pool's quoter disagrees with.
+        """
         if dx <= 0:
             return 0
-        human = output(self.arcs, dx / 10**self.decimals_in)
+        human = exact_output(self.arcs, dx / 10**self.decimals_in)
         return int(human * 10**self.decimals_out)
 
 

@@ -17,7 +17,16 @@ import math
 
 import pytest
 
-from erouter.venues.univ3 import Arc, PoolState, Tick, arcs, capacity, output
+from erouter.venues.univ3 import (
+    Arc,
+    PoolState,
+    Tick,
+    arcs,
+    capacity,
+    exact_output,
+    output,
+)
+from erouter.venues.univ3_client import Bank
 
 Q96 = 1 << 96
 
@@ -123,3 +132,66 @@ def test_the_fee_is_taken_on_the_way_in():
 def test_an_empty_bank_and_a_zero_trade_are_answers_not_errors():
     assert output([], 10.0) == 0.0
     assert output([Arc(a=1.0, B=1e-9, cap=5.0)], 0.0) == 0.0
+
+
+
+def _walk_up(state: PoolState, ticks: list[Tick], dx: float) -> float:
+    """The reference the other way: token1 in, the price rising, fee on input."""
+    keep = 1.0 - state.fee / 1e6
+    sqrt_p = state.sqrt_price_x96 / Q96
+    liquidity = float(state.liquidity)
+    out, left = 0.0, dx * 10**state.decimals1 * keep
+    for tick in sorted((t for t in ticks if t.index > state.tick), key=lambda t: t.index):
+        sqrt_next = math.pow(1.0001, tick.index / 2.0)
+        room = liquidity * (sqrt_next - sqrt_p)
+        take = min(left, room)
+        if take > 0:
+            out += liquidity * (1.0 / sqrt_p - 1.0 / (sqrt_p + take / liquidity))
+            left -= take
+        if left <= 0:
+            break
+        sqrt_p = sqrt_next
+        liquidity += tick.liquidity_net
+    return out / 10**state.decimals0
+
+
+def _sparse(fee: int = 0):
+    """Four initialized ticks 4,000 apart: every range moves the price 49%.
+
+    Where liquidity is thin, one range spans a long way, and that is where the
+    tangent quadratic gives out -- a real CRV/WETH leg lost 2,490 bp to it.
+    """
+    spacing, liquidity = 4000, 10**22
+    below = [Tick(index=-k * spacing, liquidity_net=liquidity // 8) for k in range(1, 5)]
+    above = [Tick(index=k * spacing, liquidity_net=-liquidity // 8) for k in range(1, 5)]
+    state = PoolState(sqrt_price_x96=Q96, tick=0, liquidity=liquidity,
+                      tick_spacing=spacing, fee=fee, decimals0=18, decimals1=18)
+    return state, below + above
+
+
+@pytest.mark.parametrize("fee", [0, 3000])
+def test_the_exact_fill_follows_a_wide_range_where_the_arc_law_cannot(fee):
+    state, ticks = _sparse(fee)
+    for zero_for_one, reference in ((True, _walk_fee), (False, _walk_up)):
+        bank = arcs(state, ticks, zero_for_one=zero_for_one, max_ticks=16)
+        room = capacity(bank)
+        for share in (0.001, 0.2, 0.6, 0.99):
+            dx = room * share
+            want = reference(state, ticks, dx)
+            got = exact_output(bank, dx)
+            assert abs(got / want - 1) < 1e-9, (zero_for_one, share)
+        # The arc law is still what the solver sees, and it is not this.
+        assert output(bank, room * 0.99) < reference(state, ticks, room * 0.99) * 0.97
+
+
+def test_the_number_a_route_is_ranked_on_is_the_exact_one():
+    state, ticks = _sparse(3000)
+    bank = arcs(state, ticks, zero_for_one=True, max_ticks=16)
+    priced = Bank(bank, 18, 18)
+    dx = capacity(bank) * 0.8
+    assert priced.quote(int(dx * 1e18)) / 1e18 == pytest.approx(_walk_fee(state, ticks, dx), rel=1e-9)
+
+
+def _walk_fee(state: PoolState, ticks: list[Tick], dx: float) -> float:
+    keep = 1.0 - state.fee / 1e6
+    return _walk(state, ticks, dx * keep)

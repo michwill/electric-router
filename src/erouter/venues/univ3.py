@@ -128,6 +128,28 @@ def arcs(
     return out
 
 
+def exact_output(bank: list[Arc], dx: float) -> float:
+    """What the pool pays for `dx`, tick by tick, in human units.
+
+    Within a range v3 is constant product on virtual reserves, and an arc's own
+    fields already say which: `dy = a dx / (1 + k dx)` with `k = B / 2a`, since
+    `B` is that curve's curvature at the range's start.  The arc law is its
+    tangent quadratic, which undershoots a range the trade moves a long way
+    through: -2,490 bp on a v3 CRV/WETH leg at $5M, where one initialized range
+    carried the price down 70%.  Ranges are consumed nearest first, and a trade
+    past the last one is paid for what the bank holds.
+    """
+    got, left = 0.0, dx
+    for arc in bank:
+        if left <= 0:
+            break
+        take = min(left, arc.cap)
+        k = arc.B / (2.0 * arc.a) if arc.a > 0 else 0.0
+        got += arc.a * take / (1.0 + k * take)
+        left -= take
+    return got
+
+
 # --------------------------------------------------------------- the router
 
 #: The smallest share of a bank's own capacity worth an arc.
