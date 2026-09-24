@@ -64,7 +64,7 @@ from .realize import (
 from .refit import RefitReport, refit
 from .risk import REVERT_COST_BP, RiskTable
 from .seed import k_shortest_paths, seed_subgraph
-from .solve import SolveReport, active_set_solve, solve
+from .solve import Solution, SolveReport, active_set_solve, solve
 from .split import ScoutResult as ScoutSplits
 from .split import optimise as optimise_splits
 from .split import scout as scout_splits
@@ -783,6 +783,8 @@ def route(
     `B` as a floored one.  All of them default to what a Curve-only universe
     wants, which is nothing.
     """
+    if CIRCUIT and not CIRCUIT_REFINE:
+        refit_rounds, optimise_split = 0, False
     result = RouteResult(
         src_token=src_token.lower(),
         dst_token=dst_token.lower(),
@@ -897,7 +899,9 @@ def route(
         )
 
     with_venue = one_quote(result, late_arcs)
-    if not late_arcs or not incumbent_guard:
+    # An exact solve over more pools cannot do worse than one over fewer, so
+    # the circuit does not need the guard below -- which is four more quotes.
+    if not late_arcs or not incumbent_guard or (CIRCUIT and not CIRCUIT_GUARD):
         return with_venue
 
     # --- adding liquidity must never cost the answer ---------------------
@@ -1110,11 +1114,25 @@ def _quote(
         # (universe, block), never of a previous query.
         best_path = k_shortest_paths(g, src_node, dst_node, k=1)
         warm_start = np.array(best_path[0]) if best_path else None
+    # In circuit mode the circuit's own flow is the base solve: it decides what
+    # `size_check` re-fits and what the report says, and its ballot is reused
+    # at the candidates stage unless the graph is rebuilt in between.
+    circuit_ballot = None
+    advanceable = frozenset(getattr(client, "reentrant_pools", ()) or ())
+    circuit_kw = {
+        "advanceable": advanceable, "leg_cost_bp": leg_cost_bp, "gas_table": gas_table,
+        "per_gas": value_per_gas(gas_price_wei, _dst_per_eth(nodes, nu, dst_token)
+                                 / 10 ** nodes.decimals(dst_token)),
+    }
     with clock("solve"):
-        report = solve(
-            g, src_node, dst_node, Psi_scaled, seed=seed,
-            max_rounds=max_rounds, A0=warm_start,
-        )
+        if CIRCUIT:
+            report, circuit_ballot = _circuit_report(
+                g, arcs, nu, src_node, dst_node, Psi_scaled, circuit_kw)
+        else:
+            report = solve(
+                g, src_node, dst_node, Psi_scaled, seed=seed,
+                max_rounds=max_rounds, A0=warm_start,
+            )
     result.report = report
     if not report.solution.feasible:
         raise RoutingError(report.reason or "no feasible route")
@@ -1169,8 +1187,12 @@ def _quote(
                                  max_spread=max_spread)
                     g, Psi_scaled = scale(g, Psi)
                     seed = seed_subgraph(g, src_node, dst_node, k=seed_k)
-                    report = solve(g, src_node, dst_node, Psi_scaled, seed=seed,
-                                   max_rounds=max_rounds)
+                    if CIRCUIT:
+                        report, circuit_ballot = _circuit_report(
+                            g, arcs, nu, src_node, dst_node, Psi_scaled, circuit_kw)
+                    else:
+                        report = solve(g, src_node, dst_node, Psi_scaled, seed=seed,
+                                       max_rounds=max_rounds)
                     if report.solution.feasible:
                         result.report = report
                         psi = report.solution.psi * g.g_scale
@@ -1204,7 +1226,11 @@ def _quote(
     residual = _kcl_residual(g, psi, src_node, dst_node, Psi)
     result.counters["kcl_residual"] = residual
     tolerance = _kcl_tolerance(Psi, g.g_scale)
-    if residual > tolerance:
+    # The circuit conserves tokens, to 1e-9 of the trade, and states its flow
+    # as each arc's input value: a node's arrivals then exceed its departures
+    # by the fees and impact paid upstream -- 15% at $5M -- which is not a leak.
+    # This invariant is the Laplacian's, whose value flow is a current.
+    if residual > tolerance and not CIRCUIT:
         # Before failing, ask what accuracy the solve could have had.  A
         # Laplacian of condition number `k` yields relative error about
         # `k * eps`, and the graph tolerates `k` up to MAX_CONDITION = 1e12 --
@@ -1259,7 +1285,6 @@ def _quote(
     # goes to the chain, whose static calls price the second leg against a pool
     # the first one already moved and hand back a number that beats every
     # honest candidate.
-    advanceable = frozenset(getattr(client, "reentrant_pools", ()) or ())
     conflicts = check_one_arc_per_pool(result.route, advanceable)
     if conflicts:
         result.warnings.append(
@@ -1301,13 +1326,8 @@ def _quote(
 
         with clock("candidates"):
             if CIRCUIT:
-                pool_set = _circuit.candidates(
-                    g, arcs, nu, src_node, dst_node, Psi_scaled,
-                    advanceable=advanceable, leg_cost_bp=leg_cost_bp,
-                    per_gas=value_per_gas(
-                        gas_price_wei, dst_wei_per_eth / 10 ** nodes.decimals(dst_token)),
-                    gas_table=gas_table,
-                )
+                pool_set = circuit_ballot or _circuit.candidates(
+                    g, arcs, nu, src_node, dst_node, Psi_scaled, **circuit_kw)
             else:
                 pool_set = generate(
                     g, arcs, src_node, dst_node, Psi_scaled, report.solution,
@@ -1443,14 +1463,15 @@ def _quote(
             # at one route's realised flows, which is the same leak `route`
             # already copies them for.
             finalists = [winner]
-            if FINALISTS > 1:
+            shortlist = CIRCUIT_FINALISTS if CIRCUIT else FINALISTS
+            if shortlist > 1:
                 # By verify's rank, which is net of what a route costs to
                 # execute, not by gross output.
                 finalists += sorted(
                     (c for c in pool_set.candidates
                      if c.ok and c.route and c is not winner),
                     key=lambda c: (c.rank if c.rank is not None else len(pool_set),
-                                   -int(c.verified_out or 0)))[:FINALISTS - 1]
+                                   -int(c.verified_out or 0)))[:shortlist - 1]
             result.counters["finalists"] = len(finalists)
             spare = ([copy.copy(a) for a in arcs], copy.deepcopy(g)) \
                 if len(finalists) > 1 else None
@@ -2438,6 +2459,11 @@ def _dst_per_eth(nodes: NodeMap, nu: np.ndarray, dst_token: str) -> float:
 #: Generate candidates by solving the routing problem as a nonlinear circuit
 #: (`core/circuit.py`) instead of the ballot.  Off while it is being measured.
 CIRCUIT = False
+#: In circuit mode: whether to run the leave-one-out venue guard, how many of
+#: its candidates to refine, and whether to refine at all (refit, scout, split).
+CIRCUIT_GUARD = False
+CIRCUIT_FINALISTS = 2
+CIRCUIT_REFINE = True
 
 
 #: Cryptoswap arcs as banks rather than one parabola each.  A module switch so a
@@ -2451,6 +2477,27 @@ def _with_crypto_banks(collapse, banks):
         arcs, psi = fold(arcs, psi, nu, nodes, banks, kind=ArcKind.SWAP_CRYPTO)
         return collapse(arcs, psi, nu, nodes) if collapse is not None else (arcs, psi)
     return both
+
+
+def _circuit_report(g, arcs, nu, src_node, dst_node, Psi_scaled, circuit_kw):
+    """The circuit's ballot, and its first candidate as a base `SolveReport`.
+
+    The first candidate is the solve repaired for Decision 3 and not pruned:
+    the flow the base solve used to stand for.  Its potentials are left at
+    zero -- they only label the diagram, and the circuit's node prices are a
+    different quantity from the Laplacian's.
+    """
+    ballot = _circuit.candidates(g, arcs, nu, src_node, dst_node, Psi_scaled, **circuit_kw)
+    psi = ballot.candidates[0].psi.copy() if ballot.candidates else np.zeros(g.m)
+    live = psi > 0
+    solution = Solution(
+        psi=psi, u=np.zeros(g.n_nodes), A=live, U=np.zeros(g.m, bool),
+        psi_upper=np.zeros(g.m), rho=np.zeros(g.m), pivots=ballot.pivots,
+        feasible=bool(live.any()), reason="" if live.any() else "the circuit routed nothing",
+    )
+    report = SolveReport(solution, certificate=False, cg_rounds=0,
+                         in_S=np.ones(g.m, bool), reason=solution.reason)
+    return report, ballot
 
 
 def _assemble(
