@@ -25,6 +25,9 @@ pub const TOL: f64 = 1e-9;
 pub const CYCLE_PATIENCE: u32 = 3;
 /// `seed.py`'s `MAX_HOPS`, since the repair borrows that search.
 pub const RECONNECT_HOPS: usize = 8;
+/// `solve.py`'s `RECONNECT_RESETS`: times a disconnected source may clear
+/// `readmitted` and reconnect again.
+pub const RECONNECT_RESETS: u32 = 3;
 
 /// Why a solve stopped, in the same words the Python uses.
 /// How many times a cycling basis is perturbed before the patience above
@@ -472,6 +475,26 @@ fn polish(
     }
 }
 
+/// The iterate a finishing phase started from, kept so it can be handed back.
+struct Unfinished {
+    psi: Vec<f64>,
+    u: Vec<f64>,
+    active: Vec<bool>,
+    upper: Vec<bool>,
+    psi_upper: Vec<f64>,
+    rho: Vec<f64>,
+    comp: Vec<bool>,
+    keep: Vec<usize>,
+    index: Vec<usize>,
+}
+
+/// Pivots a finishing phase may spend: an arc re-enters at most once through
+/// reconnect and once through the reseed, so four passes over the arcs bound
+/// it. Mirrors `core/solve.py::_finish_budget`, which says why not `|A| + |U|`.
+fn finish_budget(active: &[bool], _upper: &[bool]) -> u32 {
+    (4 * active.len() + 1) as u32
+}
+
 pub fn active_set_solve(
     arcs: &Arcs,
     src: usize,
@@ -539,6 +562,7 @@ pub fn active_set_solve(
     let mut use_bland = false;
     let mut cycles = 0u32;
     let mut reseeded = false;
+    let mut resets = 0u32;
     // Built on the first cut and kept; most solves never take one.
     let mut adjacency: Option<crate::seed::Adjacency> = None;
     // One turn back per arc, which is what bounds the repair below.
@@ -568,7 +592,30 @@ pub fn active_set_solve(
     // else in the rebuild test can tell that it factorises a different matrix.
     let mut basis_dirty = false;
 
-    for _ in 0..opt.maxit {
+    // An early exit used to return the last Laplacian iterate as it stood, which
+    // conserves flow but can carry anything on an arc about to be pinned. So a
+    // solve out of budget first finishes: drop negatives, pin over-cap arcs,
+    // admit nothing, until the flow is inside its box. Mirrors `core/solve.py`.
+    let mut finishing = false;
+    // What the solve held when finishing began: finishing must never do worse
+    // than stopping did. Mirrors `core/solve.py`.
+    let mut unfinished: Option<Unfinished> = None;
+    let mut limit = opt.maxit;
+    let mut steps: u32 = 0;
+    loop {
+        if steps >= limit {
+            if opt.partial_ok && !finishing {
+                finishing = true;
+                limit = steps + finish_budget(&active, &upper);
+                unfinished = Some(Unfinished {
+                    psi: psi.clone(), u: u.clone(), active: active.clone(), upper: upper.clone(),
+                    psi_upper: psi_upper.clone(), rho: rho.clone(), comp: comp.clone(),
+                    keep: keep.clone(), index: index.clone() });
+                continue;
+            }
+            break;
+        }
+        steps += 1;
         mark.lap(&mut timings[6]);
         component_of(dst, arcs, &active, &mut comp);
         if !comp[src] && psi_total != 0.0 {
@@ -627,6 +674,23 @@ pub fn active_set_solve(
                 basis_dirty = true;
                 continue;
             }
+            if resets < RECONNECT_RESETS && readmitted.iter().any(|&r| r) {
+                readmitted.iter_mut().for_each(|r| *r = false);
+                resets += 1;
+                continue;
+            }
+if let Some(mut s) = unfinished.take() {
+                polish(arcs, &mut s.u, &mut s.psi, &s_hat, &eps, &s.active, &s.upper,
+                       &s.psi_upper, &s.comp, &s.keep, &s.index, n, m, opt.tol, REFINE_ROUNDS);
+                for v in s.psi.iter_mut() {
+                    if v.abs() < opt.tol {
+                        *v = 0.0;
+                    }
+                }
+                return Solution {
+                    psi: s.psi, u: s.u, active: s.active, upper: s.upper, psi_upper: s.psi_upper,
+                    rho: s.rho, pivots, stop: Stop::Partial, chol_failures, keep_changes, refits, timings };
+            }
             return Solution {
                 psi: vec![0.0; m], u: vec![0.0; n], active, upper, psi_upper,
                 rho: vec![0.0; m], pivots, stop: Stop::SrcDetached, chol_failures, keep_changes, refits, timings };
@@ -681,6 +745,18 @@ pub fn active_set_solve(
                 }
                 pivots += 1;
                 continue;
+            }
+if let Some(mut s) = unfinished.take() {
+                polish(arcs, &mut s.u, &mut s.psi, &s_hat, &eps, &s.active, &s.upper,
+                       &s.psi_upper, &s.comp, &s.keep, &s.index, n, m, opt.tol, REFINE_ROUNDS);
+                for v in s.psi.iter_mut() {
+                    if v.abs() < opt.tol {
+                        *v = 0.0;
+                    }
+                }
+                return Solution {
+                    psi: s.psi, u: s.u, active: s.active, upper: s.upper, psi_upper: s.psi_upper,
+                    rho: s.rho, pivots, stop: Stop::Partial, chol_failures, keep_changes, refits, timings };
             }
             return Solution {
                 psi: vec![0.0; m], u: vec![0.0; n], active, upper, psi_upper,
@@ -824,6 +900,18 @@ pub fn active_set_solve(
                 vec_b = keep.iter().map(|&node| rhs[node]).collect();
                 lu::solve_in_place(&mut rebuilt, &mut vec_b, k)
             } {
+    if let Some(mut s) = unfinished.take() {
+                    polish(arcs, &mut s.u, &mut s.psi, &s_hat, &eps, &s.active, &s.upper,
+                           &s.psi_upper, &s.comp, &s.keep, &s.index, n, m, opt.tol, REFINE_ROUNDS);
+                    for v in s.psi.iter_mut() {
+                        if v.abs() < opt.tol {
+                            *v = 0.0;
+                        }
+                    }
+                    return Solution {
+                        psi: s.psi, u: s.u, active: s.active, upper: s.upper, psi_upper: s.psi_upper,
+                        rho: s.rho, pivots, stop: Stop::Partial, chol_failures, keep_changes, refits, timings };
+                }
                 return Solution {
                     psi: vec![0.0; m], u: vec![0.0; n], active, upper, psi_upper,
                     rho: vec![0.0; m], pivots, stop: Stop::Singular(e.column), chol_failures, keep_changes, refits, timings };
@@ -865,7 +953,7 @@ pub fn active_set_solve(
                 signature[words + p / 64] |= 1u64 << (p % 64);
             }
         }
-        if seen.contains(&signature) {
+        if !finishing && seen.contains(&signature) {
             if use_bland && perturbed < PERTURB_ROUNDS {
                 // Break the ties that let the basis return here. A distinct
                 // shift per arc, monotone in index so it is reproducible, and
@@ -886,21 +974,17 @@ pub fn active_set_solve(
                 cycles += 1;
                 if cycles >= CYCLE_PATIENCE {
                     if opt.partial_ok {
-                        polish(arcs, &mut u, &mut psi, &s_hat, &eps, &active,
-                               &upper, &psi_upper, &comp, &keep, &index, n, m,
-                               opt.tol, REFINE_ROUNDS);
-                        for v in psi.iter_mut() {
-                            if v.abs() < opt.tol {
-                                *v = 0.0;
-                            }
-                        }
+                        finishing = true;
+                        limit = steps + finish_budget(&active, &upper);
+                        unfinished = Some(Unfinished {
+                    psi: psi.clone(), u: u.clone(), active: active.clone(), upper: upper.clone(),
+                    psi_upper: psi_upper.clone(), rho: rho.clone(), comp: comp.clone(),
+                    keep: keep.clone(), index: index.clone() });
+                    } else {
                         return Solution {
                             psi, u, active, upper, psi_upper, rho, pivots,
-                            stop: Stop::Partial, chol_failures, keep_changes, refits, timings };
+                            stop: Stop::Cycling(pivots), chol_failures, keep_changes, refits, timings };
                     }
-                    return Solution {
-                        psi, u, active, upper, psi_upper, rho, pivots,
-                        stop: Stop::Cycling(pivots), chol_failures, keep_changes, refits, timings };
                 }
             }
             use_bland = true;
@@ -942,6 +1026,20 @@ pub fn active_set_solve(
             psi_upper[j] = arcs.cap[j];
             pivots += 1;
             continue;
+        }
+
+        if finishing {
+            // Inside the box: a feasible flow, just not an optimal one.
+            polish(arcs, &mut u, &mut psi, &s_hat, &eps, &active, &upper,
+                   &psi_upper, &comp, &keep, &index, n, m, opt.tol, REFINE_ROUNDS);
+            for v in psi.iter_mut() {
+                if v.abs() < opt.tol {
+                    *v = 0.0;
+                }
+            }
+            return Solution {
+                psi, u, active, upper, psi_upper, rho, pivots,
+                stop: Stop::Partial, chol_failures, keep_changes, refits, timings };
         }
 
         // 3. an arc outside the basis that wants in

@@ -44,6 +44,10 @@ DEGENERACY_SCREEN = 1e-4
 # a cycle.  Bland changes the pivot sequence, so it deserves a few iterations to
 # break out on its own; measured cycles repeat every 2 pivots and never recover.
 CYCLE_PATIENCE = 3
+# Times a disconnected source may clear `readmitted` and reconnect again.  One
+# turn back per arc strands a capped bank: CRV->WETH $5M pinned or used up all
+# 62 arcs out of CRV with 8% of the flow unplaced.  Finite, so it terminates.
+RECONNECT_RESETS = 3
 #: OSQP's tolerances.  Tight, because this is an oracle rather than a guess and
 #: the differential test has always held the active set to it at 1e-10.
 QP_EPS = 1e-10
@@ -283,6 +287,20 @@ def _why_unreachable(g, src: int, dst: int, Psi: float) -> str:
     return "src not connected to dst through the active set"
 
 
+def _finish_budget(A: np.ndarray, U: np.ndarray) -> int:
+    """Pivots a finishing phase may spend.
+
+    Not `|A| + |U|`: a drop can disconnect src from dst, and the reconnect then
+    re-admits a path -- a budget that assumed `A` only shrinks left 14-21% of
+    PARTIALs still over a cap.  Between `RECONNECT_RESETS`, an arc re-enters at
+    most once through reconnect (`readmitted`) and once through the single
+    reseed, so it leaves at most twice and is pinned or released at most twice
+    more: four passes over the arcs.  A reset can repeat that and the budget
+    does not count it; running out returns the flow as it stands.
+    """
+    return 4 * int(A.size) + 1
+
+
 def active_set_solve(
     g: ArcArrays,
     src: int,
@@ -366,6 +384,7 @@ def active_set_solve(
     cycles = 0
 
     reseeded = False
+    resets = 0
 
     def polished(u, psi, rounds=None):
         """One or two steps of iterative refinement, on the *flow* residual.
@@ -455,7 +474,34 @@ def active_set_solve(
     # forces a perturbation, and rebound to a shifted copy after.
     eps = g.eps
     perturbed = 0
-    for _ in range(maxit):
+    # An early exit used to return the last Laplacian iterate as it stood.  That
+    # iterate conserves flow, but the bounds are enforced one pivot at a time,
+    # so it can carry any amount on an arc that was about to be pinned: measured
+    # at $5M, 77-100% of PARTIAL solves broke a cap, by up to 1e14x, and `verify`
+    # threw the candidate away.  So a solve out of budget first *finishes*:
+    # drop negatives and pin over-cap arcs, admit nothing, until the flow is
+    # inside its box.  Each of those moves shrinks `A`, which bounds it.
+    finishing = exhausted = False
+    # What the solve held when finishing began.  Finishing must never do worse
+    # than stopping did: pinning a bank's small segments one by one can empty
+    # the active set out of the source, and "src not connected" would then fail
+    # a quote the unfinished iterate could still route.  Measured on CRV ->
+    # crvUSD with cryptoswap banks: every size failed until this fell back.
+    unfinished = None
+    idx = keep = np.zeros(0, dtype=np.int64)
+    comp = np.zeros(n, dtype=bool)
+    limit = maxit
+    steps = 0
+    while True:
+        if steps >= limit:
+            if partial_ok and not finishing:
+                finishing, limit = True, steps + _finish_budget(A, U)
+                unfinished = (psi.copy(), u.copy(), A.copy(), U.copy(), psi_upper.copy(),
+                              rho.copy(), idx.copy(), keep.copy(), comp.copy())
+                continue
+            exhausted = True
+            break
+        steps += 1
         idx = np.flatnonzero(A)
 
         comp = component_of(dst, g.tau[idx], g.sig[idx], n)
@@ -487,6 +533,15 @@ def active_set_solve(
             if not reseeded and candidates.any() and not np.array_equal(candidates, A):
                 A, reseeded = candidates.copy(), True
                 continue
+            if resets < RECONNECT_RESETS and readmitted.any():
+                readmitted[:] = False
+                resets += 1
+                continue
+            if unfinished is not None:
+                psi, u, A, U, psi_upper, rho, idx, keep, comp = unfinished
+                u, psi = polished(u, psi)
+                return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True,
+                                reason="PARTIAL")
             return Solution(
                 np.zeros(m), np.zeros(n), A, U, psi_upper, np.zeros(m), pivots,
                 feasible=False, reason=_why_unreachable(g, src, dst, Psi),
@@ -524,6 +579,11 @@ def active_set_solve(
                     psi_upper[loose] = 0.0
                     pivots += 1
                     continue
+                if unfinished is not None:
+                    psi, u, A, U, psi_upper, rho, idx, keep, comp = unfinished
+                    u, psi = polished(u, psi)
+                    return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True,
+                                    reason="PARTIAL")
                 return Solution(
                     np.zeros(m), np.zeros(n), A, U, psi_upper, np.zeros(m), pivots,
                     feasible=False, reason="a pinned arc is detached from the active network",
@@ -535,6 +595,11 @@ def active_set_solve(
             try:
                 u[keep] = solver.solve(L, rhs[keep])
             except SingularSystem as exc:
+                if unfinished is not None:
+                    psi, u, A, U, psi_upper, rho, idx, keep, comp = unfinished
+                    u, psi = polished(u, psi)
+                    return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True,
+                                    reason="PARTIAL")
                 return Solution(
                     np.zeros(m), np.zeros(n), A, U, psi_upper, np.zeros(m), pivots,
                     feasible=False, reason=f"singular Laplacian: {exc}",
@@ -565,7 +630,7 @@ def active_set_solve(
         # the incumbent, which is a valid flow: every iterate satisfies
         # conservation exactly, only optimality is incomplete.
         signature = (A.tobytes(), U.tobytes())
-        if signature in seen_bases:
+        if not finishing and signature in seen_bases:
             if bland and perturbed < PERTURB_ROUNDS:
                 # Break the ties that let the basis return here.  A distinct
                 # shift per arc, monotone in index so it is reproducible, and
@@ -586,14 +651,16 @@ def active_set_solve(
                     # screened retry passes `partial_ok`, and refusing it there
                     # turns a route that used to be quoted into no route at all.
                     if partial_ok:
-                        u, psi = polished(u, psi)
-                        return Solution(psi, u, A, U, psi_upper, rho, pivots,
-                                        feasible=True, reason="PARTIAL")
-                    return Solution(
-                        psi, u, A, U, psi_upper, rho, pivots, feasible=False,
-                        reason=f"no convergence: cycling under Bland's rule "
-                               f"after {pivots} pivots",
-                    )
+                        finishing, limit = True, steps + _finish_budget(A, U)
+                        unfinished = (psi.copy(), u.copy(), A.copy(), U.copy(),
+                                      psi_upper.copy(), rho.copy(), idx.copy(),
+                                      keep.copy(), comp.copy())
+                    else:
+                        return Solution(
+                            psi, u, A, U, psi_upper, rho, pivots, feasible=False,
+                            reason=f"no convergence: cycling under Bland's rule "
+                                   f"after {pivots} pivots",
+                        )
             bland = True
         seen_bases.add(signature)
 
@@ -615,6 +682,12 @@ def active_set_solve(
             psi_upper[j] = g.cap[j]
             pivots += 1
             continue
+
+        if finishing:
+            # Inside the box: a feasible flow, just not an optimal one.
+            u, psi = polished(u, psi)
+            return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=True,
+                            reason="PARTIAL")
 
         Z = ~A & ~U & ~forbidden
         entering = Z & (rho > tol)
@@ -644,11 +717,10 @@ def active_set_solve(
             continue
 
         break
-    else:
-        # Every iterate satisfies conservation exactly -- `u` solves the Laplacian
-        # system with the conservation right-hand side -- so only *optimality* is
-        # incomplete, never feasibility.  A candidate is a heuristic the quoter
-        # adjudicates, so an unconverged one is still a valid route to offer it.
+    if exhausted:
+        # Out of budget, and out of finishing budget too when `partial_ok`.  The
+        # flow conserves; whether it is inside its box is what finishing was
+        # for, and a candidate is a heuristic the quoter adjudicates anyway.
         if not partial_ok:
             return Solution(psi, u, A, U, psi_upper, rho, pivots, feasible=False,
                             reason=f"no convergence in {maxit} pivots")
