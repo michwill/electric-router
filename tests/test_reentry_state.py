@@ -87,6 +87,27 @@ def test_a_withdrawal_burns_against_the_supply_the_deposit_left():
         "the bug and the fix are indistinguishable on these numbers")
 
 
+def test_a_swap_prices_against_the_pool_the_withdrawal_left():
+    """Burn first and swap after: the order FRAX->USDC $10M's circuit route
+    took through 3pool, which the walk could not price until it could burn."""
+    quote = client()._stateful_leg([WITHDRAW, SWAP])
+    paid = quote(WITHDRAW, 100_000 * UNIT)
+    got = quote(SWAP, 200_000 * UNIT)
+
+    want_paid, after = StableSwapLP(pool=POOL, total_supply=SUPPLY).remove_liquidity_one_coin(
+        100_000 * UNIT, 0)
+    assert paid == want_paid
+    assert got == pytest.approx(after.pool.get_dy(2, 0, 200_000 * UNIT), rel=1e-9)
+    assert got != pytest.approx(POOL.get_dy(2, 0, 200_000 * UNIT), rel=1e-6), (
+        "the burn moved nothing")
+
+
+def test_a_pool_the_walk_can_burn_through_is_listed_so():
+    from erouter.core.candidates import BURNS
+
+    assert client().reentrant_pools == {POOL_ADDRESS, POOL_ADDRESS + BURNS}
+
+
 def test_a_deposit_prices_into_the_balances_the_swap_left():
     """A swap moves the balances the deposit is then imbalancing against."""
     quote = client()._stateful_leg([SWAP, DEPOSIT, WITHDRAW])

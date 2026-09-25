@@ -9,6 +9,7 @@ import numpy as np
 from erouter.core import candidates as candidates_module
 from erouter.core import graph
 from erouter.core.candidates import (
+    BURNS,
     CandidateSet,
     conflicting_pools,
     generate,
@@ -436,15 +437,17 @@ SWAP_AND_BURN = [
 ]
 
 
-def test_a_withdrawal_keeps_a_pool_from_being_entered_twice():
-    """DAI -> USDC and 3Crv -> USDC on 3pool is a 2-in 1-out element, but the
-    walk cannot advance the pool past a burn, and the order of the two legs
-    is the nodes'.  FRAX->USDC $10M: the circuit's route quoted 0."""
+def test_a_withdrawal_needs_a_pool_the_walk_can_burn_through():
+    """DAI -> USDC and 3Crv -> USDC on 3pool is a 2-in 1-out element, and the
+    order of the two legs is the nodes'.  Where the burn has no model the walk
+    cannot advance past it -- FRAX->USDC $10M's circuit route quoted 0 -- and
+    where it has one, it can."""
+    pool = POOL[0].lower()
     assert conflicting_pools(SWAP_AND_BURN, LIVE) == {}
     assert conflicting_pools(
-        SWAP_AND_BURN, LIVE, advanceable=frozenset({POOL[0].lower()})) == {
-        POOL[0].lower(): [0, 1]
-    }
+        SWAP_AND_BURN, LIVE, advanceable=frozenset({pool})) == {pool: [0, 1]}
+    assert conflicting_pools(
+        SWAP_AND_BURN, LIVE, advanceable=frozenset({pool, pool + BURNS})) == {}
 
 
 def test_the_gate_does_not_touch_a_parallel_bank():

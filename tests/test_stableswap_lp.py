@@ -179,6 +179,37 @@ def test_the_supply_grows_by_what_was_minted():
     assert after.total_supply == lp.total_supply + minted
 
 
+THREE = StableSwap(
+    balances=(1_000_000 * UNIT, 2_000_000 * 10**6, 1_500_000 * 10**6),
+    rates=(UNIT, 10**30, 10**30), amp=2000, fee=4_000_000, offpeg_fee_multiplier=0,
+    a_precision=1, fee_on_xp=False, admin_fee=5_000_000_000,
+)
+
+
+@pytest.mark.parametrize(("burn", "i", "paid", "left"), [
+    (100_000 * UNIT, 0, 102216182559983260381576, 897771890845092683513655),
+    (100_000 * UNIT, 1, 102269147328, 1897722327991),
+    (1_000_000 * UNIT, 2, 1022230041147, 477667776896),
+])
+def test_a_burn_leaves_the_pool_what_remove_liquidity_one_coin_does(burn, i, paid, left):
+    """`balances[i] -= dy + (dy_0 - dy) * admin_fee / FEE_DENOMINATOR`, off the
+    deployed 3pool, FRAX/USDC and sBTC pools, and matched on a fork to the wei.
+    The Rust model is pinned to the same numbers."""
+    model = StableSwapLP(pool=THREE, total_supply=4_400_000 * UNIT)
+    dy, after = model.remove_liquidity_one_coin(burn, i)
+    assert dy == paid == model.calc_withdraw_one_coin(burn, i)
+    assert after.pool.balances[i] == left
+    assert THREE.balances[i] - left > dy, "the pool keeps part of the fee"
+    assert after.total_supply == model.total_supply - burn
+    assert all(after.pool.balances[k] == THREE.balances[k] for k in range(3) if k != i)
+
+
+def test_a_burn_needs_the_admin_fee():
+    model = StableSwapLP(pool=BALANCED, total_supply=SUPPLY)
+    with pytest.raises(StableSwapError):
+        model.remove_liquidity_one_coin(UNIT, 0)
+
+
 def test_advancing_needs_the_admin_fee_and_a_supply():
     import pytest
 

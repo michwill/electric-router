@@ -77,6 +77,25 @@ impl StableLp {
 
     /// Coin `i` returned for burning `token_amount` of LP.
     pub fn calc_withdraw_one_coin(&self, token_amount: U256, i: usize) -> Option<U256> {
+        self.withdraw(token_amount, i).map(|(dy, _)| dy)
+    }
+
+    /// `(coin i paid, the pool after)` -- what `remove_liquidity_one_coin`
+    /// does (`StableSwapLP.remove_liquidity_one_coin`). The pool keeps the fee
+    /// but for the DAO's share, `dy + (dy_0 - dy) * admin_fee / FEE_DENOMINATOR`
+    /// leaves coin `i`, and the supply falls by the burn. `None` without an
+    /// `admin_fee`, as `add_liquidity`.
+    pub fn remove_liquidity_one_coin(&self, token_amount: U256, i: usize) -> Option<(U256, StableLp)> {
+        let admin_fee = self.pool.admin_fee?;
+        let (dy, dy_0) = self.withdraw(token_amount, i)?;
+        let kept = dy + dy_0.checked_sub(dy)?.checked_mul(admin_fee)? / fee_denominator();
+        let mut balances = self.pool.balances.clone();
+        balances[i] = balances[i].checked_sub(kept)?;
+        Some((dy, self.with_balances(balances, self.total_supply.checked_sub(token_amount)?)))
+    }
+
+    /// `(dy, dy_0)`: coin `i` paid for the burn, and before the fee.
+    fn withdraw(&self, token_amount: U256, i: usize) -> Option<(U256, U256)> {
         let n = self.n();
         if self.total_supply.is_zero() || i >= n {
             return None;
@@ -120,7 +139,8 @@ impl StableLp {
         if dy.is_zero() {
             return None;
         }
-        Some((dy - U256::from(1u64)) * precision() / self.pool.rates[i])
+        Some(((dy - U256::from(1u64)) * precision() / self.pool.rates[i],
+              (xp[i] - new_y) * precision() / self.pool.rates[i]))
     }
 
     /// `calc_withdraw_one_coin`, with the invariants solved in floats.
@@ -354,5 +374,73 @@ impl TriLp {
             return None;
         }
         Some((xp[i] - y) * precision() / price_scale_i)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn u(v: &str) -> U256 {
+        U256::from_str_radix(v, 10).expect("a decimal")
+    }
+
+    /// DAI/USDC/USDT-shaped, the same pool `StableSwapLP` pinned the numbers on.
+    fn three_pool() -> StableLp {
+        let e18 = u("1000000000000000000");
+        let e30 = u("1000000000000000000000000000000");
+        let pool = stableswap::Pool {
+            balances: vec![u("1000000") * e18, u("2000000000000"), u("1500000000000")],
+            rates: vec![e18, e30, e30],
+            amp: u("2000"),
+            fee: u("4000000"),
+            offpeg_fee_multiplier: U256::ZERO,
+            a_precision: u("1"),
+            fee_on_xp: false,
+            subtract_one: true,
+            admin_fee: Some(u("5000000000")),
+        };
+        let xp: Vec<f64> = pool.xp().iter().map(|v| f64::from(*v)).collect();
+        let rates: Vec<f64> = pool.rates.iter().map(|r| f64::from(*r)).collect();
+        let fast = stableswap::fast::Pool {
+            xp,
+            inv_rates: rates.iter().map(|r| 1e18 / r).collect(),
+            rates,
+            amp: 2000.0,
+            fee: 4e6,
+            offpeg_fee_multiplier: 0.0,
+            a_precision: 1.0,
+            fee_on_xp: false,
+            subtract_one: true,
+        };
+        StableLp { pool, fast, total_supply: u("4400000") * e18 }
+    }
+
+    #[test]
+    fn a_burn_leaves_the_pool_the_reference_leaves() {
+        let lp = three_pool();
+        let e18 = u("1000000000000000000");
+        let cases = [
+            (u("100000") * e18, 0, "102216182559983260381576", 0, "897771890845092683513655"),
+            (u("100000") * e18, 1, "102269147328", 1, "1897722327991"),
+            (u("1000000") * e18, 2, "1022230041147", 2, "477667776896"),
+        ];
+        for (burn, i, dy, k, left) in cases {
+            let (paid, after) = lp.remove_liquidity_one_coin(burn, i).expect("a burn");
+            assert_eq!(paid, u(dy));
+            assert_eq!(Some(paid), lp.calc_withdraw_one_coin(burn, i));
+            assert_eq!(after.pool.balances[k], u(left));
+            assert_eq!(after.total_supply, lp.total_supply - burn);
+            for j in (0..3).filter(|&j| j != k) {
+                assert_eq!(after.pool.balances[j], lp.pool.balances[j]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_burn_needs_the_admin_fee() {
+        let mut lp = three_pool();
+        lp.pool.admin_fee = None;
+        assert!(lp.remove_liquidity_one_coin(u("1000"), 0).is_none());
     }
 }

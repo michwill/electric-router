@@ -345,6 +345,10 @@ pub fn legs_of(arcs: &[PoolArc], psi: &[f64], pools: Option<&[String]>) -> usize
 /// element is admitted only for those: see the reference. Structure alone is
 /// not enough, because pricing the second port needs the pool as the first
 /// port left it. `None` asks the structural question by itself.
+/// Beside a pool in `advanceable`, this suffix says the walk can also advance
+/// it through a withdrawal (`candidates.BURNS`).
+pub const BURNS: &str = ":withdraw";
+
 pub fn conflicting_pools(
     arcs: &[PoolArc],
     psi: &[f64],
@@ -414,11 +418,12 @@ pub fn conflicting_pools(
         } else if element_from(&arcs[idx[0]].pool, arcs[idx[0]].n_coins, &triples).is_err() {
             true
         } else {
-            // The walk advances a pool through swaps and deposits only, so a
-            // withdrawal that is not the pool's last leg is unquotable, and
-            // nothing here fixes the order.
+            // A withdrawal the walk cannot advance through is unquotable unless
+            // it is the pool's last leg, and nothing fixes the order.
             advanceable.is_some_and(|set| {
-                !set.contains(&pool) || triples.iter().any(|t| t.0.is_withdraw())
+                !set.contains(&pool)
+                    || (triples.iter().any(|t| t.0.is_withdraw())
+                        && !set.contains(&format!("{pool}{BURNS}")))
             })
         };
         if clashes {

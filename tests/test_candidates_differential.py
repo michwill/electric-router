@@ -273,16 +273,20 @@ def test_conflicting_pools_agree(seed):
             assert [p for p, _ in got] == list(want), "insertion order decides the repair"
 
 
-def test_a_withdrawal_is_refused_re_entry_on_both_sides():
+@pytest.mark.parametrize("burns", [False, True])
+def test_a_withdrawal_is_admitted_to_re_entry_alike_on_both_sides(burns):
     import erouter_solve
 
+    from erouter.core.candidates import BURNS
     from test_candidates import LIVE, POOL, SWAP_AND_BURN
 
-    gate = frozenset({POOL[0].lower()})
+    pool = POOL[0].lower()
+    gate = frozenset({pool, pool + BURNS} if burns else {pool})
     want = conflicting_pools(SWAP_AND_BURN, LIVE, advanceable=gate)
     got = erouter_solve.Ballot.conflicting_pools(
         ported_arcs(SWAP_AND_BURN), list(LIVE), advanceable=list(gate))
-    assert want and dict(got) == {k: list(v) for k, v in want.items()}
+    assert bool(want) is not burns
+    assert dict(got) == {k: list(v) for k, v in want.items()}
 
 
 @pytest.mark.parametrize("seed", SEEDS)

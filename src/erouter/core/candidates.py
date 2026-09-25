@@ -311,6 +311,11 @@ def legs_of(arcs: list[PoolArc], psi: np.ndarray,
     return total
 
 
+#: Beside a pool in `advanceable`, this suffix says the walk can also advance
+#: it through a withdrawal: only where the pool's burn has a model.
+BURNS = ":withdraw"
+
+
 def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
                       Psi: float = 0.0, *, pools: np.ndarray | None = None,
                       cache: dict | None = None,
@@ -391,12 +396,12 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
             except (MultiPortError, ValueError):
                 clashes = True
             else:
-                # The walk advances a pool through swaps and deposits only, so a
-                # withdrawal that is not the pool's last leg is unquotable, and
-                # nothing here fixes the order.
+                # A withdrawal the walk cannot advance through is unquotable
+                # unless it is the pool's last leg, and nothing fixes the order.
                 clashes = advanceable is not None and (
                     pool not in advanceable
-                    or any(kind.is_withdraw for kind, _, _ in triples))
+                    or (any(kind.is_withdraw for kind, _, _ in triples)
+                        and pool + BURNS not in advanceable))
         if clashes:
             out[pool] = idx
         if cache is not None:

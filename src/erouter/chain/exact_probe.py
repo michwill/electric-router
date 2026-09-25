@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from ..core.candidates import BURNS
 from ..core.quoter import Quote
 from ..core.stableswap import StableSwapError, StableSwapLP
 from ..core.transport import Status
@@ -796,14 +797,19 @@ class ExactQuoterClient:
         nothing is stored that we would have to guess.  A cryptoswap keeps `D` and
         `price_scale` in storage and moves both in `tweak_price`, so advancing one
         by adjusting balances would be wrong in a way no gate here would catch.
+
+        A pool whose withdrawal has a model is also listed as `pool + BURNS`:
+        the walk can advance it through a burn too.
         """
         got = self._reentrant
         if got is None:
-            got = frozenset(
+            pools = frozenset(
                 pool for pool, model in (self.exact.by_pool.items()
                                          if self.exact else ())
                 if getattr(model, "admin_fee", -1) >= 0
                 and hasattr(model, "exchange"))
+            burns = getattr(self.lp, "by_pool", {}) if self.lp is not None else {}
+            got = pools | {pool + BURNS for pool in pools if pool in burns}
             self._reentrant = got
         return got
 
@@ -945,6 +951,13 @@ class ExactQuoterClient:
                 dy, after = base.exchange(leg.i, leg.j, dx)
                 state[key] = (replace(lp, pool=after) if lp is not None
                               else after)
+                return dy
+            if lp is not None and leg.kind is ArcKind.WITHDRAW_STABLE:
+                # `remove_liquidity_one_coin`, read off the deployed source and
+                # matched on a fork to the wei: balances, supply and the next
+                # `get_dy`, on 3pool, FRAX/USDC and both sBTC pools.
+                dy, after_lp = lp.remove_liquidity_one_coin(dx, leg.j)
+                state[key] = after_lp
                 return dy
             if lp is None or leg.kind not in (
                     ArcKind.DEPOSIT_FIXED, ArcKind.DEPOSIT_DYN,

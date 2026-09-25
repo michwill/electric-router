@@ -676,6 +676,30 @@ class StableSwapLP:
 
     def calc_withdraw_one_coin(self, token_amount: int, i: int) -> int:
         """Coin `i` returned for burning `token_amount` of LP."""
+        return self._withdraw(token_amount, i)[0]
+
+    def remove_liquidity_one_coin(self, token_amount: int, i: int) -> tuple[int, StableSwapLP]:
+        """`(coin i paid, the pool after)` -- what `remove_liquidity_one_coin` does.
+
+        Read off the deployed source of every pool with a withdrawal model --
+        3pool, FRAX/USDC and both sBTC pools -- which agree: the pool pays `dy`
+        and keeps the fee but for the DAO's share,
+
+            balances[i] -= dy + (dy_0 - dy) * admin_fee / FEE_DENOMINATOR
+
+        with `dy_0` the payout before fees, and the supply falls by the burn.
+        """
+        dy, dy_0 = self._withdraw(token_amount, i)
+        p = self.pool
+        if p.admin_fee < 0:
+            raise StableSwapError("admin_fee unknown; cannot advance state")
+        kept = list(p.balances)
+        kept[i] -= dy + (dy_0 - dy) * p.admin_fee // FEE_DENOMINATOR
+        return dy, replace(self, pool=replace(p, balances=tuple(kept)),
+                           total_supply=self.total_supply - token_amount)
+
+    def _withdraw(self, token_amount: int, i: int) -> tuple[int, int]:
+        """`(dy, dy_0)`: coin `i` paid for the burn, and before the fee."""
         if self.total_supply <= 0:
             raise StableSwapError("no supply")
         if not (0 <= i < self.n):
@@ -694,4 +718,5 @@ class StableSwapLP:
             reduced[j] -= fee * expected // FEE_DENOMINATOR
         dy = reduced[i] - solve_y_d(p.amp, p.a_precision, reduced, d1, i, n)
         # One wei less, as the pool does, and back out of `xp` space.
-        return (dy - 1) * PRECISION // p.rates[i]
+        return ((dy - 1) * PRECISION // p.rates[i],
+                (xp[i] - new_y) * PRECISION // p.rates[i])

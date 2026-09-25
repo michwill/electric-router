@@ -1010,9 +1010,8 @@ def _reused_pools(arcs: list[PoolArc]) -> set[str]:
 #: two balances by amounts `StableSwap.exchange` computes exactly, and a deposit
 #: is `StableSwapLP.add_liquidity` -- which charges the imbalance fee
 #: `calc_token_amount` explicitly does not, and keeps all but the DAO's share.
-#: A *withdrawal* is still not here: `remove_liquidity_one_coin`'s effect on the
-#: supply has not been read off the deployed source, and guessing it is what this
-#: list exists to prevent.
+#: A *withdrawal* is not here: only a pool whose burn has a model can be advanced
+#: past one (`candidates.BURNS`), so it still goes last where the order allows.
 ADVANCEABLE = (ArcKind.SWAP_STABLE, ArcKind.DEPOSIT_FIXED,
                ArcKind.DEPOSIT_DYN, ArcKind.DEPOSIT_FIXED_NOFLAG)
 
