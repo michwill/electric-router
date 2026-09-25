@@ -612,3 +612,35 @@ def test_the_first_probes_move_by_the_callers_scale():
         optimise(SPLIT, quoter, amount_in=1_000_000, dst_slot=2, baseline=baseline,
                  max_rounds=1, **kw)
         assert {6000 + moved, 6000 - moved} <= set(quoter.seen[:4]), (scales, quoter.seen[:4])
+
+
+def test_a_second_polish_sweep_revisits_only_what_the_first_moved():
+    """On the three slowest routes, 12-39% of the polish walks went to
+    coordinates the first sweep had left alone, and bought nothing."""
+    import erouter.core.split as split
+
+    class OneCoordinate:
+        """Only the head's share matters; it peaks at 40%."""
+
+        local = True
+
+        def quote_routes(self, routes, amounts_in, dst_slots):
+            return [int(1e9 - 1e9 * (legs[0].bps / BPS - 0.4) ** 2) for legs in routes]
+
+    groups = split_groups(SPLIT3)
+    start = weights_of(SPLIT3, groups)
+    free = [(0, 0), (0, 1)]
+
+    def run(moved: float):
+        report = split.SplitReport(groups=1, before=0)
+        old, split.POLISH_MOVED = split.POLISH_MOVED, moved
+        try:
+            _, value = split.polish(SPLIT3, OneCoordinate(), groups, start, free, report,
+                                    amount_in=1_000_000, dst_slot=1, baseline=1)
+        finally:
+            split.POLISH_MOVED = old
+        return report.polish_calls, value
+
+    focused, full = run(split.POLISH_MOVED), run(-1.0)
+    assert focused[1] == full[1], "the same answer"
+    assert focused[0] < full[0], (focused, full)

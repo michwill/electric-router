@@ -130,6 +130,11 @@ POLISH_ITERS = 12
 POLISH_SWEEPS = 2
 # The curve search has already found the basin; this only refines inside it.
 POLISH_WINDOW = 0.05
+# A sweep after the first revisits only the coordinates the last one moved
+# further than this, in weight: about the golden search's own resolution.  On
+# the three slowest routes measured it cut 12-39% of the walks and none of the
+# gain; one sweep alone halved them and cost FRAX->USDC $10M 0.68 of 1.53 bp.
+POLISH_MOVED = 1e-4
 #: Skip the polish when the curves already agree with the chain this closely.
 #
 # Each polish evaluation is a chained `quote_routes`, which makes it the most
@@ -849,10 +854,18 @@ def polish(
         got = client.quote_routes(routes, [amount_in], [dst_slot])
         return float(got[0]) if got else 0.0
 
-    tuned, value = _ascend(
-        [_project(w) for w in start], exact, free, [0],
-        iters=POLISH_ITERS, sweeps=POLISH_SWEEPS, window=POLISH_WINDOW,
-    )
+    tuned, value = [_project(w) for w in start], None
+    coords = list(free)
+    for _ in range(POLISH_SWEEPS):
+        swept, got = _ascend(tuned, exact, coords, [0], iters=POLISH_ITERS, sweeps=1,
+                             window=POLISH_WINDOW)
+        if value is not None and got <= value * (1.0 + SWEEP_TOL):
+            break
+        coords = [(g, j) for g, j in coords
+                  if abs(float(swept[g][j]) - float(tuned[g][j])) > POLISH_MOVED]
+        tuned, value = swept, got
+        if not coords:
+            break
     report.polish_calls = calls[0]
     report.evaluations += calls[0]
     if value <= baseline:
