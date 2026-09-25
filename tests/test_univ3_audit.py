@@ -167,9 +167,65 @@ def test_an_agreeing_bank_is_audited_in_one_round_trip():
     assert transport.batches == 1 and transport.calls == 1   # the batch's one call, no walk
 
 
-def test_a_disagreeing_bank_falls_back_to_the_walk_and_is_refused():
+def test_a_disagreeing_bank_is_settled_from_the_batch_and_refused():
+    """The batch already holds the quoter's answer at the input the leg sees,
+    so a second walk from it is the truth walk, with no call per leg."""
     pool_set = one_v3_candidate(12_345)
     transport = Batching(11_000)
     rows = audit(pool_set, BankedClient(12_345), transport, POOLS, block=1)
-    assert transport.batches == 1 and transport.calls == 2   # the batch, then the walk
+    assert transport.batches == 1 and transport.calls == 1
+    assert rows[0][2] == 11_000
     assert rows[0][4] is False and pool_set.candidates[0].verified_out is None
+
+
+POOL_2 = "0x" + "99" * 20
+TOKEN_MID = "0x" + "b0" * 20
+RATES = {POOL.lower(): (2.0, 1.99), POOL_2.lower(): (3.0, 3.0)}   # (bank, quoter)
+
+
+class Pricing(Batching):
+    """QuoterV2 at a rate per pool, read from the call it is handed."""
+
+    def __init__(self) -> None:
+        super().__init__(0)
+
+    def fetch(self, method, params):
+        from erouter.core.codec import decode
+
+        self.calls += 1
+        raw = bytes.fromhex(params[0]["data"][2:])[4:]
+        token_in, _, dx = decode(["address", "address", "uint256"], raw[:96])
+        pool = POOL if token_in.lower() == TOKEN_IN else POOL_2
+        body = encode(["uint256", "uint160", "uint32", "uint256"],
+                      [int(dx * RATES[pool.lower()][1]), 0, 0, 0])
+        return "0x" + body.hex()
+
+
+class RatedClient(Client):
+    def _quote_leg(self, leg, dx):
+        return int(dx * RATES[leg.target.lower()][0])
+
+
+def test_a_leg_downstream_of_a_disagreement_is_asked_again():
+    """The first bank is half a percent rich, so the second leg's input moves
+    and it is asked again -- two batches, and the answer is the one a call
+    per leg in series would give."""
+    legs = [Leg(target=pool, kind=ArcKind.SWAP_UNIV3, i=0, j=1, n=2,
+                src_slot=k, dst_slot=k + 1, bps=0) for k, pool in enumerate((POOL, POOL_2))]
+    tokens = (TOKEN_IN, TOKEN_MID, TOKEN_OUT)
+    route = RealizedRoute(
+        legs=[RealizedLeg(leg=leg, kind=ArcKind.SWAP_UNIV3, target=leg.target,
+                          token_in=tokens[k], token_out=tokens[k + 1],
+                          amount_in=AMOUNT, amount_out=1) for k, leg in enumerate(legs)],
+        slots={t: k for k, t in enumerate(tokens)}, dst_slot=2,
+        src_token=TOKEN_IN, dst_token=TOKEN_OUT, amount_in=AMOUNT,
+    )
+    candidate = Candidate(label="two v3 legs", psi=None, certificate=False)
+    candidate.route, candidate.verified_out = route, int(int(AMOUNT * 2.0) * 3.0)
+    candidate.status, candidate.rank = "ok", 0
+    pools = {POOL.lower(): (TOKEN_IN, TOKEN_MID, 500, 6, 18),
+             POOL_2.lower(): (TOKEN_MID, TOKEN_OUT, 500, 18, 18)}
+    transport = Pricing()
+    rows = audit(CandidateSet([candidate]), RatedClient(), transport, pools, block=1)
+    assert rows[0][2] == int(int(AMOUNT * 1.99) * 3.0)
+    assert transport.batches == 2 and transport.calls == 3

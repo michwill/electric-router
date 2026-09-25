@@ -125,21 +125,27 @@ def _truth_leg(transport, pools: dict, block: int, inner):
 
 
 #: How far the v3 legs' banks may sit from their pools' quoter, summed, for the
-#: batched audit to stand: 0.1 bp, so the walk it returns is within 0.1 bp of
-#: the sequential one and fifty times inside `AUDIT_TOLERANCE_BP`.  Measured on
+#: first batch to stand as it is: 0.1 bp, so the walk it returns is within 0.1 bp
+#: of the sequential one and fifty times inside `AUDIT_TOLERANCE_BP`.  Measured on
 #: a 10-leg route, legs agreed to 1e-11..3e-9 and one small WBTC leg to 1.1e-6:
 #: the pool's integer rounding against the bank's float.
 BATCH_AGREE = 1e-5
+#: Batches the walk may take to settle before it asks one leg at a time.
+BATCH_ROUNDS = 4
 
 
 def _batched_truth(legs, route, client, transport, pools: dict, block: int):
-    """The truth walk in one round trip, when every bank agrees with its pool.
+    """The truth walk in a few round trips rather than one per v3 leg.
 
-    The truth walk is sequential, one `eth_call` per v3 leg: 10 of them, 1.2 s
-    of a 2.1 s quote.  Where the banks agree with their pools, the walk with
-    the banks standing in is the truth walk, so walk it and check every v3 leg
-    against QuoterV2 in one batch.  `None` if they disagree by more than
-    `BATCH_AGREE`; the caller then walks it the slow way.
+    Walk with the banks standing in and ask QuoterV2 about every v3 leg at the
+    input it saw, in one batch.  If they agree to `BATCH_AGREE`, that walk is
+    the answer.  Otherwise walk again with the quoter's answers wherever a leg
+    sees the same input, and ask only about the legs whose input moved: once a
+    walk asks nothing new, every v3 leg was priced by its quoter at the input it
+    really saw, which is the sequential walk exactly.  One leg 3.8 bp off on
+    WETH->WBTC $10M used to send all 21 to the node in series, 2.2 s of 2.9.
+    `None` if it does not settle in `BATCH_ROUNDS`; the caller then walks it
+    the slow way.
     """
     from ..core.walk import walk_route
 
@@ -147,29 +153,44 @@ def _batched_truth(legs, route, client, transport, pools: dict, block: int):
     bank = getattr(client, "_quote_leg", None)
     if fetch_multi is None or bank is None:
         return None
-    stateful = getattr(client, "_mixed_leg", client._stateful_leg)(legs)
-    asked: list[tuple] = []
+    walker = getattr(client, "_mixed_leg", client._stateful_leg)
+    known: dict[tuple[int, int], int] = {}
+    for rounds in range(BATCH_ROUNDS + 1):
+        other = walker(legs)
+        asked: list[tuple] = []
 
-    def quote_leg(leg, dx: int) -> int:
-        if leg.kind is not ArcKind.SWAP_UNIV3:
-            return stateful(leg, dx)
-        out = bank(leg, dx)
-        asked.append((leg, dx, out))
-        return out
+        def quote_leg(leg, dx: int, other=other, asked=asked) -> int:
+            if leg.kind is not ArcKind.SWAP_UNIV3:
+                return other(leg, dx)
+            got = known.get((id(leg), dx))
+            if got is not None:
+                return got
+            out = bank(leg, dx)
+            asked.append((leg, dx, out))
+            return out
 
-    walked = walk_route(legs, route.amount_in, route.dst_slot, quote_leg)
-    calls = [_quoter_call(leg, dx, pools, block) for leg, dx, _ in asked]
-    if not walked or not asked or any(c is None for c in calls):
-        return None
-    drift = 0.0
-    for (_, _, out), raw in zip(asked, fetch_multi(calls), strict=True):
-        if not isinstance(raw, str):
+        walked = walk_route(legs, route.amount_in, route.dst_slot, quote_leg)
+        if not walked:
             return None
-        truth = _quoted(raw)
-        if truth <= 0:
+        if not asked:
+            return walked
+        if rounds == BATCH_ROUNDS:
             return None
-        drift += abs(out / truth - 1)
-    return walked if drift <= BATCH_AGREE else None
+        calls = [_quoter_call(leg, dx, pools, block) for leg, dx, _ in asked]
+        if any(c is None for c in calls):
+            return None
+        drift = 0.0
+        for (leg, dx, out), raw in zip(asked, fetch_multi(calls), strict=True):
+            if not isinstance(raw, str):
+                return None
+            truth = _quoted(raw)
+            if truth <= 0:
+                return None
+            known[(id(leg), dx)] = truth
+            drift += abs(out / truth - 1)
+        if rounds == 0 and drift <= BATCH_AGREE:
+            return walked
+    return None
 
 
 def audit(pool_set, client, transport, pools: dict, *, block: int,
