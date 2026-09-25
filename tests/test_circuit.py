@@ -149,3 +149,26 @@ def test_a_node_drawing_on_two_of_its_tokens_needs_a_conversion():
             shared(1, POOL[1], a=1.0, B=1e-3, token_in="0xa2")]
     assert circuit._legs(arcs, np.array([1.0, 1.0])) == 3
     assert circuit._legs(arcs, np.array([1.0, 0.0])) == 1
+
+
+def test_a_v2_pair_is_its_exact_curve_and_its_cap_does_not_bind():
+    """`a d / (1 + k d)` with `k = B / 2a` is the pair itself at any size; the
+    cap bounded only the tangent quadratic, which fell 1% short on CRV/WETH and
+    kept the circuit off a pair a re-split then loaded 3.5x deeper."""
+    pair = arc(0, POOL[0], 0, 1, a=2.0, B=2 * 2.0 * 0.01, cap=10.0, kind=ArcKind.SWAP_UNIV2)
+    res, dev = solve([pair], 50.0)
+    assert dev.exact[0] and dev.cap[0] > 50.0
+    assert res.delta[0] == pytest.approx(50.0, rel=1e-8)
+    assert res.out[0] == pytest.approx(2.0 * 50 / 1.5, rel=1e-8)
+
+
+def test_a_v2_pair_reaches_as_far_as_a_bank():
+    """Open-ended, a pair soaked up what the model could not place elsewhere
+    -- CRV->WETH $10M lost 308 bp -- where a bank's reach lets it spill."""
+    from erouter.core.cryptobank import DEPTH
+
+    pair = PoolArc(id="pair", pool=POOL[0], kind=ArcKind.SWAP_UNIV2, i=0, j=1, n_coins=2,
+                   token_in="0xa", token_out="0xb", tau=0, sigma=1, a=1.0, B=2e-3,
+                   cap=2.5, reserve_in=10 * 10**18, decimals_in=18)
+    dev = circuit.devices([pair], 2, np.ones(2), 1000.0)
+    assert dev.cap[0] == pytest.approx(DEPTH * 10)

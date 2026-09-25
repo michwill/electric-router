@@ -33,6 +33,22 @@ pub const BPS: i64 = 10_000;
 /// before the candidate is refused.
 pub const CAP_TOLERANCE: f64 = 0.01;
 
+/// How many input reserves a v2 pair reaches, as a bank does (`cryptobank.DEPTH`).
+pub const PAIR_DEPTH: f64 = 4.0;
+
+/// The most this leg's arc will take, in `token_in` wei (`realize._cap_in`): a
+/// v2 pair's reach is `PAIR_DEPTH` reserves, not its arc's quadratic cap.
+fn cap_in(arc: &PoolArc) -> f64 {
+    if arc.kind == ArcKind::SwapUniv2 {
+        return if arc.reserve_in > 0 { PAIR_DEPTH * arc.reserve_in as f64 } else { f64::INFINITY };
+    }
+    if arc.cap.is_finite() {
+        arc.cap * pow10(arc.decimals_in)
+    } else {
+        f64::INFINITY
+    }
+}
+
 /// Swaps whose cap is the model's reach rather than the pool's limit, and whose
 /// quote stays true past it (`realize.SPILLS`).
 pub const SPILLS: [ArcKind; 3] = [ArcKind::SwapStable, ArcKind::SwapCrypto, ArcKind::SwapUniv2];
@@ -558,7 +574,12 @@ pub fn realize(
         // showing up as a negative -- and therefore zero -- output.
         let domain = if arc.b > 0.0 { arc.a / arc.b } else { f64::INFINITY };
         let d = delta_canonical.min(domain);
-        let model = arc.a * d - 0.5 * arc.b * d * d;
+        let model = if arc.kind == ArcKind::SwapUniv2 && arc.b > 0.0 {
+            // The pair's own curve, which the quadratic is the tangent of.
+            arc.a * delta_canonical / (1.0 + arc.b / (2.0 * arc.a) * delta_canonical)
+        } else {
+            arc.a * d - 0.5 * arc.b * d * d
+        };
         let out_token = model.max(0.0) / nodes.rate(&arc.token_out);
         outs.push(to_int(out_token * pow10(nodes.decimals(&arc.token_out)))?);
     }
@@ -915,11 +936,7 @@ fn arc_leg(
         amount_in,
         amount_out,
         share_of_node: share,
-        cap_in: if arc.cap.is_finite() {
-            arc.cap * pow10(arc.decimals_in)
-        } else {
-            f64::INFINITY
-        },
+        cap_in: cap_in(arc),
         arc_id: Some(arc.id.clone()),
         pool_name: arc.note.clone(),
         eps: arc.eps,

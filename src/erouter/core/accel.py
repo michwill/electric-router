@@ -324,7 +324,8 @@ def ballot(g, arcs, src, dst, psi_total, base_psi, *, base_certificate,
                   arc.token_in, arc.token_out, arc.tau, arc.sigma,
                   arc.a, arc.B, arc.cap, arc.G, arc.eps, arc.reserve_in,
                   arc.decimals_in, arc.tvl_usd, arc.gamma_live, arc.note,
-                  arc.calib_delta, arc.decimals_out, arc.parallel, arc.venue)
+                  arc.calib_delta, arc.decimals_out, arc.parallel, arc.venue,
+                  rate_in=arc.rate_in)
 
     # The reference's pricer takes two `PoolArc`s; the port has no such object
     # to hand back, so it names them by index into the list it was given.
@@ -363,7 +364,8 @@ def circuit(arcs, n_nodes, g_scale, nu, src, dst, psi_total, *, advanceable=None
                   arc.token_in, arc.token_out, arc.tau, arc.sigma,
                   arc.a, arc.B, arc.cap, arc.G, arc.eps, arc.reserve_in,
                   arc.decimals_in, arc.tvl_usd, arc.gamma_live, arc.note,
-                  arc.calib_delta, arc.decimals_out, arc.parallel, arc.venue)
+                  arc.calib_delta, arc.decimals_out, arc.parallel, arc.venue,
+                  rate_in=arc.rate_in)
     return _rust.Ballot.circuit(
         built, int(n_nodes), float(g_scale), [float(v) for v in nu], int(src), int(dst),
         float(psi_total),

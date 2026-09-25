@@ -73,8 +73,19 @@ pub fn devices(arcs: &[PoolArc], n_nodes: usize, nu0: &[f64], v0: f64) -> Device
         let whole = v0 / nu0[arc.tau].max(1e-300);
         let floor = 1e-12 * arc.a.max(1e-300);
         b[k] = arc.b.max(floor).max(2.0 * LINEAR * arc.a / whole);
-        exact[k] = matches!(arc.kind, ArcKind::SwapUniv3 | ArcKind::SwapUniv4) && arc.parallel;
-        let c = if exact[k] { arc.cap } else { arc.cap.min(a[k] / b[k]) };
+        // A v2 pair is one range of the exact curve at any size; its cap bounded
+        // only the tangent quadratic (`circuit.devices`).
+        let pair = arc.kind == ArcKind::SwapUniv2;
+        exact[k] = pair
+            || matches!(arc.kind, ArcKind::SwapUniv3 | ArcKind::SwapUniv4) && arc.parallel;
+        let c = if pair {
+            let reserve = arc.reserve_in as f64 / 10f64.powi(arc.decimals_in as i32) * arc.rate_in;
+            if reserve > 0.0 { (2.0 * whole).min(crate::realize::PAIR_DEPTH * reserve) } else { 2.0 * whole }
+        } else if exact[k] {
+            arc.cap
+        } else {
+            arc.cap.min(a[k] / b[k])
+        };
         cap[k] = if c.is_finite() && a[k] > 0.0 { c } else { 0.0 };
     }
     let d = cap.iter().map(|c| c * 1e-6).collect();

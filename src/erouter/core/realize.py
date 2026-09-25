@@ -24,6 +24,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 from . import accel as _accel
+from .cryptobank import DEPTH
 from .multiport import MultiPortError, element_of
 from .nodes import NodeMap
 from .types import ArcKind, Leg, PoolArc
@@ -478,6 +479,9 @@ def realize(
         domain = arc.a / arc.B if arc.B > 0 else math.inf
         d = min(delta_canonical, domain)
         model = arc.a * d - 0.5 * arc.B * d * d
+        if arc.kind is ArcKind.SWAP_UNIV2 and arc.B > 0:
+            # The pair's own curve, which the quadratic is the tangent of.
+            model = arc.a * delta_canonical / (1.0 + arc.B / (2.0 * arc.a) * delta_canonical)
         out_token = max(model, 0.0) / nodes.rate(arc.token_out)
         outs.append(int(out_token * 10 ** nodes.decimals(arc.token_out)))
 
@@ -719,6 +723,19 @@ def realize(
     return route
 
 
+def _cap_in(arc: PoolArc) -> float:
+    """The most this leg's arc will take, in `token_in` wei.
+
+    A v2 pair quotes exactly at any size, so its arc's cap -- which bounds the
+    tangent quadratic a solve fits -- is not its limit; its reach is `DEPTH`
+    reserves, as a bank's is.  Unbounded, it was the free sibling a saturated
+    slot poured its excess into: CRV->WETH $10M lost 312 bp to a 68k-CRV pair.
+    """
+    if arc.kind is ArcKind.SWAP_UNIV2:
+        return DEPTH * arc.reserve_in if arc.reserve_in > 0 else math.inf
+    return arc.cap * 10 ** arc.decimals_in if math.isfinite(arc.cap) else math.inf
+
+
 def _arc_leg(
     arc: PoolArc,
     nodes: NodeMap,
@@ -752,8 +769,7 @@ def _arc_leg(
         amount_in=amount_in,
         amount_out=amount_out,
         share_of_node=share,
-        cap_in=(arc.cap * 10 ** arc.decimals_in
-                if math.isfinite(arc.cap) else math.inf),
+        cap_in=_cap_in(arc),
         arc_id=arc.id,
         pool_name=arc.note,
         eps=arc.eps,

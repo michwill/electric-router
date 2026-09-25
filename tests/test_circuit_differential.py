@@ -83,3 +83,23 @@ def test_a_tick_bank_is_solved_on_its_exact_curve_on_both_sides():
                     np.ones(2), 1.0, n_nodes=2, merge_duplicates=False)
     want, got = both(g, arcs, np.ones(2), 0, 1, 800.0 / g.g_scale)
     same(want, got)
+
+
+def test_a_v2_pair_is_solved_on_its_exact_curve_on_both_sides():
+    from erouter.core import graph
+
+    # 80 raw at 1.1 reaches 4 x 88 = 352, short of the 800 traded: it binds.
+    arcs = [PoolArc(id="pair", pool="0x" + "ee" * 20, kind=ArcKind.SWAP_UNIV2, i=0, j=1,
+                    n_coins=2, token_in="0xa", token_out="0xb", tau=0, sigma=1,
+                    a=0.99, B=2e-4, cap=100.0, reserve_in=80 * 10**18, decimals_in=18,
+                    rate_in=1.1),
+            PoolArc(id="plain", pool="0x" + "dd" * 20, kind=ArcKind.SWAP_STABLE, i=0, j=1,
+                    n_coins=2, token_in="0xa", token_out="0xb", tau=0, sigma=1,
+                    a=0.985, B=1e-4)]
+    tau = np.array([x.tau for x in arcs])
+    sig = np.array([x.sigma for x in arcs])
+    g = graph.build(tau, sig, np.array([x.a for x in arcs]), np.array([x.B for x in arcs]),
+                    np.ones(2), 1.0, n_nodes=2, merge_duplicates=False)
+    want, got = both(g, arcs, np.ones(2), 0, 1, 800.0 / g.g_scale)
+    assert 100.0 < want.candidates[0].psi[0] * g.g_scale <= 352.0 * (1 + 1e-6)
+    same(want, got)

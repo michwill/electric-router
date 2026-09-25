@@ -49,6 +49,7 @@ from .candidates import (
     port_ids,
     repair_order,
 )
+from .cryptobank import DEPTH
 from .gas import STATIC
 from .quoter import MAX_LEGS
 from .realize import cancel_cycles, prune_dust
@@ -84,7 +85,7 @@ EXACT = frozenset({ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV4})
 @dataclass(slots=True)
 class Devices:
     """Every arc as a device: `a d - B d^2/2`, or `a d / (1 + k d)` with
-    `k = B / 2a` for a v3/v4 tick range, on `[0, cap]`."""
+    `k = B / 2a` for a v3/v4 tick range or a v2 pair, on `[0, cap]`."""
 
     tau: np.ndarray
     sig: np.ndarray
@@ -109,7 +110,17 @@ def devices(arcs, n_nodes: int, nu0: np.ndarray, V0: float) -> Devices:
     B = np.maximum(B, 1e-12 * np.maximum(a, 1e-300))
     B = np.maximum(B, 2.0 * LINEAR * a / whole)
     cap = np.array([arc.cap for arc in arcs], float)
-    exact = np.array([arc.kind in EXACT and arc.parallel for arc in arcs], bool)
+    pair = np.array([arc.kind is ArcKind.SWAP_UNIV2 for arc in arcs], bool)
+    exact = np.array([arc.kind in EXACT and arc.parallel for arc in arcs], bool) | pair
+    # A v2 pair is one range of that curve at any size.  Its cap bounded only
+    # the tangent quadratic, 1% short on CRV/WETH at a quarter of the reserve,
+    # so it reaches `DEPTH` reserves as a bank does.  Not further: a trade too
+    # big for everything the model reaches is spilled at realisation, and an
+    # open-ended pair soaked it up instead -- CRV->WETH $10M lost 308 bp.
+    reserve = np.array([arc.reserve_in / 10.0 ** arc.decimals_in * arc.rate_in
+                        for arc in arcs], float)
+    reach = np.where(reserve > 0, np.minimum(2.0 * whole, DEPTH * reserve), 2.0 * whole)
+    cap = np.where(pair, reach, cap)
     # A quadratic pays nothing past its peak.
     cap = np.where(exact, cap, np.minimum(cap, a / B))
     cap = np.where(np.isfinite(cap) & (a > 0), cap, 0.0)

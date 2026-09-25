@@ -919,3 +919,25 @@ def test_a_candidate_over_its_cap_is_put_up_trimmed():
     assert candidate.route.over_capacity is None
     capped = next(rl for rl in candidate.route.legs if rl.target == POOL_A)
     assert capped.amount_in <= 40 * 10**6
+
+
+def test_a_v2_leg_reaches_as_far_as_a_bank_not_its_arcs_cap():
+    """A v2 pair quotes exactly at any size: the arc's cap bounds the tangent
+    quadratic a solve fits.  Its reach is `DEPTH` reserves, as a bank's is --
+    unbounded, a saturated slot poured its whole excess into it."""
+    nodes = base_nodes()
+    pair = arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, cap=40.0, kind=ArcKind.SWAP_UNIV2)
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    route = realize([pair], np.array([1000.0]), nu, nodes,
+                    src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6)
+    from erouter.core.cryptobank import DEPTH
+
+    assert route.legs[0].cap_in == DEPTH * pair.reserve_in and route.over_capacity is None
+    # And it pays on the pair's curve, not the tangent quadratic's: the rate at
+    # the planned 1,000, carried to the leg's input as every leg's is.
+    a, k = pair.a, pair.B / (2 * pair.a)
+    rate = a / (1 + k * 1000)
+    dx = route.legs[0].amount_in / 10**6
+    assert route.legs[0].amount_out == pytest.approx(rate * dx * 1e18, rel=1e-9)
