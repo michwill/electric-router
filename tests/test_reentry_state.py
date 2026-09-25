@@ -135,3 +135,53 @@ def test_a_swap_does_not_move_the_supply():
     want, _ = StableSwapLP(pool=swapped,
                            total_supply=SUPPLY).add_liquidity([0, 0, 100_000 * UNIT])
     assert minted == want
+
+
+class Chain:
+    """The chain as `ExactQuoterClient` sees it: one probe per leg, and whole
+    routes it must not be handed."""
+
+    def __init__(self):
+        self.asked = []
+
+    def probe(self, probes):
+        from erouter.core.quoter import Quote
+        from erouter.core.transport import Status
+
+        self.asked.extend(probes)
+        return [Quote(Status.VALUE, 2 * p.dx) for p in probes]
+
+    def quote_routes(self, *_):
+        raise AssertionError("a route the chain cannot price went to it whole")
+
+
+OTHER = "0x" + "0f" * 20
+
+
+def test_a_route_with_a_uniswap_leg_asks_the_chain_one_leg_at_a_time():
+    """The chain knows no Uniswap leg, so a route with one cannot go there
+    whole; a circuit route through TricryptoUSDC -- no model -- and v3 quoted 0
+    and lost WETH->USDC $10M 2,693 bp.  Walk it, and ask the chain
+    only about the leg nothing here models."""
+    chain = Chain()
+    lp = StableSwapLP(pool=POOL, total_supply=SUPPLY)
+    exact = ExactQuoterClient(chain, FakeSet(POOL), lp=FakeSet(lp))
+    real = exact._quote_leg
+    exact._quote_leg = lambda leg, dx: 3 * dx if leg.kind is ArcKind.SWAP_UNIV3 else real(leg, dx)
+    legs = [Leg(target=OTHER, kind=ArcKind.SWAP_STABLE, i=0, j=1, n=2,
+                src_slot=0, dst_slot=1, bps=0),
+            Leg(target="0x" + "33" * 20, kind=ArcKind.SWAP_UNIV3, i=0, j=1, n=2,
+                src_slot=1, dst_slot=2, bps=0)]
+    assert exact.quote_routes([legs], [1000], [2]) == [6000]
+    assert [(p.pool, p.dx) for p in chain.asked] == [(OTHER, 1000)]
+
+
+def test_a_pool_entered_twice_still_needs_a_model():
+    chain = Chain()
+    exact = ExactQuoterClient(chain, FakeSet(POOL), lp=None)
+    legs = [Leg(target=OTHER, kind=ArcKind.SWAP_STABLE, i=0, j=1, n=3,
+                src_slot=0, dst_slot=1, bps=0),
+            Leg(target=OTHER, kind=ArcKind.SWAP_STABLE, i=1, j=2, n=3,
+                src_slot=1, dst_slot=2, bps=0)]
+    assert exact.quote_routes([legs], [1000], [2]) == [0]
+    assert not chain.asked

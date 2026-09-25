@@ -33,7 +33,7 @@ from ..core.stableswap import StableSwapError, StableSwapLP
 from ..core.transport import Status
 from ..core.tricrypto import TricryptoError
 from ..core.twocrypto import TwocryptoError
-from ..core.types import ArcKind, Probe
+from ..core.types import OFF_CHAIN_KINDS, ArcKind, Probe
 from ..core.vault import VaultError
 from ..core.walk import LegUnquotable, walk_route
 
@@ -710,8 +710,11 @@ class ExactQuoterClient:
         so the two agree by construction rather than by luck.
 
         A route with a single leg this cannot serve -- a wrapper, an LP deposit, a
-        pool still being probed -- goes to the chain whole.  Mixing the two inside
-        one route would be worse than either.
+        pool still being probed -- goes to the chain whole.  Except where the
+        chain cannot take it whole: it knows no Uniswap leg, and it prices a
+        pool's second leg against the state before the first.  Such a route is
+        walked here, the chain asked about each leg without a model
+        (`_mixed_leg`).
         """
         if not self.enabled:
             return self.client.quote_routes(routes, amounts_in, dst_slots)
@@ -724,14 +727,19 @@ class ExactQuoterClient:
             try:
                 out[k] = walk_route(legs, amount, dst, self._stateful_leg(legs))
             except LegUnquotable:
-                if reused:
+                if reused or any(leg.kind in OFF_CHAIN_KINDS for leg in legs):
                     # A route that enters a pool twice must be walked here or
                     # dropped.  The chain cannot price it: `quote_routes` is
                     # static calls, so its second leg reads the pool before the
                     # first one touched it and answers too well -- turning "we
                     # cannot price this" into a number that beats every honest
-                    # candidate.
-                    out[k] = 0
+                    # candidate.  Nor can it price a Uniswap leg at all, and a
+                    # circuit route through TricryptoUSDC and v3 quoted 0.
+                    try:
+                        out[k] = walk_route(legs, amount, dst, self._mixed_leg(legs))
+                    except (LegUnquotable, StableSwapError, TwocryptoError,
+                            TricryptoError, VaultError, ZeroDivisionError, ValueError):
+                        out[k] = 0
                 else:
                     holes.append(k)
             except (StableSwapError, TwocryptoError, TricryptoError,
@@ -887,6 +895,28 @@ class ExactQuoterClient:
             key = leg.target.lower()
             seen[key] = seen.get(key, 0) + 1
         return {pool for pool, n in seen.items() if n > 1}
+
+    def _mixed_leg(self, legs):
+        """`_stateful_leg`, with the chain asked about each leg without a model.
+
+        One probe per such leg, at the input the walk reached.  A pool entered
+        twice still needs a model: the chain would price its second leg against
+        the state before the first.
+        """
+        inner = self._stateful_leg(legs)
+        reused = self._reused(legs)
+
+        def quote(leg, dx: int) -> int:
+            try:
+                return inner(leg, dx)
+            except LegUnquotable:
+                if leg.target.lower() in reused:
+                    raise
+            got = self.client.probe([Probe(pool=leg.target, kind=leg.kind, i=leg.i,
+                                           j=leg.j, n=leg.n, dx=dx)])[0]
+            return int(got.value) if got.status is Status.VALUE else 0
+
+        return quote
 
     def _stateful_leg(self, legs):
         """A `quote_leg` that carries each reused pool forward as it goes.

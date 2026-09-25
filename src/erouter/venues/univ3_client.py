@@ -147,7 +147,7 @@ def _batched_truth(legs, route, client, transport, pools: dict, block: int):
     bank = getattr(client, "_quote_leg", None)
     if fetch_multi is None or bank is None:
         return None
-    stateful = client._stateful_leg(legs)
+    stateful = getattr(client, "_mixed_leg", client._stateful_leg)(legs)
     asked: list[tuple] = []
 
     def quote_leg(leg, dx: int) -> int:
@@ -217,7 +217,8 @@ def audit(pool_set, client, transport, pools: dict, *, block: int,
             try:
                 truth = walk_route(
                     legs, winner.route.amount_in, winner.route.dst_slot,
-                    _truth_leg(transport, pools, block, client._stateful_leg(legs)))
+                    _truth_leg(transport, pools, block,
+                               getattr(client, "_mixed_leg", client._stateful_leg)(legs)))
             except Exception:
                 truth = 0
         bp = (ranked / truth - 1) * 1e4 if truth else float("inf")
