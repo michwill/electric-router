@@ -95,9 +95,23 @@ def test_a_small_pool_is_banked_to_its_own_depth_not_the_trade():
     assert all(math.isfinite(a.cap) for a in arcs)
 
 
-def test_only_cryptoswap_arcs_are_banked():
+def test_a_stableswap_arc_is_banked_for_the_circuit_alone():
+    """Stableswap has a wall too -- it cannot pay out more than it holds --
+    and one quadratic extrapolated past it promised 2.3x what a pool paid.  The
+    active set cannot use the bank, so by default it keeps its quadratic."""
     nodes, arc, nu, client = setup(2e6, 256.0, kind=ArcKind.SWAP_STABLE)
     arcs, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6)
+    assert banks == {} and arcs == [arc]
+    _, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6,
+                                    kinds=cryptobank.CIRCUIT_BANKED)
+    assert banks
+
+
+def test_an_lp_withdrawal_is_never_banked():
+    """Not a swap the invariant probe answers the same way."""
+    nodes, arc, nu, client = setup(2e6, 256.0, kind=ArcKind.WITHDRAW_STABLE)
+    arcs, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6,
+                                       kinds=cryptobank.CIRCUIT_BANKED)
     assert banks == {} and arcs == [arc]
 
 
@@ -162,3 +176,17 @@ def test_a_piece_never_prices_above_the_pools_own_rate_at_zero():
     assert bank[0].a <= client.p * (1 + 1e-6)
     paid = bank[0].a * width - 0.5 * bank[0].B * width * width
     assert abs(paid / client.chain(width) - 1) < 1e-6
+
+
+def test_a_folded_bank_can_be_left_uncapped():
+    """A stableswap bank's reach is where the model ends, not what the pool
+    will take; held to it, the cap guard refused every GHO->USDT $10M
+    candidate."""
+    nodes, arc, nu, client = setup(2e6, 256.0)
+    pieces, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6)
+    assert banks
+    psi = np.zeros(len(pieces))
+    psi[0] = 1e3
+    ticks, _ = collapse(pieces, psi, nu, nodes, banks, kind=arc.kind)
+    curve, _ = collapse(pieces, psi, nu, nodes, banks, kind=arc.kind, bounded=False)
+    assert math.isfinite(ticks[0].cap) and curve[0].cap == math.inf

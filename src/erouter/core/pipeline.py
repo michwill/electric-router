@@ -26,7 +26,7 @@ from . import circuit as _circuit
 from .bank import collapse as fold
 from .calibrate import DRIFT_TOL, Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
-from .cryptobank import bank_arcs
+from .cryptobank import BANKED, CIRCUIT_BANKED, bank_arcs
 from .gas import GasTable, min_useful_flow, shape_cost, value_per_gas
 from .graph import MAX_CONDITION, PATHOLOGICAL_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
@@ -1090,11 +1090,12 @@ def _quote(
     # is most of the pool: see `core/cryptobank.py`.  After the refine, because
     # the bank is sized to this trade and `Psi` is only known here.
     if CRYPTO_BANKS:
+        kinds = CIRCUIT_BANKED if CIRCUIT else BANKED
         with clock("crypto_banks"):
-            banked, crypto_banks = bank_arcs(arcs, nu, nodes, client, Psi)
+            banked, crypto_banks = bank_arcs(arcs, nu, nodes, client, Psi, kinds)
         if crypto_banks:
             result.counters["crypto_banks"] = len(crypto_banks)
-            collapse = _with_crypto_banks(collapse, crypto_banks)
+            collapse = _with_crypto_banks(collapse, crypto_banks, kinds)
             arcs, g = _assemble(banked, nu, Psi, nodes, src_node, dst_node, result,
                                 max_spread=max_spread)
             g, Psi_scaled = scale(g, Psi)
@@ -2471,10 +2472,12 @@ CIRCUIT_REFINE = True
 CRYPTO_BANKS = True
 
 
-def _with_crypto_banks(collapse, banks):
-    """The venue's `collapse`, after the cryptoswap banks are folded too."""
+def _with_crypto_banks(collapse, banks, kinds):
+    """The venue's `collapse`, after the Curve banks are folded too."""
     def both(arcs, psi, nu, nodes):
-        arcs, psi = fold(arcs, psi, nu, nodes, banks, kind=ArcKind.SWAP_CRYPTO)
+        for kind in kinds:
+            arcs, psi = fold(arcs, psi, nu, nodes, banks, kind=kind,
+                             bounded=kind is not ArcKind.SWAP_STABLE)
         return collapse(arcs, psi, nu, nodes) if collapse is not None else (arcs, psi)
     return both
 

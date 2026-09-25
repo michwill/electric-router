@@ -40,6 +40,12 @@ REACH = 1.25
 MIN_IMPACT = 0.02
 #: Where the zero-size rate is read, as a share of the first piece.
 SPOT_PROBE = 1e-4
+#: What is banked.  Stableswap too under the circuit: nearly linear at peg and
+#: then a wall, which one quadratic cannot know -- an OUSD/USDe arc promised
+#: 2.3x what the pool paid.  Not for the active set: near-parallel pieces sent
+#: its base solve cycling, and FRAX->USDC $10M paid 1.9M USDC, not 8.0M.
+BANKED = frozenset({ArcKind.SWAP_CRYPTO})
+CIRCUIT_BANKED = BANKED | {ArcKind.SWAP_STABLE}
 #: Nor past this multiple of the pool's input reserve.  A grid sized to the
 #: trade put a small twocrypto pool's first probe at 26x its reserve; the
 #: invariant refused it, the pool kept an uncapped near-linear quadratic, and
@@ -48,8 +54,8 @@ SPOT_PROBE = 1e-4
 DEPTH = 4.0
 
 
-def bank_arcs(arcs, nu, nodes, client, Psi: float):
-    """`(arcs, banks)` with every computable cryptoswap arc replaced by a bank.
+def bank_arcs(arcs, nu, nodes, client, Psi: float, kinds=BANKED):
+    """`(arcs, banks)` with every computable arc of `kinds` replaced by a bank.
 
     `banks` maps `(pool, i, j)` to `univ3.Arc`s in human token units, which is
     what `univ3.collapse` and `univ3.output` read.  An arc whose pool cannot be
@@ -63,7 +69,7 @@ def bank_arcs(arcs, nu, nodes, client, Psi: float):
         return arcs, {}
     plans = []
     for k, arc in enumerate(arcs):
-        if arc.kind is not ArcKind.SWAP_CRYPTO or not computes(arc.pool):
+        if arc.kind not in kinds or not computes(arc.pool):
             continue
         price, rate = float(nu[arc.tau]), nodes.rate(arc.token_in)
         if price <= 0 or rate <= 0:
