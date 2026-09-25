@@ -432,17 +432,19 @@ def test_total_loss_bp_agrees():
         assert (one == two) or (math.isnan(one) and math.isnan(two)), price
 
 
-@pytest.mark.parametrize("caps, bps, fits", [
-    ((0.05, math.inf, math.inf), (9000, 500, 0), True),    # an explicit leg over
-    ((math.inf, math.inf, 0.05), (100, 100, 0), True),     # the remainder over
-    ((0.05, 0.05, math.inf), (6000, 3000, 0), True),       # two cut, one takes it all
-    ((0.05, 0.05, 0.05), (6000, 3000, 0), False),          # nowhere to go
+@pytest.mark.parametrize("caps, bps, kind, fits", [
+    ((0.05, math.inf, math.inf), (9000, 500, 0), ArcKind.SWAP_STABLE, True),  # a leg over
+    ((math.inf, math.inf, 0.05), (100, 100, 0), ArcKind.SWAP_STABLE, True),   # the remainder
+    ((0.05, 0.05, math.inf), (6000, 3000, 0), ArcKind.SWAP_STABLE, True),     # two cut
+    ((0.05, 0.05, 0.05), (6000, 3000, 0), ArcKind.SWAP_UNIV3, False),         # nowhere to go
+    ((0.05, 0.10, 0.20), (6000, 3000, 0), ArcKind.SWAP_CRYPTO, True),         # spilled
 ])
-def test_a_trimmed_resplit_agrees(caps, bps, fits):
+def test_a_trimmed_resplit_agrees(caps, bps, kind, fits):
     """Cutting a re-split back to its caps: same bps, same order, same verdict."""
     reference, ported = build_nodes()
     pools = (POOL_A, POOL_B, POOL_C)
-    arcs = [make_arc(pool, WETH, USDC, reference, a=3000.0 - k, B=1e-3 * (k + 1), cap=cap)
+    arcs = [make_arc(pool, WETH, USDC, reference, a=3000.0 - k, B=1e-3 * (k + 1), cap=cap,
+                     kind=kind)
             for k, (pool, cap) in enumerate(zip(pools, caps, strict=True))]
     want, got = both(arcs, [0.5, 0.3, 0.2], np.ones(reference.n_nodes),
                      reference, ported, src=WETH, dst=USDC, amount_in=10**18)

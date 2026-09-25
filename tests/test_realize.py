@@ -54,12 +54,12 @@ def merged_nodes() -> NodeMap:
 
 
 def arc(pool, token_in, token_out, nodes, *, a=1.0, B=1e-9, i=0, j=1,
-        reserve=10**24, cap=math.inf):
+        reserve=10**24, cap=math.inf, kind=ArcKind.SWAP_STABLE):
     return PoolArc(
         cap=cap,
         id=f"{pool}:{i}>{j}",
         pool=pool,
-        kind=ArcKind.SWAP_STABLE,
+        kind=kind,
         i=i,
         j=j,
         n_coins=2,
@@ -234,9 +234,10 @@ def test_a_leg_past_its_arc_cap_is_visible_on_the_route():
 
 
 
-def _two_way(nodes, *, cap_a=math.inf, cap_b=math.inf, psi=(30.0, 970.0)):
-    first = arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, cap=cap_a)
-    second = arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1, cap=cap_b)
+def _two_way(nodes, *, cap_a=math.inf, cap_b=math.inf, psi=(30.0, 970.0),
+             kind=ArcKind.SWAP_STABLE):
+    first = arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, cap=cap_a, kind=kind)
+    second = arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1, cap=cap_b, kind=kind)
     nu = np.zeros(nodes.n_nodes)
     nu[nodes.node(USDC)] = 1.0
     nu[nodes.node(WETH)] = 4000.0
@@ -282,11 +283,33 @@ def test_a_remainder_leg_past_its_cap_hands_the_remainder_on():
 
 
 def test_a_slot_with_nowhere_to_go_cannot_be_trimmed():
+    """v3 banks price only the ticks that were read, so nothing spills."""
     nodes = base_nodes()
-    route = _two_way(nodes, cap_a=40.0, cap_b=40.0, psi=(20.0, 20.0))
+    route = _two_way(nodes, cap_a=40.0, cap_b=40.0, psi=(20.0, 20.0),
+                     kind=ArcKind.SWAP_UNIV3)
     route.legs[0].leg = replace(route.legs[0].leg, bps=9000)
     _forward_simulate(route, nodes)
     assert not trim_to_capacity(route, nodes)
+
+
+def test_a_saturated_slot_spills_past_the_reach_of_curve_pools():
+    """A trade bigger than every pool's reach: CRV->WETH $10M fits 14.4M of
+    20M CRV, and refusing it left no route at all.  Curve's quote is true past
+    the reach, so the rest goes there, in proportion to it, and the quote
+    judges.  The legs are replaced, so restoring the old ones restores caps."""
+    nodes = base_nodes()
+    route = _two_way(nodes, cap_a=100.0, cap_b=300.0, psi=(100.0, 300.0))
+    route.legs[0].leg = replace(route.legs[0].leg, bps=9000)
+    _forward_simulate(route, nodes)
+    order = list(route.legs)
+
+    assert trim_to_capacity(route, nodes)
+    assert route.over_capacity is None
+    assert all(rl.cap_in == math.inf for rl in route.legs)
+    assert sum(rl.amount_in for rl in route.legs) == 1000 * 10**6
+    by = {rl.target: rl.amount_in for rl in route.legs}
+    assert by[POOL_B] == pytest.approx(3 * by[POOL_A], rel=0.01), "in proportion to reach"
+    assert all(math.isfinite(rl.cap_in) for rl in order)
 
 
 def test_the_share_shown_follows_a_retuned_split():

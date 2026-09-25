@@ -62,6 +62,13 @@ class RealizationError(RuntimeError):
 #: FRAX->USDC $5M at -1.96 at the other block, and -17.6 bp at 25%.
 CAP_TOLERANCE = 0.01
 
+#: Swaps whose cap is the model's reach rather than the pool's limit, and whose
+#: quote stays true past it: Curve's exact models and the chain refuse what the
+#: pool refuses, and a v2 pair is exact at any size.  Not v3 or v4, whose banks
+#: price only the ticks that were read.
+SPILLS = frozenset({ArcKind.SWAP_STABLE, ArcKind.SWAP_CRYPTO, ArcKind.SWAP_UNIV2})
+
+
 @dataclass(slots=True)
 class RealizedLeg:
     leg: Leg
@@ -908,8 +915,15 @@ def trim_to_capacity(route: RealizedRoute, nodes: NodeMap) -> bool:
     that threw away +2,945 bp on CRV->WETH $5M.  So the leg is cut to its cap
     and the share it frees goes to its siblings -- the legs leaving the same
     slot -- in proportion to what they carry.  A leg once cut is never raised
-    again, which bounds the loop.  False when a slot has nowhere left to put
-    its flow; the route is then partly re-weighted and the caller reverts it.
+    again, which bounds the loop.
+
+    When every sibling is at its cap the trade is bigger than all the model
+    reaches from that slot -- CRV->WETH $10M fits 14.4M of 20M CRV -- and the
+    rest is spilled past the reach of the `SPILLS` legs, in proportion to it,
+    for the quote to judge.  They are replaced rather than edited, so a caller
+    that restores the old legs restores their caps.  False when a slot has
+    nowhere left to put its flow; the route is then partly re-weighted and the
+    caller reverts it.
     """
     held: set[int] = set()
     for _ in range(4 * len(route.legs) + 1):
@@ -931,6 +945,22 @@ def trim_to_capacity(route: RealizedRoute, nodes: NodeMap) -> bool:
         free = [rl for rl in group if id(rl) not in held]
         pinned = {id(rl): (cut if rl is over else rl.leg.bps) for rl in kept}
         room = BPS - sum(pinned.values())
+        if not free and room >= 1:
+            soft = [rl for rl in kept if rl.kind in SPILLS]
+            if not soft:
+                return False
+            hard = [rl for rl in kept if rl.kind not in SPILLS]
+            for rl in hard:
+                rl.leg = replace(rl.leg, bps=pinned[id(rl)])
+            reach = sum(rl.cap_in for rl in soft)
+            spilled = [
+                replace(rl, cap_in=math.inf, leg=replace(rl.leg, bps=(
+                    0 if n == len(soft) - 1
+                    else pinned[id(rl)] + int(room * rl.cap_in / reach))))
+                for n, rl in enumerate(soft)]
+            for k, rl in zip(at, hard + spilled, strict=True):
+                route.legs[k] = rl
+            continue
         if not free or room < 1:
             return False
         weight = sum(rl.amount_in for rl in free)

@@ -33,6 +33,10 @@ pub const BPS: i64 = 10_000;
 /// before the candidate is refused.
 pub const CAP_TOLERANCE: f64 = 0.01;
 
+/// Swaps whose cap is the model's reach rather than the pool's limit, and whose
+/// quote stays true past it (`realize.SPILLS`).
+pub const SPILLS: [ArcKind; 3] = [ArcKind::SwapStable, ArcKind::SwapCrypto, ArcKind::SwapUniv2];
+
 /// A branch carrying less than this share of what leaves its node cannot
 /// change the answer, but it can still destroy it: measured on rETH->WETH, a
 /// branch holding 7e-6 of one node fed six more legs, each carrying an amount
@@ -1186,6 +1190,39 @@ pub fn trim_to_capacity(route: &mut RealizedRoute, nodes: &NodeMap) -> bool {
             .map(|&p| if p == k { cut } else { route.legs[p].leg.bps as i64 })
             .collect();
         let room = BPS - pinned.iter().sum::<i64>();
+        if free.is_empty() && room >= 1 {
+            // Every sibling at its cap: spill the rest past the reach of the
+            // `SPILLS` legs, in proportion to it, for the quote to judge.
+            let soft: Vec<usize> = (0..kept.len())
+                .filter(|&n| SPILLS.contains(&route.legs[kept[n]].kind))
+                .collect();
+            if soft.is_empty() {
+                return false;
+            }
+            let reach: f64 = soft.iter().map(|&n| route.legs[kept[n]].cap_in).sum();
+            let hard: Vec<usize> = (0..kept.len()).filter(|n| !soft.contains(n)).collect();
+            let mut moved: Vec<RealizedLeg> = Vec::with_capacity(kept.len());
+            for &n in &hard {
+                let mut rl = route.legs[kept[n]].clone();
+                rl.leg.bps = pinned[n] as i32;
+                moved.push(rl);
+            }
+            for (m, &n) in soft.iter().enumerate() {
+                let mut rl = route.legs[kept[n]].clone();
+                rl.leg.bps = if m == soft.len() - 1 {
+                    0
+                } else {
+                    (pinned[n] + (room as f64 * rl.cap_in / reach) as i64) as i32
+                };
+                rl.cap_in = f64::INFINITY;
+                moved.push(rl);
+            }
+            for (&p, rl) in at.iter().zip(moved) {
+                route.legs[p] = rl;
+                held[p] = true;
+            }
+            continue;
+        }
         if free.is_empty() || room < 1 {
             return false;
         }
