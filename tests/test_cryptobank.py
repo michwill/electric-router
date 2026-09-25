@@ -190,3 +190,22 @@ def test_a_folded_bank_can_be_left_uncapped():
     ticks, _ = collapse(pieces, psi, nu, nodes, banks, kind=arc.kind)
     curve, _ = collapse(pieces, psi, nu, nodes, banks, kind=arc.kind, bounded=False)
     assert math.isfinite(ticks[0].cap) and curve[0].cap == math.inf
+
+
+def test_a_pool_drained_inside_the_first_segment_is_banked_on_that_segment():
+    """frxUSD/sDOLA ran out of frxUSD by 310k sDOLA, so its bank stopped after
+    one piece and was discarded, and the parabola left in its place paid until
+    23M: the circuit put 621k sDOLA through it for 860k frxUSD, and the chain
+    paid 216k.  One piece across the segment is no cure either -- it peaks
+    through the wall -- so the segment is gridded again on its own."""
+    nodes, arc, nu, _ = setup(2e6, 256.0)
+    width = 2e6 * cryptobank.REACH / 2 ** (cryptobank.SEGMENTS - 1)
+    client = Amplified(p=1e-4, L=width / 10)
+    arcs, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6)
+    bank = banks[(POOL, 2, 1)]
+    assert len(bank) > 1 and len(arcs) == len(bank)
+    # It ends where the pool stops paying, having paid what the pool pays.
+    assert capacity(bank) < width
+    assert output(bank, capacity(bank)) == pytest.approx(client.chain(width), rel=0.02)
+    for dx in (width / 40, width / 20, width / 10, width / 5):
+        assert output(bank, dx) == pytest.approx(client.chain(dx), rel=0.06), dx  # a parabola was 2x
