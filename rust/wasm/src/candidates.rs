@@ -99,12 +99,12 @@ impl Ballot {
     /// prices, repaired for pools used on two ports, and once more pruned of
     /// ports earning less than their leg. `gas` is each arc's gas as the
     /// executor's table charges it; `perGas` one unit of gas in canonical
-    /// destination units.
+    /// destination units; `maxLegs` the longest route to offer.
     #[allow(clippy::too_many_arguments)]
     pub fn circuit(
         arcs: &Arcs, n_nodes: usize, g_scale: f64, nu: Vec<f64>, src: usize, dst: usize,
         psi_total: f64, advanceable: Option<Vec<String>>, leg_cost_bp: Option<f64>,
-        per_gas: Option<f64>, gas: Option<Vec<f64>>,
+        per_gas: Option<f64>, gas: Option<Vec<f64>>, max_legs: Option<usize>,
     ) -> Result<Ballot, JsValue> {
         let m = arcs.inner.len();
         if nu.len() != n_nodes || src >= n_nodes || dst >= n_nodes
@@ -120,6 +120,7 @@ impl Ballot {
             leg_cost_bp: leg_cost_bp.unwrap_or(0.0),
             per_gas: per_gas.unwrap_or(0.0),
             gas,
+            max_legs: max_legs.unwrap_or(erouter_solve::circuit::MAX_LEGS),
         };
         let inner = erouter_solve::circuit::candidates(
             &arcs.inner, n_nodes, g_scale, &nu, src, dst, psi_total, &opts);

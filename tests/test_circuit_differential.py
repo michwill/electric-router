@@ -15,6 +15,7 @@ import pytest
 from erouter.core import accel, circuit
 from erouter.core.accel import available
 from erouter.core.candidates import _from_ballot
+from erouter.core.quoter import MAX_LEGS
 from erouter.core.types import ArcKind, PoolArc
 from test_candidates_differential import SEEDS, universe
 
@@ -27,7 +28,7 @@ def both(g, arcs, nu, src, dst, Psi, **kw):
     got = _from_ballot(accel.circuit(
         arcs, g.n_nodes, g.g_scale, nu, src, dst, Psi,
         advanceable=kw.get("advanceable"), leg_cost_bp=kw.get("leg_cost_bp", 0.0),
-        per_gas=kw.get("per_gas", 0.0), gas=gas))
+        per_gas=kw.get("per_gas", 0.0), gas=gas, max_legs=kw.get("max_legs", MAX_LEGS)))
     return want, got
 
 
@@ -47,6 +48,20 @@ def test_the_ballot_agrees(seed, advanceable):
     want, got = both(g, arcs, nu, 0, g.n_nodes - 1, 1e3 / g.g_scale,
                      advanceable=advanceable, leg_cost_bp=2.0)
     assert want.candidates
+    same(want, got)
+
+
+@pytest.mark.parametrize("seed", SEEDS)
+def test_a_route_is_cut_to_the_same_leg_budget(seed):
+    """Which ports go is decided by surplus, so a port whose surplus the two
+    sides round differently would be cut on one and kept on the other."""
+    g, arcs = universe(seed)[:2]
+    nu = np.ones(g.n_nodes)
+    src, dst, Psi = 0, g.n_nodes - 1, 1e3 / g.g_scale
+    free = circuit.candidates(g, arcs, nu, src, dst, Psi)
+    budget = max(1, circuit._legs(arcs, free.candidates[0].psi) // 2)
+    want, got = both(g, arcs, nu, src, dst, Psi, max_legs=budget)
+    assert all(circuit._legs(arcs, c.psi) <= budget for c in want.candidates)
     same(want, got)
 
 

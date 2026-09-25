@@ -13,7 +13,7 @@
 //! agree to rounding rather than bit for bit.
 
 use crate::candidates::{
-    conflicting_pools, keep_only, port_ids, repair_order, Candidate, CandidateSet,
+    conflicting_pools, keep_only, legs_of, port_ids, repair_order, Candidate, CandidateSet,
     MIN_FLOW_FRACTION,
 };
 use crate::cycles::cancel_cycles;
@@ -406,8 +406,11 @@ fn solve(p: &Problem, dev_d: &mut Vec<f64>, nu0: &[f64], nu_start: Option<&[f64]
     Solved { nu, delta: d, out: f, iterations: total, residual }
 }
 
+/// The quoter's ABI capacity, `circuit.candidates`'s default leg budget.
+pub const MAX_LEGS: usize = 128;
+
 /// What the circuit needs beyond the graph.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CircuitOptions {
     pub advanceable: Option<HashSet<String>>,
     pub leg_cost_bp: f64,
@@ -415,6 +418,20 @@ pub struct CircuitOptions {
     pub per_gas: f64,
     /// Each arc's gas, as `verify`'s table would charge its leg.
     pub gas: Vec<f64>,
+    /// The most legs a candidate may realise as.
+    pub max_legs: usize,
+}
+
+impl Default for CircuitOptions {
+    fn default() -> Self {
+        CircuitOptions {
+            advanceable: None,
+            leg_cost_bp: 0.0,
+            per_gas: 0.0,
+            gas: Vec::new(),
+            max_legs: MAX_LEGS,
+        }
+    }
 }
 
 /// The circuit's answer, as a ballot of two for `verify` to adjudicate
@@ -464,6 +481,9 @@ pub fn candidates(arcs: &[PoolArc], n_nodes: usize, g_scale: f64, nu: &[f64],
                 }
             }
             if !banned.iter().any(|&b| b) {
+                banned = over_budget(dev, &res, arcs, &psi, &port, opts.max_legs);
+            }
+            if !banned.iter().any(|&b| b) {
                 break;
             }
             for (k, &b) in banned.iter().enumerate() {
@@ -490,19 +510,11 @@ pub fn candidates(arcs: &[PoolArc], n_nodes: usize, g_scale: f64, nu: &[f64],
     out
 }
 
-/// Arcs of every port whose surplus is below its leg charge.
-fn unearned(dev: &Devices, res: &Solved, arcs: &[PoolArc], psi: &[f64], port: &[usize],
-            dst: usize, opts: &CircuitOptions) -> Vec<bool> {
-    let m = arcs.len();
-    let mut premium = 0.0;
-    for k in 0..m {
-        if dev.sig[k] == dst {
-            premium += res.out[k];
-        }
-    }
-    premium *= opts.leg_cost_bp / 1e4;
+/// Each port's surplus at the solved prices, by its head arc, in the order
+/// the ports first carry flow.
+fn earned(dev: &Devices, res: &Solved, psi: &[f64], port: &[usize]) -> Vec<(usize, f64)> {
     let mut earned: Vec<(usize, f64)> = Vec::new();
-    for k in 0..m {
+    for k in 0..psi.len() {
         if psi[k] > 0.0 {
             let surplus = if dev.live(k) {
                 res.nu[dev.sig[k]] * res.out[k] - res.nu[dev.tau[k]] * res.delta[k]
@@ -515,8 +527,22 @@ fn unearned(dev: &Devices, res: &Solved, arcs: &[PoolArc], psi: &[f64], port: &[
             }
         }
     }
+    earned
+}
+
+/// Arcs of every port whose surplus is below its leg charge.
+fn unearned(dev: &Devices, res: &Solved, arcs: &[PoolArc], psi: &[f64], port: &[usize],
+            dst: usize, opts: &CircuitOptions) -> Vec<bool> {
+    let m = arcs.len();
+    let mut premium = 0.0;
+    for k in 0..m {
+        if dev.sig[k] == dst {
+            premium += res.out[k];
+        }
+    }
+    premium *= opts.leg_cost_bp / 1e4;
     let mut banned = vec![false; m];
-    for (head, got) in earned {
+    for (head, got) in earned(dev, res, psi, port) {
         let arc = &arcs[head];
         let gas = opts.gas.get(head).copied().unwrap_or(0.0) * opts.per_gas;
         let charge = if is_conversion(arc.kind) { gas } else { premium.max(gas) };
@@ -525,6 +551,50 @@ fn unearned(dev: &Devices, res: &Solved, arcs: &[PoolArc], psi: &[f64], port: &[
                 if port[k] == head {
                     banned[k] = true;
                 }
+            }
+        }
+    }
+    banned
+}
+
+/// The legs this flow realises as, conversions included (`circuit._legs`):
+/// ports, plus a wrap or unwrap for each token past the first a node uses.
+fn legs(arcs: &[PoolArc], psi: &[f64]) -> usize {
+    let mut tokens: Vec<(usize, HashSet<String>)> = Vec::new();
+    let mut add = |node: usize, token: &str| {
+        let token = token.to_ascii_lowercase();
+        match tokens.iter_mut().find(|(n, _)| *n == node) {
+            Some((_, set)) => {
+                set.insert(token);
+            }
+            None => tokens.push((node, HashSet::from([token]))),
+        }
+    };
+    for (arc, &f) in arcs.iter().zip(psi) {
+        if f > 0.0 {
+            add(arc.tau, &arc.token_in);
+            add(arc.sigma, &arc.token_out);
+        }
+    }
+    legs_of(arcs, psi, None) + tokens.iter().map(|(_, set)| set.len() - 1).sum::<usize>()
+}
+
+/// The weakest ports, one per leg over `max_legs` (`circuit._over_budget`).
+fn over_budget(dev: &Devices, res: &Solved, arcs: &[PoolArc], psi: &[f64], port: &[usize],
+               max_legs: usize) -> Vec<bool> {
+    let mut banned = vec![false; arcs.len()];
+    let excess = legs(arcs, psi).saturating_sub(max_legs);
+    if excess == 0 {
+        return banned;
+    }
+    let mut ranked = earned(dev, res, psi, port);
+    ranked.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0))
+    });
+    for &(head, _) in ranked.iter().take(excess) {
+        for k in 0..arcs.len() {
+            if port[k] == head {
+                banned[k] = true;
             }
         }
     }
@@ -647,5 +717,38 @@ mod tests {
         let labels: Vec<&str> = got.candidates.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["circuit", "circuit, pruned"]);
         assert!(got.candidates[0].psi[1] > 0.0 && got.candidates[1].psi[1] == 0.0);
+    }
+
+    #[test]
+    fn a_route_over_the_leg_limit_loses_its_weakest_ports() {
+        // Six pools on one pair of tokens, so no conversion is counted.
+        let arcs: Vec<PoolArc> = (0..6).map(|k| {
+            let mut x = swap(k, 0, 1, 1.0 - 0.002 * k as f64, 1e-3, f64::INFINITY);
+            x.token_in = "0xa".into();
+            x.token_out = "0xb".into();
+            x
+        }).collect();
+        let free = candidates(&arcs, 2, 1.0, &[1.0; 2], 0, 1, 100.0, &CircuitOptions::default());
+        assert_eq!(free.candidates[0].psi.iter().filter(|&&x| x > 0.0).count(), 6);
+        let opts = CircuitOptions { max_legs: 3, ..Default::default() };
+        let got = candidates(&arcs, 2, 1.0, &[1.0; 2], 0, 1, 100.0, &opts);
+        assert!(!got.candidates.is_empty());
+        for c in &got.candidates {
+            let live: Vec<usize> = (0..6).filter(|&k| c.psi[k] > 0.0).collect();
+            assert_eq!(live, [0, 1, 2]);
+        }
+    }
+
+    #[test]
+    fn a_node_drawing_on_two_of_its_tokens_needs_a_conversion() {
+        let mut arcs = vec![swap(0, 0, 1, 1.0, 1e-3, f64::INFINITY),
+                            swap(1, 0, 1, 1.0, 1e-3, f64::INFINITY)];
+        for x in arcs.iter_mut() {
+            x.token_out = "0xb".into();
+        }
+        arcs[0].token_in = "0xa".into();
+        arcs[1].token_in = "0xa2".into();
+        assert_eq!(legs(&arcs, &[1.0, 1.0]), 3);
+        assert_eq!(legs(&arcs, &[1.0, 0.0]), 1);
     }
 }

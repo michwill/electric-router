@@ -122,3 +122,30 @@ def test_the_pruned_candidate_drops_a_branch_worth_less_than_its_leg():
     assert labels == ["circuit", "circuit, pruned"]
     plain, pruned = got.candidates
     assert plain.psi[1] > 0 and pruned.psi[1] == 0.0
+
+
+def shared(k, pool, *, a, B, token_in="0xa", token_out="0xb", tau=0, sigma=1):
+    """An arc on the node pair's own tokens, so no conversion is counted."""
+    return PoolArc(id=f"{pool}:{k}", pool=pool, kind=ArcKind.SWAP_STABLE, i=0, j=1,
+                   n_coins=2, token_in=token_in, token_out=token_out, tau=tau,
+                   sigma=sigma, a=a, B=B, note=f"pool{k}")
+
+
+def test_a_route_over_the_leg_limit_loses_its_weakest_ports():
+    """`verify` refuses a route over the limit whole, so the circuit cuts it
+    to fit, keeping the ports that earn most."""
+    arcs = [shared(k, POOL[k], a=1.0 - 0.002 * k, B=1e-3) for k in range(6)]
+    g = build(arcs, 2)
+    free = circuit.candidates(g, arcs, np.ones(2), 0, 1, 100.0)
+    assert np.count_nonzero(free.candidates[0].psi) == 6
+    got = circuit.candidates(g, arcs, np.ones(2), 0, 1, 100.0, max_legs=3)
+    assert got.candidates
+    for c in got.candidates:
+        assert set(np.flatnonzero(c.psi)) == {0, 1, 2}
+
+
+def test_a_node_drawing_on_two_of_its_tokens_needs_a_conversion():
+    arcs = [shared(0, POOL[0], a=1.0, B=1e-3),
+            shared(1, POOL[1], a=1.0, B=1e-3, token_in="0xa2")]
+    assert circuit._legs(arcs, np.array([1.0, 1.0])) == 3
+    assert circuit._legs(arcs, np.array([1.0, 0.0])) == 1

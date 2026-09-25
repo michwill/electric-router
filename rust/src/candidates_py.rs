@@ -158,11 +158,12 @@ impl Ballot {
     #[staticmethod]
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (arcs, n_nodes, g_scale, nu, src, dst, psi_total, *,
-                        advanceable=None, leg_cost_bp=0.0, per_gas=0.0, gas=None))]
+                        advanceable=None, leg_cost_bp=0.0, per_gas=0.0, gas=None,
+                        max_legs=crate::circuit::MAX_LEGS))]
     fn circuit(
         arcs: PyRef<'_, Arcs>, n_nodes: usize, g_scale: f64, nu: Vec<f64>, src: usize,
         dst: usize, psi_total: f64, advanceable: Option<Vec<String>>, leg_cost_bp: f64,
-        per_gas: f64, gas: Option<Vec<f64>>,
+        per_gas: f64, gas: Option<Vec<f64>>, max_legs: usize,
     ) -> PyResult<Ballot> {
         let m = arcs.inner.len();
         if nu.len() != n_nodes || src >= n_nodes || dst >= n_nodes
@@ -177,7 +178,7 @@ impl Ballot {
         }
         let opts = crate::circuit::CircuitOptions {
             advanceable: advanceable.map(|v| v.into_iter().map(|p| p.to_ascii_lowercase()).collect()),
-            leg_cost_bp, per_gas, gas,
+            leg_cost_bp, per_gas, gas, max_legs,
         };
         let inner = crate::circuit::candidates(
             &arcs.inner, n_nodes, g_scale, &nu, src, dst, psi_total, &opts);

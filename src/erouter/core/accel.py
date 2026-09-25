@@ -349,7 +349,7 @@ def ballot(g, arcs, src, dst, psi_total, base_psi, *, base_certificate,
 
 
 def circuit(arcs, n_nodes, g_scale, nu, src, dst, psi_total, *, advanceable=None,
-            leg_cost_bp=0.0, per_gas=0.0, gas=None):
+            leg_cost_bp=0.0, per_gas=0.0, gas=None, max_legs):
     """`circuit.candidates`, in Rust.  `None` when it cannot run.
 
     The circuit reads each arc's `a`, `B`, `cap`, kind, pool and ports, not the
@@ -369,5 +369,5 @@ def circuit(arcs, n_nodes, g_scale, nu, src, dst, psi_total, *, advanceable=None
         float(psi_total),
         advanceable=None if advanceable is None else sorted(advanceable),
         leg_cost_bp=float(leg_cost_bp), per_gas=float(per_gas),
-        gas=None if gas is None else [float(v) for v in gas],
+        gas=None if gas is None else [float(v) for v in gas], max_legs=int(max_legs),
     )

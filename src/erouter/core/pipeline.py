@@ -1122,6 +1122,7 @@ def _quote(
     advanceable = frozenset(getattr(client, "reentrant_pools", ()) or ())
     circuit_kw = {
         "advanceable": advanceable, "leg_cost_bp": leg_cost_bp, "gas_table": gas_table,
+        "max_legs": max_legs,
         "per_gas": value_per_gas(gas_price_wei, _dst_per_eth(nodes, nu, dst_token)
                                  / 10 ** nodes.decimals(dst_token)),
     }

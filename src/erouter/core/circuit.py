@@ -45,10 +45,12 @@ from .candidates import (
     _from_ballot,
     conflicting_pools,
     keep_only,
+    legs_of,
     port_ids,
     repair_order,
 )
 from .gas import STATIC
+from .quoter import MAX_LEGS
 from .realize import cancel_cycles, prune_dust
 from .types import ArcKind
 
@@ -274,7 +276,7 @@ def solve(dev: Devices, Q: float, src: int, dst: int, nu0: np.ndarray, *,
 
 def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
                advanceable=None, leg_cost_bp: float = 0.0, per_gas: float = 0.0,
-               gas_table=None) -> CandidateSet:
+               gas_table=None, max_legs: int = MAX_LEGS) -> CandidateSet:
     """The circuit's answer, as a ballot of two for `verify` to adjudicate.
 
     `Psi` is the trade in the graph's scaled value units, as `generate` takes
@@ -287,13 +289,14 @@ def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
     leg is dropped and the solve resumed.  Surplus is right for a thin branch
     and wrong for a deep near-linear pool, which carries a great deal at almost
     no rent -- the prune alone cost 39 bp on USDC->WBTC $5M -- so the quoter
-    chooses, as it does for the ballot.
+    chooses, as it does for the ballot.  Both are then cut to `max_legs`, the
+    weakest ports first.
     """
     table = gas_table or STATIC
     if _ACCEL_ON and _accel.available():
         got = _accel.circuit(
             arcs, g.n_nodes, g.g_scale, nu, src, dst, Psi, advanceable=advanceable,
-            leg_cost_bp=leg_cost_bp, per_gas=per_gas,
+            leg_cost_bp=leg_cost_bp, per_gas=per_gas, max_legs=max_legs,
             gas=[table.gas(arc.kind, arc.pool, arc.i, arc.j) for arc in arcs])
         if got is not None:
             return _from_ballot(got)
@@ -320,6 +323,8 @@ def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
                 banned |= _unearned(dev, res, arcs, psi, port, dst,
                                     leg_cost_bp, per_gas, table)
             if not banned.any():
+                banned = _over_budget(dev, res, arcs, psi, port, max_legs)
+            if not banned.any():
                 break
             dev.cap[banned] = 0.0
             res = solve(dev, Q, src, dst, nu0, nu_start=res.nu,
@@ -341,19 +346,56 @@ def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
     return out
 
 
-def _unearned(dev, res, arcs, psi, port, dst, leg_cost_bp, per_gas, table) -> np.ndarray:
-    """Arcs of every port whose surplus is below its leg charge."""
+def _earned(dev, res, psi, port) -> dict[int, float]:
+    """Each port's surplus at the solved prices, by its head arc."""
     surplus = np.where(dev.live(), res.nu[dev.sig] * res.out - res.nu[dev.tau] * res.delta, 0.0)
-    premium = float(res.out[dev.sig == dst].sum()) * leg_cost_bp / 1e4
     earned: dict[int, float] = {}
     for k in np.flatnonzero(psi > 0):
         earned[int(port[k])] = earned.get(int(port[k]), 0.0) + float(surplus[k])
+    return earned
+
+
+def _unearned(dev, res, arcs, psi, port, dst, leg_cost_bp, per_gas, table) -> np.ndarray:
+    """Arcs of every port whose surplus is below its leg charge."""
+    premium = float(res.out[dev.sig == dst].sum()) * leg_cost_bp / 1e4
+    earned = _earned(dev, res, psi, port)
     banned = np.zeros(len(arcs), bool)
     for head, got in earned.items():
         arc = arcs[head]
         gas = table.gas(arc.kind, arc.pool, arc.i, arc.j) * per_gas
         if got < (gas if arc.kind in CONVERSIONS else max(premium, gas)):
             banned |= port == head
+    return banned
+
+
+def _legs(arcs, psi) -> int:
+    """The legs this flow realises as, conversions included.
+
+    `legs_of` counts ports.  A node whose arcs use more than one of its tokens
+    also needs a wrap or unwrap per extra token, which is how a route of 83
+    ports came out at 90 legs.
+    """
+    tokens: dict[int, set[str]] = {}
+    for k in np.flatnonzero(psi > 0):
+        arc = arcs[int(k)]
+        tokens.setdefault(arc.tau, set()).add(arc.token_in.lower())
+        tokens.setdefault(arc.sigma, set()).add(arc.token_out.lower())
+    return legs_of(arcs, psi) + sum(len(t) - 1 for t in tokens.values())
+
+
+def _over_budget(dev, res, arcs, psi, port, max_legs: int) -> np.ndarray:
+    """The weakest ports, one per leg over `max_legs`.
+
+    `verify` refuses a longer route outright, and the ballot is then down to
+    its one-pool fallbacks: 2% of the trade on FRAX->USDC $10M.
+    """
+    banned = np.zeros(len(arcs), bool)
+    excess = _legs(arcs, psi) - max_legs
+    if excess <= 0:
+        return banned
+    earned = _earned(dev, res, psi, port)
+    for head, _ in sorted(earned.items(), key=lambda kv: (kv[1], kv[0]))[:excess]:
+        banned |= port == head
     return banned
 
 
