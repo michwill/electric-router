@@ -414,7 +414,12 @@ pub fn conflicting_pools(
         } else if element_from(&arcs[idx[0]].pool, arcs[idx[0]].n_coins, &triples).is_err() {
             true
         } else {
-            advanceable.is_some_and(|set| !set.contains(&pool))
+            // The walk advances a pool through swaps and deposits only, so a
+            // withdrawal that is not the pool's last leg is unquotable, and
+            // nothing here fixes the order.
+            advanceable.is_some_and(|set| {
+                !set.contains(&pool) || triples.iter().any(|t| t.0.is_withdraw())
+            })
         };
         if clashes {
             out.push((pool, idx.clone()));

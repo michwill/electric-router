@@ -273,6 +273,18 @@ def test_conflicting_pools_agree(seed):
             assert [p for p, _ in got] == list(want), "insertion order decides the repair"
 
 
+def test_a_withdrawal_is_refused_re_entry_on_both_sides():
+    import erouter_solve
+
+    from test_candidates import LIVE, POOL, SWAP_AND_BURN
+
+    gate = frozenset({POOL[0].lower()})
+    want = conflicting_pools(SWAP_AND_BURN, LIVE, advanceable=gate)
+    got = erouter_solve.Ballot.conflicting_pools(
+        ported_arcs(SWAP_AND_BURN), list(LIVE), advanceable=list(gate))
+    assert want and dict(got) == {k: list(v) for k, v in want.items()}
+
+
 @pytest.mark.parametrize("seed", SEEDS)
 def test_repair_order_and_keep_only_agree(seed):
     """Which arc a repair keeps, and which it bans."""

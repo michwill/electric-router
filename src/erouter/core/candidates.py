@@ -391,7 +391,12 @@ def conflicting_pools(arcs: list[PoolArc], psi: np.ndarray,
             except (MultiPortError, ValueError):
                 clashes = True
             else:
-                clashes = advanceable is not None and pool not in advanceable
+                # The walk advances a pool through swaps and deposits only, so a
+                # withdrawal that is not the pool's last leg is unquotable, and
+                # nothing here fixes the order.
+                clashes = advanceable is not None and (
+                    pool not in advanceable
+                    or any(kind.is_withdraw for kind, _, _ in triples))
         if clashes:
             out[pool] = idx
         if cache is not None:

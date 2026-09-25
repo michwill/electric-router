@@ -429,6 +429,24 @@ def test_an_element_needs_a_pool_a_second_leg_can_be_priced_against():
         ELEMENT, LIVE, advanceable=frozenset({POOL[0].lower()})) == {}
 
 
+SWAP_AND_BURN = [
+    PoolArc(id=f"{POOL[0]}:{k}", pool=POOL[0], kind=kind, i=0, j=1, n_coins=3,
+            token_in=f"0xin{k}", token_out="0xout", tau=k, sigma=2, a=1.0, B=1.0)
+    for k, kind in enumerate((ArcKind.SWAP_STABLE, ArcKind.WITHDRAW_STABLE))
+]
+
+
+def test_a_withdrawal_keeps_a_pool_from_being_entered_twice():
+    """DAI -> USDC and 3Crv -> USDC on 3pool is a 2-in 1-out element, but the
+    walk cannot advance the pool past a burn, and the order of the two legs
+    is the nodes'.  FRAX->USDC $10M: the circuit's route quoted 0."""
+    assert conflicting_pools(SWAP_AND_BURN, LIVE) == {}
+    assert conflicting_pools(
+        SWAP_AND_BURN, LIVE, advanceable=frozenset({POOL[0].lower()})) == {
+        POOL[0].lower(): [0, 1]
+    }
+
+
 def test_the_gate_does_not_touch_a_parallel_bank():
     """A v3 bank is one leg, not an element, so no pool has to be advanceable."""
     arcs = [
