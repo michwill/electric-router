@@ -335,6 +335,22 @@ def test_one_fill_per_spoke_on_both_sides():
     assert len(fills) == 1, "one fill per spoke, not one per arc"
 
 
+def test_a_node_splits_between_its_tokens_by_value_on_both_sides():
+    """scrvUSD is 1.1 crvUSD: equal value out of the node is an even split."""
+    reference, ported = build_nodes()
+    arcs = [
+        make_arc(POOL_A, USDC, CRVUSD, reference, a=1.0, B=1e-9),
+        make_arc(POOL_B, CRVUSD, USDT, reference, a=1.0, B=1e-9),
+        make_arc(POOL_C, SCRVUSD, USDT, reference, a=1.0, B=1e-9),
+    ]
+    want, got = both(arcs, [2.0, 1.0, 1.0], np.ones(reference.n_nodes),
+                     reference, ported, src=USDC, dst=USDT,
+                     amount_in=2 * 10**6)
+    same_route(want, got)
+    hub = want.slots[CRVUSD]
+    assert sorted(rl.leg.bps for rl in want.legs if rl.leg.src_slot == hub) == [0, 5000]
+
+
 def test_two_arcs_on_one_spoke_are_one_bps_group():
     """Two sweepers in one group leaves the second with nothing to trade."""
     reference, ported = build_nodes()

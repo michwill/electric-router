@@ -446,6 +446,25 @@ def test_erc4626_destination_applies_the_vault_rate():
     assert deposit.amount_out == pytest.approx(deposit.amount_in / 1.1, rel=1e-9)
 
 
+def test_a_node_splits_between_its_tokens_by_value():
+    """A hub and its spoke hold different tokens, so the node's split is by
+    canonical value, not by wei: summed as wei, a scrvUSD worth 1.1 crvUSD was
+    counted at 1/1.1 and the other legs handed the difference.  On USDe->USDC
+    $10M, sDOLA at 1.418 DOLA put 1.82M on a pool the solve gave 1.49M."""
+    nodes = merged_nodes()
+    arcs = [arc(POOL_A, USDC, CRVUSD, nodes, a=1.0),
+            arc(POOL_B, CRVUSD, WETH, nodes, a=1 / 4000.0),
+            arc(POOL_C, SCRVUSD, WETH, nodes, a=1 / 4000.0)]
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = nu[nodes.node(CRVUSD)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    route = realize(arcs, np.array([2000.0, 1000.0, 1000.0]), nu, nodes,
+                    src_token=USDC, dst_token=WETH, amount_in=2000 * 10**6)
+    hub = route.slots[CRVUSD]
+    split = [rl.leg.bps for rl in route.legs if rl.leg.src_slot == hub]
+    assert sorted(split) == [0, 5000], split
+
+
 def test_one_arc_per_pool_violation_is_detected():
     """Decision 3: a view-only quoter cannot see its own earlier leg."""
     nodes = base_nodes()

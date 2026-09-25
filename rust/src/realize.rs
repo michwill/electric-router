@@ -544,10 +544,14 @@ pub fn realize(
     // --- amounts --------------------------------------------------------
     let mut deltas: Vec<U256> = Vec::with_capacity(arcs.len());
     let mut outs: Vec<U256> = Vec::with_capacity(arcs.len());
+    // What a node's split is weighed in: canonical units, since a hub and its
+    // spokes hold different tokens and their wei are not comparable.
+    let mut weights: Vec<U256> = Vec::with_capacity(arcs.len());
     for (arc, &flow) in arcs.iter().zip(psi.iter()) {
         let delta_canonical = flow / nu[arc.tau];
         let delta_token = delta_canonical / nodes.rate(&arc.token_in);
         deltas.push(to_int(delta_token * pow10(nodes.decimals(&arc.token_in)))?);
+        weights.push(to_int(delta_canonical * pow10(18))?);
         // (M1) is only valid on [0, a/B], where f_hat' hits zero; beyond that
         // the model turns *decreasing*, so it is a hard box constraint rather
         // than something to watch. Clipping keeps a solver excursion from
@@ -671,7 +675,7 @@ pub fn realize(
         }
 
         // (2) everything leaving the hub, as one contiguous group
-        let total: U256 = outgoing.iter().map(|&k| deltas[k]).fold(U256::ZERO, |a, b| a + b);
+        let total: U256 = outgoing.iter().map(|&k| weights[k]).fold(U256::ZERO, |a, b| a + b);
         if total.is_zero() {
             continue;
         }
@@ -767,7 +771,7 @@ pub fn realize(
 
         for (position, item) in group.iter().enumerate() {
             let carried = behind(item);
-            let share: U256 = carried.iter().map(|&k| deltas[k]).fold(U256::ZERO, |a, b| a + b);
+            let share: U256 = carried.iter().map(|&k| weights[k]).fold(U256::ZERO, |a, b| a + b);
             let bps = if position as i64 == sweeper {
                 0
             } else {
@@ -791,7 +795,7 @@ pub fn realize(
                     let dst = slot(&mut route, nodes, &arcs[*k].token_out)?;
                     route.legs.push(arc_leg(
                         &arcs[*k], hub_slot, dst, bps, deltas[*k], outs[*k], psi[*k],
-                        ratio(deltas[*k], total),
+                        ratio(weights[*k], total),
                     )?);
                 }
             }
@@ -832,7 +836,7 @@ pub fn realize(
                 let dst = slot(&mut route, nodes, &arcs[k].token_out)?;
                 route.legs.push(arc_leg(
                     &arcs[k], *spoke, dst, bps, deltas[k], outs[k], psi[k],
-                    ratio(deltas[k], total),
+                    ratio(weights[k], total),
                 )?);
             }
         }

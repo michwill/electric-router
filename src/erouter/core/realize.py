@@ -460,10 +460,17 @@ def realize(
     # --- amounts --------------------------------------------------------
     deltas: list[int] = []
     outs: list[int] = []
+    # What a node's split is weighed in: canonical units.  `deltas` are each
+    # arc's own token, and a hub and its spokes hold different ones -- summed
+    # as wei, sDOLA counted 1/1.418 of its DOLA and every other leg out of the
+    # node was handed that much more: DOLA/sUSDS 1.82M where the solve put
+    # 1.49M, and USDe->USDC $10M lost 185 bp.
+    weights: list[int] = []
     for arc, flow in zip(arcs, psi, strict=True):
         delta_canonical = float(flow) / float(nu[arc.tau])
         delta_token = delta_canonical / nodes.rate(arc.token_in)
         deltas.append(int(delta_token * 10 ** nodes.decimals(arc.token_in)))
+        weights.append(int(delta_canonical * 10**18))
         # (M1) is only valid on [0, a/B], where f_hat' hits zero; beyond that
         # the model turns *decreasing*, so it is a hard box constraint rather
         # than something to watch.  Clipping keeps a solver excursion from
@@ -551,7 +558,7 @@ def realize(
             continue
 
         # (2) everything leaving the hub, as one contiguous group
-        total = sum(deltas[k] for k in outgoing)
+        total = sum(weights[k] for k in outgoing)
         if total <= 0:
             continue
         spokes: list[tuple[int, int]] = []  # (arc index, spoke slot)
@@ -632,7 +639,7 @@ def realize(
         sweeper = len(group) - 1 if any(map(absorbs_remainder, group)) else -1
 
         for position, item in enumerate(group):
-            share = sum(deltas[k] for k in behind(item))
+            share = sum(weights[k] for k in behind(item))
             bps = (0 if position == sweeper
                    else max(1, min(BPS - 1, round(BPS * share / total))))
             if item[0] == "spoke":
@@ -647,7 +654,7 @@ def realize(
                 k = item[1]
                 route.legs.append(
                     _arc_leg(arcs[k], nodes, slot(hub), slot(arcs[k].token_out),
-                             bps, deltas[k], outs[k], float(psi[k]), deltas[k] / total)
+                             bps, deltas[k], outs[k], float(psi[k]), weights[k] / total)
                 )
 
         # (3) arcs that had to draw from a spoke.  One group per spoke *slot*,
@@ -677,7 +684,7 @@ def realize(
                 route.legs.append(
                     _arc_leg(arcs[k], nodes, spoke, slot(arcs[k].token_out),
                              bps, deltas[k], outs[k], float(psi[k]),
-                             deltas[k] / total)
+                             weights[k] / total)
                 )
 
     # --- destination ----------------------------------------------------
