@@ -231,6 +231,8 @@ class JsonRpcTransport:
             int(self.fetch("eth_blockNumber", []), 16) if block == "latest" else int(block)
         )
         self.pin = Pin(chain_id=chain_id, block=resolved, url=url)
+        #: Whether the caller named the block, rather than taking the tip.
+        self.pinned = block != "latest"
 
     # ---------------------------------------------------------------- Transport
 
@@ -244,6 +246,24 @@ class JsonRpcTransport:
             return int(self.fetch("eth_gasPrice", []), 16)
         except Exception:
             return 0
+
+    def quote_gas_price(self) -> int:
+        """The gas price a quote is ranked at: the pinned block's base fee.
+
+        `eth_gasPrice` is today's price, and a quote pinned to an old block
+        then chose its legs by it -- WETH->crvUSD $10k took 11 legs in one run
+        and 1 in the next.  Live when unpinned, or the block has no base fee.
+        Not for sending: a transaction wants `gas_price`.
+        """
+        if self.pinned:
+            try:
+                header = self.fetch("eth_getBlockByNumber", [self.pin.hex_block, False])
+                fee = header.get("baseFeePerGas") if isinstance(header, dict) else None
+                if isinstance(fee, str):
+                    return int(fee, 16)
+            except Exception:
+                pass
+        return self.gas_price()
 
     @property
     def chain_id(self) -> int:

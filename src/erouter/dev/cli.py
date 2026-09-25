@@ -1159,7 +1159,7 @@ def cmd_route(args: argparse.Namespace) -> int:
     # leg costs more than it saves.
     gas_price_wei = (
         int(float(args.gas_price) * 1e9) if args.gas_price is not None
-        else rpc.gas_price()
+        else rpc.quote_gas_price()
     )
     args.gas_price_wei = gas_price_wei
     # The pool list is the input `--block` does not pin, so say which one this
@@ -1167,8 +1167,9 @@ def cmd_route(args: argparse.Namespace) -> int:
     # these match; a run whose fingerprint moved was handed a different market.
     print(f"  universe {load.fingerprint} · {len(load.pools)} pools · "
           f"{load.source} {load.age:.0f}s old")
-    print(f"  gas {gas_price_wei / 1e9:.4f} gwei"
-          f"{'' if args.gas_price is not None else ' (live)'}")
+    source = ("" if args.gas_price is not None
+              else " (block base fee)" if rpc.pinned else " (live)")
+    print(f"  gas {gas_price_wei / 1e9:.4f} gwei{source}")
     if getattr(args, "timings", False):
         print(_boot_line(started))
     for line in _introduce_endpoints(args, chain, rpc, nodes, src, dst):
@@ -1791,7 +1792,7 @@ def cmd_bench(args: argparse.Namespace) -> int:
         return 2
     amount = int(Decimal(args.amount.replace("_", "")) * 10 ** nodes.decimals(src))
     gas_price = (
-        int(float(args.gas_price) * 1e9) if args.gas_price is not None else rpc.gas_price()
+        int(float(args.gas_price) * 1e9) if args.gas_price is not None else rpc.quote_gas_price()
     )
 
     print(f"\n  {chain.name} · block {rpc.block:,} · {len(load.pools)} pools · "

@@ -134,3 +134,23 @@ def test_an_oversized_batch_is_still_halved(monkeypatch):
     out = rpc.fetch_multi([("eth_blockNumber", [])] * 4)
     assert sizes[0] == 4 and max(sizes[1:]) <= 2
     assert out == ["0x1"] * 4
+
+
+def test_a_pinned_quote_prices_gas_at_its_block():
+    """`eth_gasPrice` is today's price, and a quote pinned to an old block then
+    chose its legs by it: WETH->crvUSD $10k took 11 legs in one run and 1 in
+    the next.  Sending a transaction still wants the live figure."""
+    answers = {"eth_getBlockByNumber": {"baseFeePerGas": hex(59_000_000)},
+               "eth_gasPrice": hex(3_000_000_000)}
+    pinned = JsonRpcTransport("http://node.invalid", block=26_019_000, chain_id=1)
+    pinned.fetch = lambda method, params: answers[method]
+    assert pinned.pinned and pinned.quote_gas_price() == 59_000_000
+    assert pinned.gas_price() == 3_000_000_000
+
+    answers["eth_getBlockByNumber"] = {}
+    assert pinned.quote_gas_price() == 3_000_000_000, "a block with no base fee"
+
+    tip = JsonRpcTransport("http://node.invalid", block=26_019_000, chain_id=1)
+    tip.pinned = False                      # as `block="latest"` leaves it
+    tip.fetch = lambda method, params: answers[method]
+    assert tip.quote_gas_price() == 3_000_000_000

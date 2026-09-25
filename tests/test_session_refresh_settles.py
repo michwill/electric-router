@@ -215,3 +215,15 @@ def test_a_zero_answer_does_not_erase_what_was_known():
     run(made.refresh())
 
     assert made.gas_price_wei == 1_000_000_000
+
+
+def test_a_pinned_warm_prices_gas_at_its_block():
+    """`eth_gasPrice` is today's price, and a run pinned to an old block then
+    chose routes by it: WETH->crvUSD $10k took 11 legs in one run and 1 in the
+    next.  A pinned warm takes its block's base fee; `latest` stays live."""
+    from erouter.chain.session import RouterSession
+
+    header = {"number": hex(26_019_000), "baseFeePerGas": hex(59_000_000)}
+    assert RouterSession._base_fee(header, 26_019_000) == 59_000_000
+    assert RouterSession._base_fee(header, "latest") == 0
+    assert RouterSession._base_fee({"number": "0x1"}, 1) == 0, "a chain with no base fee"

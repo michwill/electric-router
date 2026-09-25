@@ -301,6 +301,7 @@ class RouterSession:
             block if isinstance(block, str) else hex(int(block)))
         self.block = int(header["number"], 16)
         report.block = self.block
+        pinned_fee = self._base_fee(header, block)
         say("block", 1.0)
 
         say("caches", 0.0)
@@ -381,7 +382,7 @@ class RouterSession:
 
         self.gas_table, _ = self.facts.table(self.pools), None
         self.risk_table = self.facts.risk_table()
-        self.gas_price_wei = await self._gas_price()
+        self.gas_price_wei = pinned_fee or await self._gas_price()
 
         report.unreadable = evm.stats.unreadable
         report.warnings.extend(evm.stats.errors[:6])
@@ -1289,6 +1290,19 @@ class RouterSession:
                 wrappers=wrappers)
         say("models", 1.0)
         return len(exact) + len(two) + len(tri)
+
+    @staticmethod
+    def _base_fee(header: dict, block) -> int:
+        """The pinned block's base fee, or 0 when unpinned or it has none.
+
+        A pinned quote prices gas as its block did.  `eth_gasPrice` is the
+        network's price now, and it moved small trades' leg counts between two
+        runs of one block: WETH->crvUSD $10k took 11 legs, then 1.
+        """
+        if isinstance(block, str):
+            return 0
+        fee = header.get("baseFeePerGas")
+        return int(fee, 16) if isinstance(fee, str) else 0
 
     async def _gas_price(self) -> int:
         """What a leg costs to execute, priced.
