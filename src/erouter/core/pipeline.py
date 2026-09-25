@@ -65,10 +65,10 @@ from .refit import RefitReport, refit
 from .risk import REVERT_COST_BP, RiskTable
 from .seed import k_shortest_paths, seed_subgraph
 from .solve import Solution, SolveReport, active_set_solve, solve
+from .split import FINE_SCALES, PROBE_SCALES, should_optimise, split_groups
 from .split import ScoutResult as ScoutSplits
 from .split import optimise as optimise_splits
 from .split import scout as scout_splits
-from .split import should_optimise, split_groups
 from .types import ArcKind, FlagReason, PoolArc, Probe
 from .verify import (
     IMPACT_FRACTION,
@@ -2042,6 +2042,7 @@ def _optimise_split(
         nominal_in=[rl.amount_in for rl in route.legs],
         nominal_out=[rl.amount_out for rl in route.legs],
         curves=result.scout_curves or None,
+        scales=FINE_SCALES if CIRCUIT else PROBE_SCALES,
     )
     result.counters["split_reused_curves"] = int(report.reused)
     result.counters["split_calls"] = report.calls

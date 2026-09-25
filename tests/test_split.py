@@ -590,3 +590,25 @@ def test_scouting_in_company_still_costs_one_batch():
             [2_500_000, 2_500_000, 3_500_000])],
           client, amount_in=1_000_000)
     assert client.probe_calls == 1
+
+
+def test_the_first_probes_move_by_the_callers_scale():
+    """The circuit's route starts at its model's optimum and asks for a finer
+    step than the ballot's: on rETH->WETH $1M every 2% probe lost, and 0.5%
+    found +5 to +15 bp."""
+    class Recording(ConcaveQuoter):
+        def __init__(self):
+            super().__init__()
+            self.seen: list[int] = []
+
+        def quote_routes(self, routes, amounts_in, dst_slots):
+            self.seen.extend(legs[0].bps for legs in routes)
+            return super().quote_routes(routes, amounts_in, dst_slots)
+
+    for scales, moved in (((0.005,), 50), (None, 200)):
+        quoter = Recording()
+        baseline = quoter.payoff([0.6, 0.4], 1_000_000)
+        kw = {} if scales is None else {"scales": scales}
+        optimise(SPLIT, quoter, amount_in=1_000_000, dst_slot=2, baseline=baseline,
+                 max_rounds=1, **kw)
+        assert {6000 + moved, 6000 - moved} <= set(quoter.seen[:4]), (scales, quoter.seen[:4])

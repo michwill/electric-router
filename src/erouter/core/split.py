@@ -48,6 +48,12 @@ HOT_ROUNDS = 4
 # is not knowable in advance: 0.02 clears integer `bps` granularity by two orders
 # and stays local, 0.08 still resolves a coordinate whose curvature is flat there.
 PROBE_SCALES = (0.02, 0.08)
+# ...and for a route that starts at its model's optimum, as the circuit's does,
+# where only a small correction is left: 0.005 still clears `bps` granularity
+# fifty times.  On rETH->WETH $1M every 2% probe lost 24 bp or more, and 0.005
+# found +5 to +15 bp at no cost elsewhere; the ballot's candidates start further
+# out, and there it moved FRAX->USDC $10M -228 to +30 bp.
+FINE_SCALES = (0.005, 0.02, 0.08)
 # Multipliers along the normalised gradient, spanning two decades so one batch
 # covers both a cautious and an aggressive step.
 LINE_STEPS = (0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64)
@@ -665,6 +671,7 @@ def optimise(
     max_rounds: int = MAX_ROUNDS,
     hot_rounds: int = HOT_ROUNDS,
     curves=None,
+    scales: tuple[float, ...] = PROBE_SCALES,
 ) -> tuple[list[Leg], SplitReport]:
     """Re-split a finished route.  Returns the best legs found and a report.
 
@@ -714,6 +721,7 @@ def optimise(
             chased, chased_report = optimise(
                 legs, client, amount_in=amount_in, dst_slot=dst_slot,
                 baseline=baseline, max_rounds=max_rounds, hot_rounds=hot_rounds,
+                scales=scales,
             )
             report.mode = "curves+chained"
             report.calls += chased_report.calls
@@ -745,7 +753,7 @@ def optimise(
     # As many probe scales as the trip can carry, smallest first -- the
     # gradient wants the smallest scale that quotes on both sides.
     depth = max(1, budget // (2 * len(free)))
-    scales = PROBE_SCALES[:depth] or PROBE_SCALES[:1]
+    scales = scales[:depth] or scales[:1]
 
     allowed = max_rounds
     while report.rounds < allowed:
