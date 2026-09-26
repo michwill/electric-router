@@ -306,6 +306,31 @@ def test_a_curve_leg_past_its_reach_is_left_to_the_quote():
         assert (route.over_pool_limit is not None) is limit, kind
 
 
+def test_a_quoted_split_is_trimmed_only_at_a_pool_limit():
+    """A v3 leg past the ticks read is cut; the stableswap sibling past its
+    reach takes the freed share and keeps its cap.  Cutting it too cascaded
+    through FRAX->USDC $10M's slots and lost a +41 bp split."""
+    nodes = base_nodes()
+    v3 = arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, cap=40.0, kind=ArcKind.SWAP_UNIV3)
+    stable = arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1, cap=50.0,
+                 kind=ArcKind.SWAP_STABLE)
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    route = realize([v3, stable], np.array([30.0, 40.0]), nu, nodes,
+                    src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6)
+    first = next(k for k, rl in enumerate(route.legs) if rl.target == POOL_A)
+    route.legs[first].leg = replace(route.legs[first].leg, bps=500)
+    _forward_simulate(route, nodes)
+    assert route.over_pool_limit is not None
+
+    assert trim_to_capacity(route, nodes, limits_only=True)
+    by = {rl.target: rl for rl in route.legs}
+    assert by[POOL_A].amount_in <= 40 * 10**6 * (1 + 1e-9)
+    assert by[POOL_B].amount_in >= 959 * 10**6 and by[POOL_B].cap_in == 50 * 10**6
+    assert route.over_pool_limit is None and route.over_capacity is not None
+
+
 def test_a_saturated_slot_spills_past_the_reach_of_curve_pools():
     """A trade bigger than every pool's reach: CRV->WETH $10M fits 14.4M of
     20M CRV, and refusing it left no route at all.  Curve's quote is true past

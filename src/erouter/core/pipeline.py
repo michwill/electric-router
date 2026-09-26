@@ -1995,7 +1995,7 @@ def _scout_wider(
     if candidate.route.over_pool_limit is not None:
         result.counters["scout_over_capacity"] = 1
         order = list(candidate.route.legs)
-        trimmed = trim_to_capacity(candidate.route, nodes)
+        trimmed = trim_to_capacity(candidate.route, nodes, limits_only=True)
         value = 0.0
         if trimmed:
             legs = [rl.leg for rl in candidate.route.legs]
@@ -2074,7 +2074,7 @@ def _optimise_split(
         result.counters["split_over_capacity"] = 1
         order = list(route.legs)
         after = 0
-        if trim_to_capacity(route, nodes):
+        if trim_to_capacity(route, nodes, limits_only=True):
             after = int(client.quote_routes(
                 [[rl.leg for rl in route.legs]], [amount_in], [route.dst_slot])[0])
         if after <= (result.verified_out or 0):

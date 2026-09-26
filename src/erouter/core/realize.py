@@ -947,7 +947,7 @@ def _forward_simulate(route: RealizedRoute, nodes: NodeMap) -> int:
     return balances.get(route.dst_slot, 0)
 
 
-def trim_to_capacity(route: RealizedRoute, nodes: NodeMap) -> bool:
+def trim_to_capacity(route: RealizedRoute, nodes: NodeMap, *, limits_only: bool = False) -> bool:
     """Re-weight every leg over its cap down to it, in place.
 
     A re-split works from quotes, and a view does not refuse what a pool will,
@@ -965,11 +965,16 @@ def trim_to_capacity(route: RealizedRoute, nodes: NodeMap) -> bool:
     that restores the old legs restores their caps.  False when a slot has
     nowhere left to put its flow; the route is then partly re-weighted and the
     caller reverts it.
+
+    `limits_only` cuts only a leg over a pool's limit (`over_pool_limit`), for
+    a split adopted on a quote, which has judged its `SPILLS` legs already.
+    Cutting those too, when only a 14k-USDC v4 leg was past its read ticks,
+    cascaded through FRAX->USDC $10M's slots and lost a +41 bp split.
     """
     held: set[int] = set()
     for _ in range(4 * len(route.legs) + 1):
         route.modelled_out = _forward_simulate(route, nodes)
-        over = route.over_capacity
+        over = route.over_pool_limit if limits_only else route.over_capacity
         if over is None:
             return True
         if not over.share_of_node > 0:

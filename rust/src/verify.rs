@@ -124,7 +124,7 @@ pub fn realize_candidates(
         // Cut an over-cap split back rather than lose the topology; what
         // cannot be cut is still refused by `verify`, with the leg named.
         if route.over_capacity().is_some() {
-            trim_to_capacity(&mut route, nodes);
+            trim_to_capacity(&mut route, nodes, false);
         }
         candidate.route = Some(route);
         candidate.status = "ready".into();

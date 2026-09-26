@@ -416,15 +416,23 @@ impl Route {
     }
 
     /// Cut every leg over its cap back to it; `false` when a slot cannot.
+    /// `limitsOnly` cuts only a leg over a pool's limit.
     #[wasm_bindgen(js_name = trimToCapacity)]
-    pub fn trim_to_capacity(&mut self, nodes: &NodeMap) -> bool {
-        realize::trim_to_capacity(&mut self.inner, &nodes.inner)
+    pub fn trim_to_capacity(&mut self, nodes: &NodeMap, limits_only: bool) -> bool {
+        realize::trim_to_capacity(&mut self.inner, &nodes.inner, limits_only)
     }
 
     /// The index of the first leg over its cap, or `undefined`.
     #[wasm_bindgen(js_name = overCapacity)]
     pub fn over_capacity(&self) -> Option<usize> {
         let target = self.inner.over_capacity()?;
+        self.inner.legs.iter().position(|rl| std::ptr::eq(rl, target))
+    }
+
+    /// The index of the first leg over a pool's limit, or `undefined`.
+    #[wasm_bindgen(js_name = overPoolLimit)]
+    pub fn over_pool_limit(&self) -> Option<usize> {
+        let target = self.inner.over_pool_limit()?;
         self.inner.legs.iter().position(|rl| std::ptr::eq(rl, target))
     }
 

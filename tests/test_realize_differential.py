@@ -482,3 +482,29 @@ def test_a_trimmed_resplit_agrees(caps, bps, kind, fits):
     same_route(want, got)
     if fits:
         assert want.over_capacity is None and got.over_capacity() is None
+
+
+def test_a_trim_to_pool_limits_agrees():
+    """Only the v3 leg is cut; the stableswap legs past their reach stay."""
+    reference, ported = build_nodes()
+    pools = (POOL_A, POOL_B, POOL_C)
+    kinds = (ArcKind.SWAP_UNIV3, ArcKind.SWAP_STABLE, ArcKind.SWAP_STABLE)
+    caps = (0.05, 0.05, 0.05)
+    arcs = [make_arc(pool, WETH, USDC, reference, a=3000.0 - k, B=1e-3 * (k + 1), cap=cap,
+                     kind=kinds[k])
+            for k, (pool, cap) in enumerate(zip(pools, caps, strict=True))]
+    want, got = both(arcs, [0.5, 0.3, 0.2], np.ones(reference.n_nodes),
+                     reference, ported, src=WETH, dst=USDC, amount_in=10**18)
+    bps = (6000, 3000, 0)
+    split = [0 if n == 2 else bps[pools.index(rl.target)] for n, rl in enumerate(want.legs)]
+    for rl, b in zip(want.legs, split, strict=True):
+        rl.leg = dataclasses.replace(rl.leg, bps=b)
+    _forward_simulate(want, reference)
+    got.reweight(split, ported)
+    assert want.over_pool_limit is not None and got.over_pool_limit() is not None
+
+    assert trim_to_capacity(want, reference, limits_only=True)
+    assert got.trim_to_capacity(ported, limits_only=True)
+    same_route(want, got)
+    assert want.over_pool_limit is None and got.over_pool_limit() is None
+    assert want.over_capacity is not None and got.over_capacity() is not None

@@ -365,13 +365,20 @@ impl Route {
     }
 
     /// Cut every leg over its cap back to it; `False` when a slot cannot.
-    fn trim_to_capacity(&mut self, nodes: PyRef<'_, NodeMap>) -> bool {
-        realize::trim_to_capacity(&mut self.inner, &nodes.inner)
+    #[pyo3(signature = (nodes, limits_only=false))]
+    fn trim_to_capacity(&mut self, nodes: PyRef<'_, NodeMap>, limits_only: bool) -> bool {
+        realize::trim_to_capacity(&mut self.inner, &nodes.inner, limits_only)
     }
 
     /// The index of the first leg over its cap, or `None`.
     fn over_capacity(&self) -> Option<usize> {
         let target = self.inner.over_capacity()?;
+        self.inner.legs.iter().position(|rl| std::ptr::eq(rl, target))
+    }
+
+    /// The index of the first leg over a pool's limit, or `None`.
+    fn over_pool_limit(&self) -> Option<usize> {
+        let target = self.inner.over_pool_limit()?;
         self.inner.legs.iter().position(|rl| std::ptr::eq(rl, target))
     }
 
