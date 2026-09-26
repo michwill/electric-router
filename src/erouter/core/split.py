@@ -715,7 +715,10 @@ def optimise(
                 budget=budget,
             )
             gained = (report.after / baseline - 1) * 1e4 if baseline > 0 else 0.0
-            if gained >= CURVE_ENOUGH_BP or not report.improved:
+            # Found nothing, having promised much: rETH->WETH $10M's curves
+            # promised 186 bp and the chained search found 104.
+            missed = report.curve_error_bp > CURVE_ENOUGH_BP
+            if gained >= CURVE_ENOUGH_BP or not (report.improved or missed):
                 return tuned, report
             # Curves found something, but not much -- and "not much" is where
             # the chained search they replaced was measurably ahead.  Run it too,

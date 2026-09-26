@@ -301,6 +301,39 @@ def test_it_falls_back_to_the_chained_search_without_a_probe_path():
     assert report.mode == "chained"
 
 
+class OverPromisingQuoter(PoolQuoter):
+    """Probes that are true up to twice pool B's realised size and 3x rich
+    past it.
+
+    The composed curves then match the chain at the split in hand, so they pass
+    their check, and promise a gain from loading B that the chain refuses.
+    """
+
+    def probe(self, probes):
+        from erouter.core.quoter import Quote, Status
+
+        self.probe_calls += 1
+        return [Quote(Status.VALUE, int(self.out(p.pool, p.dx)
+                                        * (3.0 if p.pool == POOL_B and p.dx > 800_000 else 1.0)))
+                for p in probes]
+
+
+def test_curves_that_promise_much_and_find_nothing_hand_over_to_the_chained_search():
+    """rETH->WETH $10M: the curves promised 186 bp, the chain found none of it,
+    and the circuit kept a split the chained search improved by 104 bp."""
+    amount = 1_000_000
+    quoter = OverPromisingQuoter()
+    baseline = quoter.quote_routes([SPLIT], [amount], [2])[0]
+    tuned, report = optimise(
+        SPLIT, quoter, amount_in=amount, dst_slot=2, baseline=baseline,
+        nominal_in=[600_000, 400_000, 500_000],
+        nominal_out=[500_000, 380_000, 490_000],
+    )
+    assert report.mode == "curves+chained" and report.curve_error_bp > 1000
+    assert report.improved and report.after > baseline
+    assert report.after == quoter.quote_routes([tuned], [amount], [2])[0]
+
+
 class LocalPoolQuoter(PoolQuoter):
     """The same pools, but claiming quotes are cheap enough to spend freely."""
 
