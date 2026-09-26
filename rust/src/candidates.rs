@@ -208,7 +208,7 @@ fn round3(x: f64) -> f64 {
     format!("{x:.3}").parse().unwrap_or(x)
 }
 
-fn pool_of(arcs: &[PoolArc]) -> Vec<String> {
+pub(crate) fn pool_of(arcs: &[PoolArc]) -> Vec<String> {
     arcs.iter().map(|a| a.pool.to_ascii_lowercase()).collect()
 }
 

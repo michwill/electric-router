@@ -40,9 +40,12 @@ import numpy as np
 from . import accel as _accel
 from .candidates import (
     MIN_FLOW_FRACTION,
+    ORDER_QUANTUM,
+    TOP_K,
     Candidate,
     CandidateSet,
     _from_ballot,
+    _pool_of,
     conflicting_pools,
     keep_only,
     legs_of,
@@ -74,6 +77,13 @@ GMIN = 1e-14              # isolated nodes only: every arc leaks
 #: real cap otherwise put conductances near 1e12 into the Hessian.
 LINEAR = 1e-6
 MAX_ROUNDS = 12
+#: The ballot's pool ladder: the k pools the solve put most through, solved
+#: alone; how short of the trade such a solve may fall and still be offered;
+#: and how close two of them may come before they are one route -- `bps`
+#: resolution, which is all realisation keeps of a split.
+POOL_LEVELS = TOP_K
+POOL_SHORTFALL = 1e-3
+SAME_ROUTE = 1e-4
 
 CONVERSIONS = frozenset({
     ArcKind.WRAP_NATIVE, ArcKind.UNWRAP_NATIVE, ArcKind.WSTETH_WRAP,
@@ -288,7 +298,7 @@ def solve(dev: Devices, Q: float, src: int, dst: int, nu0: np.ndarray, *,
 def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
                advanceable=None, leg_cost_bp: float = 0.0, per_gas: float = 0.0,
                gas_table=None, max_legs: int = MAX_LEGS) -> CandidateSet:
-    """The circuit's answer, as a ballot of two for `verify` to adjudicate.
+    """The circuit's answer, as a ballot for `verify` to adjudicate.
 
     `Psi` is the trade in the graph's scaled value units, as `generate` takes
     it, and the candidates come back in them.  `per_gas` is one unit of gas in
@@ -302,6 +312,12 @@ def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
     no rent -- the prune alone cost 39 bp on USDC->WBTC $5M -- so the quoter
     chooses, as it does for the ballot.  Both are then cut to `max_legs`, the
     weakest ports first.
+
+    Then the ballot's pool family: the k pools the solve put most through,
+    every port of them, solved alone for each k in `POOL_LEVELS`.  The solve
+    spreads a small trade over every arc that pays at all, and CRV->WETH $10k
+    took 16 legs where three paid more.  A set of pools the trade does not fit
+    is skipped, since the whole amount is realised through whatever it routed.
     """
     table = gas_table or STATIC
     if _ACCEL_ON and _accel.available():
@@ -315,6 +331,7 @@ def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
     Q = V / nu[src]
     nu0 = nu / nu[dst]
     dev = devices(arcs, g.n_nodes, nu0, Q * nu0[src])
+    pristine = dev.cap.copy()
     port = port_ids(arcs)
     out = CandidateSet()
 
@@ -350,9 +367,31 @@ def candidates(g, arcs, nu, src: int, dst: int, Psi: float, *,
     out.pivots += first.iterations
     settled, psi = settle(first, prune=False)
     _offer(out, g, psi, src, dst, "circuit")
+    base = psi
     saved, warm = dev.cap.copy(), dev.d.copy()
     _, psi = settle(settled, prune=True)
     _offer(out, g, psi, src, dst, "circuit, pruned")
+    dev.cap, dev.d = saved, warm.copy()
+
+    # Ranked as the ballot ranks them, to a millionth of the trade and by name.
+    pools = _pool_of(arcs)
+    quantum = ORDER_QUANTUM * Psi if Psi > 0 else ORDER_QUANTUM
+    carried: dict[str, float] = {}
+    for k in np.flatnonzero(base > 0):
+        carried[pools[k]] = carried.get(pools[k], 0.0) + float(base[k])
+    ranked = sorted(carried, key=lambda p: (-round(carried[p] / quantum), p))
+    for k in POOL_LEVELS:
+        if k >= len(ranked):
+            continue
+        # From the caps before any repair: the solve's own may have banned the
+        # very port these pools need once the rest are gone.
+        dev.cap = np.where(np.isin(pools, ranked[:k]), pristine, 0.0)
+        res = solve(dev, Q, src, dst, nu0)
+        out.solves += 1
+        out.pivots += res.iterations
+        _, psi = settle(res, prune=False)
+        _offer(out, g, psi, src, dst, f"circuit, top {k} pool{'s' if k > 1 else ''}",
+               rtol=SAME_ROUTE, whole=Psi)
     dev.cap, dev.d = saved, warm
     return out
 
@@ -410,12 +449,17 @@ def _over_budget(dev, res, arcs, psi, port, max_legs: int) -> np.ndarray:
     return banned
 
 
-def _offer(out: CandidateSet, g, psi, src, dst, label: str) -> None:
+def _offer(out: CandidateSet, g, psi, src, dst, label: str, rtol: float = 1e-12,
+           whole: float = 0.0) -> None:
+    """Add `psi` unless it is one already held, to `rtol`; or, given `whole`,
+    unless the route it leaves carries less of the trade than that."""
     psi, _ = cancel_cycles(g.tau, g.sig, psi)
     psi, _ = prune_dust(g.tau, g.sig, psi, src, dst)
     if not (psi > 0).any():
         return
-    if any(np.allclose(psi, c.psi, rtol=1e-12, atol=0.0) for c in out.candidates):
+    if float(psi[g.tau == src].sum()) < (1.0 - POOL_SHORTFALL) * whole:
+        return
+    if any(np.allclose(psi, c.psi, rtol=rtol, atol=0.0) for c in out.candidates):
         return
     out.candidates.append(Candidate(
         label=label, psi=psi, certificate=False, kind="circuit",

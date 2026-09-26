@@ -141,7 +141,50 @@ def test_a_route_over_the_leg_limit_loses_its_weakest_ports():
     got = circuit.candidates(g, arcs, np.ones(2), 0, 1, 100.0, max_legs=3)
     assert got.candidates
     for c in got.candidates:
-        assert set(np.flatnonzero(c.psi)) == {0, 1, 2}
+        assert np.count_nonzero(c.psi) <= 3
+        if not c.label.startswith("circuit, top"):
+            assert set(np.flatnonzero(c.psi)) == {0, 1, 2}
+
+
+def test_the_pools_carrying_most_are_offered_alone():
+    """The solve spreads a trade over every arc that pays at all: CRV->WETH
+    $10k took 16 legs where three paid more.  The k pools it put most through,
+    solved alone, are on the ballot too, and verify weighs their gas."""
+    arcs = [shared(0, POOL[0], a=1.0, B=1e-5)]
+    arcs += [shared(k, POOL[k], a=0.9999, B=1e-3) for k in range(1, 6)]
+    g = build(arcs, 2)
+    got = circuit.candidates(g, arcs, np.ones(2), 0, 1, 100.0)
+    assert np.count_nonzero(got.candidates[0].psi) > 1
+    by = {c.label: c for c in got.candidates}
+    assert set(np.flatnonzero(by["circuit, top 1 pool"].psi)) == {0}
+
+
+def test_a_pool_is_kept_with_every_port_it_has():
+    """TriCRV fed crvUSD on to WETH; kept alone, it has to be free to sell
+    straight to WETH instead, or the ballot's three-leg route is out of reach."""
+    tri = POOL[0]
+    arcs = [
+        arc(0, tri, 0, 1, a=1.0, B=2e-3, kind=ArcKind.SWAP_CRYPTO, i=0, j=1, n=3),
+        arc(1, tri, 0, 2, a=1.01, B=2e-3, kind=ArcKind.SWAP_CRYPTO, i=0, j=2, n=3),
+        arc(2, POOL[1], 2, 1, a=1.0, B=1e-4),
+    ]
+    g = build(arcs, 3)
+    got = circuit.candidates(g, arcs, np.ones(3), 0, 1, 100.0, advanceable=frozenset())
+    assert got.candidates[0].psi[1] > 0 and got.candidates[0].psi[0] == 0.0
+    by = {c.label: c for c in got.candidates}
+    assert set(np.flatnonzero(by["circuit, top 1 pool"].psi)) == {0}
+
+
+def test_pools_the_trade_does_not_fit_are_not_offered():
+    """WETH->USDC $10k's compact candidates ran through a v3 bank reaching
+    2.1 wstETH, and realisation put the whole 2.7 through it."""
+    arcs = [shared(0, POOL[0], a=1.0, B=1e-5), shared(1, POOL[1], a=0.99, B=1e-3)]
+    arcs[0].cap = 60.0
+    arcs[1].cap = 45.0
+    g = build(arcs, 2)
+    got = circuit.candidates(g, arcs, np.ones(2), 0, 1, 100.0)
+    assert got.candidates[0].psi[0] > got.candidates[0].psi[1] > 0
+    assert "circuit, top 1 pool" not in [c.label for c in got.candidates]
 
 
 def test_a_node_drawing_on_two_of_its_tokens_needs_a_conversion():

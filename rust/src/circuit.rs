@@ -13,14 +13,14 @@
 //! agree to rounding rather than bit for bit.
 
 use crate::candidates::{
-    conflicting_pools, keep_only, legs_of, port_ids, repair_order, Candidate, CandidateSet,
-    MIN_FLOW_FRACTION,
+    conflicting_pools, keep_only, legs_of, pool_of, port_ids, repair_order, Candidate,
+    CandidateSet, MIN_FLOW_FRACTION, ORDER_QUANTUM, TOP_K,
 };
 use crate::cycles::cancel_cycles;
 use crate::realize::prune_dust;
 use crate::sparse::Symbolic;
 use crate::types::{ArcKind, PoolArc};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub const ARMIJO: f64 = 1e-4;
 pub const MAX_ITER: usize = 60;
@@ -34,6 +34,14 @@ pub const INNER: usize = 80;
 pub const GMIN: f64 = 1e-14;
 pub const LINEAR: f64 = 1e-6;
 pub const MAX_ROUNDS: usize = 12;
+/// The ballot's pool ladder, each set solved alone (`circuit.POOL_LEVELS`);
+/// how short of the trade such a solve may fall (`POOL_SHORTFALL`); and how
+/// close two may come before they are one route (`SAME_ROUTE`).
+pub const POOL_LEVELS: [usize; 7] = TOP_K;
+pub const POOL_SHORTFALL: f64 = 1e-3;
+pub const SAME_ROUTE: f64 = 1e-4;
+/// `_offer`'s default: identical to rounding.
+const SAME_FLOW: f64 = 1e-12;
 /// `realize.DUST_SHARE` and the tolerance `prune_dust`/`cancel_cycles` take.
 const DUST_SHARE: f64 = 1e-4;
 const FLOW_TOL: f64 = 1e-12;
@@ -445,9 +453,10 @@ impl Default for CircuitOptions {
     }
 }
 
-/// The circuit's answer, as a ballot of two for `verify` to adjudicate
-/// (`circuit.candidates`). `psi_total` and the candidates are in the graph's
-/// scaled value units.
+/// The circuit's answer, as a ballot for `verify` to adjudicate
+/// (`circuit.candidates`): the solve, its pruned form, and the k pools it put
+/// most through solved alone for each k in `POOL_LEVELS`. `psi_total` and the
+/// candidates are in the graph's scaled value units.
 #[allow(clippy::too_many_arguments)]
 pub fn candidates(arcs: &[PoolArc], n_nodes: usize, g_scale: f64, nu: &[f64],
                   src: usize, dst: usize, psi_total: f64, opts: &CircuitOptions) -> CandidateSet {
@@ -455,6 +464,7 @@ pub fn candidates(arcs: &[PoolArc], n_nodes: usize, g_scale: f64, nu: &[f64],
     let q = v / nu[src];
     let nu0: Vec<f64> = nu.iter().map(|x| x / nu[dst]).collect();
     let mut dev = devices(arcs, n_nodes, &nu0, q * nu0[src]);
+    let pristine = dev.cap.clone();
     let port = port_ids(arcs);
     let tau64: Vec<i64> = arcs.iter().map(|a| a.tau as i64).collect();
     let sig64: Vec<i64> = arcs.iter().map(|a| a.sigma as i64).collect();
@@ -512,10 +522,47 @@ pub fn candidates(arcs: &[PoolArc], n_nodes: usize, g_scale: f64, nu: &[f64],
     };
 
     let (settled, psi) = settle(&mut dev, &mut dev_d, &mut out, first, false);
-    offer(&mut out, &tau64, &sig64, n_nodes, psi, src, dst, "circuit");
+    let base = psi.clone();
+    offer(&mut out, &tau64, &sig64, n_nodes, psi, src, dst, "circuit", SAME_FLOW, 0.0);
     let (saved, warm) = (dev.cap.clone(), dev_d.clone());
     let (_, psi) = settle(&mut dev, &mut dev_d, &mut out, settled, true);
-    offer(&mut out, &tau64, &sig64, n_nodes, psi, src, dst, "circuit, pruned");
+    offer(&mut out, &tau64, &sig64, n_nodes, psi, src, dst, "circuit, pruned", SAME_FLOW, 0.0);
+    dev_d = warm.clone();
+
+    // Ranked as the ballot ranks them, to a millionth of the trade and by
+    // name; summed in index order, as the reference sums them.
+    let pools = pool_of(arcs);
+    let quantum = if psi_total > 0.0 { ORDER_QUANTUM * psi_total } else { ORDER_QUANTUM };
+    let mut carried: HashMap<&str, f64> = HashMap::new();
+    for (k, &f) in base.iter().enumerate() {
+        if f > 0.0 {
+            *carried.entry(pools[k].as_str()).or_insert(0.0) += f;
+        }
+    }
+    let mut ranked: Vec<&str> = carried.keys().copied().collect();
+    ranked.sort_by(|a, b| {
+        let (x, y) = ((carried[a] / quantum).round() as i64, (carried[b] / quantum).round() as i64);
+        y.cmp(&x).then(a.cmp(b))
+    });
+    for k in POOL_LEVELS {
+        if k >= ranked.len() {
+            continue;
+        }
+        // From the caps before any repair: see the reference.
+        let keep = &ranked[..k];
+        dev.cap = pristine.iter().zip(&pools)
+            .map(|(&c, p)| if keep.contains(&p.as_str()) { c } else { 0.0 })
+            .collect();
+        let res = {
+            let p = Problem { dev: &dev, q, src, dst, sys: &sys };
+            solve(&p, &mut dev_d, &nu0, None, MU_START, STAGES)
+        };
+        out.solves += 1;
+        out.pivots += res.iterations;
+        let (_, psi) = settle(&mut dev, &mut dev_d, &mut out, res, false);
+        let label = format!("circuit, top {k} pool{}", if k > 1 { "s" } else { "" });
+        offer(&mut out, &tau64, &sig64, n_nodes, psi, src, dst, &label, SAME_ROUTE, psi_total);
+    }
     dev.cap = saved;
     dev.d = warm;
     out
@@ -614,14 +661,19 @@ fn over_budget(dev: &Devices, res: &Solved, arcs: &[PoolArc], psi: &[f64], port:
 
 #[allow(clippy::too_many_arguments)]
 fn offer(out: &mut CandidateSet, tau: &[i64], sig: &[i64], n_nodes: usize, psi: Vec<f64>,
-         src: usize, dst: usize, label: &str) {
+         src: usize, dst: usize, label: &str, rtol: f64, whole: f64) {
     let (psi, _) = cancel_cycles(tau, sig, &psi, FLOW_TOL, n_nodes);
     let (psi, _) = prune_dust(tau, sig, &psi, src, dst, DUST_SHARE, FLOW_TOL);
     if !psi.iter().any(|&x| x > 0.0) {
         return;
     }
+    let carried: f64 = (0..psi.len()).filter(|&j| tau[j] == src as i64).map(|j| psi[j]).sum();
+    if carried < (1.0 - POOL_SHORTFALL) * whole {
+        return;
+    }
+    // `np.allclose(psi, c.psi, rtol, atol=0)`: measured against the one held.
     let same = |c: &Candidate| c.psi.len() == psi.len()
-        && c.psi.iter().zip(&psi).all(|(a, b)| (a - b).abs() <= 1e-12 * b.abs());
+        && c.psi.iter().zip(&psi).all(|(held, new)| (new - held).abs() <= rtol * held.abs());
     if out.candidates.iter().any(same) {
         return;
     }
