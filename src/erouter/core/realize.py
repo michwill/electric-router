@@ -68,6 +68,10 @@ CAP_TOLERANCE = 0.01
 #: pool refuses, and a v2 pair is exact at any size.  Not v3 or v4, whose banks
 #: price only the ticks that were read.
 SPILLS = frozenset({ArcKind.SWAP_STABLE, ArcKind.SWAP_CRYPTO, ArcKind.SWAP_UNIV2})
+#: The `SPILLS` legs that only saturate past their reach.  A cryptoswap may
+#: refuse there instead, and one refusal reverts the route: Rocketpool
+#: rETH/ETH did on rETH->WETH $10M, 309 WETH down to 40.
+SATURATES = frozenset({ArcKind.SWAP_STABLE, ArcKind.SWAP_UNIV2})
 
 
 @dataclass(slots=True)
@@ -942,8 +946,9 @@ def trim_to_capacity(route: RealizedRoute, nodes: NodeMap) -> bool:
 
     When every sibling is at its cap the trade is bigger than all the model
     reaches from that slot -- CRV->WETH $10M fits 14.4M of 20M CRV -- and the
-    rest is spilled past the reach of the `SPILLS` legs, in proportion to it,
-    for the quote to judge.  They are replaced rather than edited, so a caller
+    rest is spilled past the reach of the `SATURATES` legs, or of every
+    `SPILLS` leg when there are none, in proportion to it, for the quote to
+    judge.  They are replaced rather than edited, so a caller
     that restores the old legs restores their caps.  False when a slot has
     nowhere left to put its flow; the route is then partly re-weighted and the
     caller reverts it.
@@ -972,7 +977,8 @@ def trim_to_capacity(route: RealizedRoute, nodes: NodeMap) -> bool:
             soft = [rl for rl in kept if rl.kind in SPILLS]
             if not soft:
                 return False
-            hard = [rl for rl in kept if rl.kind not in SPILLS]
+            soft = [rl for rl in soft if rl.kind in SATURATES] or soft
+            hard = [rl for rl in kept if all(rl is not s for s in soft)]
             for rl in hard:
                 rl.leg = replace(rl.leg, bps=pinned[id(rl)])
             reach = sum(rl.cap_in for rl in soft)

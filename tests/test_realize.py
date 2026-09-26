@@ -312,6 +312,28 @@ def test_a_saturated_slot_spills_past_the_reach_of_curve_pools():
     assert all(math.isfinite(rl.cap_in) for rl in order)
 
 
+def test_a_saturated_slot_spills_into_stableswap_before_cryptoswap():
+    """A cryptoswap may refuse past its reach rather than saturate: rETH->WETH
+    $10M spilled into Rocketpool rETH/ETH and every circuit route reverted."""
+    nodes = base_nodes()
+    crypto = arc(POOL_A, USDC, WETH, nodes, a=1 / 4000.0, cap=100.0, kind=ArcKind.SWAP_CRYPTO)
+    stable = arc(POOL_B, USDC, WETH, nodes, a=1 / 4001.0, i=0, j=1, cap=300.0,
+                 kind=ArcKind.SWAP_STABLE)
+    nu = np.zeros(nodes.n_nodes)
+    nu[nodes.node(USDC)] = 1.0
+    nu[nodes.node(WETH)] = 4000.0
+    route = realize([crypto, stable], np.array([100.0, 300.0]), nu, nodes,
+                    src_token=USDC, dst_token=WETH, amount_in=1000 * 10**6)
+    route.legs[0].leg = replace(route.legs[0].leg, bps=9000)
+    _forward_simulate(route, nodes)
+
+    assert trim_to_capacity(route, nodes)
+    by = {rl.target: rl for rl in route.legs}
+    assert by[POOL_A].amount_in <= 100 * 10**6 * (1 + 1e-9)
+    assert by[POOL_B].amount_in >= 899 * 10**6 and by[POOL_B].cap_in == math.inf
+    assert sum(rl.amount_in for rl in route.legs) == 1000 * 10**6
+
+
 def test_the_share_shown_follows_a_retuned_split():
     """The diagram's percentage has to describe the amounts beside it.
 

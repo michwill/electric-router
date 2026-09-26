@@ -52,6 +52,9 @@ fn cap_in(arc: &PoolArc) -> f64 {
 /// Swaps whose cap is the model's reach rather than the pool's limit, and whose
 /// quote stays true past it (`realize.SPILLS`).
 pub const SPILLS: [ArcKind; 3] = [ArcKind::SwapStable, ArcKind::SwapCrypto, ArcKind::SwapUniv2];
+/// The `SPILLS` legs that only saturate past their reach; a cryptoswap may
+/// refuse there and revert the route (`realize.SATURATES`).
+pub const SATURATES: [ArcKind; 2] = [ArcKind::SwapStable, ArcKind::SwapUniv2];
 
 /// A branch carrying less than this share of what leaves its node cannot
 /// change the answer, but it can still destroy it: measured on rETH->WETH, a
@@ -1213,13 +1216,20 @@ pub fn trim_to_capacity(route: &mut RealizedRoute, nodes: &NodeMap) -> bool {
         let room = BPS - pinned.iter().sum::<i64>();
         if free.is_empty() && room >= 1 {
             // Every sibling at its cap: spill the rest past the reach of the
-            // `SPILLS` legs, in proportion to it, for the quote to judge.
-            let soft: Vec<usize> = (0..kept.len())
+            // `SATURATES` legs, or of every `SPILLS` leg when there are none,
+            // in proportion to it, for the quote to judge.
+            let spills: Vec<usize> = (0..kept.len())
                 .filter(|&n| SPILLS.contains(&route.legs[kept[n]].kind))
                 .collect();
-            if soft.is_empty() {
+            if spills.is_empty() {
                 return false;
             }
+            let saturates: Vec<usize> = spills
+                .iter()
+                .copied()
+                .filter(|&n| SATURATES.contains(&route.legs[kept[n]].kind))
+                .collect();
+            let soft = if saturates.is_empty() { spills } else { saturates };
             let reach: f64 = soft.iter().map(|&n| route.legs[kept[n]].cap_in).sum();
             let hard: Vec<usize> = (0..kept.len()).filter(|n| !soft.contains(n)).collect();
             let mut moved: Vec<RealizedLeg> = Vec::with_capacity(kept.len());

@@ -2478,8 +2478,7 @@ def _with_crypto_banks(collapse, banks, kinds):
     """The venue's `collapse`, after the Curve banks are folded too."""
     def both(arcs, psi, nu, nodes):
         for kind in kinds:
-            arcs, psi = fold(arcs, psi, nu, nodes, banks, kind=kind,
-                             bounded=kind is not ArcKind.SWAP_STABLE)
+            arcs, psi = fold(arcs, psi, nu, nodes, banks, kind=kind)
         return collapse(arcs, psi, nu, nodes) if collapse is not None else (arcs, psi)
     return both
 

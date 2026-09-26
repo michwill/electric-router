@@ -83,7 +83,7 @@ def capacity(bank: list[Arc]) -> float:
     return sum(arc.cap for arc in bank)
 
 
-def collapse(live, psi, nu, nodes, banks, kind=None, bounded=True):
+def collapse(live, psi, nu, nodes, banks, kind=None):
     """Put each pool's tick-arcs back into one arc before the route is built.
 
     `kind` is a parameter for the reason `pool_arcs` and `univ3_client.teach`
@@ -101,15 +101,15 @@ def collapse(live, psi, nu, nodes, banks, kind=None, bounded=True):
     piecewise, so they are summed here and priced by the bank at the size that
     actually landed -- `a = dy/dx` with `B = 0`, a chord exact at that point.
 
-    `bounded=False` leaves the folded arc uncapped, for a stableswap bank: it
-    takes any size and only saturates, so its reach is where the model ends.
-    Held to it, the cap guard refused every GHO->USDT $10M candidate.  Not a
-    cryptoswap: Rocketpool rETH/ETH refuses 8x its reach ("unsafe value for y").
+    A stableswap fold is capped at its reach too, though the pool only
+    saturates past it.  Uncapped, it was the one sibling `trim_to_capacity`
+    could never cut, so a saturated slot's whole overflow landed on it:
+    CRV->WETH $10M put 4.84M CRV into a 63k-CRV cvxCRV pool and lost 320 bp.
+    The trim's spill takes a trade past reach to every Curve leg instead.
 
     Returns `(arcs, psi)` with every other arc untouched and in order.
     """
     import copy
-    import math
 
     import numpy as np
 
@@ -159,7 +159,7 @@ def collapse(live, psi, nu, nodes, banks, kind=None, bounded=True):
         # pinned to the realised size is a cap the very next step steps over.
         # Measured: every v3 leg vanished from the winning candidate while the
         # solve was still routing nineteen v3 arcs through it.
-        arc.cap = capacity(banks[key]) * rate_in if bounded else math.inf
+        arc.cap = capacity(banks[key]) * rate_in
         # The tick arcs carry the venue and fee tier; the collapsed leg keeps
         # that and drops the tick index, which no longer means anything once
         # they are one leg.

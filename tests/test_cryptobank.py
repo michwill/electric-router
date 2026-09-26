@@ -178,18 +178,18 @@ def test_a_piece_never_prices_above_the_pools_own_rate_at_zero():
     assert abs(paid / client.chain(width) - 1) < 1e-6
 
 
-def test_a_folded_bank_can_be_left_uncapped():
-    """A stableswap bank's reach is where the model ends, not what the pool
-    will take; held to it, the cap guard refused every GHO->USDT $10M
-    candidate."""
-    nodes, arc, nu, client = setup(2e6, 256.0)
-    pieces, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6)
+def test_a_folded_stable_bank_is_capped_at_its_reach():
+    """Uncapped, a stableswap fold was the sibling `trim_to_capacity` could
+    never cut: CRV->WETH $10M poured 4.84M CRV into a 63k-CRV cvxCRV pool the
+    solve had given 10k."""
+    nodes, arc, nu, client = setup(2e6, 256.0, kind=ArcKind.SWAP_STABLE)
+    pieces, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6,
+                                         kinds=cryptobank.CIRCUIT_BANKED)
     assert banks
     psi = np.zeros(len(pieces))
     psi[0] = 1e3
-    ticks, _ = collapse(pieces, psi, nu, nodes, banks, kind=arc.kind)
-    curve, _ = collapse(pieces, psi, nu, nodes, banks, kind=arc.kind, bounded=False)
-    assert math.isfinite(ticks[0].cap) and curve[0].cap == math.inf
+    folded, _ = collapse(pieces, psi, nu, nodes, banks, kind=arc.kind)
+    assert folded[0].cap == pytest.approx(capacity(banks[(POOL, 2, 1)]))
 
 
 def test_a_pool_drained_inside_the_first_segment_is_banked_on_that_segment():

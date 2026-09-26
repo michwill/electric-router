@@ -454,13 +454,16 @@ def test_total_loss_bp_agrees():
     ((0.05, 0.05, math.inf), (6000, 3000, 0), ArcKind.SWAP_STABLE, True),     # two cut
     ((0.05, 0.05, 0.05), (6000, 3000, 0), ArcKind.SWAP_UNIV3, False),         # nowhere to go
     ((0.05, 0.10, 0.20), (6000, 3000, 0), ArcKind.SWAP_CRYPTO, True),         # spilled
+    ((0.05, 0.10, 0.20), (6000, 3000, 0),                                     # into the stable
+     (ArcKind.SWAP_CRYPTO, ArcKind.SWAP_STABLE, ArcKind.SWAP_CRYPTO), True),
 ])
 def test_a_trimmed_resplit_agrees(caps, bps, kind, fits):
     """Cutting a re-split back to its caps: same bps, same order, same verdict."""
     reference, ported = build_nodes()
     pools = (POOL_A, POOL_B, POOL_C)
+    kinds = kind if isinstance(kind, tuple) else (kind,) * len(pools)
     arcs = [make_arc(pool, WETH, USDC, reference, a=3000.0 - k, B=1e-3 * (k + 1), cap=cap,
-                     kind=kind)
+                     kind=kinds[k])
             for k, (pool, cap) in enumerate(zip(pools, caps, strict=True))]
     want, got = both(arcs, [0.5, 0.3, 0.2], np.ones(reference.n_nodes),
                      reference, ported, src=WETH, dst=USDC, amount_in=10**18)
