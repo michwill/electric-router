@@ -203,6 +203,19 @@ class RealizedRoute:
                 return realized
         return None
 
+    @property
+    def over_pool_limit(self) -> RealizedLeg | None:
+        """The first leg over a cap its quote would not show.
+
+        A `SPILLS` leg's cap is the model's reach, and its quote stays true
+        past it, so a split adopted on a quote may leave it there.
+        """
+        for realized in self.legs:
+            if (realized.kind not in SPILLS
+                    and realized.amount_in > realized.cap_in * (1.0 + CAP_TOLERANCE)):
+                return realized
+        return None
+
 
 def topological_nodes(tau: np.ndarray, sig: np.ndarray, n_nodes: int) -> list[int]:
     """Kahn's algorithm over the active arcs.  Raises on a cycle."""

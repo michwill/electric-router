@@ -1990,7 +1990,8 @@ def _scout_wider(
     candidate.route.modelled_out = _forward_simulate(candidate.route, nodes)
     # The re-split works from quotes, which do not refuse what the pool will.
     # Cut the leg back to its cap and re-quote before giving the split up.
-    if candidate.route.over_capacity is not None:
+    # A `SPILLS` leg's quote does refuse it, so its reach is left to the quote.
+    if candidate.route.over_pool_limit is not None:
         result.counters["scout_over_capacity"] = 1
         order = list(candidate.route.legs)
         trimmed = trim_to_capacity(candidate.route, nodes)
@@ -2067,7 +2068,7 @@ def _optimise_split(
     # diagram and the JSON report the flow that is actually being quoted.
     route.modelled_out = _forward_simulate(route, nodes)
     after = report.after
-    if route.over_capacity is not None:
+    if route.over_pool_limit is not None:
         # As in `_scout_wider`: cut back to the cap and re-quote first.
         result.counters["split_over_capacity"] = 1
         order = list(route.legs)

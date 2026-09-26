@@ -292,6 +292,20 @@ def test_a_slot_with_nowhere_to_go_cannot_be_trimmed():
     assert not trim_to_capacity(route, nodes)
 
 
+def test_a_curve_leg_past_its_reach_is_left_to_the_quote():
+    """A split the chain quoted is not undone for a Curve leg past its reach:
+    FRAX->USDC $10M found +37 bp, two stableswap legs ended past their banks'
+    reach, and the trim then lost all of it.  A v3 leg past the ticks read
+    still is."""
+    for kind, limit in ((ArcKind.SWAP_STABLE, False), (ArcKind.SWAP_UNIV3, True)):
+        nodes = base_nodes()
+        route = _two_way(nodes, cap_a=40.0, kind=kind)
+        route.legs[0].leg = replace(route.legs[0].leg, bps=9000)
+        _forward_simulate(route, nodes)
+        assert route.over_capacity is not None
+        assert (route.over_pool_limit is not None) is limit, kind
+
+
 def test_a_saturated_slot_spills_past_the_reach_of_curve_pools():
     """A trade bigger than every pool's reach: CRV->WETH $10M fits 14.4M of
     20M CRV, and refusing it left no route at all.  Curve's quote is true past
