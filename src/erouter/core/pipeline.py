@@ -1092,7 +1092,8 @@ def _quote(
     if CRYPTO_BANKS:
         kinds = CIRCUIT_BANKED if CIRCUIT else BANKED
         with clock("crypto_banks"):
-            banked, crypto_banks = bank_arcs(arcs, nu, nodes, client, Psi, kinds)
+            banked, crypto_banks = bank_arcs(arcs, nu, nodes, client, Psi, kinds,
+                                             fine=CIRCUIT)
         if crypto_banks:
             result.counters["crypto_banks"] = len(crypto_banks)
             collapse = _with_crypto_banks(collapse, crypto_banks, kinds)

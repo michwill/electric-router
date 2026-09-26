@@ -209,3 +209,34 @@ def test_a_pool_drained_inside_the_first_segment_is_banked_on_that_segment():
     assert output(bank, capacity(bank)) == pytest.approx(client.chain(width), rel=0.02)
     for dx in (width / 40, width / 20, width / 10, width / 5):
         assert output(bank, dx) == pytest.approx(client.chain(dx), rel=0.06), dx  # a parabola was 2x
+
+
+def test_a_pool_drained_in_its_second_segment_is_gridded_again_for_the_circuit():
+    """DOLA/sUSDS ran dry in its bank's second segment, so two pieces covered
+    everything it pays, and the first -- one parabola across the whole useful
+    range -- was 1.6% short mid-way.  USDe->USDC $10M lost 15 bp to it.  The
+    ballot keeps the coarse bank: its active set churns on a fine one."""
+    for L in (2e5, 4e5):
+        nodes, arc, nu, _ = setup(2e6, 256.0)
+        client = Amplified(p=1e-4, L=L)
+        _, coarse = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6)
+        assert len(coarse[(POOL, 2, 1)]) < cryptobank.SEGMENTS
+        _, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6, fine=True)
+        bank = banks[(POOL, 2, 1)]
+        assert len(bank) >= cryptobank.SEGMENTS
+        for dx in (L / 2, L, 1.5 * L):
+            assert output(bank, dx) == pytest.approx(client.chain(dx), rel=0.002), (L, dx)
+
+
+def test_a_piece_that_misses_the_pool_is_split_for_the_circuit():
+    """FRAXUSDe's last piece spanned 6.25-12.5M FRAX, across its wall, and was
+    2.4% short at 8.4M; the circuit lost 60 bp on FRAX->USDC $10M to it."""
+    nodes, arc, nu, _ = setup(2e6, 256.0)
+    client = Amplified(p=1e-4, L=3e5)
+    _, coarse = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6)
+    _, banks = cryptobank.bank_arcs([arc], nu, nodes, client, Psi=2e6, fine=True)
+    bank = banks[(POOL, 2, 1)]
+    assert len(coarse[(POOL, 2, 1)]) < len(bank) <= cryptobank.MAX_PIECES
+    for dx in np.linspace(0, 3 * client.L, 61)[1:]:
+        assert output(bank, dx) == pytest.approx(client.chain(dx), rel=0.002), dx
+        assert output(coarse[(POOL, 2, 1)], dx) == pytest.approx(client.chain(dx), rel=0.06)

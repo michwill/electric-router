@@ -55,15 +55,26 @@ DEPTH = 4.0
 #: Times a pool drained inside its first segment is re-gridded on that segment
 #: alone: nine probes each, and only for such pools.
 ZOOM = 3
+#: Under the circuit, how far a piece's quadratic may miss the pool at its
+#: quarter points, relative to what the pool has paid there, before the piece
+#: is split at its midpoint; the most pieces a bank may reach that way; and
+#: the rounds of splitting, two probes per piece checked in each.
+FIT_TOL = 1e-3
+MAX_PIECES = 12
+REFINE_ROUNDS = 3
 
 
-def bank_arcs(arcs, nu, nodes, client, Psi: float, kinds=BANKED):
+def bank_arcs(arcs, nu, nodes, client, Psi: float, kinds=BANKED, *, fine: bool = False):
     """`(arcs, banks)` with every computable arc of `kinds` replaced by a bank.
 
     `banks` maps `(pool, i, j)` to `univ3.Arc`s in human token units, which is
     what `univ3.collapse` and `univ3.output` read.  An arc whose pool cannot be
     computed, whose price is unknown, or whose invariant refuses the smallest
     segment is left exactly as it was.
+
+    `fine` is for the circuit, which solves a finer bank where the active set
+    churns on one: a pool drained before its last segment is gridded again,
+    and a piece that misses the pool is split (`_refine`).
     """
     computes = getattr(client, "computes", None)
     if computes is None or not (Psi > 0.0):
@@ -82,8 +93,7 @@ def bank_arcs(arcs, nu, nodes, client, Psi: float, kinds=BANKED):
             continue
         plans.append((k, arc, whole))
 
-    banks: dict[tuple, list] = {}
-    replace: dict[int, list] = {}
+    kept = []
     for zoom in range(ZOOM + 1):
         if not plans:
             break
@@ -100,26 +110,112 @@ def bank_arcs(arcs, nu, nodes, client, Psi: float, kinds=BANKED):
             at_spot = next(quotes)
             at_end = [next(quotes) for _ in ends]
             at_mid = [next(quotes) for _ in mids]
-            bank, pieces, exit_price = _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid)
+            tiny = ends[0] * SPOT_PROBE
+            bank, _, exit_price = _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny)
             # Drained inside the first segment: one parabola across it pays
             # through the wall -- FRAX/frxUSD's peaked at 544k frxUSD against
             # the pool's 258k -- so grid that segment alone and fit again.
-            if len(bank) == 1 and not exit_price > 0.0 and zoom < ZOOM:
-                again.append((k, arc, ends[0]))
+            # Under the circuit, drained anywhere short of the last: DOLA/sUSDS
+            # ran dry in its second, and its first was 1.6% short mid-way.
+            short = len(bank) < SEGMENTS if fine else len(bank) == 1
+            if bank and short and not exit_price > 0.0 and zoom < ZOOM:
+                again.append((k, arc, ends[len(bank) - 1]))
                 continue
             # One piece is a bank too, when zooming no longer splits it: the
             # parabola it would keep instead pays until far past the wall.
             if not bank or exit_price > (1.0 - MIN_IMPACT) * bank[0].a:
                 continue
-            banks[(arc.pool, arc.i, arc.j)] = bank
-            replace[k] = pieces
+            kept.append((k, arc, starts, ends, mids, tiny, at_spot, at_end, at_mid))
         plans = again
+    if fine:
+        kept = _refine(kept, nodes, client)
+
+    banks: dict[tuple, list] = {}
+    replace: dict[int, list] = {}
+    for k, arc, starts, ends, _mids, tiny, at_spot, at_end, at_mid in kept:
+        bank, pieces, _ = _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny)
+        banks[(arc.pool, arc.i, arc.j)] = bank
+        replace[k] = pieces
     if not replace:
         return arcs, {}
     out = []
     for k, arc in enumerate(arcs):
         out.extend(replace.get(k, (arc,)))
     return out, banks
+
+
+def _refine(kept, nodes, client):
+    """Split every piece whose quadratic misses the pool at its quarter points.
+
+    Four pieces halving from the top leave the widest where a pool's wall
+    usually is: FRAXUSDe's last spanned 6.25-12.5M FRAX and was 2.4% short at
+    8.4M.  A piece is checked at a quarter and three quarters of its width, and
+    if it misses by more than `FIT_TOL` it becomes two whose ends and
+    midpoints are all probed already -- its own midpoint and those two checks.
+    """
+    kept = list(kept)
+    settled: list[set] = [set() for _ in kept]
+    for _ in range(REFINE_ROUNDS):
+        checks = []
+        for n, (_, arc, starts, ends, _, tiny, at_spot, at_end, at_mid) in enumerate(kept):
+            bank, _, _ = _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny)
+            room = MAX_PIECES - len(starts)
+            for seg, piece in enumerate(bank):
+                if room <= 0:
+                    break
+                if (starts[seg], ends[seg]) not in settled[n]:
+                    checks.append((n, seg, piece))
+                    room -= 1
+        if not checks:
+            break
+        probes = []
+        for n, seg, _ in checks:
+            arc, lo, hi = kept[n][1], kept[n][2][seg], kept[n][3][seg]
+            scale = 10 ** arc.decimals_in
+            for x in (lo + (hi - lo) / 4, lo + 3 * (hi - lo) / 4):
+                probes.append(Probe(pool=arc.pool, kind=arc.kind, i=arc.i, j=arc.j,
+                                    n=arc.n_coins, dx=max(1, int(x * scale))))
+        quotes = iter(client.probe(probes))
+        splits: dict[int, dict[int, tuple]] = {}
+        for n, seg, piece in checks:
+            q1, q3 = next(quotes), next(quotes)
+            arc, starts, ends, at_end = kept[n][1], kept[n][2], kept[n][3], kept[n][7]
+            scale = 10 ** arc.decimals_out
+            base = _human(at_end[seg - 1], scale) if seg else 0.0
+            width = ends[seg] - starts[seg]
+            worst = 0.0 if base is not None else math.inf
+            for quote, x in ((q1, width / 4), (q3, 3 * width / 4)):
+                truth = _human(quote, scale)
+                if truth is None or base is None:
+                    worst = math.inf
+                    break
+                model = base + piece.a * x - 0.5 * piece.B * x * x
+                worst = max(worst, abs(model / truth - 1.0))
+            if worst > FIT_TOL and math.isfinite(worst):
+                splits.setdefault(n, {})[seg] = (q1, q3)
+            else:
+                settled[n].add((starts[seg], ends[seg]))
+        if not splits:
+            break
+        for n, halves in splits.items():
+            k, arc, starts, ends, mids, tiny, at_spot, at_end, at_mid = kept[n]
+            s2, e2, m2, ae2, am2 = [], [], [], [], []
+            for seg, (lo, hi, mid) in enumerate(zip(starts, ends, mids, strict=True)):
+                if seg in halves:
+                    q1, q3 = halves[seg]
+                    s2 += [lo, mid]
+                    e2 += [mid, hi]
+                    m2 += [(lo + mid) / 2, (mid + hi) / 2]
+                    ae2 += [at_mid[seg], at_end[seg]]
+                    am2 += [q1, q3]
+                else:
+                    s2.append(lo)
+                    e2.append(hi)
+                    m2.append(mid)
+                    ae2.append(at_end[seg])
+                    am2.append(at_mid[seg])
+            kept[n] = (k, arc, s2, e2, m2, tiny, at_spot, ae2, am2)
+    return kept
 
 
 def _grid(whole: float):
@@ -130,13 +226,14 @@ def _grid(whole: float):
     return starts, ends, mids
 
 
-def _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid):
+def _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny):
     """`(bank, pieces, exit_price)`: the bank the quotes describe, as far as
-    the invariant answers, and the marginal price where it ends."""
+    the invariant answers, and the marginal price where it ends.  `tiny` is
+    the size `at_spot` was probed at."""
     from .nodes import rescale
 
     out_scale = 10 ** arc.decimals_out
-    raw_tiny = max(1, int(ends[0] * SPOT_PROBE * 10 ** arc.decimals_in))
+    raw_tiny = max(1, int(tiny * 10 ** arc.decimals_in))
     bank, pieces = [], []
     previous_end = 0.0
     # The pool's own rate at zero size caps the first piece, as each exit
