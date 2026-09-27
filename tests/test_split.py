@@ -301,6 +301,45 @@ def test_it_falls_back_to_the_chained_search_without_a_probe_path():
     assert report.mode == "chained"
 
 
+class PinnedSweepQuoter:
+    """Three branches out of one slot, the last -- the sweep leg -- paying 3x
+    up to its cap and nothing past it; the other two concave, misallocated.
+
+    Every single move trades a branch against the sweep leg and loses, and so
+    does the gradient line, which sends the rest into the full sweep leg.
+    """
+
+    CAP = 0.4
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def quote_routes(self, routes, amounts_in, dst_slots):
+        self.calls += 1
+        out = []
+        for legs, amount in zip(routes, amounts_in, strict=True):
+            a, b = legs[0].bps / BPS, legs[1].bps / BPS
+            c = 1.0 - a - b
+            x, y = a * amount, b * amount
+            value = (x - x * x / (2 * amount)) + (y - y * y / (2 * amount))
+            value += 3.0 * min(c, self.CAP) * amount
+            out.append(int(value))
+        return out
+
+
+def test_legs_trade_against_each_other_when_the_sweep_leg_is_full():
+    """rETH->WETH $1M: the sweep leg was a v4 bank at its read ticks, paying
+    best at the margin, and the chained search could not move at all."""
+    split = [leg(0, 1, 5000, POOL_A), leg(0, 1, 1000, POOL_B), leg(0, 1, 0, POOL_C)]
+    quoter = PinnedSweepQuoter()
+    amount = 1_000_000
+    baseline = quoter.quote_routes([split], [amount], [1])[0]
+    tuned, report = optimise(split, quoter, amount_in=amount, dst_slot=1, baseline=baseline)
+    assert report.improved and report.after > baseline
+    assert tuned[0].bps < 5000 and tuned[1].bps > 1000
+    assert abs((tuned[0].bps + tuned[1].bps) - 6000) <= 60, "the sweep leg stays full"
+
+
 class OverPromisingQuoter(PoolQuoter):
     """Probes that are true up to twice pool B's realised size and 3x rich
     past it.

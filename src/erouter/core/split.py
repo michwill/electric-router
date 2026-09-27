@@ -61,6 +61,10 @@ LINE_STEPS = (0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64)
 # once.  A gradient step is one direction; this is a second one, free to the
 # round because it rides the batch the line search was already paying for.
 COMBINED_STEPS = (1.0, 0.5, 0.25)
+# Multiples of the smallest scale a paying pairwise move is pushed on to, alone
+# and all together: the rETH->WETH $1M moves that paid were a fraction of what
+# the ballot's split had moved.
+PAIR_STEPS = (2.0, 4.0, 8.0)
 # No branch may be driven to nothing: that is a topology change, and the point
 # of this pass is that the topology is fixed.
 MIN_WEIGHT = 1e-4
@@ -826,6 +830,8 @@ def optimise(
                     best, best_w = value, candidate
 
         if best <= opened:
+            best, best_w = _pairwise(centre, best, best_w, groups, scales[0], quote, budget)
+        if best <= opened:
             break
         report.improved = True
         gain_bp = (best / opened - 1) * 10_000
@@ -836,6 +842,49 @@ def optimise(
 
     report.after = best
     return (apply_weights(legs, groups, best_w) if report.improved else legs), report
+
+
+def _shift(weights: list[np.ndarray], moves) -> list[np.ndarray]:
+    """`weights` with `[(group, from, to, delta)]` moved between two legs."""
+    out = [w.copy() for w in weights]
+    for g, i, j, delta in moves:
+        out[g][i] -= delta
+        out[g][j] += delta
+    return [_project(w) for w in out]
+
+
+def _pairwise(centre, best, best_w, groups, scale, quote, budget):
+    """Every move of one leg's share to another, then the best ones further.
+
+    The chained search prices each leg against its group's sweep leg, and when
+    that leg pays best at the margin but cannot take more -- a v4 bank at its
+    read ticks on rETH->WETH $1M -- every one of its moves loses, while moving
+    TryLSD's share to rETH/wstETH alone still paid.  So when a round finds
+    nothing, the legs are traded against one another directly.
+    """
+    pairs = [(g, i, j) for g, run in enumerate(groups)
+             for i in range(len(run)) for j in range(len(run)) if i != j][:budget]
+    if not pairs:
+        return best, best_w
+    opened = best
+    values = quote([_shift(centre, [(g, i, j, scale)]) for g, i, j in pairs])
+    paying = sorted(((v, pair) for v, pair in zip(values, pairs, strict=True) if v > opened),
+                    reverse=True)
+    if not paying:
+        return best, best_w
+    top, (g, i, j) = paying[0]
+    if top > best:
+        best, best_w = top, _shift(centre, [(g, i, j, scale)])
+    together = [(pg, pi, pj, scale) for _, (pg, pi, pj) in paying]
+    trials = [_shift(centre, [(g, i, j, scale * f)]) for f in PAIR_STEPS]
+    if len(together) > 1:
+        trials += [_shift(centre, [(pg, pi, pj, d * f) for pg, pi, pj, d in together])
+                   for f in (1.0, *PAIR_STEPS)]
+    trials = trials[:budget]
+    for candidate, value in zip(trials, quote(trials), strict=True):
+        if value > best:
+            best, best_w = value, candidate
+    return best, best_w
 
 
 def polish(
