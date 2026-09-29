@@ -111,7 +111,8 @@ def bank_arcs(arcs, nu, nodes, client, Psi: float, kinds=BANKED, *, fine: bool =
             at_end = [next(quotes) for _ in ends]
             at_mid = [next(quotes) for _ in mids]
             tiny = ends[0] * SPOT_PROBE
-            bank, _, exit_price = _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny)
+            bank, _, exit_price = _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny,
+                                       build=False)
             # Drained inside the first segment: one parabola across it pays
             # through the wall -- FRAX/frxUSD's peaked at 544k frxUSD against
             # the pool's 258k -- so grid that segment alone and fit again.
@@ -153,12 +154,19 @@ def _refine(kept, nodes, client):
     if it misses by more than `FIT_TOL` it becomes two whose ends and
     midpoints are all probed already -- its own midpoint and those two checks.
     """
+    def curve(plan):
+        _, arc, starts, ends, _, tiny, at_spot, at_end, at_mid = plan
+        return _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny, build=False)[0]
+
     kept = list(kept)
     settled: list[set] = [set() for _ in kept]
+    # Fitted once, and again only where a round split something: refitting
+    # every bank every round was half of `bank_arcs`.
+    banks = [curve(plan) for plan in kept]
     for _ in range(REFINE_ROUNDS):
         checks = []
-        for n, (_, arc, starts, ends, _, tiny, at_spot, at_end, at_mid) in enumerate(kept):
-            bank, _, _ = _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny)
+        for n, (_, _, starts, ends, *_rest) in enumerate(kept):
+            bank = banks[n]
             room = MAX_PIECES - len(starts)
             for seg, piece in enumerate(bank):
                 if room <= 0:
@@ -215,6 +223,7 @@ def _refine(kept, nodes, client):
                     ae2.append(at_end[seg])
                     am2.append(at_mid[seg])
             kept[n] = (k, arc, s2, e2, m2, tiny, at_spot, ae2, am2)
+            banks[n] = curve(kept[n])
     return kept
 
 
@@ -226,10 +235,12 @@ def _grid(whole: float):
     return starts, ends, mids
 
 
-def _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny):
+def _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny, build: bool = True):
     """`(bank, pieces, exit_price)`: the bank the quotes describe, as far as
     the invariant answers, and the marginal price where it ends.  `tiny` is
-    the size `at_spot` was probed at."""
+    the size `at_spot` was probed at.  `build=False` leaves `pieces` empty,
+    for a caller that only reads the curve: copying an arc per piece was a
+    third of the fit."""
     from .nodes import rescale
 
     out_scale = 10 ** arc.decimals_out
@@ -267,6 +278,10 @@ def _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny):
             break
         B = max(B, a * 1e-9 / width)    # finite conductance, never zero
         bank.append(Arc(a=a, B=B, cap=width))
+        previous_end = f_hi
+        exit_price = a - B * width
+        if not build:
+            continue
         # The node's rate, not the arc's: a Curve arc leaves `rate_in` at 1.0
         # even on a merged token, and the fall-through never fired.  Every
         # wstETH piece came out 1.2445x rich, and the graph held 219 WETH of
@@ -281,8 +296,6 @@ def _fit(arc, nodes, starts, ends, at_spot, at_end, at_mid, tiny):
         piece.parallel = True
         piece.note = f"{arc.note} tick {seg}"
         pieces.append(piece)
-        previous_end = f_hi
-        exit_price = a - B * width
     return bank, pieces, exit_price
 
 
