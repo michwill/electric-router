@@ -243,3 +243,23 @@ def test_naming_no_node_bridges_nothing():
     fresh, refused, _out, bridged = admissible_late_arcs(
         frame, [_arc("v2:0", 2, 1, "uniswap v2", a=3.0)], nu)
     assert bridged == 0 and fresh == [] and refused == 1
+
+
+def test_a_tick_bank_is_cut_where_the_trade_cannot_reach():
+    """CRV->WETH $10k priced 2,484 Uniswap ranges on every solver step, 71% of
+    its graph, where the trade could reach a few near each pool's price."""
+    from erouter.core.nodes import NodeMap
+    from erouter.core.pipeline import _within_reach
+
+    nodes = NodeMap()
+    nodes.add_token("0xa", "A", 18)
+    nodes.add_token("0xb", "B", 18)
+    nu = np.ones(nodes.n_nodes)
+    bank = [PoolArc(id=f"0xp:3:0>1#{k}", pool="0xp", kind=ArcKind.SWAP_UNIV3, i=0, j=1,
+                    n_coins=2, token_in="0xa", token_out="0xb", tau=0, sigma=1,
+                    a=1.0, B=1e-3, cap=100.0, parallel=True) for k in range(8)]
+    curve = _arc("curve:0", 0, 1)
+    # 250 A with `REACH` 1.25 reaches 312.5: pieces starting at 0, 100, 200, 300.
+    kept, dropped = _within_reach([curve, *bank], nu, nodes, "0xa", 250 * 10**18)
+    assert [a.id for a in kept] == ["curve:0", *(f"0xp:3:0>1#{k}" for k in range(4))]
+    assert dropped == 4

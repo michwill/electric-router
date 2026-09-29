@@ -26,7 +26,7 @@ from . import circuit as _circuit
 from .bank import collapse as fold
 from .calibrate import DRIFT_TOL, Calibration, CalibrationError, calibrate
 from .candidates import Candidate, CandidateSet, generate
-from .cryptobank import BANKED, CIRCUIT_BANKED, bank_arcs
+from .cryptobank import BANKED, CIRCUIT_BANKED, REACH, bank_arcs
 from .gas import GasTable, min_useful_flow, shape_cost, value_per_gas
 from .graph import MAX_CONDITION, PATHOLOGICAL_CONDITION, ArcArrays, build, scale
 from .nodes import NodeMap, rescale
@@ -615,6 +615,34 @@ class Prepared:
     block: int = 0
 
 
+def _within_reach(arcs, nu, nodes, src_token: str, amount_in: int):
+    """`(arcs, dropped)`: a Uniswap tick bank cut where the trade cannot reach.
+
+    Every pool comes with up to 16 ranges each way, sized to the pool rather
+    than the trade, and every one is an arc the solve prices on every step:
+    2,484 of them on CRV->WETH $10k, 71% of its graph.  A range that starts
+    past `REACH` times the whole trade, measured from the price, is out of
+    reach even if all of it went through this one pool.  The collapse still
+    folds what is left against the whole bank.
+    """
+    src = nodes.node(src_token)
+    whole = (amount_in / 10 ** nodes.decimals(src_token) * nodes.rate(src_token)
+             * float(nu[src]) * REACH)
+    held: dict[tuple, float] = {}
+    kept = []
+    for arc in arcs:
+        if not (arc.parallel and arc.kind in (ArcKind.SWAP_UNIV3, ArcKind.SWAP_UNIV4)):
+            kept.append(arc)
+            continue
+        key = (arc.pool, arc.kind, arc.i, arc.j)
+        before = held.get(key, 0.0)
+        if before > whole:
+            continue
+        held[key] = before + arc.cap * float(nu[arc.tau])
+        kept.append(arc)
+    return kept, len(arcs) - len(kept)
+
+
 def admissible_late_arcs(
     arcs: list[PoolArc], late_arcs: list[PoolArc], nu=None, bridgeable=(),
 ) -> tuple[list[PoolArc], int] | tuple[list[PoolArc], int, object, int]:
@@ -868,6 +896,12 @@ def route(
         if joining:
             fresh, unpriced, nu, bridged = admissible_late_arcs(
                 arcs, joining, nu, bridgeable=(src_node, dst_node))
+            # The circuit only: the ballot's candidates moved both ways by
+            # hundreds of bp on it, where the circuit's did not move at all.
+            if CIRCUIT:
+                fresh, beyond = _within_reach(fresh, nu, nodes, src_token, amount_in)
+                if beyond:
+                    into.counters["late_arcs_beyond_reach"] = beyond
             arcs = arcs + fresh
             into.counters["late_arcs"] = len(fresh)
             if unpriced:
