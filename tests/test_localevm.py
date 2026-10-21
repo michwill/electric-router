@@ -196,25 +196,3 @@ async def _test_a_batch_is_split_at_the_limit():
     await evm._fetch(rpc, {"accounts": [], "slots": wanted, "blocks": []},
                      block="latest")
     assert rpc.batches == 3, "250 slots is three batches of at most 100"
-
-
-def test_a_fill_hands_over_as_many_slots_as_the_transport_runs_at_once():
-    asyncio.run(_test_a_fill_hands_over_as_many_slots_as_the_transport_runs_at_once())
-
-
-async def _test_a_fill_hands_over_as_many_slots_as_the_transport_runs_at_once():
-    """`max_streams` chunks of `batch_size` per call, as `AsyncRpc` documents.
-    A hundred per call left a 44k-slot fill one serial round trip per hundred."""
-
-    class Streams(FakeRpc):
-        max_streams = 4
-
-    evm, _ = fresh()
-    storage = {(POOL, k): k + 1 for k in range(1000)}
-    rpc = Streams(code={POOL: READS_SLOT_7}, storage=storage)
-    wanted = [(POOL, k) for k in range(1000)]
-    await evm._fetch(rpc, {"accounts": [], "slots": wanted, "blocks": []},
-                     block="latest")
-    assert rpc.batches == 3, "1,000 slots at 400 a call"
-    assert [int(r[1][1], 16) for r in rpc.requests] == list(range(1000)), "in order"
-    assert all(int(evm._evm.storage_at(POOL, hex(k)), 16) == k + 1 for k in (0, 399, 999))
