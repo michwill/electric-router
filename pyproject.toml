@@ -73,6 +73,11 @@ package = true
 # still installable.  See `scripts/check_dependency_age.py`, which enforces the
 # same rule on `rust/Cargo.lock`, where Cargo has no equivalent setting yet.
 exclude-newer = "1 week"
+# One-off exception, 2026-10-21: certifi 2026.10.19 drops emSign ECC Root CA - G3,
+# above the eMudhra intermediates whose private keys were recoverable from their
+# certificates (emudhra.we-have-a-problem.com).  A fixed date, so it admits that
+# release and nothing later; delete once "1 week" covers it (after 2026-10-27).
+exclude-newer-package = { certifi = "2026-10-21T00:00:00Z" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
