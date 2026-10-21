@@ -293,9 +293,14 @@ class LocalEvm:
 
     @staticmethod
     async def _batched(rpc, payloads: list[tuple[str, list]]) -> list:
+        # `batch_size * max_streams` at a time, as `AsyncRpc` says and
+        # `RouterSession._batched` does.  A hundred per call was one serial
+        # round trip per hundred slots: 397 s for a 44k-slot fill, 16 s so.
+        span = (getattr(rpc, "batch_size", BATCH_LIMIT) or BATCH_LIMIT) \
+            * (getattr(rpc, "max_streams", 1) or 1)
         out: list = []
-        for start in range(0, len(payloads), BATCH_LIMIT):
-            out.extend(await rpc.batch(payloads[start:start + BATCH_LIMIT]))
+        for start in range(0, len(payloads), span):
+            out.extend(await rpc.batch(payloads[start:start + span]))
         return out
 
 
