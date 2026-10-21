@@ -8,11 +8,14 @@ sizes on an arc owes the same floor, `plan_refine` off the reserve and
 """
 
 from erouter.core.probe import (
+    COARSE_GRID,
     GRID,
     MIN_OUT_QUANTA,
+    RETRY_GRID,
     ArcRef,
     Ladder,
     plan_deltas,
+    plan_grid,
     plan_refine,
     plan_sized,
 )
@@ -88,3 +91,34 @@ def test_a_retry_owes_the_same_output_floor_as_the_pass_it_retries():
 
     smallest = min(p.dx for p in plan.probes)
     assert smallest * reserve_out // reserve_in >= MIN_OUT_QUANTA
+
+
+def test_a_floor_past_the_coarse_grid_falls_back_to_wider_sizes():
+    """tac USDT/cbBTC: 10,000 sats is 1.27% of the pool, past both coarse points."""
+    arc = _arc(reserve_in=750_931_029, decimals_in=6, decimals_out=8,
+               reserve_out=789_257)
+    assert len(plan_deltas(arc.reserve_in, 6, COARSE_GRID, arc.reserve_out)) == 1
+
+    plan = plan_grid([arc], grid=COARSE_GRID)
+
+    assert plan.arcs == [arc]
+    deltas = [p.dx for p in plan.probes]
+    assert deltas == plan_deltas(arc.reserve_in, 6, RETRY_GRID, arc.reserve_out)
+    assert min(deltas) * arc.reserve_out // arc.reserve_in >= MIN_OUT_QUANTA
+
+
+def test_an_arc_too_thin_for_any_grid_is_still_skipped():
+    # 100,000 sats: the floor is 10% of the pool, the top of every grid.
+    arc = _arc(reserve_in=95 * 10**6, decimals_in=6, decimals_out=8,
+               reserve_out=100_000)
+
+    assert plan_grid([arc], grid=COARSE_GRID).arcs == []
+
+
+def test_a_grid_that_fits_ignores_the_fallback():
+    arc = _arc(reserve_in=10**24, decimals_in=18, decimals_out=18,
+               reserve_out=10**24)
+
+    plan = plan_grid([arc], grid=COARSE_GRID)
+
+    assert [p.dx for p in plan.probes] == plan_deltas(10**24, 18, COARSE_GRID, 10**24)

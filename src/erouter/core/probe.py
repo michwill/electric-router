@@ -139,11 +139,20 @@ class ProbePlan:
         return len(self.probes)
 
 
-def plan_grid(arcs: list[ArcRef], grid: tuple[float, ...] = GRID) -> ProbePlan:
+def plan_grid(
+    arcs: list[ArcRef],
+    grid: tuple[float, ...] = GRID,
+    fallback: tuple[float, ...] = RETRY_GRID,
+) -> ProbePlan:
     """One batch covering every arc's whole ladder."""
     plan = ProbePlan()
     for arc in arcs:
         deltas = plan_deltas(arc.reserve_in, arc.decimals_in, grid, arc.reserve_out)
+        if len(deltas) < 2:
+            # The output floor can swallow a short grid on a thin pool -- tac's
+            # USDT/cbBTC holds 789,257 sats, so 10,000 is past both coarse
+            # points -- and nothing retries an arc that was never probed.
+            deltas = plan_deltas(arc.reserve_in, arc.decimals_in, fallback, arc.reserve_out)
         if len(deltas) < 2:  # too little room to fit even a curvature estimate
             continue
         start = len(plan.probes)
