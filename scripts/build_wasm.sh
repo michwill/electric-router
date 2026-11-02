@@ -21,9 +21,13 @@ command -v wasm-bindgen >/dev/null || {
     exit 1
 }
 
-cargo build \
+# From rust/, not the root: rustup picks the toolchain by working directory,
+# so only there does rust/rust-toolchain.toml apply.  Anywhere else this builds
+# with the default toolchain, and the native/wasm byte equality that
+# tests/test_wasm_differential.py checks holds only while the two coincide.
+(cd "$ROOT/rust" && cargo build \
     --manifest-path "$ROOT/rust/Cargo.toml" \
-    -p erouter-wasm --release --target wasm32-unknown-unknown
+    -p erouter-wasm --release --target wasm32-unknown-unknown)
 
 # `--target web`: the Flet worker is a *module* worker, so the glue is loaded
 # with a dynamic `import()` and initialises itself by fetching the .wasm beside

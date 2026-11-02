@@ -118,7 +118,7 @@ Python, so `core/accel.py` never learns which one answered.
 2.30 MB, 806 kB gzipped, carrying the solver *and* the EVM (see `evm/`).
 `tests/test_wasm_differential.py` differs it against the native extension and
 requires **byte equality** -- same crate, same compiler (`rust-toolchain.toml`
-pins 1.96.1), and `sqrt` is the only non-trivially-rounded operation in the
+pins 1.98.1), and `sqrt` is the only non-trivially-rounded operation in the
 solver, which IEEE-754 requires be correctly rounded on both targets.  The
 hard paths are in there too: `maxit` exhaustion, cycling under Bland's rule,
 `partial_ok`.  Those are what the earlier port got wrong while passing every
@@ -131,11 +131,11 @@ The system `rust-bin` has x86_64 std only, so this needs rustup, and a
 which is why `wasm/Cargo.toml` pins it with `=`.
 
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.96.1
+        | sh -s -- -y --no-modify-path --profile minimal --default-toolchain 1.98.1
     ~/.cargo/bin/rustup target add wasm32-unknown-unknown
-    curl -L https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.127/\
-    wasm-bindgen-0.2.127-x86_64-unknown-linux-musl.tar.gz \
+    curl -L https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.129/\
+    wasm-bindgen-0.2.129-x86_64-unknown-linux-musl.tar.gz \
         | tar xz -C ~/.local/bin --strip-components=1 --wildcards '*/wasm-bindgen'
-    uv tool install maturin==1.14.1
+    uv tool install maturin==1.16.0
 
 Nothing needs root and nothing replaces `/usr/bin/cargo`.
