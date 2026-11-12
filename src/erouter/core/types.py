@@ -185,6 +185,9 @@ class PoolArc:
     B: float = 0.0
     cap: float = math.inf
     calib_delta: float = 0.0
+    # The cap is this arc's own ladder's reading, so a longer ladder supersedes
+    # it; False for a limit read off the chain, which a fit must never lift.
+    cap_from_ladder: bool = False
 
     # §2.3 / §12.2 diagnostics
     convex_flag: bool = False

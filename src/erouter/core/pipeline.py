@@ -36,6 +36,7 @@ from .prices import (
 )
 from .probe import (
     COARSE_GRID,
+    REACH_GRID,
     RETRY_GRID,
     TRADE_GRID,
     ArcRef,
@@ -289,6 +290,7 @@ def _to_arc(
         a=a,
         B=B,
         cap=cap,
+        cap_from_ladder=True,
         calib_delta=fit.calib_delta,
         convex_flag=fit.convex_flag,
         clamped=fit.clamped,
@@ -749,6 +751,8 @@ def _quote(
             if not math.isfinite(whole) or whole <= 0:
                 continue
             sizes[arc.id] = [int(whole * f) for f in TRADE_GRID]
+            if arc.cap_from_ladder and arc.cap < Psi / price:
+                sizes[arc.id] += [int(whole * f) for f in REACH_GRID]
         if resident is not None:
             at, deltas = resident.plan(sizes)
             result.counters["probes_refined"] = len(deltas)
@@ -2108,11 +2112,11 @@ def _apply_fit(arc: PoolArc, fit, nodes: NodeMap) -> int:
     """Write one fit onto its arc, in the units the graph is built in."""
     a, B = rescale(fit.a, fit.B, nodes.rate(arc.token_in), nodes.rate(arc.token_out))
     arc.a, arc.B = a, B
-    # **A cap only ever tightens.**  A fit can discover a wall the ladder
-    # walked into; it cannot know about a capacity the curve does not show.
+    # **A cap read off the chain only ever tightens**: a fit cannot see it.  One
+    # the ladder set is replaced, since this fit stands on a longer ladder.
     fitted = (fit.cap * nodes.rate(arc.token_in)
               if math.isfinite(fit.cap) else math.inf)
-    arc.cap = min(arc.cap, fitted)
+    arc.cap = fitted if arc.cap_from_ladder else min(arc.cap, fitted)
     arc.clamped, arc.convex_flag = fit.clamped, fit.convex_flag
     arc.flag_reason, arc.drift, arc.eta = fit.flag_reason, fit.drift, fit.eta
     arc.calib_delta = fit.calib_delta

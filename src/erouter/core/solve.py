@@ -216,7 +216,10 @@ def _why_unreachable(g, src: int, dst: int, Psi: float) -> str:
             share = room / Psi if Psi else 0.0
             return (f"the pools {phrase} can carry {share:.3%} of this size "
                     f"-- their quotes stop rising beyond that")
-    return "src not connected to dst through the active set"
+    return _DETACHED
+
+
+_DETACHED = "src not connected to dst through the active set"
 
 
 def active_set_solve(
@@ -260,11 +263,15 @@ def active_set_solve(
             partial_ok=partial_ok,
         )
         if got is not None:
+            reason = str(got["reason"])
+            # Rust names no cut; say which one, as the reference does.
+            if not got["feasible"] and reason == _DETACHED:
+                reason = _why_unreachable(g, src, dst, Psi)
             return Solution(
                 got["psi"], got["u"], got["active"], got["upper"],
                 got["psi_upper"], got["rho"],
                 int(got["pivots"]), feasible=bool(got["feasible"]),
-                reason=str(got["reason"]),
+                reason=reason,
             )
 
     solver = solver or DEFAULT_SOLVER

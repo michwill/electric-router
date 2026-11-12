@@ -51,6 +51,10 @@ RETRY_GRID: tuple[float, ...] = (1e-3, 3e-2, 1e-1)
 # quantity the solve consumes.  Only `eta` needs more, and `eta` is a diagnostic.
 TRADE_GRID: tuple[float, ...] = (0.05, 0.10, 0.20)
 
+# Where an arc capped short of the trade samples as well: a cap that is only the
+# ladder's reach must be probed past, or it binds as though it were a wall.
+REACH_GRID: tuple[float, ...] = (0.5, 1.0, 2.0)
+
 
 @dataclass(frozen=True, slots=True)
 class ArcRef:
